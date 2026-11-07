@@ -12,6 +12,7 @@
 | Architecture | [architecture/extensibility.md](architecture/extensibility.md) | Core, packs, sidecars; media backends; trust model |
 | Decisions | [adr/](adr/README.md) | Why we chose what we chose |
 | Quality | [quality/testing-strategy.md](quality/testing-strategy.md) | Test levels, CI gates, review checklist |
+| Quality | [quality/traceability.md](quality/traceability.md) | Requirement-to-test map and measured results |
 | Security | [security/threat-model.md](security/threat-model.md) | Assets, threats, mitigations |
 | Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
