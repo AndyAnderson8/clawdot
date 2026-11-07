@@ -7,7 +7,10 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-hooks_dir=$(git rev-parse --git-path hooks)
+# Always the real hooks directory. Never `git rev-parse --git-path hooks`: it honours a hooks-path
+# setting and could point at the versioned .githooks/ directory, which these stubs would overwrite.
+git config --unset core.hooksPath 2>/dev/null || true
+hooks_dir="$(git rev-parse --git-common-dir)/hooks"
 mkdir -p "$hooks_dir"
 for name in pre-commit commit-msg pre-merge-commit pre-push; do
   cat >"$hooks_dir/$name" <<'STUB'
@@ -30,7 +33,6 @@ STUB
   chmod +x "$hooks_dir/$name"
 done
 
-git config --unset core.hooksPath 2>/dev/null || true
 git config pull.ff only
 git config merge.ff false
 chmod +x scripts/*.sh .githooks/* .claude/hooks/*.sh 2>/dev/null || true
