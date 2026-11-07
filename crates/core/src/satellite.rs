@@ -10,7 +10,7 @@
 //! over TCP. Limits that protect a small device: connections are capped, the `hello` must arrive quickly, a
 //! silent peer is dropped after the keepalive timeout, and frames are size-limited by the protocol decoder.
 
-use crate::assistant::Effect;
+use crate::assistant::{Effect, MediaCmd};
 use crate::inbox::endpoint::verify_token;
 use crate::speech::decode_pcm16;
 use crate::voice::{
@@ -19,7 +19,7 @@ use crate::voice::{
 };
 use clawdot_protocol::frame::{Decoder, Limits, encode};
 use clawdot_protocol::message::{
-    AudioCodec, AudioFormat, Indicator, Message, PROTOCOL_VERSION, Reject, Welcome,
+    AudioCodec, AudioFormat, Indicator, MediaAction, Message, PROTOCOL_VERSION, Reject, Welcome,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -320,6 +320,10 @@ where
     let mut last_heard = Instant::now();
     let mut volume: u8 = 50;
     let mut playing = false;
+    let media_url = hello.capabilities.media_url;
+    let mut music = false;
+    let mut ducked = false;
+    let mut after: Vec<Message> = Vec::new();
     let mut work: Option<Work> = None;
     let mut warned_format = false;
     let mut tick = tokio::time::interval(
@@ -362,6 +366,14 @@ where
                     }
                     Message::PlaybackDone { .. } if playing => {
                         playing = false;
+                        if ducked {
+                            ducked = false;
+                            if after.is_empty() {
+                                send(&mut wr, &Message::MediaControl(MediaAction::Resume)).await?;
+                                music = true;
+                            }
+                        }
+                        flush_media(&mut wr, &mut after, &mut music).await?;
                         steps.push(dialog.on_playback_done());
                     }
                     // Pong, button names we do not use, errors, unknown events, and anything that only
@@ -371,32 +383,53 @@ where
             }
             (outcome, effects) = poll_work(&mut work), if work.is_some() => {
                 work = None;
-                if outcome.audio.is_empty() {
-                    steps.push(dialog.on_reply_failed());
-                } else {
-                    dialog.on_reply_started();
-                    for e in &effects {
-                        match e {
-                            Effect::StopPlayback => send(&mut wr, &Message::StopPlayback).await?,
-                            Effect::VolumeSet(l) => {
-                                volume = (*l).min(100);
-                                send(&mut wr, &Message::SetVolume { level: volume }).await?;
-                            }
-                            Effect::VolumeUp => {
-                                volume = volume.saturating_add(VOLUME_STEP).min(100);
-                                send(&mut wr, &Message::SetVolume { level: volume }).await?;
-                            }
-                            Effect::VolumeDown => {
-                                volume = volume.saturating_sub(VOLUME_STEP);
-                                send(&mut wr, &Message::SetVolume { level: volume }).await?;
-                            }
-                            // Streaming radio to a satellite needs a playback path the protocol does not
-                            // define yet; see docs/architecture/satellite-server.md.
-                            Effect::PlayStream { .. } | Effect::Media(_) => {}
+                // Volume and stop take effect now; stream commands wait until the satellite has finished
+                // speaking, so music never covers the reply.
+                for e in &effects {
+                    match e {
+                        Effect::StopPlayback => {
+                            send(&mut wr, &Message::StopPlayback).await?;
+                            music = false;
+                            after.clear();
                         }
+                        Effect::VolumeSet(l) => {
+                            volume = (*l).min(100);
+                            send(&mut wr, &Message::SetVolume { level: volume }).await?;
+                        }
+                        Effect::VolumeUp => {
+                            volume = volume.saturating_add(VOLUME_STEP).min(100);
+                            send(&mut wr, &Message::SetVolume { level: volume }).await?;
+                        }
+                        Effect::VolumeDown => {
+                            volume = volume.saturating_sub(VOLUME_STEP);
+                            send(&mut wr, &Message::SetVolume { level: volume }).await?;
+                        }
+                        Effect::PlayStream { url, title } if media_url => {
+                            after.push(Message::PlayUrl { url: url.clone(), title: title.clone() });
+                        }
+                        Effect::PlayStream { .. } => {
+                            send(&mut wr, &Message::Error(clawdot_protocol::message::ErrorReport {
+                                text: "this satellite did not declare media_url, so it cannot play streams".into(),
+                                code: Some("media-unsupported".into()),
+                            })).await?;
+                        }
+                        Effect::Media(MediaCmd::Pause) if media_url => after.push(Message::MediaControl(MediaAction::Pause)),
+                        Effect::Media(MediaCmd::Resume) if media_url => after.push(Message::MediaControl(MediaAction::Resume)),
+                        Effect::Media(_) => {}
                     }
+                }
+                if !outcome.audio.is_empty() {
+                    dialog.on_reply_started();
+                    duck(&mut wr, &mut music, &mut ducked).await?;
                     play_audio(&mut wr, &outcome.audio).await?;
                     playing = true;
+                } else if outcome.transcript.is_some() && outcome.reply.is_empty() {
+                    // A command with nothing to say ("pause", "volume up"): do it now and go quiet.
+                    flush_media(&mut wr, &mut after, &mut music).await?;
+                    send(&mut wr, &Message::SetIndicator(Indicator::Idle)).await?;
+                    steps.push(dialog.on_reply_silent());
+                } else {
+                    steps.push(dialog.on_reply_failed());
                 }
             }
             Some(a) = announce_rx.recv() => {
@@ -410,6 +443,7 @@ where
                             false
                         } else {
                             dialog.on_reply_started();
+                            duck(&mut wr, &mut music, &mut ducked).await?;
                             play_audio(&mut wr, &audio).await?;
                             playing = true;
                             true
@@ -488,6 +522,37 @@ async fn play_audio<W: AsyncWrite + Unpin>(w: &mut W, audio: &[Vec<i16>]) -> Res
         }
     }
     send(w, &Message::AudioStop).await
+}
+
+/// Pause music for the duration of speech (REQ-MUS-004); resumed on playback-done.
+async fn duck<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    music: &mut bool,
+    ducked: &mut bool,
+) -> Result<(), String> {
+    if *music {
+        send(w, &Message::MediaControl(MediaAction::Pause)).await?;
+        *music = false;
+        *ducked = true;
+    }
+    Ok(())
+}
+
+/// Send the stream commands that were waiting for speech to finish, tracking whether music is now playing.
+async fn flush_media<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    after: &mut Vec<Message>,
+    music: &mut bool,
+) -> Result<(), String> {
+    for m in after.drain(..) {
+        match &m {
+            Message::PlayUrl { .. } | Message::MediaControl(MediaAction::Resume) => *music = true,
+            Message::MediaControl(MediaAction::Pause) => *music = false,
+            _ => {}
+        }
+        send(w, &m).await?;
+    }
+    Ok(())
 }
 
 async fn poll_work(work: &mut Option<Work>) -> (VoiceOutcome, Vec<Effect>) {
@@ -1093,5 +1158,242 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("the session should deregister when the peer goes away");
+    }
+
+    // ----- music on a satellite (REQ-MUS-001, REQ-MUS-004) -----
+
+    /// Like `start`, but the assistant answers with whatever `respond` says, the satellite can play URLs when
+    /// `media_url` is true, and the speech-to-text always hears `heard`.
+    async fn start_music(
+        media_url: bool,
+        heard: &'static str,
+        respond: fn(&str) -> Answer,
+    ) -> Peer {
+        let (near, far) = tokio::io::duplex(1 << 20);
+        let (tx, mut rx) = mpsc::channel::<Ask>(4);
+        tokio::spawn(async move {
+            while let Some(ask) = rx.recv().await {
+                let _ = ask.reply.send(respond(&ask.text));
+            }
+        });
+        tokio::spawn(run_session(
+            far,
+            Arc::new(Ears(heard)),
+            Arc::new(Mouth),
+            tx,
+            fast(),
+        ));
+        let mut p = Peer {
+            io: near,
+            dec: Decoder::new(Limits::default()),
+        };
+        p.send(&Message::Hello(Hello {
+            protocol: PROTOCOL_VERSION,
+            device_id: "radio".into(),
+            name: None,
+            token: None,
+            capabilities: Capabilities {
+                media_url,
+                ..Capabilities::default()
+            },
+        }))
+        .await;
+        assert!(matches!(p.recv().await, Message::Welcome(_)));
+        p
+    }
+
+    /// Wake the satellite and speak one utterance.
+    async fn speak(p: &mut Peer) {
+        p.send(&Message::Wake(Wake {
+            name: "hey".into(),
+            timestamp_ms: None,
+        }))
+        .await;
+        assert_eq!(p.recv().await, Message::SetIndicator(Indicator::Listening));
+        assert_eq!(p.recv().await, Message::StreamStart);
+        p.say(600).await;
+    }
+
+    /// Messages (without keepalives) up to and including the first one `done` accepts.
+    async fn until(p: &mut Peer, done: impl Fn(&Message) -> bool) -> Vec<Message> {
+        let mut seen = Vec::new();
+        loop {
+            match p.recv().await {
+                Message::Ping => p.send(&Message::Pong).await,
+                m => {
+                    let stop = done(&m);
+                    seen.push(m);
+                    if stop {
+                        return seen;
+                    }
+                }
+            }
+        }
+    }
+
+    fn jazz_url() -> Message {
+        Message::PlayUrl {
+            url: "http://r.example/jazz".into(),
+            title: "jazz".into(),
+        }
+    }
+
+    fn play_jazz(_: &str) -> Answer {
+        Answer {
+            say: "Playing jazz.".into(),
+            effects: vec![Effect::PlayStream {
+                url: "http://r.example/jazz".into(),
+                title: "jazz".into(),
+            }],
+        }
+    }
+
+    /// Answers "play jazz" with the stream, anything else with a plain reply.
+    fn jazz_or_chat(heard: &str) -> Answer {
+        if heard.contains("jazz") {
+            play_jazz(heard)
+        } else {
+            Answer {
+                say: "Fine.".into(),
+                effects: vec![],
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_radio_stream_starts_only_after_the_spoken_confirmation() {
+        let mut p = start_music(true, "play jazz", play_jazz).await;
+        speak(&mut p).await;
+        let seen = until(&mut p, |m| matches!(m, Message::AudioStop)).await;
+        assert!(
+            !seen.iter().any(|m| matches!(m, Message::PlayUrl { .. })),
+            "music must not cover the reply: {seen:?}"
+        );
+        p.send(&Message::PlaybackDone { id: None }).await;
+        let seen = until(&mut p, |m| matches!(m, Message::PlayUrl { .. })).await;
+        assert_eq!(seen.last(), Some(&jazz_url()));
+    }
+
+    #[tokio::test]
+    async fn music_is_paused_while_the_assistant_talks_and_resumed_afterwards() {
+        // Hears "play jazz" first (starts the radio), then something else.
+        let (near, far) = tokio::io::duplex(1 << 20);
+        let (tx, mut rx) = mpsc::channel::<Ask>(4);
+        tokio::spawn(async move {
+            while let Some(ask) = rx.recv().await {
+                let _ = ask.reply.send(jazz_or_chat(&ask.text));
+            }
+        });
+        struct Sequence(std::sync::atomic::AtomicUsize);
+        impl Transcriber for Sequence {
+            async fn transcribe(&self, _: &[i16]) -> Result<String, String> {
+                let n = self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(if n == 0 { "play jazz" } else { "how are you" }.to_owned())
+            }
+        }
+        let ears = Arc::new(Sequence(std::sync::atomic::AtomicUsize::new(0)));
+        tokio::spawn(run_session(far, ears, Arc::new(Mouth), tx, fast()));
+        let mut p = Peer {
+            io: near,
+            dec: Decoder::new(Limits::default()),
+        };
+        p.send(&Message::Hello(Hello {
+            protocol: PROTOCOL_VERSION,
+            device_id: "radio".into(),
+            name: None,
+            token: None,
+            capabilities: Capabilities {
+                media_url: true,
+                ..Capabilities::default()
+            },
+        }))
+        .await;
+        assert!(matches!(p.recv().await, Message::Welcome(_)));
+
+        speak(&mut p).await;
+        until(&mut p, |m| matches!(m, Message::AudioStop)).await;
+        p.send(&Message::PlaybackDone { id: None }).await;
+        until(&mut p, |m| matches!(m, Message::StreamStart)).await;
+
+        // The radio is playing and the follow-up window is open: ask something else.
+        p.say(600).await;
+        let seen = until(&mut p, |m| matches!(m, Message::AudioStop)).await;
+        let pause = seen
+            .iter()
+            .position(|m| *m == Message::MediaControl(MediaAction::Pause));
+        let start = seen
+            .iter()
+            .position(|m| matches!(m, Message::AudioStart(_)));
+        assert!(
+            pause.is_some() && pause < start,
+            "the music is paused before speech: {seen:?}"
+        );
+
+        p.send(&Message::PlaybackDone { id: None }).await;
+        let seen = until(&mut p, |m| {
+            matches!(m, Message::MediaControl(MediaAction::Resume))
+        })
+        .await;
+        assert!(
+            !seen.is_empty(),
+            "the music resumes once the reply has been played"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_command_is_carried_out_without_speech_or_an_error_cue() {
+        fn pause_only(_: &str) -> Answer {
+            Answer {
+                say: String::new(),
+                effects: vec![Effect::Media(MediaCmd::Pause)],
+            }
+        }
+        let mut p = start_music(true, "pause", pause_only).await;
+        speak(&mut p).await;
+        let seen = until(&mut p, |m| {
+            matches!(m, Message::SetIndicator(Indicator::Idle))
+        })
+        .await;
+        assert!(
+            seen.contains(&Message::MediaControl(MediaAction::Pause)),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|m| matches!(
+                m,
+                Message::AudioStart(_) | Message::SetIndicator(Indicator::Error)
+            )),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_satellite_that_cannot_play_urls_is_told_so_and_sent_no_stream_commands() {
+        let mut p = start_music(false, "play jazz", play_jazz).await;
+        speak(&mut p).await;
+        let seen = until(&mut p, |m| matches!(m, Message::AudioStop)).await;
+        let err = seen.iter().find_map(|m| match m {
+            Message::Error(e) => Some(e),
+            _ => None,
+        });
+        assert_eq!(
+            err.and_then(|e| e.code.as_deref()),
+            Some("media-unsupported"),
+            "{seen:?}"
+        );
+        p.send(&Message::PlaybackDone { id: None }).await;
+        // Whatever follows (the follow-up window), it is never a stream command.
+        let end = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < end {
+            let left = end.saturating_duration_since(Instant::now());
+            match timeout(left, next_message(&mut p.io, &mut p.dec)).await {
+                Err(_) => break,
+                Ok(Ok(Some(Message::Ping))) => p.send(&Message::Pong).await,
+                Ok(Ok(Some(Message::PlayUrl { .. } | Message::MediaControl(_)))) => {
+                    panic!("a stream command was sent to a satellite that cannot play streams")
+                }
+                Ok(_) => {}
+            }
+        }
     }
 }

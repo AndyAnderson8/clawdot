@@ -332,13 +332,8 @@ impl Brain {
     /// Answer locally if the fast path can, otherwise ask the language model.
     async fn respond(&mut self, line: &str) -> Reply {
         if let Some(out) = self.assistant.handle(line) {
-            let say = if out.say.is_empty() {
-                "(done)".to_owned()
-            } else {
-                out.say
-            };
             return Reply {
-                say,
+                say: out.say,
                 effects: out.effects,
             };
         }
@@ -761,7 +756,11 @@ async fn main() -> ExitCode {
                 let Some(line) = line else { return ExitCode::SUCCESS };
                 if line.is_empty() { continue; }
                 let reply = brain.respond(&line).await;
-                println!("speaker> {}", reply.say);
+                if reply.say.is_empty() {
+                    println!("speaker> (done)");
+                } else {
+                    println!("speaker> {}", reply.say);
+                }
                 for e in &reply.effects {
                     println!("satellite> {e:?}");
                 }
