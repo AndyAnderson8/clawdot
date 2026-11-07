@@ -181,6 +181,11 @@ struct Inner {
     auth_failures: Bucket,
 }
 
+/// Test phrases that may wait to be spoken.
+pub const MAX_PENDING_SPEECH: usize = 4;
+/// Longest test phrase.
+pub const MAX_SPEECH_CHARS: usize = 200;
+
 /// The shared core.
 pub struct Core {
     clock: Arc<dyn Clock + Send + Sync>,
@@ -190,6 +195,8 @@ pub struct Core {
     inner: Mutex<Inner>,
     notify: Notify,
     admin_hash: Mutex<Option<String>>,
+    status: Mutex<serde_json::Value>,
+    speech: Mutex<std::collections::VecDeque<String>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -274,6 +281,8 @@ impl Core {
             }),
             notify: Notify::new(),
             admin_hash: Mutex::new(None),
+            status: Mutex::new(serde_json::Value::Null),
+            speech: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -529,6 +538,45 @@ impl Core {
         } else {
             HookError::RateLimited
         })
+    }
+
+    // ----- status and test speech for the web UI -----
+
+    /// Publish a snapshot of the assistant for the web UI to show (replaces the previous one).
+    pub fn set_ui_status(&self, status: serde_json::Value) {
+        *self.status.lock().unwrap_or_else(PoisonError::into_inner) = status;
+    }
+
+    /// The latest snapshot (`null` before the first).
+    #[must_use]
+    pub fn ui_status(&self) -> serde_json::Value {
+        self.status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Ask the speaker to say `text` (the UI's "test speak"). At most [`MAX_PENDING_SPEECH`] requests wait, each
+    /// up to [`MAX_SPEECH_CHARS`] characters. Returns false if refused.
+    pub fn queue_speech(&self, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() || text.chars().count() > MAX_SPEECH_CHARS {
+            return false;
+        }
+        let mut q = self.speech.lock().unwrap_or_else(PoisonError::into_inner);
+        if q.len() >= MAX_PENDING_SPEECH {
+            return false;
+        }
+        q.push_back(text.to_owned());
+        true
+    }
+
+    /// The next queued test phrase, if any.
+    pub fn take_speech(&self) -> Option<String> {
+        self.speech
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
     }
 
     // ----- voice side -----

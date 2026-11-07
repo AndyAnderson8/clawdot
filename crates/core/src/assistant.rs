@@ -289,6 +289,25 @@ impl Assistant {
         self.zone.local_minute_of_day(self.clock.now())
     }
 
+    /// Timers, alarms, and reminders for display: kind, label, and seconds until they fire (soonest first, at most 20).
+    #[must_use]
+    pub fn scheduled(&self) -> Vec<(&'static str, String, i64)> {
+        let now = self.clock.now();
+        self.sched
+            .list()
+            .into_iter()
+            .take(20)
+            .map(|i| {
+                let kind = match i.kind {
+                    Kind::Timer => "timer",
+                    Kind::Alarm => "alarm",
+                    Kind::Reminder => "reminder",
+                };
+                (kind, i.label.clone(), (i.fire_at - now).max(0))
+            })
+            .collect()
+    }
+
     /// The local calendar day (days since the epoch), for daily usage limits.
     #[must_use]
     pub fn local_day(&self) -> i64 {

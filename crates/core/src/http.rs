@@ -1021,4 +1021,59 @@ mod tests {
         }
         assert!(limited, "guessing must be throttled");
     }
+
+    #[tokio::test]
+    async fn status_and_test_speak_need_the_administrator_and_are_bounded() {
+        let h = start(Limits::default(), ServeOptions::default()).await;
+        let a = admin(&h);
+        let auth = [("Authorization", a.as_str())];
+        for (m, p) in [("GET", "/api/status"), ("POST", "/api/speak")] {
+            assert_eq!(call(h.addr, m, p, &[], "{}").await.0, 401, "{p}");
+        }
+
+        h.core
+            .set_ui_status(serde_json::json!({"version": "9", "llm": {"configured": false}}));
+        let (status, _, body) = call(h.addr, "GET", "/api/status", &auth, "").await;
+        assert_eq!(status, 200);
+        assert!(
+            body.contains(r#""version":"9""#) && body.contains(r#""now""#),
+            "{body}"
+        );
+
+        let speak = |t: &str| format!(r#"{{"text":"{t}"}}"#);
+        assert_eq!(
+            call(h.addr, "POST", "/api/speak", &auth, &speak("hello there"))
+                .await
+                .0,
+            202
+        );
+        assert_eq!(h.core.take_speech().as_deref(), Some("hello there"));
+        assert!(h.core.take_speech().is_none());
+
+        for bad in [
+            speak(""),
+            speak("   "),
+            speak(&"x".repeat(201)),
+            "{nope".to_owned(),
+            r#"{"text":"a","extra":1}"#.to_owned(),
+        ] {
+            assert_eq!(
+                call(h.addr, "POST", "/api/speak", &auth, &bad).await.0,
+                400,
+                "{bad}"
+            );
+        }
+        // Only a few phrases may wait; the rest are refused rather than piling up.
+        let mut refused = 0;
+        for _ in 0..10 {
+            if call(h.addr, "POST", "/api/speak", &auth, &speak("again"))
+                .await
+                .0
+                == 400
+            {
+                refused += 1;
+            }
+        }
+        assert_eq!(refused, 10 - crate::app::MAX_PENDING_SPEECH);
+    }
 }

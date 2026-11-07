@@ -3,6 +3,8 @@
 //! * `GET /` and `GET /ui`: one static page. No external assets, no frameworks, works on a phone. It holds no
 //!   data, so it needs no credentials; everything it shows comes from the API below.
 //! * `GET  /api/overview`                      endpoints and recent inbox events
+//! * `GET  /api/status`                        what the assistant is doing (model, satellites, tools, usage, schedule)
+//! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
 //! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
 //! * `POST /api/endpoints/{name}/rotate`       a new token, returned once
 //! * `DELETE /api/endpoints/{name}`
@@ -174,7 +176,12 @@ pub async fn handle(
     };
     let known = matches!(
         rest,
-        ["overview"] | ["endpoints"] | ["endpoints", _] | ["endpoints", _, "rotate"]
+        ["overview"]
+            | ["status"]
+            | ["speak"]
+            | ["endpoints"]
+            | ["endpoints", _]
+            | ["endpoints", _, "rotate"]
     );
     if !known {
         return Some(error(StatusCode::NOT_FOUND, "not found"));
@@ -188,6 +195,11 @@ pub async fn handle(
     }
     Some(match (method, rest) {
         (&Method::GET, ["overview"]) => overview(core),
+        (&Method::GET, ["status"]) => json_reply(
+            StatusCode::OK,
+            &json!({ "now": core.now(), "status": core.ui_status() }),
+        ),
+        (&Method::POST, ["speak"]) => speak(core, body).await,
         (&Method::POST, ["endpoints"]) => create(core, body).await,
         (&Method::POST, ["endpoints", name, "rotate"]) => match core.rotate_endpoint(name) {
             Ok(t) => json_reply(StatusCode::OK, &json!({ "name": name, "token": t })),
@@ -199,6 +211,31 @@ pub async fn handle(
         },
         _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Speak {
+    text: String,
+}
+
+/// "Test speak": queue a phrase for the speaker to say.
+async fn speak(core: &Core, body: Incoming) -> Resp {
+    let bytes = match Limited::new(body, MAX_BODY).collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "body too large"),
+    };
+    let Ok(req) = serde_json::from_slice::<Speak>(&bytes) else {
+        return error(StatusCode::BAD_REQUEST, "expected {\"text\":..}");
+    };
+    if core.queue_speech(&req.text) {
+        json_reply(StatusCode::ACCEPTED, &json!({ "queued": true }))
+    } else {
+        error(
+            StatusCode::BAD_REQUEST,
+            "give some text of up to 200 characters, and wait for the last phrase to finish",
+        )
+    }
 }
 
 async fn create(core: &Core, body: Incoming) -> Resp {

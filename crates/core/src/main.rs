@@ -334,6 +334,37 @@ struct Reply {
 }
 
 impl Brain {
+    /// A snapshot for the web UI. Contains no secrets and no agent text.
+    fn status_json(
+        &self,
+        satellites: usize,
+        stations: &[String],
+        tools: &serde_json::Value,
+    ) -> serde_json::Value {
+        let scheduled: Vec<serde_json::Value> = self
+            .assistant
+            .scheduled()
+            .into_iter()
+            .map(|(kind, label, secs)| serde_json::json!({ "kind": kind, "label": label, "seconds_left": secs }))
+            .collect();
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "llm": {
+                "configured": self.llm.is_some(),
+                "model": self.llm.as_ref().map(|l| l.cfg.model.clone()),
+            },
+            "usage": {
+                "requests_today": self.usage.requests_today(),
+                "max_requests_per_day": self.usage.limits().max_requests_per_day,
+                "spend_today": self.usage.spend_today(),
+            },
+            "satellites": satellites,
+            "tools": tools,
+            "stations": stations,
+            "scheduled": scheduled,
+        })
+    }
+
     /// Answer locally if the fast path can, otherwise ask the language model.
     async fn respond(&mut self, line: &str) -> Reply {
         if let Some(out) = self.assistant.handle(line) {
@@ -617,6 +648,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let station_names: Vec<String> = args.stations.iter().map(|s| s.name.clone()).collect();
     let assistant = Assistant::new(
         clock.clone(),
         zone,
@@ -670,6 +702,11 @@ async fn main() -> ExitCode {
         clock: clock.clone(),
     };
 
+    let tool_counts = serde_json::json!({
+        "builtin": builtin.len(),
+        "http": brain.http_tools.specs().len(),
+        "mcp": brain.mcp.tools().len(),
+    });
     if let Some(input) = args.voice_in.clone() {
         return match voice_once(&mut brain, &args.speech, &input, args.voice_out.as_deref()).await {
             Ok(()) => ExitCode::SUCCESS,
@@ -798,6 +835,13 @@ async fn main() -> ExitCode {
                 let _ = ask.reply.send(Answer { say: r.say, effects: r.effects });
             }
             _ = tick.tick() => {
+                core.set_ui_status(brain.status_json(announcer.connected(), &station_names, &tool_counts));
+                while let Some(phrase) = core.take_speech() {
+                    println!("speaker> {phrase}");
+                    if announcer.connected() > 0 {
+                        announcer.announce(&phrase).await;
+                    }
+                }
                 for fired in brain.assistant.tick() {
                     let line = describe_fired(&fired);
                     println!("speaker> {line}");

@@ -60,4 +60,6 @@ phone. It shows endpoints and the recent inbox, and creates, rotates, and delete
   there is no TLS, so use a trusted network or a VPN (REQ-CFG-005).
 - **Throttling.** Wrong administrator tokens share the authentication rate limit.
 - **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
-- Not yet in the UI: provider keys, voice and wake word settings, scheduled items, logs, and "test speak".
+- **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), radio stations, and the schedule. It contains no secrets and no agent text.
+- **Test speak** makes the speaker say a short phrase (up to 200 characters, a few at a time) on the console and on any free satellite, a quick way to check the speaker end to end.
+- Not yet in the UI: provider keys, voice and wake word settings, logs, history search, and editing the configuration (change the file and restart).

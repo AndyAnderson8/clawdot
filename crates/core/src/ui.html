@@ -47,6 +47,20 @@
     <div class="row"><span class="mut" id="who"></span><button class="plain" id="out">Sign out</button></div>
 
     <section>
+      <h2>Status</h2>
+      <ul id="status"><li class="mut">Loading...</li></ul>
+      <form class="row" id="speakform">
+        <input id="speaktext" placeholder="Make the speaker say something" aria-label="Test speak" maxlength="200">
+        <button>Test speak</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Scheduled</h2>
+      <ul id="scheduled"></ul>
+    </section>
+
+    <section>
       <h2>Endpoints</h2>
       <ul id="endpoints"></ul>
       <form class="row" id="newform">
@@ -133,11 +147,39 @@
     });
   }
 
+  function fmt(secs) {
+    if (secs < 90) return secs + " s";
+    if (secs < 5400) return Math.round(secs / 60) + " min";
+    return (secs / 3600).toFixed(1) + " h";
+  }
+
+  function renderStatus(r) {
+    var s = r.status || {};
+    var ul = $("status"); ul.replaceChildren();
+    if (!s.llm) { ul.append(el("li", "Starting up...", "mut")); return; }
+    var rows = [
+      ["Language model", s.llm.configured ? s.llm.model : "not configured (local commands only)"],
+      ["Requests today", s.usage.requests_today + " of " + s.usage.max_requests_per_day + (s.usage.spend_today > 0 ? ", $" + s.usage.spend_today.toFixed(3) : "")],
+      ["Satellites connected", String(s.satellites)],
+      ["Tools", s.tools.builtin + " built in, " + s.tools.http + " HTTP, " + s.tools.mcp + " MCP"],
+      ["Radio stations", s.stations.length ? s.stations.join(", ") : "none"],
+      ["Version", s.version]
+    ];
+    rows.forEach(function (p) {
+      var li = el("li"); li.append(el("strong", p[0] + ": "), el("span", p[1])); ul.append(li);
+    });
+    var sc = $("scheduled"); sc.replaceChildren();
+    if (!s.scheduled.length) sc.append(el("li", "Nothing scheduled.", "mut"));
+    s.scheduled.forEach(function (i) {
+      var li = el("li"); li.append(el("strong", i.kind + (i.label ? ": " + i.label : "")), el("span", "  in " + fmt(i.seconds_left), "mut")); sc.append(li);
+    });
+  }
+
   function secret(t) { $("secrettext").textContent = t; $("secret").classList.remove("hidden"); }
 
   async function load() {
     say("");
-    try { render(await api("GET", "/api/overview")); show(true); }
+    try { render(await api("GET", "/api/overview")); show(true); renderStatus(await api("GET", "/api/status")); }
     catch (x) {
       show(false);
       if (x.status === 401) { token = ""; try { sessionStorage.removeItem("clawdot-admin"); } catch (e) {} say("That token was not accepted."); }
@@ -158,6 +200,14 @@
     try {
       var r = await api("POST", "/api/endpoints", { name: $("newname").value.trim(), adapter: $("newadapter").value });
       $("newname").value = ""; secret(r.token); await load();
+    } catch (x) { say(x.message); }
+  };
+
+  $("speakform").onsubmit = async function (ev) {
+    ev.preventDefault();
+    try {
+      await api("POST", "/api/speak", { text: $("speaktext").value });
+      $("speaktext").value = ""; say("");
     } catch (x) { say(x.message); }
   };
 
