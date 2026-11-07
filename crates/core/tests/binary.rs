@@ -1005,3 +1005,106 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
     assert!(calls[0].contains(r#""name":"turn_on""#) && calls[0].contains(r#""room":"den""#));
     assert!(!calls[0].contains("confirmed"), "{}", calls[0]);
 }
+
+/// One HTTP request to the running binary; returns (status, body).
+fn http(port: u16, method: &str, path: &str, token: &str, body: &str) -> (u16, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(
+        s,
+        "{method} {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut raw = String::new();
+    let _ = s.read_to_string(&mut raw);
+    let status = raw
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    (
+        status,
+        raw.split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_owned())
+            .unwrap_or_default(),
+    )
+}
+
+#[test]
+fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!("clawdot-ui-test-{}", std::process::id()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--no-console",
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--data-dir",
+            dir.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let (mut admin, mut listening) = (None, false);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !(admin.is_some() && listening) {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            if admin.is_none() && line.trim_start().starts_with("cdt_") {
+                admin = Some(line.trim().to_owned());
+            }
+            listening |= line.contains("listening on");
+        }
+    }
+    let admin = admin.expect("the administrator token is printed once");
+
+    // Status appears within a tick or two of starting.
+    let mut body = String::new();
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end {
+        let (status, b) = http(port, "GET", "/api/status", &admin, "");
+        assert_eq!(status, 200);
+        if b.contains("\"llm\"") {
+            body = b;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        body.contains(r#""configured":false"#) && body.contains(r#""satellites":0"#),
+        "{body}"
+    );
+    assert!(body.contains(r#""scheduled":[]"#), "{body}");
+
+    assert_eq!(
+        http(
+            port,
+            "POST",
+            "/api/speak",
+            &admin,
+            r#"{"text":"testing one two"}"#
+        )
+        .0,
+        202
+    );
+    let mut spoken = false;
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end && !spoken {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
+            spoken = line == "speaker> testing one two";
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(spoken, "the test phrase should be spoken");
+}
