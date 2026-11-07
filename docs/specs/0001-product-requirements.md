@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.5 |
+| **Version** | 0.6 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006 |
 
@@ -146,6 +146,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-010 | The UI MUST manage connections and tools: MCP servers, HTTP tools, tool enable/disable and confirm policies, and media backends. (Pack management arrives with packs, v1.x.) | Must | M5 | D |
 | REQ-CFG-011 | The core SHOULD serve a read-only `/display` page (state, transcript, now-playing, timers, inbox cards) so a satellite with a screen can show it in a browser without new protocol work. | Should | v1.x | D |
 | REQ-CFG-012 | Documentation MUST cover headless network setup for the supported Raspberry Pi path (pre-seeded Wi-Fi). An on-device provisioning portal is post-1.0. | Must | M4 | I |
+| REQ-CFG-013 | The build MUST include the project changelog; the UI "About" page SHOULD show the running version, build information, and the release notes for that version. | Should | M4 | T |
 
 ### 4.7 Non-functional (`NFR`)
 
@@ -227,3 +228,4 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | 0.3 | 2026-11-07 | Scope review applied: v1.0 definition and default modality (half-duplex, batch STT); barge-in made opt-in (VOI-005, VOI-012); Pi satellite in scope; persona config (AST-013); agent-status voice query (INB-016); offline degraded mode (NFR-009); upgrade path and schema versioning (NFR-010); no telemetry (SEC-007); AC-9/10; milestones renumbered to put the agent inbox first (M2) and time/fast-path second (M3) |
 | 0.4 | 2026-11-07 | Extension model (ADR-0010) and new section 4.9 (EXT-001..006); declarative HTTP tools (AST-014); media-source interface with playback/control shapes (MUS-002/003/005/006); reply stream over SSE replaces device-initiated callbacks (INB-008); reply types and bounded spoken summaries (INB-017/018); event `kind`; portal extension management, mDNS, `/display` page, headless Wi-Fi docs (CFG-009..012); AC-11/12; MCP server deferred to v1.x |
 | 0.5 | 2026-11-07 | v1.0 trim: pack installation (EXT-002/003), `/display` page (CFG-011) deferred to v1.x; added TTS voice to persona config (AST-013), "Connect an agent" flow (INB-019), pluggable harness adapters in the bridge (INB-020); open questions 10-11 (multi-profile routing, harness verification) |
+| 0.6 | 2026-11-07 | Changelog shipped in the build and shown on the About page (CFG-013), following the git-flow release process (ADR-0011) |
