@@ -1,0 +1,36 @@
+[package]
+name = "clawdot-core"
+description = "ClawDot core: agent inbox, scheduler, fast-path commands, and the HTTP front end"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["tz"]
+# IANA time-zone support with a bundled database (correct daylight-saving behaviour, no OS tzdata needed).
+tz = ["dep:jiff"]
+
+[[bin]]
+name = "clawdot"
+path = "src/main.rs"
+
+[dependencies]
+clawdot-protocol = { path = "../protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+getrandom = "0.3"
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }
+hyper = { version = "1", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util"] }
