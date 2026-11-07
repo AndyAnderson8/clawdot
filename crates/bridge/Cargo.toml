@@ -15,6 +15,10 @@ workspace = true
 name = "clawdot_bridge"
 path = "src/lib.rs"
 
+[[bin]]
+name = "clawdot-bridge"
+path = "src/main.rs"
+
 [dependencies]
 clawdot-protocol = { path = "../protocol" }
 serde_json = "1"
