@@ -1,0 +1,45 @@
+# Research Notes
+
+Short, dated notes that capture what we learned from external sources and what it means for the specs. They are **inputs to decisions, not decisions**: conclusions that change a contract become spec amendments or ADRs.
+
+## Conventions
+- Each note ends with *Spec impact* (recommended changes) and a *Confidence* line.
+- Confidence: **high** = primary source read in full for the claim; **medium** = several consistent secondary sources; **low** = single source, vendor claim, or forum report.
+- Notes are not edited after the fact except to add a dated correction. New findings go in new notes.
+
+## Index
+
+| Note | Topic | Feeds |
+|---|---|---|
+| [R-01](01-agent-integration.md) | Agent hooks, session resume, MCP | INB requirements, ADR-0006 |
+| [R-02](02-providers.md) | OpenRouter, STT, TTS | VOI/AST requirements, NFR-002 |
+| [R-03](03-wake-word.md) | openWakeWord vs microWakeWord, licensing | ADR-0002, SPIKE-002 |
+| [R-04](04-echo-dot-gen2.md) | Echo Dot Gen 2 specs and unlock status | ADR-0003, spec 0002 |
+| [R-05](05-wyoming-and-local-intents.md) | Wyoming protocol, hassil, local intents | ADR-0005, spec 0003 |
+| [R-06](06-naming.md) | Name collision check | Public release |
+
+An earlier survey of two reference repositories and the wider landscape (make-a-smart-speaker, chatgpt-openai-smart-speaker, Home Assistant, OpenVoiceOS, Willow, Pipecat, LiveKit) was done in conversation; its conclusions are the eight "ideas to add" reflected below.
+
+## Consolidated spec-change proposals
+
+| # | Change | Source | Target |
+|---|---|---|---|
+| 1 | Inbox format adapters (Claude Code native HTTP hook, Codex, Gemini, generic) | R-01 | REQ-INB-003/013 |
+| 2 | Agent bridge as reply target; device talks only to a pre-configured bridge | R-01 | REQ-INB-008, threat T4 |
+| 3 | Event filtering and priority mapping (`Stop` noise, needs-input > completed) | R-01 | new REQ-INB-014 |
+| 4 | MCP client: Streamable HTTP only; pin spec revision | R-01 | REQ-AST-005 |
+| 5 | `Stt` batch and streaming modes; OpenAI-style HTTP provider interface | R-02 | REQ-VOI-003, providers |
+| 6 | Latency target conditional on STT mode; measure in M1 | R-02 | REQ-NFR-002 |
+| 7 | Cost and usage caps | R-02, repo review | new REQ-AST-011 |
+| 8 | Wake-word licence/provenance rule; microWakeWord as default candidate | R-03 | new REQ-VOI-009, ADR-0002 |
+| 9 | Wake-word model workstream epic | R-03 | roadmap |
+| 10 | Reference device table sourced; Dot port downgraded to opportunistic | R-04 | spec 0002 §2, roadmap M7 |
+| 11 | Software AEC/beamforming as declared capability | R-04 | spec 0003, SPIKE-004 |
+| 12 | Wyoming-compatible framing with extension layer (decide in M0) | R-05 | ADR-0005, spec 0003 |
+| 13 | Local fast-path intents (bounded-time, hassil-style subset) | R-05, repo review | new REQ-AST-010 |
+| 14 | Latency earcon / filler; adaptive end-of-turn detection | repo review | VOI requirements |
+| 15 | Rename before public release | R-06 | README, repo |
+
+Process: these are applied in a single `spec` change set, reviewed like code (see [SDLC §5](../process/sdlc.md#5-spec-driven-workflow)).
+
+**Status (2026-11-07):** items 1-14 applied in spec 0001 v0.2, 0002 v0.2, 0003 v0.2, ADR-0006 (amended while Proposed), ADR-0008 (new), the threat model, testing strategy, and roadmap. Item 12 is Proposed pending SPIKE-005. Item 15 was decided by the maintainer: keep the name, risk accepted ([ADR-0009](../adr/0009-project-name.md)).
