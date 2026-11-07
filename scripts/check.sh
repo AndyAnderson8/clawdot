@@ -35,7 +35,13 @@ else
   echo "note: shellcheck not installed locally (CI runs it)"
 fi
 
-if [ -f scripts/test-policy.sh ]; then
+# The policy tests spin up scratch repositories and are slow. In the fast (pre-commit) gate they run
+# only when the policy tooling itself is being changed; the full gate and CI always run them.
+policy_relevant() {
+  [ "$fast" -eq 0 ] && return 0
+  git diff --cached --name-only | grep -qE '^(scripts/|\.githooks/|\.claude/|\.shellcheckrc)'
+}
+if [ -f scripts/test-policy.sh ] && policy_relevant; then
   step "policy tooling: commit-message rules, agent guard, landing and release flow"
   run scripts/test-policy.sh
 fi
@@ -53,21 +59,19 @@ fi
 if [ -n "$range" ]; then run scripts/check-commit-msg.sh --range "$range"; else echo "(no range to check)"; fi
 
 if [ -f Cargo.toml ]; then
-  command -v cargo >/dev/null 2>&1 || { echo "FAILED: Cargo.toml exists but cargo is not installed" >&2; fail=1; }
-  if command -v cargo >/dev/null 2>&1; then
-    step "rust: formatting"
-    run cargo fmt --all --check
-    step "rust: lint and type-check (clippy, warnings are errors)"
-    run cargo clippy --workspace --all-targets --locked -- -D warnings
-    if [ "$fast" -eq 0 ]; then
-      step "rust: unit and integration tests"
-      run cargo test --workspace --locked
-      if command -v cargo-deny >/dev/null 2>&1 && [ -f deny.toml ]; then
-        step "rust: dependency policy (cargo-deny)"
-        run cargo deny check
-      else
-        echo "note: cargo-deny/deny.toml not available locally (CI enforces it)"
-      fi
+  # scripts/cargo.sh uses native cargo, or WSL when there is no native toolchain. Missing both is a failure.
+  step "rust: formatting"
+  run scripts/cargo.sh fmt --all --check
+  step "rust: lint and type-check (clippy, warnings are errors)"
+  run scripts/cargo.sh clippy --workspace --all-targets --locked -- -D warnings
+  if [ "$fast" -eq 0 ]; then
+    step "rust: unit and integration tests"
+    run scripts/cargo.sh test --workspace --locked
+    if [ -f deny.toml ] && scripts/cargo.sh deny --version >/dev/null 2>&1; then
+      step "rust: dependency policy (cargo-deny)"
+      run scripts/cargo.sh deny check
+    else
+      echo "note: cargo-deny is not installed locally (CI enforces it)"
     fi
   fi
 else
