@@ -57,6 +57,9 @@ pub struct Config {
     /// Usage caps.
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Radio stations for the music commands.
+    #[serde(default)]
+    pub stations: Vec<crate::media::Station>,
     /// Declarative HTTP tools the model may call (see `docs/architecture/http-tools.md`).
     #[serde(default)]
     pub tools: Vec<crate::httptools::ToolDef>,
@@ -110,6 +113,9 @@ impl Config {
             && (!s.is_finite() || s < 0.0)
         {
             return Err("config: `limits.daily_spend_usd` must be zero or more".into());
+        }
+        for s in &self.stations {
+            s.validate().map_err(|e| format!("config: {e}"))?;
         }
         for t in &self.tools {
             t.validate().map_err(|e| format!("config: {e}"))?;
