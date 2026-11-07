@@ -17,6 +17,7 @@ pub mod httptools;
 pub mod inbox;
 pub mod llm;
 pub mod media;
+pub mod satellite;
 pub mod sched;
 pub mod session;
 pub mod speech;
