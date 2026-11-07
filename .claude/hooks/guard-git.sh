@@ -3,7 +3,11 @@
 # docs/process/git-workflow.md. Exit 2 = block; stderr is shown to the agent.
 # This is the first of several layers: git hooks (.githooks), CI, and server rules back it up.
 input=$(cat)
-h=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
+# Scan only the command text. The full payload carries unrelated fields (for example
+# "permission_mode") whose contents must never be matched by the patterns below.
+cmd=$(printf '%s' "$input" | sed -nE 's/.*"tool_input":\{"command":"(([^"\\]|\\.)*)".*/\1/p')
+[ -n "$cmd" ] || cmd="$input"
+h=$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')
 
 block() {
   echo "BLOCKED by the ClawDot git-flow policy: $1" >&2
@@ -23,7 +27,13 @@ branch=$(current_branch)
 # 1. Never bypass hooks, signing, or identity controls.
 has '(--no-verify|--no-gpg-sign|git[[:space:]]+commit[^|;&\]*[[:space:]]-[a-z]*n[a-z]*([[:space:]]|\\|"|$))' &&
   block "bypassing hooks (--no-verify / -n) is not allowed."
-has 'core\.hookspath|rm[^|;&\]*\.githooks|git[[:space:]]+config[^|;&\]*(user\.name|user\.email|user\.signingkey)|[[:space:]]-c[[:space:]]+user\.(name|email)|--author|git_(author|committer)_(name|email)' &&
+# Reading identity or hook settings (git config --get / --list) is fine; changing them is not.
+reading_config=0
+has 'git[[:space:]]+config[[:space:]]+(--get|--list|-l)' && reading_config=1
+if [ "$reading_config" -eq 0 ] && has 'core\.hookspath|git[[:space:]]+config[^|;&\]*(user\.name|user\.email|user\.signingkey)'; then
+  block "do not change git identity or hook configuration (read it with 'git config --get'). Commits are authored by the configured human only."
+fi
+has 'rm[^|;&\]*\.githooks|[[:space:]]-c[[:space:]]+(user\.(name|email)|core\.hookspath)|--author|git_(author|committer)_(name|email)' &&
   block "do not change git identity or hook configuration. Commits are authored by the configured human only."
 
 # 2. No AI attribution anywhere.

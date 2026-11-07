@@ -38,6 +38,6 @@ Run `scripts/check.sh` before landing. It must pass: formatting, lint and type-c
 ## Enforcement (so you know what to expect)
 
 1. A Claude Code `PreToolUse` guard (`.claude/hooks/guard-git.sh`) blocks violating git commands.
-2. Git hooks in `.githooks/` (enabled with `git config core.hooksPath .githooks`) enforce branch names, commit messages, and protected branches for every tool.
+2. Git hooks in `.githooks/` (installed by `scripts/setup.sh`, with stubs that fail closed on `main`) enforce branch names, commit messages, and protected branches for every tool.
 3. GitHub Actions `gate` must pass for anything that reaches `dev` or `main`.
 4. Server-side rulesets protect `main`, `dev`, and release tags (see docs/process/repo-settings.md).
