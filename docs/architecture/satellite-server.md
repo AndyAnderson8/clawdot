@@ -52,7 +52,7 @@ a `play-url` command) before it works on a satellite.
 
 ## Not built yet
 
-- A reference satellite (desktop or Raspberry Pi) and the conformance suite (REQ-SAT-012, REQ-SAT-015).
+- A Raspberry Pi satellite and the conformance suite (REQ-SAT-012, REQ-SAT-015); the desktop reference satellite exists, see [porting-a-satellite.md](porting-a-satellite.md).
 - Wake-word detection in the core for satellites that cannot do it themselves (REQ-SAT-013); today those need a
   button, or the satellite must send `wake`.
 - Opus downlink (REQ-SAT-005), TLS, per-satellite tokens, and displaying inbox announcements on a satellite.
