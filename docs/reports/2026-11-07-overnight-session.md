@@ -13,17 +13,17 @@ ahead of the last published state; the `origin` remote was detached for the sess
 | `crates/e2e` | Six end-to-end tests of the headline loop over real sockets. |
 | Process | Git flow tooling, hooks, agent guard, landing and release scripts, policy tests, budget script. |
 
-Added after the first draft of this report: a validated JSON config file (`--config`, see [configuration](../architecture/configuration.md)) and a test that runs the real binary against a fake model provider. Test count at the end: 223 passing across the workspace; clippy `-D warnings` and rustfmt clean.
+Added later in the session (each documented under `docs/architecture/`): a validated JSON config file, an embedded web UI for endpoints and the inbox, declarative HTTP tools, internet radio by voice with a service-agnostic media model, the voice dialog layer (endpointing, mute, half-duplex, follow-up window, speech turn), and OpenAI-compatible speech-to-text and text-to-speech clients, plus tests that run the real binary against fake providers. Test count at the end: 275 passing across the workspace; clippy `-D warnings` and rustfmt clean.
 
-## Measured budget (scripts/budget.sh, x86_64 musl, 400 hook posts)
+## Measured budget (scripts/budget.sh, x86_64 musl, 400 hook posts, after all features below)
 
 | Measure | Result | Limit |
 |---|---|---|
-| Binary, x86_64 | 2.35 MiB | 8 MiB |
-| Binary, armv7 (cross-built) | 1.89 MiB | 8 MiB |
-| Idle RSS | 2.8 MiB | 24 MiB |
-| Peak RSS under load | 3.8 MiB | 48 MiB target, 64 MiB hard |
-| State on disk | 98 KiB | 16 MiB |
+| Binary, x86_64 | 2.45 MiB | 8 MiB |
+| Binary, armv7 (cross-built) | 1.97 MiB | 8 MiB |
+| Idle RSS | 2.9 MiB | 24 MiB |
+| Peak RSS under load | 4.1 MiB | 48 MiB target, 64 MiB hard |
+| State on disk | 101 KiB | 16 MiB |
 
 Large headroom. The budget ratchet (REQ-NFR-114) should now be tightened from these numbers; I left the limits
 alone because tightening is your call.
@@ -42,13 +42,19 @@ alone because tightening is your call.
 6. **Confirmation is enforced in code** (`confirmed: true`), not by prompt.
 7. **Daily caps default to 500 requests; spend cap off.** Cap reset follows the local calendar day.
 8. **Static musl builds link with zig** via small wrappers created by `scripts/setup-wsl.sh`.
-9. **Landing without a remote is local only.** `scripts/land.sh` says so; the CI-verified path is untested.
+. **Config is JSON, flags override it, secrets never live in it.** No TOML parser dependency; unknown keys are errors.
+11. **Web UI is one static page plus a small authenticated API.** The administrator token is shown once and stored hashed; agent text is only ever rendered as text, under a strict CSP. Default bind stays on `127.0.0.1`.
+12. **HTTP tools confirm by default.** The model fills typed parameters only; URL, headers, and credential are fixed in the config. You can turn confirmation off per tool.
+13. **Music: the core never plays audio.** It emits stream effects; the satellite plays and ducks. Control-shape backends (Spotify, MPD, Home Assistant) are expressed as HTTP tools, and those recipes are untested.
+14. **Voice: energy-based endpointing first.** No model dependency; a better detector can replace it behind the same interface once measured.
+15. **Speech providers: plain `http://` only for localhost and private hosts**, because audio must not cross the internet unencrypted.
 
 ## Not done
 
 - Hot reload of the config file (a SHOULD in REQ-CFG-007).
-- Everything audio: satellite, wake word, VAD, STT, TTS (M1). The LLM and inbox work without it via the text console.
-- Web UI (M4), music and MCP (M5), Wi-Fi provisioning.
+- The satellite itself: microphone and speaker I/O, wake-word detection, and wiring the speech clients and dialog into the binary (M1). The inbox and LLM work today through the text console.
+- Web UI pages for provider keys, voice settings, schedules, logs, and "test speak"; mDNS (M4).
+- MCP client, resume positions for podcasts, library search (M5); Wi-Fi provisioning.
 - The tag itself (human-only). `release/0.1.0` was prepared and landed into `dev` with the generated changelog; Cargo versions are still 0.0.0 because `cargo-set-version` is not installed. To publish, run in a terminal: `scripts/release.sh publish 0.1.0`. It merges `dev` into `main`, tags, and pushes, so it is the one step that needs you. Consider whether v0.1.0 is the right first version with no audio yet.
 
 ## Untested or unverified
@@ -59,6 +65,9 @@ alone because tightening is your call.
 - The real `claude` CLI's handling of `-p --resume ... -- <text>` is unverified.
 - Codex, Gemini, Hermes, and Home Assistant integration details come from secondary sources.
 - `cargo-deny` is not installed locally; only CI runs it.
+- The speech clients, HTTP tools, and radio streams have only been run against fake servers.
+- Energy-based endpointing has only seen synthetic audio; real rooms (television, fans) are untested.
+- The web UI page has never been opened in a browser; the API behind it is tested.
 
 ## For you to decide
 
