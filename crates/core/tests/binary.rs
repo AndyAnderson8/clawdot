@@ -235,3 +235,110 @@ fn a_bad_config_file_stops_startup_and_names_the_problem() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("listn"), "got: {err}");
 }
+
+#[test]
+fn a_configured_http_tool_runs_only_after_the_user_confirms() {
+    // The device the tool controls.
+    let device = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let device_port = device.local_addr().unwrap().port();
+    let device_thread = std::thread::spawn(move || {
+        let (mut c, _) = device.accept().unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 2048];
+        while !String::from_utf8_lossy(&raw).contains("}") {
+            let n = c.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+        }
+        c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            .unwrap();
+        String::from_utf8_lossy(&raw).into_owned()
+    });
+
+    let call = |id: &str, args: &str| {
+        sse(&[
+            &format!(
+                r#"{{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"id":"{id}","function":{{"name":"set_light","arguments":{}}}}}]}}}}]}}"#,
+                serde_json::to_string(args).unwrap()
+            ),
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ])
+    };
+    let (llm_port, llm) = fake_llm(vec![
+        call("c1", r#"{"room":"den"}"#),
+        call("c2", r#"{"room":"den","confirmed":true}"#),
+        sse(&[
+            r#"{"choices":[{"delta":{"content":"The den light is on."},"finish_reason":"stop"}]}"#,
+        ]),
+    ]);
+
+    let dir = std::env::temp_dir().join(format!("clawdot-tool-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            r#"{{"llm": {{"url": "http://127.0.0.1:{llm_port}", "model": "m"}},
+                "tools": [{{"name": "set_light", "description": "Turn a light on", "method": "POST",
+                            "url": "http://127.0.0.1:{device_port}/light",
+                            "params": {{"room": {{"type": "string", "enum": ["den", "kitchen"], "required": true}}}}}}]}}"#
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "--listen",
+            &format!("127.0.0.1:{}", free_port()),
+            "--data-dir",
+            dir.join("state").to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut ready = false;
+    while Instant::now() < deadline && !ready {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            ready = line.contains("console ready");
+        }
+    }
+    assert!(ready);
+    stdin.write_all(b"make the den bright please\n").unwrap();
+    let mut spoken = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && spoken.is_none() {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
+            if line.starts_with("speaker> ") {
+                spoken = Some(line);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let spoken = spoken.expect("the assistant should answer");
+    assert!(spoken.contains("The den light is on."), "got: {spoken}");
+    let bodies = llm.join().unwrap();
+    assert!(
+        bodies[1].contains("needs the user's confirmation"),
+        "the first call was refused"
+    );
+    let request = device_thread.join().unwrap();
+    assert!(request.starts_with("POST /light "), "{request}");
+    assert!(request.ends_with(r#"{"room":"den"}"#), "{request}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

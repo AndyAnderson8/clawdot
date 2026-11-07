@@ -75,8 +75,7 @@ pub struct HttpBackend {
     endpoint: Endpoint,
     api_key: String,
     deadline: Duration,
-    #[cfg(feature = "tls")]
-    tls: tokio_rustls::TlsConnector,
+    connector: Connector,
 }
 
 impl std::fmt::Debug for HttpBackend {
@@ -101,8 +100,7 @@ impl HttpBackend {
             return Err("this build has no TLS support (feature `tls`); use an http:// URL".into());
         }
         Ok(Self {
-            #[cfg(feature = "tls")]
-            tls: tls_connector()?,
+            connector: Connector::new()?,
             endpoint,
             api_key: api_key.to_owned(),
             deadline,
@@ -132,40 +130,6 @@ impl HttpBackend {
         req: &ChatRequest,
         on_text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Completion, LlmError> {
-        let tcp = TcpStream::connect((self.endpoint.host.as_str(), self.endpoint.port))
-            .await
-            .map_err(|e| LlmError::Transport(format!("connect: {e}")))?;
-        // `connect` shortens the type-erased stream to something both branches share.
-        #[cfg(feature = "tls")]
-        if self.endpoint.tls {
-            let name = rustls::pki_types::ServerName::try_from(self.endpoint.host.clone())
-                .map_err(|e| LlmError::Transport(format!("bad host name: {e}")))?;
-            let stream = self
-                .tls
-                .connect(name, tcp)
-                .await
-                .map_err(|e| LlmError::Transport(format!("TLS: {e}")))?;
-            return self.send(TokioIo::new(stream), req, on_text).await;
-        }
-        self.send(TokioIo::new(tcp), req, on_text).await
-    }
-
-    async fn send<T>(
-        &self,
-        io: T,
-        req: &ChatRequest,
-        on_text: &mut (dyn FnMut(&str) + Send),
-    ) -> Result<Completion, LlmError>
-    where
-        T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
-    {
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-            .await
-            .map_err(|e| LlmError::Transport(format!("handshake: {e}")))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-
         let body = serde_json::to_vec(&req.to_json(true))
             .map_err(|e| LlmError::Malformed(e.to_string()))?;
         let mut builder = Request::builder()
@@ -182,10 +146,11 @@ impl HttpBackend {
         let request = builder
             .body(Full::new(Bytes::from(body)))
             .map_err(|e| LlmError::Malformed(e.to_string()))?;
-        let response = sender
-            .send_request(request)
+        let response = self
+            .connector
+            .request(&self.endpoint, request)
             .await
-            .map_err(|e| LlmError::Transport(format!("request: {e}")))?;
+            .map_err(LlmError::Transport)?;
 
         let status = response.status();
         let streaming = response
@@ -261,6 +226,81 @@ impl HttpBackend {
         }
         Ok(acc.finish())
     }
+}
+
+/// Opens a connection (with TLS when the URL asks for it) and performs one HTTP/1.1 request.
+pub struct Connector {
+    #[cfg(feature = "tls")]
+    tls: tokio_rustls::TlsConnector,
+}
+
+impl std::fmt::Debug for Connector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connector").finish_non_exhaustive()
+    }
+}
+
+impl Connector {
+    /// A connector.
+    ///
+    /// # Errors
+    /// A TLS configuration failure.
+    pub fn new() -> Result<Self, String> {
+        Ok(Self {
+            #[cfg(feature = "tls")]
+            tls: tls_connector()?,
+        })
+    }
+
+    /// Send `request` to `endpoint` and return the response, whose body is still to be read. The request
+    /// must carry its own `host` header.
+    ///
+    /// # Errors
+    /// Connection, TLS, and protocol failures, or `https://` in a build without the `tls` feature.
+    pub async fn request(
+        &self,
+        endpoint: &Endpoint,
+        request: Request<Full<Bytes>>,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, String> {
+        let tcp = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        #[cfg(feature = "tls")]
+        if endpoint.tls {
+            let name = rustls::pki_types::ServerName::try_from(endpoint.host.clone())
+                .map_err(|e| format!("bad host name: {e}"))?;
+            let stream = self
+                .tls
+                .connect(name, tcp)
+                .await
+                .map_err(|e| format!("TLS: {e}"))?;
+            return roundtrip(TokioIo::new(stream), request).await;
+        }
+        #[cfg(not(feature = "tls"))]
+        if endpoint.tls {
+            return Err("this build has no TLS support (feature `tls`); use an http:// URL".into());
+        }
+        roundtrip(TokioIo::new(tcp), request).await
+    }
+}
+
+async fn roundtrip<T>(
+    io: T,
+    request: Request<Full<Bytes>>,
+) -> Result<hyper::Response<hyper::body::Incoming>, String>
+where
+    T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .map_err(|e| format!("handshake: {e}"))?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    sender
+        .send_request(request)
+        .await
+        .map_err(|e| format!("request: {e}"))
 }
 
 #[cfg(feature = "tls")]

@@ -9,13 +9,14 @@ use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, describe_fired};
 use clawdot_core::config::Config;
 use clawdot_core::http::{ServeOptions, serve};
+use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
 use clawdot_core::inbox::event::Event;
 use clawdot_core::inbox::summary::{
     SummaryConfig, announcement, clamp_for_speech, fallback_summary, summary_prompt,
 };
 use clawdot_core::llm::{ChatRequest, Message};
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
-use clawdot_core::session::{ChatBackend, Conversation, TurnConfig, TurnEnd, run_turn};
+use clawdot_core::session::{ChatBackend, Conversation, ToolHost, TurnConfig, TurnEnd, run_turn};
 use clawdot_core::store::JsonStore;
 use clawdot_core::transport::HttpBackend;
 use clawdot_core::usage::{UsageLimits, UsageTracker};
@@ -77,6 +78,7 @@ struct Args {
     summary_model: Option<String>,
     key_env: String,
     persona_file: Option<PathBuf>,
+    tools: Vec<ToolDef>,
     max_requests: u32,
     daily_spend: Option<f64>,
 }
@@ -99,6 +101,7 @@ fn parse() -> Result<Args, String> {
         summary_model: None,
         key_env: "OPENROUTER_API_KEY".into(),
         persona_file: None,
+        tools: Vec::new(),
         max_requests: UsageLimits::default().max_requests_per_day,
         daily_spend: None,
     };
@@ -165,6 +168,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.public_url.clone_from(&c.public_url);
     a.zone.clone_from(&c.zone);
     a.persona_file.clone_from(&c.persona_file);
+    a.tools.clone_from(&c.tools);
     a.create.extend(c.endpoints.iter().cloned());
     a.llm_url.clone_from(&c.llm.url);
     a.llm_model.clone_from(&c.llm.model);
@@ -288,7 +292,7 @@ async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Event)
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let args = match parse() {
+    let mut args = match parse() {
         Ok(a) => a,
         Err(m) if m.is_empty() => {
             print!("{HELP}");
@@ -419,6 +423,20 @@ async fn main() -> ExitCode {
         Some(Arc::clone(&core)),
     );
 
+    let builtin: Vec<String> = ToolHost::tool_specs(&assistant)
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    let http_tools = match HttpTools::new(std::mem::take(&mut args.tools), &builtin, |v| {
+        std::env::var(v).ok()
+    }) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("clawdot: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
     let listener = match TcpListener::bind(args.listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -477,7 +495,7 @@ async fn main() -> ExitCode {
                         None => println!("speaker> (that needs a language model; start with --llm-url and --llm-model)"),
                         Some(l) => {
                             let (day, now) = (assistant.local_day(), clock.now());
-                            let r = run_turn(&l.backend, &mut assistant, &mut conversation, &l.cfg, &mut usage, day, now, &line).await;
+                            let r = run_turn(&l.backend, &mut WithHttp { inner: &mut assistant, http: &http_tools }, &mut conversation, &l.cfg, &mut usage, day, now, &line).await;
                             if let Err(e) = usage.save(&usage_store) {
                                 eprintln!("clawdot: could not save usage counters: {e}");
                             }

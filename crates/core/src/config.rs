@@ -57,6 +57,9 @@ pub struct Config {
     /// Usage caps.
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Declarative HTTP tools the model may call (see `docs/architecture/http-tools.md`).
+    #[serde(default)]
+    pub tools: Vec<crate::httptools::ToolDef>,
 }
 
 impl Config {
@@ -107,6 +110,9 @@ impl Config {
             && (!s.is_finite() || s < 0.0)
         {
             return Err("config: `limits.daily_spend_usd` must be zero or more".into());
+        }
+        for t in &self.tools {
+            t.validate().map_err(|e| format!("config: {e}"))?;
         }
         if let Some(e) = self.endpoints.iter().find(|e| e.trim().is_empty()) {
             return Err(format!("config: an `endpoints` entry is empty ({e:?})"));

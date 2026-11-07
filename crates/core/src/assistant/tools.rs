@@ -151,7 +151,13 @@ impl ToolHost for Assistant {
         false
     }
 
-    fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
+    async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
+        self.run_tool(name, args)
+    }
+}
+
+impl Assistant {
+    fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let now = self.clock.now();
         match name {
             "set_timer" => {
@@ -335,7 +341,7 @@ mod tests {
     use super::*;
 
     fn call(a: &mut Assistant, name: &str, args: Value) -> Result<String, String> {
-        a.call_tool(name, &args)
+        a.run_tool(name, &args)
     }
 
     #[test]

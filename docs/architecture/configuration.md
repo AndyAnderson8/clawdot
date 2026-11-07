@@ -35,6 +35,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `llm.key_env` | Name of the environment variable holding the key | `OPENROUTER_API_KEY` |
 | `limits.max_requests_per_day` | Model requests per local day, at least 1 | 500 |
 | `limits.daily_spend_usd` | Stop calling the model after this much spend | none |
+| `tools` | Declarative HTTP tools the model may call; see [http-tools.md](http-tools.md) | none |
 
 ## Rules
 
