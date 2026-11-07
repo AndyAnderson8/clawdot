@@ -20,6 +20,7 @@ secrets/
 .DS_Store
 Thumbs.db
 
-# Tooling
-.claude/
+# Tooling (shared agent settings and hooks in .claude/ ARE committed; only local overrides are ignored)
+.claude/settings.local.json
+.claude/*.local.*
 .run/

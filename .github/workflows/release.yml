@@ -1,0 +1,53 @@
+name: release
+
+# Runs when scripts/release.sh pushes a version tag from main.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag is on main and the changelog has its entry
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "tag must point into main"; exit 1; }
+          grep -q "^## \[$ver\]" CHANGELOG.md || { echo "CHANGELOG.md has no entry for $ver"; exit 1; }
+
+      - name: Run all gates for the release
+        run: scripts/check.sh --release "${GITHUB_REF_NAME#v}"
+
+      - name: Generate release notes from Conventional Commits
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      # TODO(TASK-003): build armv7/x86_64 binaries, embed CHANGELOG.md for the UI "About" page
+      # (REQ-CFG-013), generate an SBOM (REQ-SEC-005), and attach them. Until the workspace exists
+      # the release contains the source archive and the changelog.
+      - name: Package
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="clawdot-${GITHUB_REF_NAME}/" -o "dist/clawdot-${GITHUB_REF_NAME}-source.tar.gz" "$GITHUB_SHA"
+          cp CHANGELOG.md LICENSE NOTICE dist/
+          (cd dist && sha256sum -- * > SHA256SUMS)
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, '-') }}

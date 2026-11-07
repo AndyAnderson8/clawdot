@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Merges into dev or main happen only through scripts/land.sh, which runs every gate first.
+root=$(git rev-parse --show-toplevel)
+# shellcheck source=../scripts/lib-git.sh
+. "$root/scripts/lib-git.sh"
+
+branch=$(current_branch)
+if is_protected "$branch" && [ "${CLAWDOT_LANDING:-}" != "1" ]; then
+  die "merging into $branch must go through scripts/land.sh (it runs every gate first)."
+fi
+exit 0

@@ -15,8 +15,8 @@ Foundations
 - [ ] `deny.toml` licence allowlist and `license = "Apache-2.0"` in manifests (TASK-002)
 - [ ] Repo: Cargo workspace, `rust-toolchain.toml`, `justfile`, `.editorconfig`, `.gitattributes`
 - [ ] Dev environment validated ([dev-environment.md](process/dev-environment.md), TASK-001)
-- [ ] CI: fmt, clippy, test, deny/audit, commitlint, docs lint, cross-armv7 build
-- [ ] Branch protection and signed commits enabled; GitHub Project board configured
+- [x] Git flow enforcement: hooks, agent guard, landing and release scripts, CI skeleton with the `gate` job ([ADR-0011](adr/0011-git-flow-merge-commits.md)). Rust, deny, cross-armv7, and budget jobs activate with the workspace (TASK-001..003).
+- [ ] GitHub repository created; rulesets applied ([repo-settings.md](process/repo-settings.md)); signed commits once keys exist; Project board configured
 - [x] SPIKE-001 (desk phase): specs sourced, no known unlock, see [R-04](research/04-echo-dot-gen2.md). Hands-on teardown is opportunistic.
 
 Feasibility spikes (each ends with a written finding)
@@ -66,7 +66,7 @@ REQ-TMR-001..008, REQ-AST-004, 010..013, REQ-NFR-008, 009, 111
 **Exit:** AC-2, AC-4, AC-7, AC-8, and AC-9 pass.
 
 ## M4: Web UI
-REQ-CFG-001..006, 008, 009, 012, REQ-INB-019, REQ-NFR-006
+REQ-CFG-001..006, 008, 009, 012, 013, REQ-INB-019, REQ-NFR-006
 - Embedded static UI; auth; provider keys, voice and persona; endpoint management; history; test speak; health
 - **Connect an agent** flow (generates per-harness snippets, token, bridge command); mDNS (`clawdot.local`); headless Wi-Fi docs for Pi
 
