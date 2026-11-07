@@ -54,6 +54,19 @@ pub struct SpeechConfig {
     pub tts_sample_rate: Option<u32>,
 }
 
+/// The satellite server: where speakers and other audio devices connect.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SatelliteConfig {
+    /// Address to accept satellites on, for example `0.0.0.0:10400`. Off when unset.
+    pub listen: Option<String>,
+    /// Name of the environment variable holding the shared satellite token. Required unless `listen` is
+    /// a loopback address.
+    pub token_env: Option<String>,
+    /// Seconds after a reply during which listening stays open without the wake word (default 8; 0 = off).
+    pub follow_up_secs: Option<u64>,
+}
+
 /// The whole file.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +93,9 @@ pub struct Config {
     /// Speech provider.
     #[serde(default)]
     pub speech: SpeechConfig,
+    /// Satellite server.
+    #[serde(default)]
+    pub satellite: SatelliteConfig,
     /// Radio stations for the music commands.
     #[serde(default)]
     pub stations: Vec<crate::media::Station>,
@@ -136,6 +152,21 @@ impl Config {
             && (!s.is_finite() || s < 0.0)
         {
             return Err("config: `limits.daily_spend_usd` must be zero or more".into());
+        }
+        if let Some(l) = &self.satellite.listen {
+            let addr: SocketAddr = l.parse().map_err(|e| {
+                format!("config: `satellite.listen` is not an address like 0.0.0.0:10400: {e}")
+            })?;
+            if self.speech.url.is_none() {
+                return Err("config: `satellite.listen` needs the `speech` section".into());
+            }
+            if !addr.ip().is_loopback() && self.satellite.token_env.is_none() {
+                return Err("config: `satellite.token_env` is required unless `satellite.listen` is a loopback address".into());
+            }
+        } else if self.satellite.token_env.is_some() || self.satellite.follow_up_secs.is_some() {
+            return Err(
+                "config: `satellite.listen` is needed for the other `satellite` settings".into(),
+            );
         }
         let sp = &self.speech;
         if sp.url.is_some() {
@@ -218,6 +249,13 @@ mod tests {
             (r#"{"llm": {"summary_model": "m"}}"#, "need"),
             (r#"{"limits": {"max_requests_per_day": 0}}"#, "at least 1"),
             (r#"{"limits": {"daily_spend_usd": -1}}"#, "zero or more"),
+            (r#"{"satellite": {"listen": "127.0.0.1:1"}}"#, "speech"),
+            (r#"{"satellite": {"listen": "x"}}"#, "address"),
+            (r#"{"satellite": {"token_env": "T"}}"#, "satellite.listen"),
+            (
+                r#"{"satellite": {"listen": "0.0.0.0:10400"}, "speech": {"url": "https://x/v1", "stt_model": "w", "tts_model": "t", "voice": "v"}}"#,
+                "token_env",
+            ),
             (r#"{"speech": {"stt_model": "w"}}"#, "speech.url"),
             (
                 r#"{"speech": {"url": "https://x/v1", "stt_model": "w", "tts_model": "t"}}"#,

@@ -475,3 +475,197 @@ fn voice_mode_explains_a_missing_speech_setup() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("speech.url is not configured"));
 }
+
+/// A fake speech provider that answers any number of requests until the test ends.
+fn fake_speech_provider() -> u16 {
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in server.incoming() {
+            let Ok(mut c) = conn else { break };
+            std::thread::spawn(move || {
+                c.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                loop {
+                    let Ok(n) = c.read(&mut buf) else { return };
+                    if n == 0 {
+                        return;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    if let Some(p) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&raw[..p]).to_ascii_lowercase();
+                        let want: usize = head
+                            .lines()
+                            .find_map(|l| {
+                                l.strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if raw.len() >= p + 4 + want {
+                            let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
+                            let (ctype, body): (&str, Vec<u8>) =
+                                if path.ends_with("/audio/transcriptions") {
+                                    (
+                                        "application/json",
+                                        br#"{"text":"set a timer for ten minutes"}"#.to_vec(),
+                                    )
+                                } else {
+                                    (
+                                        "audio/pcm",
+                                        (0..2400i16).flat_map(|i| (i % 50).to_le_bytes()).collect(),
+                                    )
+                                };
+                            let mut resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            resp.extend_from_slice(&body);
+                            let _ = c.write_all(&resp);
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
+    use clawdot_protocol::message::{
+        AudioFormat, Capabilities, Hello, Indicator, Message, PROTOCOL_VERSION, Wake,
+    };
+    use clawdot_protocol::{Decoder, Limits, encode};
+
+    let speech_port = fake_speech_provider();
+    let sat_port = free_port();
+    let dir = std::env::temp_dir().join(format!("clawdot-sat-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            r#"{{"speech": {{"url": "http://127.0.0.1:{speech_port}/v1", "stt_model": "w", "tts_model": "t", "voice": "v"}},
+                "satellite": {{"listen": "127.0.0.1:{sat_port}"}}}}"#
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--no-console",
+            "--config",
+            cfg.to_str().unwrap(),
+            "--listen",
+            &format!("127.0.0.1:{}", free_port()),
+            "--data-dir",
+            dir.join("state").to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut ready = false;
+    while Instant::now() < deadline && !ready {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            ready = line.contains("satellites connect to");
+        }
+    }
+    assert!(ready, "the satellite server should start");
+
+    let mut sock = TcpStream::connect(("127.0.0.1", sat_port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut dec = Decoder::new(Limits::default());
+    let send =
+        |sock: &mut TcpStream, m: Message| sock.write_all(&encode(&m.to_frame()).unwrap()).unwrap();
+    let recv = |sock: &mut TcpStream, dec: &mut Decoder| -> Option<Message> {
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut buf = [0u8; 8192];
+        while Instant::now() < end {
+            if let Some(f) = dec.next_frame().unwrap() {
+                return Some(Message::from_frame(f).unwrap());
+            }
+            match sock.read(&mut buf) {
+                Ok(0) => return None,
+                Ok(n) => dec.push(&buf[..n]),
+                Err(_) => {}
+            }
+        }
+        None
+    };
+
+    send(
+        &mut sock,
+        Message::Hello(Hello {
+            protocol: PROTOCOL_VERSION,
+            device_id: "test".into(),
+            name: None,
+            token: None,
+            capabilities: Capabilities::default(),
+        }),
+    );
+    assert!(matches!(
+        recv(&mut sock, &mut dec),
+        Some(Message::Welcome(_))
+    ));
+    send(
+        &mut sock,
+        Message::Wake(Wake {
+            name: "hey".into(),
+            timestamp_ms: None,
+        }),
+    );
+    assert_eq!(
+        recv(&mut sock, &mut dec),
+        Some(Message::SetIndicator(Indicator::Listening))
+    );
+    assert_eq!(recv(&mut sock, &mut dec), Some(Message::StreamStart));
+
+    // 0.2 s of silence, 0.6 s of tone, 1 s of silence, in 20 ms frames.
+    let mut samples = vec![0i16; 3200];
+    samples.extend((0..9600).map(|i| (3000.0 * (f64::from(i) * 0.35).sin()) as i16));
+    samples.extend(vec![0i16; 16000]);
+    for chunk in samples.chunks(320) {
+        let payload: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+        send(
+            &mut sock,
+            Message::AudioChunk {
+                format: AudioFormat::PCM_16K_MONO,
+                timestamp_ms: None,
+                payload,
+            },
+        );
+    }
+
+    let mut got_audio = 0usize;
+    let mut speaking = false;
+    loop {
+        match recv(&mut sock, &mut dec).expect("the core should reply") {
+            Message::Ping => send(&mut sock, Message::Pong),
+            Message::SetIndicator(Indicator::Speaking) => speaking = true,
+            Message::AudioChunk { payload, .. } => got_audio += payload.len() / 2,
+            Message::AudioStop => break,
+            _ => {}
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(speaking, "the satellite is told to show the speaking state");
+    assert_eq!(
+        got_audio, 1600,
+        "0.1 s of 24 kHz speech arrives as 1600 samples at 16 kHz"
+    );
+}

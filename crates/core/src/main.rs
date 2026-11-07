@@ -7,7 +7,7 @@
 
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, Effect, describe_fired};
-use clawdot_core::config::{Config, SpeechConfig};
+use clawdot_core::config::{Config, SatelliteConfig, SpeechConfig};
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
 use clawdot_core::inbox::event::Event;
@@ -16,6 +16,7 @@ use clawdot_core::inbox::summary::{
 };
 use clawdot_core::llm::{ChatRequest, Message};
 use clawdot_core::media::Station;
+use clawdot_core::satellite::{self, Answer, Ask};
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
 use clawdot_core::session::{ChatBackend, Conversation, ToolHost, TurnConfig, TurnEnd, run_turn};
 use clawdot_core::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
@@ -86,6 +87,7 @@ struct Args {
     tools: Vec<ToolDef>,
     stations: Vec<Station>,
     speech: SpeechConfig,
+    satellite: SatelliteConfig,
     voice_in: Option<PathBuf>,
     voice_out: Option<PathBuf>,
     max_requests: u32,
@@ -113,6 +115,7 @@ fn parse() -> Result<Args, String> {
         tools: Vec::new(),
         stations: Vec::new(),
         speech: SpeechConfig::default(),
+        satellite: SatelliteConfig::default(),
         voice_in: None,
         voice_out: None,
         max_requests: UsageLimits::default().max_requests_per_day,
@@ -186,6 +189,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.tools.clone_from(&c.tools);
     a.stations.clone_from(&c.stations);
     a.speech.clone_from(&c.speech);
+    a.satellite.clone_from(&c.satellite);
     a.create.extend(c.endpoints.iter().cloned());
     a.llm_url.clone_from(&c.llm.url);
     a.llm_model.clone_from(&c.llm.model);
@@ -370,6 +374,41 @@ impl Brain {
             effects: self.assistant.take_effects(),
         }
     }
+}
+
+/// Build the speech providers from the `speech` configuration section.
+fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
+    let missing =
+        |k: &str| format!("speech.{k} is not configured (see docs/architecture/voice-pipeline.md)");
+    let url = speech.url.as_deref().ok_or_else(|| missing("url"))?;
+    let key = speech
+        .key_env
+        .as_deref()
+        .map(|v| std::env::var(v).unwrap_or_default())
+        .unwrap_or_default();
+    let deadline = Duration::from_secs(30);
+    let stt = HttpTranscriber::new(
+        url,
+        &key,
+        speech
+            .stt_model
+            .as_deref()
+            .ok_or_else(|| missing("stt_model"))?,
+        speech.language.as_deref(),
+        deadline,
+    )?;
+    let tts = HttpSynthesizer::new(
+        url,
+        &key,
+        speech
+            .tts_model
+            .as_deref()
+            .ok_or_else(|| missing("tts_model"))?,
+        speech.voice.as_deref().ok_or_else(|| missing("voice"))?,
+        speech.tts_sample_rate.unwrap_or(24_000),
+        deadline,
+    )?;
+    Ok((stt, tts))
 }
 
 /// Answer one recorded utterance: transcribe the WAV, respond, speak the reply into a WAV.
@@ -649,6 +688,54 @@ async fn main() -> ExitCode {
         }
     });
 
+    // Satellites (speakers) connect here; their questions come back to this loop through `ask_rx`.
+    let (ask_tx, mut ask_rx) = mpsc::channel::<Ask>(8);
+    if let Some(listen) = &args.satellite.listen {
+        let started = async {
+            let addr: SocketAddr = listen
+                .parse()
+                .map_err(|e| format!("satellite.listen: {e}"))?;
+            let (stt, tts) = build_speech(&args.speech)?;
+            let mut settings = satellite::Settings::default();
+            if let Some(var) = &args.satellite.token_env {
+                let token = std::env::var(var).unwrap_or_default();
+                if token.is_empty() {
+                    return Err(format!(
+                        "environment variable {var} (satellite.token_env) is not set"
+                    ));
+                }
+                settings.token_hashes = vec![clawdot_core::inbox::endpoint::hash_token(&token)];
+            }
+            if let Some(s) = args.satellite.follow_up_secs {
+                settings.dialog.follow_up_secs = s;
+            }
+            let l = TcpListener::bind(addr)
+                .await
+                .map_err(|e| format!("cannot listen on {addr}: {e}"))?;
+            println!("clawdot: satellites connect to {addr}");
+            let tx = ask_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = satellite::serve(
+                    l,
+                    Arc::new(stt),
+                    Arc::new(tts),
+                    tx,
+                    settings,
+                    std::future::pending(),
+                )
+                .await
+                {
+                    eprintln!("clawdot: satellite server stopped: {e}");
+                }
+            });
+            Ok::<(), String>(())
+        };
+        if let Err(e) = started.await {
+            eprintln!("clawdot: {e}");
+            return ExitCode::from(1);
+        }
+    }
+
     let (line_tx, mut line_rx) = mpsc::channel::<String>(8);
     if args.console {
         std::thread::spawn(move || {
@@ -674,6 +761,10 @@ async fn main() -> ExitCode {
                 for e in &reply.effects {
                     println!("satellite> {e:?}");
                 }
+            }
+            Some(ask) = ask_rx.recv() => {
+                let r = brain.respond(&ask.text).await;
+                let _ = ask.reply.send(Answer { say: r.say, effects: r.effects });
             }
             _ = tick.tick() => {
                 for fired in brain.assistant.tick() {
