@@ -1,0 +1,39 @@
+name: Feature
+description: A user-visible capability tied to an Accepted spec
+labels: ["type:feature"]
+body:
+  - type: input
+    id: spec
+    attributes:
+      label: Spec and requirement IDs
+      placeholder: "0001 / REQ-TMR-001, REQ-TMR-002"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What the user can do after this ships.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable Given/When/Then statements.
+      placeholder: "- Given ..., when ..., then ..."
+    validations:
+      required: true
+  - type: textarea
+    id: budget
+    attributes:
+      label: Budget impact
+      description: Expected effect on RAM, binary size, CPU. Write "negligible" if so.
+  - type: checkboxes
+    id: dor
+    attributes:
+      label: Definition of Ready
+      options:
+        - label: Linked spec is Accepted
+        - label: Estimated at 3 working days or less (else split)
+        - label: Dependencies identified
