@@ -49,6 +49,10 @@ pub mod kind {
     pub const SET_INDICATOR: &str = "clawdot.set-indicator";
     /// Core -> satellite: mute or unmute the microphone.
     pub const SET_MUTE: &str = "clawdot.set-mute";
+    /// Core to satellite: play an audio stream from a URL (radio).
+    pub const PLAY_URL: &str = "clawdot.play-url";
+    /// Core to satellite: pause or resume stream playback.
+    pub const MEDIA_CONTROL: &str = "clawdot.media-control";
 }
 
 /// Protocol version. While `major` is 0 the format is unstable and peers must match exactly.
@@ -128,6 +132,9 @@ pub struct Capabilities {
     pub beamforming: bool,
     /// Downlink codecs; empty means PCM only.
     pub audio_out: Vec<AudioCodec>,
+    /// The satellite can fetch and play an audio stream from a URL itself (internet radio), so the core may send
+    /// `clawdot.play-url`.
+    pub media_url: bool,
 }
 
 /// First message from a satellite.
@@ -218,6 +225,21 @@ pub enum Indicator {
     Notification,
 }
 
+/// What to do with a stream that is playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MediaAction {
+    /// Pause, keeping the position.
+    Pause,
+    /// Continue.
+    Resume,
+}
+
+/// Longest stream URL accepted.
+pub const MAX_URL: usize = 2048;
+/// Longest stream title accepted.
+pub const MAX_TITLE: usize = 200;
+
 /// Every message the protocol defines.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
@@ -278,6 +300,15 @@ pub enum Message {
         /// Desired state.
         muted: bool,
     },
+    /// Play an audio stream, replacing whatever was playing. Only sent to satellites that declared `media_url`.
+    PlayUrl {
+        /// `http://` or `https://` stream address.
+        url: String,
+        /// Name to show.
+        title: String,
+    },
+    /// Pause or resume stream playback.
+    MediaControl(MediaAction),
     /// An event this version does not know; kept so peers can ignore it.
     Unknown(Frame),
 }
@@ -368,6 +399,15 @@ impl Message {
             Self::SetMute { muted } => {
                 Frame::new(kind::SET_MUTE).with_data(one("muted", Value::Bool(*muted)))
             }
+            Self::PlayUrl { url, title } => {
+                let mut d = one("url", Value::String(url.clone()));
+                d.insert("title".into(), Value::String(title.clone()));
+                Frame::new(kind::PLAY_URL).with_data(d)
+            }
+            Self::MediaControl(a) => Frame::new(kind::MEDIA_CONTROL).with_data(one(
+                "action",
+                serde_json::to_value(a).unwrap_or(Value::Null),
+            )),
             Self::Unknown(f) => f.clone(),
         }
     }
@@ -442,6 +482,34 @@ impl Message {
             kind::SET_MUTE => Self::SetMute {
                 muted: simple_bool(&data, "muted")?,
             },
+            kind::PLAY_URL => {
+                let bad = |reason: &str| MessageError {
+                    kind: name.clone(),
+                    reason: reason.into(),
+                };
+                let url = data.get("url").and_then(Value::as_str).unwrap_or("");
+                if !(url.starts_with("http://") || url.starts_with("https://"))
+                    || url.len() > MAX_URL
+                    || url.contains(char::is_whitespace)
+                {
+                    return Err(bad("`url` must be an http:// or https:// address"));
+                }
+                let title = data.get("title").and_then(Value::as_str).unwrap_or("");
+                if title.chars().count() > MAX_TITLE {
+                    return Err(bad("`title` is too long"));
+                }
+                Self::PlayUrl {
+                    url: url.to_owned(),
+                    title: title.to_owned(),
+                }
+            }
+            kind::MEDIA_CONTROL => {
+                let action = data.get("action").cloned().unwrap_or(Value::Null);
+                Self::MediaControl(serde_json::from_value(action).map_err(|e| MessageError {
+                    kind: name.clone(),
+                    reason: e.to_string(),
+                })?)
+            }
             _ => Self::Unknown(Frame {
                 kind: name,
                 data,
@@ -515,6 +583,12 @@ mod tests {
             Message::StreamStop,
             Message::StopPlayback,
             Message::SetVolume { level: 55 },
+            Message::PlayUrl {
+                url: "http://radio.example/jazz".into(),
+                title: "Jazz".into(),
+            },
+            Message::MediaControl(MediaAction::Pause),
+            Message::MediaControl(MediaAction::Resume),
             Message::SetIndicator(Indicator::WakeDetected),
             Message::SetMute { muted: false },
         ]
@@ -581,5 +655,50 @@ mod tests {
             "minor additions are compatible"
         );
         assert!(!v(1, 0).compatible_with(v(2, 0)), "major is breaking");
+    }
+
+    #[test]
+    fn stream_urls_are_validated() {
+        let frame = |url: &str, title: &str| {
+            let mut d = Map::new();
+            d.insert("url".into(), Value::String(url.into()));
+            d.insert("title".into(), Value::String(title.into()));
+            Frame::new(kind::PLAY_URL).with_data(d)
+        };
+        assert!(Message::from_frame(frame("https://r.example/a", "A")).is_ok());
+        for bad in [
+            "",
+            "file:///etc/passwd",
+            "ftp://x/y",
+            "http://a b/c",
+            "javascript:alert(1)",
+        ] {
+            assert!(Message::from_frame(frame(bad, "x")).is_err(), "{bad}");
+        }
+        let long = format!("http://x/{}", "a".repeat(MAX_URL));
+        assert!(Message::from_frame(frame(&long, "x")).is_err());
+        assert!(Message::from_frame(frame("http://x/", &"t".repeat(MAX_TITLE + 1))).is_err());
+        assert!(
+            Message::from_frame(Frame::new(kind::PLAY_URL)).is_err(),
+            "missing fields"
+        );
+    }
+
+    #[test]
+    fn media_control_rejects_unknown_actions() {
+        let mut d = Map::new();
+        d.insert("action".into(), Value::String("explode".into()));
+        assert!(Message::from_frame(Frame::new(kind::MEDIA_CONTROL).with_data(d)).is_err());
+    }
+
+    #[test]
+    fn media_url_is_off_unless_declared() {
+        assert!(!Capabilities::default().media_url);
+        let h: Hello =
+            serde_json::from_str(r#"{"protocol":{"major":0,"minor":1},"device_id":"d"}"#).unwrap();
+        assert!(
+            !h.capabilities.media_url,
+            "older satellites that never heard of it stay off"
+        );
     }
 }
