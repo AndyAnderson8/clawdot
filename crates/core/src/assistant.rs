@@ -6,6 +6,7 @@ use crate::app::{Core, ReplyError};
 use crate::fastpath::{Match, Matcher, Time};
 use crate::inbox::reply::ReplyKind;
 use crate::inbox::summary::{details_text, status_sentence};
+use crate::media::{Action as MediaAction, MediaError, Player, Station};
 use crate::sched::{
     Clock, Fired, Kind, Scheduler, Ts, Zone, civil_from_days, days, next_occurrence, weekday,
 };
@@ -28,7 +29,7 @@ pub enum MediaCmd {
 }
 
 /// Something the satellite or player should do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Stop speech, ringing, and any playback now.
     StopPlayback,
@@ -40,6 +41,13 @@ pub enum Effect {
     VolumeSet(u8),
     /// A media control.
     Media(MediaCmd),
+    /// Start playing a stream, replacing whatever was playing.
+    PlayStream {
+        /// Stream URL.
+        url: String,
+        /// Name to show and speak.
+        title: String,
+    },
 }
 
 /// What to do and say.
@@ -193,6 +201,8 @@ pub struct Assistant {
     zone: Box<dyn Zone + Send + Sync>,
     clock: Arc<dyn Clock + Send + Sync>,
     core: Option<Arc<Core>>,
+    player: Player,
+    effects: Vec<Effect>,
 }
 
 impl std::fmt::Debug for Assistant {
@@ -218,7 +228,42 @@ impl Assistant {
             zone,
             clock,
             core,
+            player: Player::default(),
+            effects: Vec::new(),
         }
+    }
+
+    /// Set up the radio stations the music commands use.
+    #[must_use]
+    pub fn with_stations(mut self, stations: Vec<Station>) -> Self {
+        self.player = Player::new(stations);
+        self
+    }
+
+    /// Effects produced by model tool calls since the last call; the satellite carries them out.
+    pub fn take_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effects)
+    }
+
+    fn media(&mut self, act: Result<MediaAction, MediaError>) -> Option<Outcome> {
+        Some(match act {
+            Ok(MediaAction::Play { url, title }) => Outcome {
+                say: format!("Playing {title}."),
+                effects: vec![Effect::PlayStream { url, title }],
+            },
+            Ok(MediaAction::Pause) => Outcome {
+                say: String::new(),
+                effects: vec![Effect::Media(MediaCmd::Pause)],
+            },
+            Ok(MediaAction::Resume) => Outcome {
+                say: String::new(),
+                effects: vec![Effect::Media(MediaCmd::Resume)],
+            },
+            Err(e) => Outcome {
+                say: e.to_string(),
+                effects: Vec::new(),
+            },
+        })
     }
 
     fn save(&self) {
@@ -277,7 +322,32 @@ impl Assistant {
         let m = self.matcher.matches(utterance)?;
         let now = self.clock.now();
         match m.intent.as_str() {
-            "stop" => Outcome::effect("", Effect::StopPlayback),
+            "stop" => {
+                self.player.stop();
+                Outcome::effect("", Effect::StopPlayback)
+            }
+            "media.play" if self.player.is_configured() => {
+                let q = m.text("name").unwrap_or("").to_owned();
+                let r = self.player.play(&q);
+                self.media(r)
+            }
+            "media.play" => None,
+            "media.pause" if self.player.is_configured() => {
+                let r = self.player.pause();
+                self.media(r)
+            }
+            "media.resume" if self.player.is_configured() => {
+                let r = self.player.resume();
+                self.media(r)
+            }
+            "media.next" if self.player.is_configured() => {
+                let r = self.player.next_station();
+                self.media(r)
+            }
+            "media.previous" if self.player.is_configured() => {
+                let r = self.player.previous_station();
+                self.media(r)
+            }
             "media.pause" => Outcome::effect("", Effect::Media(MediaCmd::Pause)),
             "media.resume" => Outcome::effect("", Effect::Media(MediaCmd::Resume)),
             "media.next" => Outcome::effect("", Effect::Media(MediaCmd::Next)),
@@ -795,5 +865,91 @@ mod tests {
         }
         let sched = Scheduler::load(&store, 16).unwrap();
         assert_eq!(sched.list().len(), 1);
+    }
+
+    // ----- music (REQ-MUS-001, 002) -----
+
+    fn radio() -> Assistant {
+        let (a, ..) = setup(false);
+        a.with_stations(vec![
+            Station {
+                name: "jazz".into(),
+                url: "http://r.example/jazz".into(),
+            },
+            Station {
+                name: "bbc world service".into(),
+                url: "http://r.example/bbc".into(),
+            },
+        ])
+    }
+
+    fn played(o: &Outcome) -> Option<&str> {
+        o.effects.iter().find_map(|e| match e {
+            Effect::PlayStream { title, .. } => Some(title.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn play_by_name_starts_the_stream() {
+        let mut a = radio();
+        let o = a.handle("play jazz").unwrap();
+        assert_eq!(o.say, "Playing jazz.");
+        assert_eq!(played(&o), Some("jazz"));
+        let o = a.handle("play the bbc world service").unwrap();
+        assert_eq!(played(&o), Some("bbc world service"));
+        let o = a.handle("put on some jazz music").unwrap();
+        assert_eq!(played(&o), Some("jazz"));
+    }
+
+    #[test]
+    fn transport_commands_follow_the_player() {
+        let mut a = radio();
+        assert!(
+            a.handle("pause")
+                .unwrap()
+                .say
+                .contains("Nothing is playing")
+        );
+        a.handle("play jazz").unwrap();
+        assert_eq!(
+            a.handle("pause the music").unwrap().effects,
+            vec![Effect::Media(MediaCmd::Pause)]
+        );
+        assert_eq!(
+            a.handle("resume").unwrap().effects,
+            vec![Effect::Media(MediaCmd::Resume)]
+        );
+        assert_eq!(
+            played(&a.handle("next station").unwrap()),
+            Some("bbc world service")
+        );
+        assert_eq!(played(&a.handle("go back").unwrap()), Some("jazz"));
+        // "stop" halts playback, and the selection survives for "resume".
+        assert_eq!(
+            a.handle("stop").unwrap().effects,
+            vec![Effect::StopPlayback]
+        );
+        assert_eq!(
+            a.handle("play the music").unwrap().effects,
+            vec![Effect::Media(MediaCmd::Resume)]
+        );
+    }
+
+    #[test]
+    fn an_unknown_station_is_answered_locally_but_without_stations_play_goes_to_the_model() {
+        let mut a = radio();
+        let o = a.handle("play polka").unwrap();
+        assert!(o.say.contains("jazz") && o.effects.is_empty(), "{o:?}");
+        let (mut bare, ..) = setup(false);
+        assert!(
+            bare.handle("play a game with me").is_none(),
+            "no stations: the model decides"
+        );
+        // Without stations the old controls still produce their effects.
+        assert_eq!(
+            bare.handle("pause").unwrap().effects,
+            vec![Effect::Media(MediaCmd::Pause)]
+        );
     }
 }

@@ -4,10 +4,11 @@
 //! These are local, reversible actions, so none needs spoken confirmation. Anything with an outside
 //! effect (a future HTTP tool, REQ-AST-014) must declare `needs_confirmation`.
 
-use super::{Assistant, MONTHS, WEEKDAYS, format_clock, format_duration};
+use super::{Assistant, Effect, MONTHS, MediaCmd, WEEKDAYS, format_clock, format_duration};
 use crate::inbox::reply::ReplyKind;
 use crate::inbox::summary::{details_text, status_sentence};
 use crate::llm::ToolSpec;
+use crate::media::{Action as MediaAction, MediaError};
 use crate::sched::{Kind, civil_from_days, days, next_occurrence, weekday};
 use crate::session::ToolHost;
 use serde_json::{Value, json};
@@ -130,6 +131,22 @@ impl ToolHost for Assistant {
                 &[],
             ),
         ];
+        if self.player.is_configured() {
+            tools.extend([
+                spec(
+                    "play_music",
+                    "Play a configured radio station by name, or any station if the name is empty.",
+                    json!({ "name": {"type":"string","description":"For example jazz"} }),
+                    &[],
+                ),
+                spec(
+                    "music_control",
+                    "Control the music that is playing.",
+                    json!({ "action": {"type":"string","enum":["pause","resume","next","previous","stop"]} }),
+                    &["action"],
+                ),
+            ]);
+        }
         if self.core.is_some() {
             tools.extend([
                 spec("inbox_status", "What the user's agents are doing: what is waiting and what finished.", json!({}), &[]),
@@ -157,6 +174,28 @@ impl ToolHost for Assistant {
 }
 
 impl Assistant {
+    /// Queue a media action for the satellite and describe it to the model.
+    fn run_media(&mut self, r: Result<MediaAction, MediaError>) -> Result<String, String> {
+        match r {
+            Ok(MediaAction::Play { url, title }) => {
+                self.effects.push(Effect::PlayStream {
+                    url,
+                    title: title.clone(),
+                });
+                Ok(format!("Now playing {title}."))
+            }
+            Ok(MediaAction::Pause) => {
+                self.effects.push(Effect::Media(MediaCmd::Pause));
+                Ok("Paused.".into())
+            }
+            Ok(MediaAction::Resume) => {
+                self.effects.push(Effect::Media(MediaCmd::Resume));
+                Ok("Resumed.".into())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let now = self.clock.now();
         match name {
@@ -215,6 +254,25 @@ impl Assistant {
                     format_clock(h, m),
                     self.day_words(now, at)
                 ))
+            }
+            "play_music" if self.player.is_configured() => {
+                let r = self.player.play(opt_text(args, "name"));
+                self.run_media(r)
+            }
+            "music_control" if self.player.is_configured() => {
+                let r = match text(args, "action")? {
+                    "pause" => self.player.pause(),
+                    "resume" => self.player.resume(),
+                    "next" => self.player.next_station(),
+                    "previous" => self.player.previous_station(),
+                    "stop" => {
+                        self.player.stop();
+                        self.effects.push(Effect::StopPlayback);
+                        return Ok("Stopped.".into());
+                    }
+                    other => return Err(format!("unknown action `{other}`")),
+                };
+                self.run_media(r)
             }
             "cancel_alarms" => {
                 let n = self.sched.cancel_kind(Kind::Alarm);
@@ -539,5 +597,35 @@ mod tests {
                 .unwrap_err()
                 .contains("unknown tool")
         );
+    }
+
+    #[test]
+    fn music_tools_exist_only_with_stations_and_queue_effects() {
+        let (a, ..) = setup(false);
+        assert!(!a.tool_specs().iter().any(|t| t.name == "play_music"));
+        let mut a = a.with_stations(vec![crate::media::Station {
+            name: "jazz".into(),
+            url: "http://r.example/jazz".into(),
+        }]);
+        let names: Vec<String> = a.tool_specs().into_iter().map(|t| t.name).collect();
+        assert!(names.contains(&"play_music".into()) && names.contains(&"music_control".into()));
+        assert_eq!(
+            call(&mut a, "play_music", json!({"name": "jazz"})).unwrap(),
+            "Now playing jazz."
+        );
+        assert_eq!(
+            call(&mut a, "music_control", json!({"action": "pause"})).unwrap(),
+            "Paused."
+        );
+        assert!(call(&mut a, "music_control", json!({"action": "dance"})).is_err());
+        assert!(
+            call(&mut a, "play_music", json!({"name": "polka"}))
+                .unwrap_err()
+                .contains("jazz")
+        );
+        let fx = a.take_effects();
+        assert!(matches!(&fx[0], Effect::PlayStream { title, .. } if title == "jazz"));
+        assert_eq!(fx[1], Effect::Media(MediaCmd::Pause));
+        assert!(a.take_effects().is_empty(), "effects are handed over once");
     }
 }

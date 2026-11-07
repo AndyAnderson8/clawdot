@@ -837,6 +837,15 @@ pub const BUILTIN: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "media.play",
+        &[
+            "play [some] {name:text} (radio|station|music)",
+            "play [some|the] {name:text}",
+            "put on [some|the] {name:text}",
+            "(listen to|i want to hear) [some|the] {name:text}",
+        ],
+    ),
+    (
         "volume.set",
         &[
             "(set|turn|put) [the] volume (to|at) {level:number} [percent]",
@@ -1160,6 +1169,13 @@ mod tests {
         assert_eq!(intent("stop the music").as_deref(), Some("media.pause"));
         assert_eq!(intent("resume").as_deref(), Some("media.resume"));
         assert_eq!(intent("skip this song").as_deref(), Some("media.next"));
+        assert_eq!(intent("play some jazz").as_deref(), Some("media.play"));
+        assert_eq!(
+            intent("put on the bbc world service").as_deref(),
+            Some("media.play")
+        );
+        // "play the music" is a resume, not a station called "music".
+        assert_eq!(intent("play the music").as_deref(), Some("media.resume"));
     }
 
     #[test]
@@ -1215,7 +1231,6 @@ mod tests {
             "set an alarm",
             "remind me",
             "how tall is mount everest",
-            "play some jazz",
             "stop being so annoying and tell me a story about dragons",
             "",
             "   ",

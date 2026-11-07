@@ -15,6 +15,7 @@ use clawdot_core::inbox::summary::{
     SummaryConfig, announcement, clamp_for_speech, fallback_summary, summary_prompt,
 };
 use clawdot_core::llm::{ChatRequest, Message};
+use clawdot_core::media::Station;
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
 use clawdot_core::session::{ChatBackend, Conversation, ToolHost, TurnConfig, TurnEnd, run_turn};
 use clawdot_core::store::JsonStore;
@@ -79,6 +80,7 @@ struct Args {
     key_env: String,
     persona_file: Option<PathBuf>,
     tools: Vec<ToolDef>,
+    stations: Vec<Station>,
     max_requests: u32,
     daily_spend: Option<f64>,
 }
@@ -102,6 +104,7 @@ fn parse() -> Result<Args, String> {
         key_env: "OPENROUTER_API_KEY".into(),
         persona_file: None,
         tools: Vec::new(),
+        stations: Vec::new(),
         max_requests: UsageLimits::default().max_requests_per_day,
         daily_spend: None,
     };
@@ -169,6 +172,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.zone.clone_from(&c.zone);
     a.persona_file.clone_from(&c.persona_file);
     a.tools.clone_from(&c.tools);
+    a.stations.clone_from(&c.stations);
     a.create.extend(c.endpoints.iter().cloned());
     a.llm_url.clone_from(&c.llm.url);
     a.llm_model.clone_from(&c.llm.model);
@@ -421,7 +425,8 @@ async fn main() -> ExitCode {
         sched,
         Some(sched_store),
         Some(Arc::clone(&core)),
-    );
+    )
+    .with_stations(std::mem::take(&mut args.stations));
 
     let builtin: Vec<String> = ToolHost::tool_specs(&assistant)
         .into_iter()
@@ -489,8 +494,16 @@ async fn main() -> ExitCode {
                 let Some(line) = line else { return ExitCode::SUCCESS };
                 if line.is_empty() { continue; }
                 match assistant.handle(&line) {
-                    Some(out) if out.say.is_empty() => println!("speaker> (done: {:?})", out.effects),
-                    Some(out) => println!("speaker> {}", out.say),
+                    Some(out) => {
+                        if out.say.is_empty() {
+                            println!("speaker> (done)");
+                        } else {
+                            println!("speaker> {}", out.say);
+                        }
+                        for e in &out.effects {
+                            println!("satellite> {e:?}");
+                        }
+                    }
                     None => match &llm {
                         None => println!("speaker> (that needs a language model; start with --llm-url and --llm-model)"),
                         Some(l) => {
@@ -503,6 +516,9 @@ async fn main() -> ExitCode {
                                 eprintln!("clawdot: language model error: {e}");
                             }
                             println!("speaker> {}", r.speech);
+                            for e in assistant.take_effects() {
+                                println!("satellite> {e:?}");
+                            }
                         }
                     },
                 }

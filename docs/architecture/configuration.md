@@ -36,6 +36,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `limits.max_requests_per_day` | Model requests per local day, at least 1 | 500 |
 | `limits.daily_spend_usd` | Stop calling the model after this much spend | none |
 | `tools` | Declarative HTTP tools the model may call; see [http-tools.md](http-tools.md) | none |
+| `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |
 
 ## Rules
 
