@@ -16,6 +16,7 @@ In Rust, the `Device` trait. In another language, the same eight things:
 | `indicator` | Show `idle`, `wake-detected`, `listening`, `thinking`, `speaking`, `error`, `muted`, or `notification`. Ignore the ones your hardware cannot show. |
 | `set_volume` | 0 to 100. |
 | `set_mute` | Obey the core's request to mute or unmute capture. |
+| `supports_streams`, `play_url`, `pause_stream` | Optional. If your device can fetch and play an audio stream (a Linux board with `mpv`, for example), return true; the core will then send radio URLs and pause/resume commands. Otherwise leave the defaults and the core never sends them. |
 
 Everything else (handshake, keepalive, streaming only when asked, reporting `playback-done`, ignoring events you do
 not know) is in `clawdot_satellite::run`.
@@ -55,4 +56,4 @@ check that a core is set up correctly before any hardware exists.
 
 - A conformance test suite you can run against a port (REQ-SAT-012). Today the reference satellite and the end to
   end tests in `crates/e2e` are the closest thing.
-- Opus downlink, TLS, and a way to play a radio stream on a satellite.
+- Opus downlink and TLS.

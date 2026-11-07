@@ -34,6 +34,15 @@ pub trait Device {
     fn set_volume(&mut self, level: u8);
     /// Mute or unmute the microphone as the core asked.
     fn set_mute(&mut self, muted: bool);
+    /// Whether this device can fetch and play an audio stream from a URL itself (internet radio). If false, the
+    /// core never sends stream commands.
+    fn supports_streams(&self) -> bool {
+        false
+    }
+    /// Start playing the stream at `url`, replacing whatever was playing. Only called if `supports_streams`.
+    fn play_url(&mut self, _url: &str, _title: &str) {}
+    /// Pause or resume stream playback. Only called if `supports_streams`.
+    fn pause_stream(&mut self, _paused: bool) {}
     /// Return true to disconnect cleanly (for development devices that do one exchange).
     fn finished(&self) -> bool {
         false
@@ -124,6 +133,7 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
             token: cfg.token.clone(),
             capabilities: Capabilities {
                 wake_word: cfg.wake_on_connect,
+                media_url: device.supports_streams(),
                 ..Capabilities::default()
             },
         }),
@@ -190,6 +200,12 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
                 device.set_mute(m);
             }
             Message::StopPlayback => device.stop_playback(),
+            Message::PlayUrl { url, title } if device.supports_streams() => {
+                device.play_url(&url, &title)
+            }
+            Message::MediaControl(a) if device.supports_streams() => {
+                device.pause_stream(a == clawdot_protocol::message::MediaAction::Pause);
+            }
             Message::AudioStart(_) => device.begin_playback(),
             Message::AudioChunk { payload, .. } => {
                 let pcm = samples(&payload);
@@ -220,6 +236,14 @@ pub struct FileDevice {
     pub volume: Option<u8>,
     /// Stop after this many replies.
     pub stop_after: usize,
+    /// Streams the core asked to play, as (url, title).
+    pub streams: Vec<(String, String)>,
+    /// Pause (true) and resume (false) commands received, in order.
+    pub pauses: Vec<bool>,
+    /// Whether to declare stream support.
+    pub can_stream: bool,
+    /// Keep the session open until this many streams have been started (for tests of radio).
+    pub wait_for_streams: usize,
 }
 
 impl FileDevice {
@@ -257,9 +281,18 @@ impl Device for FileDevice {
     fn set_volume(&mut self, level: u8) {
         self.volume = Some(level);
     }
+    fn supports_streams(&self) -> bool {
+        self.can_stream
+    }
+    fn play_url(&mut self, url: &str, title: &str) {
+        self.streams.push((url.to_owned(), title.to_owned()));
+    }
+    fn pause_stream(&mut self, paused: bool) {
+        self.pauses.push(paused);
+    }
     fn set_mute(&mut self, _: bool) {}
     fn finished(&self) -> bool {
-        self.replies >= self.stop_after
+        self.replies >= self.stop_after && self.streams.len() >= self.wait_for_streams
     }
 }
 
@@ -424,6 +457,92 @@ mod tests {
         };
         let e = run(sock, &mut dev, &cfg).unwrap_err();
         assert!(e.contains("done"));
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn stream_commands_reach_a_device_that_declared_support() {
+        let (port, h) = fake_core(|s, dec| {
+            let mut closed = false;
+            send(s, &welcome()).unwrap();
+            send(
+                s,
+                &Message::PlayUrl {
+                    url: "http://r.example/jazz".into(),
+                    title: "jazz".into(),
+                },
+            )
+            .unwrap();
+            send(
+                s,
+                &Message::MediaControl(clawdot_protocol::message::MediaAction::Pause),
+            )
+            .unwrap();
+            send(
+                s,
+                &Message::MediaControl(clawdot_protocol::message::MediaAction::Resume),
+            )
+            .unwrap();
+            send(s, &Message::AudioStart(AudioFormat::PCM_16K_MONO)).unwrap();
+            send(s, &Message::AudioStop).unwrap();
+            loop {
+                if matches!(next(s, dec, &mut closed), Message::PlaybackDone { .. }) {
+                    break;
+                }
+            }
+        });
+        let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut dev = FileDevice::new(vec![]);
+        dev.can_stream = true;
+        dev.wait_for_streams = 1;
+        run(
+            sock,
+            &mut dev,
+            &Config {
+                wake_on_connect: false,
+                ..cfg()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            dev.streams,
+            vec![("http://r.example/jazz".to_owned(), "jazz".to_owned())]
+        );
+        assert_eq!(dev.pauses, vec![true, false]);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_device_without_stream_support_declares_so_and_ignores_the_commands() {
+        let (port, h) = fake_core(|s, _| {
+            send(s, &welcome()).unwrap();
+            send(
+                s,
+                &Message::PlayUrl {
+                    url: "http://r.example/jazz".into(),
+                    title: "jazz".into(),
+                },
+            )
+            .unwrap();
+            send(
+                s,
+                &Message::Reject(Reject {
+                    reason: "bye".into(),
+                }),
+            )
+            .unwrap();
+        });
+        let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut dev = FileDevice::new(vec![]);
+        let _ = run(
+            sock,
+            &mut dev,
+            &Config {
+                wake_on_connect: false,
+                ..cfg()
+            },
+        );
+        assert!(dev.streams.is_empty());
         h.join().unwrap();
     }
 }

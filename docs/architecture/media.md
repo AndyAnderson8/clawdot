@@ -34,7 +34,9 @@ With no stations configured, "play ..." goes to the language model like any othe
 produce plain player commands for a satellite that has its own player. With stations, the model also gets
 `play_music` and `music_control` tools.
 
-The core never decodes or plays audio. It hands the satellite effects (`PlayStream { url, title }`,
+The core never decodes or plays audio. On a satellite the stream is played by the device itself: it declares
+`media_url` in its hello and receives `clawdot.play-url` and `clawdot.media-control` ([satellite-server.md](satellite-server.md)).
+It hands the satellite effects (`PlayStream { url, title }`,
 `Media(Pause | Resume)`, `StopPlayback`) and the satellite plays the stream. **Ducking or pausing music during
 assistant speech, alarms, and announcements (REQ-MUS-004) is the satellite's job**, because only it owns the
 audio device; this keeps that rule in one place.

@@ -190,6 +190,13 @@ impl Dialog {
         self.thinking_since = None;
     }
 
+    /// A command was carried out and there is nothing to say; go idle without an error cue.
+    pub fn on_reply_silent(&mut self) -> Step {
+        self.phase = Phase::Idle;
+        self.thinking_since = None;
+        Step::Nothing
+    }
+
     /// The reply failed or there is nothing to say.
     pub fn on_reply_failed(&mut self) -> Step {
         self.phase = Phase::Idle;

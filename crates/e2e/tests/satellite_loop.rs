@@ -36,6 +36,17 @@ impl Synthesizer for Mouth {
 
 /// Run the core's satellite server on its own thread; returns its address and a stop switch.
 fn start_core(token: Option<&str>) -> (SocketAddr, oneshot::Sender<()>, mpsc::Receiver<String>) {
+    start_core_with(token, |_| Answer {
+        say: "Nothing is waiting.".to_owned(),
+        effects: vec![Effect::VolumeSet(40)],
+    })
+}
+
+/// Like `start_core`, with a custom answer for each question.
+fn start_core_with(
+    token: Option<&str>,
+    respond: fn(&str) -> Answer,
+) -> (SocketAddr, oneshot::Sender<()>, mpsc::Receiver<String>) {
     let (addr_tx, addr_rx) = mpsc::channel();
     let (asked_tx, asked_rx) = mpsc::channel();
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -55,10 +66,7 @@ fn start_core(token: Option<&str>) -> (SocketAddr, oneshot::Sender<()>, mpsc::Re
             tokio::spawn(async move {
                 while let Some(ask) = rx.recv().await {
                     asked_tx.send(ask.text.clone()).unwrap();
-                    let _ = ask.reply.send(Answer {
-                        say: "Nothing is waiting.".to_owned(),
-                        effects: vec![Effect::VolumeSet(40)],
-                    });
+                    let _ = ask.reply.send(respond(&ask.text));
                 }
             });
             let _ = serve(
@@ -140,5 +148,30 @@ fn the_token_is_checked_and_a_refusal_says_why() {
     )
     .unwrap();
     assert!(!dev.reply.is_empty(), "the right token gets an answer");
+    let _ = stop.send(());
+}
+
+#[test]
+fn radio_reaches_a_satellite_that_can_play_streams() {
+    let (addr, stop, _asked) = start_core_with(None, |_| Answer {
+        say: "Playing jazz.".to_owned(),
+        effects: vec![Effect::PlayStream {
+            url: "http://radio.example/jazz".into(),
+            title: "jazz".into(),
+        }],
+    });
+    let mut dev = FileDevice::new(utterance());
+    dev.can_stream = true;
+    dev.wait_for_streams = 1;
+    run(TcpStream::connect(addr).unwrap(), &mut dev, &cfg(None)).unwrap();
+    assert_eq!(
+        dev.streams,
+        vec![("http://radio.example/jazz".to_owned(), "jazz".to_owned())]
+    );
+    assert_eq!(
+        dev.reply.len(),
+        "Playing jazz.".len() * 50,
+        "the confirmation was spoken first"
+    );
     let _ = stop.send(());
 }

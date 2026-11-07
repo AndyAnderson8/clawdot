@@ -59,6 +59,8 @@ The satellite protocol is the **only contract** a hardware port must implement. 
 | C→S | `stream_start` / `stream_stop` | Tell the satellite to start/stop sending mic audio |
 | C→S | audio frame (binary) | TTS/tones/music |
 | C→S | `play_audio`, `stop_playback`, `set_volume`, `set_indicator`, `set_mute` | Commands |
+| C→S | `clawdot.play-url` | Play an audio stream (radio) from a URL. Only sent to satellites that declared `media_url`. The satellite decodes it. |
+| C→S | `clawdot.media-control` | `pause` or `resume` stream playback. The core pauses music while the assistant speaks and resumes it afterwards (REQ-MUS-004). |
 | both | `ping` / `pong` | Keepalive |
 
 ## 6. Open questions
@@ -76,3 +78,4 @@ The satellite protocol is the **only contract** a hardware port must implement. 
 |---|---|---|
 | 0.1 | 2026-11-07 | Skeleton |
 | 0.2 | 2026-11-07 | Framing changed to Wyoming-compatible (pending ADR-0008); audio front-end capabilities; Wyoming bridge requirement |
+| 0.3 | 2026-11-07 | `clawdot.play-url` and `clawdot.media-control` commands and the `media_url` capability for internet radio on satellites with a player (additive; unknown events are still ignored). |
