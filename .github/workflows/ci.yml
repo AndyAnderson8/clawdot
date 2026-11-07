@@ -1,0 +1,117 @@
+name: ci
+
+# Required status check on dev and main: the `gate` job.
+# Candidate refs (ci/**) are pushed by scripts/land.sh so the exact commit that will be published
+# is verified before it reaches a protected branch.
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - "feature/**"
+      - "bugfix/**"
+      - "hotfix/**"
+      - "release/**"
+      - "docs/**"
+      - "chore/**"
+      - "spike/**"
+      - "ci/**"
+  pull_request:
+    branches: [dev, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.d.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: d
+        run: |
+          if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+
+  commits:
+    name: commits (conventional, human-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check commit messages and identities
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          base="${BASE_SHA:-}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base=$(git merge-base origin/dev "$HEAD_SHA" 2>/dev/null || git rev-list --max-parents=0 "$HEAD_SHA" | tail -1)
+          fi
+          scripts/check-commit-msg.sh --range "$base..$HEAD_SHA"
+
+  docs:
+    name: docs (links, requirement IDs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-docs.sh
+
+  scripts:
+    name: scripts (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          for f in scripts/*.sh .githooks/* .claude/hooks/*.sh; do bash -n "$f"; done
+          shellcheck -x scripts/*.sh .githooks/* .claude/hooks/*.sh
+          scripts/test-policy.sh
+
+  rust:
+    name: rust (fmt, clippy, test, deny)
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Lint and type-check (warnings are errors)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Unit and integration tests
+        run: cargo test --workspace --locked
+      - name: Dependency policy
+        if: hashFiles('deny.toml') != ''
+        uses: EmbarkStudios/cargo-deny-action@v2
+  # TODO(TASK-003): cross-armv7 build and the resource-budget gate join here as required jobs.
+
+  release-check:
+    name: release readiness
+    if: startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: scripts/check.sh --release "${GITHUB_REF_NAME#release/}"
+
+  gate:
+    name: gate
+    if: always()
+    needs: [detect, commits, docs, scripts, rust, release-check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every required job passed (skipped jobs are fine)
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
+            echo "A required job failed."; exit 1
+          fi
