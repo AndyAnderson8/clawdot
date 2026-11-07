@@ -12,6 +12,8 @@ use crate::sched::{
 use crate::store::JsonStore;
 use std::sync::Arc;
 
+mod tools;
+
 /// Playback controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaCmd {
@@ -240,6 +242,12 @@ impl Assistant {
     #[must_use]
     pub fn minute_of_day(&self) -> u16 {
         self.zone.local_minute_of_day(self.clock.now())
+    }
+
+    /// The local calendar day (days since the epoch), for daily usage limits.
+    #[must_use]
+    pub fn local_day(&self) -> i64 {
+        self.zone.local_day(self.clock.now())
     }
 
     /// Seconds until the next timer, alarm, or reminder, for sleeping the event loop.
@@ -492,19 +500,19 @@ mod tests {
     use crate::sched::{FixedOffset, days_from_civil};
     use std::sync::atomic::{AtomicI64, Ordering};
 
-    struct TestClock(AtomicI64);
+    pub(super) struct TestClock(pub(super) AtomicI64);
     impl Clock for TestClock {
         fn now(&self) -> Ts {
             self.0.load(Ordering::Relaxed)
         }
     }
 
-    fn utc(y: i64, mo: i64, d: i64, h: i64, mi: i64) -> Ts {
+    pub(super) fn utc(y: i64, mo: i64, d: i64, h: i64, mi: i64) -> Ts {
         days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60
     }
 
     /// Saturday 2026-11-07 14:42 UTC, zone UTC.
-    fn setup(with_core: bool) -> (Assistant, Arc<TestClock>, Option<Arc<Core>>) {
+    pub(super) fn setup(with_core: bool) -> (Assistant, Arc<TestClock>, Option<Arc<Core>>) {
         let clock = Arc::new(TestClock(AtomicI64::new(utc(2026, 11, 7, 14, 42))));
         let core = with_core.then(|| {
             Arc::new(Core::in_memory(
