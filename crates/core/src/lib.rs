@@ -19,4 +19,5 @@ pub mod sched;
 pub mod session;
 pub mod store;
 pub mod transport;
+pub mod ui;
 pub mod usage;

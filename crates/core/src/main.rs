@@ -41,6 +41,7 @@ OPTIONS:
     --zone NAME                IANA time zone, for example America/New_York (default: UTC)
     --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once
     --rotate-endpoint NAME     Issue a new token for an endpoint
+    --rotate-admin-token       Issue a new web UI administrator token (printed once)
     --no-console               Do not read the console (run as a server only)
 
 LANGUAGE MODEL (optional; without it only the local fast path and fallback summaries work):
@@ -68,6 +69,7 @@ struct Args {
     zone: Option<String>,
     create: Vec<String>,
     rotate: Vec<String>,
+    rotate_admin: bool,
     console: bool,
     llm_url: Option<String>,
     llm_model: Option<String>,
@@ -89,6 +91,7 @@ fn parse() -> Result<Args, String> {
         zone: None,
         create: Vec::new(),
         rotate: Vec::new(),
+        rotate_admin: false,
         console: true,
         llm_url: None,
         llm_model: None,
@@ -123,6 +126,7 @@ fn parse() -> Result<Args, String> {
             "--zone" => a.zone = Some(value("--zone")?),
             "--create-endpoint" => a.create.push(value("--create-endpoint")?),
             "--rotate-endpoint" => a.rotate.push(value("--rotate-endpoint")?),
+            "--rotate-admin-token" => a.rotate_admin = true,
             "--no-console" => a.console = false,
             "--llm-url" => a.llm_url = Some(value("--llm-url")?),
             "--llm-model" => a.llm_model = Some(value("--llm-model")?),
@@ -173,6 +177,42 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
         a.max_requests = n;
     }
     a.daily_spend = c.limits.daily_spend_usd;
+    Ok(())
+}
+
+/// Load the web UI administrator token hash, creating a token on first run (printed once, stored hashed).
+fn setup_admin(
+    core: &Core,
+    dir: &std::path::Path,
+    rotate: bool,
+    public: &str,
+) -> Result<(), String> {
+    use clawdot_core::inbox::endpoint::{generate_token, hash_token};
+    let path = dir.join("admin-token.hash");
+    if !rotate && let Ok(h) = std::fs::read_to_string(&path) {
+        core.set_admin_token_hash(h.trim());
+        return Ok(());
+    }
+    let token = generate_token().map_err(|e| e.to_string())?;
+    let hash = hash_token(&token);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let tmp = dir.join("admin-token.hash.tmp");
+    std::fs::write(&tmp, &hash).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    core.set_admin_token_hash(&hash);
+    println!(
+        "
+Web UI: {public}/
+Administrator token (shown only now):
+  {token}
+"
+    );
     Ok(())
 }
 
@@ -302,6 +342,11 @@ async fn main() -> ExitCode {
             Ok(token) => println!("New token for `{name}` (shown once): {token}"),
             Err(e) => eprintln!("clawdot: endpoint `{name}`: {e}"),
         }
+    }
+
+    if let Err(e) = setup_admin(&core, &args.data_dir, args.rotate_admin, &public) {
+        eprintln!("clawdot: web UI administrator token: {e}");
+        return ExitCode::from(1);
     }
 
     let limits = UsageLimits {

@@ -195,7 +195,10 @@ async fn route(
             Method::POST => ack(&core, &parts.headers, name, id),
             _ => method_not_allowed(),
         },
-        _ => json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#),
+        _ => match crate::ui::handle(&core, &parts.method, &segs, &parts.headers, body).await {
+            Some(r) => r,
+            None => json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#),
+        },
     };
     Ok(resp)
 }
@@ -822,5 +825,200 @@ mod tests {
                 .unwrap()
                 .is_ok()
         );
+    }
+
+    // ----- web UI (REQ-CFG-001, 003, 005, 006) -----
+
+    fn admin(h: &Harness) -> String {
+        h.core
+            .set_admin_token_hash(&crate::inbox::endpoint::hash_token("adm-secret"));
+        bearer("adm-secret")
+    }
+
+    #[tokio::test]
+    async fn the_page_is_static_self_contained_and_locked_down() {
+        let h = start(Limits::default(), ServeOptions::default()).await;
+        for path in ["/", "/ui"] {
+            let (status, head, body) = call(h.addr, "GET", path, &[], "").await;
+            assert_eq!(status, 200, "{path}");
+            let lower = head.to_ascii_lowercase();
+            assert!(
+                lower.contains("content-security-policy: default-src 'none'"),
+                "{head}"
+            );
+            assert!(lower.contains("x-frame-options: deny"));
+            assert!(body.contains("<title>ClawDot</title>"));
+            // No external assets (REQ-CFG-001).
+            assert!(
+                !body.contains("http://") && !body.contains("src=\"https://"),
+                "external reference in page"
+            );
+            assert!(
+                !body.contains("innerHTML"),
+                "agent text must only be rendered as text"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_api_needs_the_administrator_token() {
+        let h = start(Limits::default(), ServeOptions::default()).await;
+        // No administrator token configured at all: everyone is refused.
+        assert_eq!(call(h.addr, "GET", "/api/overview", &[], "").await.0, 401);
+        let good = admin(&h);
+        let bad = bearer("nope");
+        assert_eq!(call(h.addr, "GET", "/api/overview", &[], "").await.0, 401);
+        assert_eq!(
+            call(
+                h.addr,
+                "GET",
+                "/api/overview",
+                &[("Authorization", bad.as_str())],
+                ""
+            )
+            .await
+            .0,
+            401
+        );
+        // An endpoint token is not an administrator token.
+        let ep = bearer(&h.token);
+        assert_eq!(
+            call(
+                h.addr,
+                "GET",
+                "/api/overview",
+                &[("Authorization", ep.as_str())],
+                ""
+            )
+            .await
+            .0,
+            401
+        );
+        let (status, _, body) = call(
+            h.addr,
+            "GET",
+            "/api/overview",
+            &[("Authorization", good.as_str())],
+            "",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(body.contains("claude-code"));
+        assert!(!body.contains("token_hash"), "hashes are never shown");
+    }
+
+    #[tokio::test]
+    async fn endpoints_can_be_created_rotated_and_deleted_and_tokens_show_once() {
+        let h = start(Limits::default(), ServeOptions::default()).await;
+        let a = admin(&h);
+        let auth = [("Authorization", a.as_str())];
+
+        let (status, _, body) = call(
+            h.addr,
+            "POST",
+            "/api/endpoints",
+            &auth,
+            r#"{"name":"ci","adapter":"generic"}"#,
+        )
+        .await;
+        assert_eq!(status, 201);
+        let token = serde_json::from_str::<serde_json::Value>(&body).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // The new token works for posting events.
+        let tb = bearer(&token);
+        let (status, ..) = call(
+            h.addr,
+            "POST",
+            "/hook/ci",
+            &[("Authorization", tb.as_str())],
+            r#"{"title":"build done","text":"ok"}"#,
+        )
+        .await;
+        assert_eq!(status, 202);
+        // The overview shows the event but never the token.
+        let (_, _, ov) = call(h.addr, "GET", "/api/overview", &auth, "").await;
+        assert!(ov.contains("build done") && !ov.contains(&token));
+
+        let (status, ..) = call(
+            h.addr,
+            "POST",
+            "/api/endpoints",
+            &auth,
+            r#"{"name":"ci","adapter":"generic"}"#,
+        )
+        .await;
+        assert_eq!(status, 409);
+        let (status, ..) = call(
+            h.addr,
+            "POST",
+            "/api/endpoints",
+            &auth,
+            r#"{"name":"x","adapter":"nope"}"#,
+        )
+        .await;
+        assert_eq!(status, 400);
+        let (status, ..) = call(
+            h.addr,
+            "POST",
+            "/api/endpoints",
+            &auth,
+            r#"{"name":"Bad Name","adapter":"generic"}"#,
+        )
+        .await;
+        assert_eq!(status, 400);
+        let (status, ..) = call(h.addr, "POST", "/api/endpoints", &auth, "{nope").await;
+        assert_eq!(status, 400);
+
+        let (status, _, body) = call(h.addr, "POST", "/api/endpoints/ci/rotate", &auth, "").await;
+        assert_eq!(status, 200);
+        assert!(body.contains("cdt_") && !body.contains(&token));
+        let (status, ..) = call(
+            h.addr,
+            "POST",
+            "/hook/ci",
+            &[("Authorization", tb.as_str())],
+            r#"{"title":"x"}"#,
+        )
+        .await;
+        assert_eq!(status, 401, "the old token stops working");
+
+        assert_eq!(
+            call(h.addr, "DELETE", "/api/endpoints/ci", &auth, "")
+                .await
+                .0,
+            200
+        );
+        assert_eq!(
+            call(h.addr, "DELETE", "/api/endpoints/ci", &auth, "")
+                .await
+                .0,
+            404
+        );
+        assert_eq!(call(h.addr, "GET", "/api/nothing", &auth, "").await.0, 404);
+    }
+
+    #[tokio::test]
+    async fn wrong_administrator_guesses_get_rate_limited() {
+        let h = start(Limits::default(), ServeOptions::default()).await;
+        admin(&h);
+        let bad = bearer("guess");
+        let mut limited = false;
+        for _ in 0..200 {
+            let (status, ..) = call(
+                h.addr,
+                "GET",
+                "/api/overview",
+                &[("Authorization", bad.as_str())],
+                "",
+            )
+            .await;
+            if status == 429 {
+                limited = true;
+                break;
+            }
+        }
+        assert!(limited, "guessing must be throttled");
     }
 }

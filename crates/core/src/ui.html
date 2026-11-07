@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClawDot</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafafa; --fg: #1b1b1f; --mut: #6b6b76; --line: #d9d9e0; --acc: #2b59c3; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #16161a; --fg: #ececf1; --mut: #9a9aa6; --line: #2e2e36; --acc: #7ea2ff; --bad: #ff8a80; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, sans-serif; }
+  main { max-width: 46rem; margin: 0 auto; padding: 1rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+  p.sub, .mut { color: var(--mut); font-size: .9rem; }
+  section { border-top: 1px solid var(--line); }
+  input, select, button { font: inherit; padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+  button { cursor: pointer; background: var(--acc); color: #fff; border-color: transparent; }
+  button.plain { background: transparent; color: var(--acc); border-color: var(--line); }
+  button.danger { background: transparent; color: var(--bad); border-color: var(--line); }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: .4rem 0; }
+  .row > input { flex: 1 1 10rem; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: .6rem 0; border-bottom: 1px solid var(--line); }
+  code, .token { font-family: ui-monospace, monospace; word-break: break-all; }
+  .token { display: block; padding: .5rem; border: 1px dashed var(--acc); border-radius: 6px; margin: .4rem 0; }
+  #msg { min-height: 1.4rem; color: var(--bad); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ClawDot</h1>
+  <p class="sub">Your speaker's agent inbox. Nothing on this page leaves your network.</p>
+  <div id="msg" role="status"></div>
+
+  <section id="login">
+    <h2>Sign in</h2>
+    <form class="row" id="loginform">
+      <input id="tok" type="password" autocomplete="current-password" placeholder="Administrator token" aria-label="Administrator token">
+      <button>Sign in</button>
+    </form>
+    <p class="mut">The token was printed once when the device first started. It is kept only for this browser tab.</p>
+  </section>
+
+  <div id="app" class="hidden">
+    <div class="row"><span class="mut" id="who"></span><button class="plain" id="out">Sign out</button></div>
+
+    <section>
+      <h2>Endpoints</h2>
+      <ul id="endpoints"></ul>
+      <form class="row" id="newform">
+        <input id="newname" placeholder="name (a-z, 0-9, - _)" aria-label="New endpoint name" maxlength="32">
+        <select id="newadapter" aria-label="Adapter"><option>claude-code</option><option>generic</option></select>
+        <button>Create</button>
+      </form>
+      <div id="secret" class="hidden">
+        <p>Copy this token now. It is shown only once.</p>
+        <code class="token" id="secrettext"></code>
+      </div>
+    </section>
+
+    <section>
+      <h2>Inbox</h2>
+      <ul id="events"></ul>
+    </section>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var token = "";
+  try { token = sessionStorage.getItem("clawdot-admin") || ""; } catch (e) { token = ""; }
+
+  function say(m) { $("msg").textContent = m || ""; }
+  function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+
+  async function api(method, path, body) {
+    var r = await fetch(path, {
+      method: method,
+      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    var data = {};
+    try { data = await r.json(); } catch (e) { data = {}; }
+    if (!r.ok) { var err = new Error(data.error || ("HTTP " + r.status)); err.status = r.status; throw err; }
+    return data;
+  }
+
+  function show(signedIn) {
+    $("login").classList.toggle("hidden", signedIn);
+    $("app").classList.toggle("hidden", !signedIn);
+  }
+
+  function ago(ts, now) {
+    var s = Math.max(0, now - ts);
+    if (s < 90) return s + " s ago";
+    if (s < 5400) return Math.round(s / 60) + " min ago";
+    if (s < 129600) return Math.round(s / 3600) + " h ago";
+    return Math.round(s / 86400) + " d ago";
+  }
+
+  function render(o) {
+    $("who").textContent = o.endpoints.length + " endpoint(s), " + o.events.length + " event(s)";
+    var ul = $("endpoints"); ul.replaceChildren();
+    o.endpoints.forEach(function (e) {
+      var li = el("li");
+      li.append(el("strong", e.name), el("span", "  " + e.adapter + (e.enabled ? "" : "  (disabled)"), "mut"));
+      var hook = el("div", location.origin + "/hook/" + e.name, "mut"); hook.style.wordBreak = "break-all";
+      var row = el("div", undefined, "row");
+      var rot = el("button", "Rotate token", "plain");
+      rot.onclick = async function () {
+        try { var r = await api("POST", "/api/endpoints/" + e.name + "/rotate"); secret(r.token); } catch (x) { say(x.message); }
+      };
+      var del = el("button", "Delete", "danger");
+      del.onclick = async function () {
+        if (!confirm("Delete endpoint " + e.name + "?")) return;
+        try { await api("DELETE", "/api/endpoints/" + e.name); await load(); } catch (x) { say(x.message); }
+      };
+      row.append(rot, del);
+      li.append(hook, row);
+      ul.append(li);
+    });
+    var ev = $("events"); ev.replaceChildren();
+    if (!o.events.length) ev.append(el("li", "Nothing in the inbox.", "mut"));
+    o.events.forEach(function (e) {
+      var li = el("li");
+      li.append(el("strong", e.title));
+      li.append(el("div", e.source + " via " + e.endpoint + " - " + e.state + " - " + ago(e.received_at, o.now), "mut"));
+      if (e.text) li.append(el("div", e.text));
+      ev.append(li);
+    });
+  }
+
+  function secret(t) { $("secrettext").textContent = t; $("secret").classList.remove("hidden"); }
+
+  async function load() {
+    say("");
+    try { render(await api("GET", "/api/overview")); show(true); }
+    catch (x) {
+      show(false);
+      if (x.status === 401) { token = ""; try { sessionStorage.removeItem("clawdot-admin"); } catch (e) {} say("That token was not accepted."); }
+      else if (x.status === 429) say("Too many attempts. Wait a few seconds.");
+      else say(x.message);
+    }
+  }
+
+  $("loginform").onsubmit = function (ev) {
+    ev.preventDefault();
+    token = $("tok").value.trim(); $("tok").value = "";
+    try { sessionStorage.setItem("clawdot-admin", token); } catch (e) {}
+    load();
+  };
+  $("out").onclick = function () { token = ""; try { sessionStorage.removeItem("clawdot-admin"); } catch (e) {} $("secret").classList.add("hidden"); show(false); };
+  $("newform").onsubmit = async function (ev) {
+    ev.preventDefault();
+    try {
+      var r = await api("POST", "/api/endpoints", { name: $("newname").value.trim(), adapter: $("newadapter").value });
+      $("newname").value = ""; secret(r.token); await load();
+    } catch (x) { say(x.message); }
+  };
+
+  if (token) load();
+  setInterval(function () { if (token && !$("app").classList.contains("hidden")) load(); }, 10000);
+})();
+</script>
+</body>
+</html>

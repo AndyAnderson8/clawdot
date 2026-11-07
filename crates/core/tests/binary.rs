@@ -66,7 +66,7 @@ fn the_binary_serves_hooks_and_announces_them() {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline && !(token.is_some() && listening) {
         if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            if line.trim_start().starts_with("cdt_") {
+            if token.is_none() && line.trim_start().starts_with("cdt_") {
                 token = Some(line.trim().to_owned());
             }
             if line.contains("listening on") {
