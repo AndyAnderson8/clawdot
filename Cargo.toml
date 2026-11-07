@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+# Bumped by `scripts/release.sh prepare` (cargo set-version --workspace).
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/AndyAnderson8/clawdot"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# Panics must never be reachable from external input (protocol frames, webhooks, LLM output).
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+
+# The resource budget (spec 0002) is a feature: optimise for size, abort on panic, strip symbols.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

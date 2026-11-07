@@ -1,0 +1,6 @@
+# Pinned toolchain for reproducible builds. Update deliberately (and re-measure the resource budget).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+targets = ["armv7-unknown-linux-musleabihf"]
+profile = "minimal"
