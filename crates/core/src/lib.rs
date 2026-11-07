@@ -24,3 +24,4 @@ pub mod transport;
 pub mod ui;
 pub mod usage;
 pub mod vad;
+pub mod voice;
