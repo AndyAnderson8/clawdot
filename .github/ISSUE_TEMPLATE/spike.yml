@@ -1,0 +1,24 @@
+name: Spike
+description: A time-boxed investigation that produces knowledge, not product code
+labels: ["type:spike"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question to answer
+    validations:
+      required: true
+  - type: input
+    id: timebox
+    attributes:
+      label: Time box
+      placeholder: "e.g. 2 days. Stop and report when reached."
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected output
+      description: A written finding, an ADR, or a spec update. Throwaway code is not delivered.
+    validations:
+      required: true

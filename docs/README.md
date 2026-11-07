@@ -1,0 +1,25 @@
+# Documentation Index
+
+| Area | Document | Purpose |
+|---|---|---|
+| Process | [sdlc.md](process/sdlc.md) | Kanban board, WIP limits, spec-driven workflow, DoR/DoD, releases |
+| Process | [git-workflow.md](process/git-workflow.md) | Trunk-based flow, branch naming, Conventional Commits, signing |
+| Specs | [specs/](specs/README.md) | What the system must do, with stable requirement IDs |
+| Architecture | [architecture/overview.md](architecture/overview.md) | Components, flows, constraints, risks |
+| Architecture | [architecture/extensibility.md](architecture/extensibility.md) | Core, packs, sidecars; media backends; trust model |
+| Decisions | [adr/](adr/README.md) | Why we chose what we chose |
+| Quality | [quality/testing-strategy.md](quality/testing-strategy.md) | Test levels, CI gates, review checklist |
+| Security | [security/threat-model.md](security/threat-model.md) | Assets, threats, mitigations |
+| Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
+| Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
+| Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |
+| Planning | [roadmap.md](roadmap.md) | Milestones, feasibility gate, exit criteria, initial backlog |
+| Planning | [future-scope.md](future-scope.md) | Parked ideas with promotion conditions |
+
+## Document precedence
+
+If documents disagree: **Accepted spec > ADR > architecture overview > roadmap**. Fix the inconsistency in the same PR.
+
+## Glossary
+
+See [spec 0001 §3](specs/0001-product-requirements.md#3-definitions).
