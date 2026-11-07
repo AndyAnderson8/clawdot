@@ -19,9 +19,21 @@ mkdir -p "$HOME/zig" "$HOME/bin"
 tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
 echo "zig $("$HOME/zig/zig" version)"
 
-# cc, c++, ar, and ranlib wrappers so cargo and build scripts find a C toolchain.
+# cc and c++ drop the host --target triple (zig rejects "unknown" vendors, e.g. from the ring crate).
 # shellcheck disable=SC2016  # $HOME and "$@" must expand when the wrapper runs, not now
-for tool in cc c++ ar ranlib; do
+for tool in cc c++; do
+  cat >"$HOME/bin/$tool" <<WRAP
+#!/usr/bin/env bash
+args=()
+for a in "\$@"; do
+  case "\$a" in --target=*-unknown-linux-gnu) ;; *) args+=("\$a") ;; esac
+done
+exec "\$HOME/zig/zig" $tool "\${args[@]}"
+WRAP
+  chmod +x "$HOME/bin/$tool"
+done
+# shellcheck disable=SC2016  # as above
+for tool in ar ranlib; do
   printf '#!/usr/bin/env bash\nexec "$HOME/zig/zig" %s "$@"\n' "$tool" >"$HOME/bin/$tool"
   chmod +x "$HOME/bin/$tool"
 done
