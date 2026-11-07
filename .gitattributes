@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.wav binary
+*.opus binary
+*.tflite binary
+*.png binary

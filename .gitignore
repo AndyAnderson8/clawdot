@@ -1,0 +1,25 @@
+# Build
+/target/
+**/*.rs.bk
+
+# Local config and secrets (ship config.example.toml only)
+config.toml
+*.local.toml
+.env
+.env.*
+secrets/
+
+# Runtime data
+/data/
+*.log
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Tooling
+.claude/
+.run/
