@@ -13,6 +13,7 @@ pub mod assistant;
 pub mod config;
 pub mod fastpath;
 pub mod http;
+pub mod httptools;
 pub mod inbox;
 pub mod llm;
 pub mod sched;
