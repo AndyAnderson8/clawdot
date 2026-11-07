@@ -19,6 +19,7 @@ pub mod llm;
 pub mod media;
 pub mod sched;
 pub mod session;
+pub mod speech;
 pub mod store;
 pub mod transport;
 pub mod ui;
