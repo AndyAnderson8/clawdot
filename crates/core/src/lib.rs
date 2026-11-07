@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod fastpath;
+pub mod http;
 pub mod inbox;
 pub mod sched;
 pub mod store;
