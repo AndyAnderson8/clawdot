@@ -1,0 +1,23 @@
+[package]
+name = "clawdot-satellite"
+description = "ClawDot reference satellite: a small std-only client for the satellite protocol, with a WAV-file device for development"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "clawdot_satellite"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clawdot-satellite"
+path = "src/main.rs"
+
+[dependencies]
+clawdot-protocol = { path = "../protocol" }
