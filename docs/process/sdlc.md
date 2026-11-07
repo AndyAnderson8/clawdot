@@ -1,12 +1,12 @@
 # Development Process
 
-This document is the single source of truth for how work is planned, built, reviewed, and shipped. It is intentionally prescriptive. If the process is wrong, change it through a PR and an ADR (see [ADR-0004](../adr/0004-process-kanban-spec-driven.md)), not by quietly diverging.
+This document is the single source of truth for how work is planned, built, reviewed, and shipped. It is intentionally prescriptive. If the process is wrong, change it on a branch and record it in an ADR (see [ADR-0004](../adr/0004-process-kanban-spec-driven.md)), not by quietly diverging.
 
 ## 1. Principles
 
 1. **Specs before code.** Behaviour is defined in an accepted spec before implementation begins.
-2. **Everything traces.** Requirement ID → spec → issue → PR → test. If you can't trace it, it's not done.
-3. **Small and continuous.** Small changes, short-lived branches, `main` always releasable.
+2. **Everything traces.** Requirement ID → spec → issue → branch and commits → test. If you can't trace it, it's not done.
+3. **Small and continuous.** Small changes, short-lived branches, `dev` always green, `main` always a release ([git flow](git-workflow.md)).
 4. **The budget is a feature.** The resource budget ([spec 0002](../specs/0002-resource-budget.md)) is enforced by CI, not by good intentions.
 5. **Decisions are written down.** Significant choices become ADRs. Chat and memory don't count.
 6. **Flow over velocity.** We manage work-in-progress and cycle time, not story points.
@@ -39,8 +39,8 @@ Tool: **GitHub Projects** (board view), linked to the repo so issues, PRs, and m
 |---|---|---|---|
 | **Backlog** | Captured, not yet refined | none | Meets Definition of Ready |
 | **Ready** | Refined and ordered; top is next | 5 | Pulled by someone with capacity |
-| **In Progress** | Actively being built (branch exists) | **2 per person** | PR opened and CI green |
-| **In Review** | PR open, awaiting review | 3 | Approved and merged |
+| **In Progress** | Actively being built (branch exists) | **2 per person** | Branch complete; local gates pass |
+| **In Review** | Diff being reviewed before landing (external pull requests wait here) | 3 | Landed into `dev` |
 | **Verify** | Merged; acceptance criteria checked against the build | 3 | Criteria demonstrably met |
 | **Done** | Meets Definition of Done | none | none |
 | **Blocked** | Waiting on an external dependency (flagged, with reason) | none | Unblocked, returns to the prior column |
@@ -71,25 +71,24 @@ Idea → Spike (optional) → Spec (Draft) → Spec Review → Spec (Accepted)
 
 1. **Capture.** Open an issue (idea or feature request).
 2. **Spec.** For anything that changes externally observable behaviour, the protocol, the budget, or security posture, write or amend a spec in `docs/specs/` using the [template](../specs/_template.md). Specs use requirement IDs (`REQ-VOI-001`) and RFC 2119 keywords (MUST/SHOULD/MAY).
-3. **Review.** Spec PRs are reviewed like code. A spec must be *Accepted* (merged with status `Accepted`) before feature work on it starts.
+3. **Review.** Spec changes are reviewed like code. A spec must be *Accepted* (merged with status `Accepted`) before feature work on it starts.
 4. **Decompose.** Create issues referencing requirement IDs. Each feature lists its acceptance criteria, copied or derived from the spec.
 5. **Build** (see §6).
 6. **Verify.** Acceptance criteria are checked against the merged build. Tests cite the requirement IDs they cover.
-7. **Close the loop.** When all requirements in a spec are covered by passing tests, the spec moves to `Implemented`. Spec changes after Acceptance go through a PR and, if they alter a contract, a version bump.
+7. **Close the loop.** When all requirements in a spec are covered by passing tests, the spec moves to `Implemented`. Spec changes after Acceptance go through a branch and, if they alter a contract, a version bump.
 
-Changing code without a matching spec change (when behaviour changes) is a defect in the PR.
+Changing code without a matching spec change (when behaviour changes) is a defect in the change.
 
 ## 6. Build procedure (per work item)
 
 1. Confirm the item meets the **Definition of Ready**.
-2. Create a branch: `<type>/<issue#>-<slug>` (see [git workflow](git-workflow.md)).
+2. Create a branch from an up-to-date `dev`: `feature/`, `bugfix/`, `docs/`, `chore/`, or `spike/` + `<name>` (see [git flow](git-workflow.md)).
 3. **Write tests first or alongside**, tagged with requirement IDs.
-4. Implement. Keep commits small and [Conventional](git-workflow.md#commit-messages).
-5. Run the local gate: `just check` (fmt, clippy, tests, `cargo deny`). The budget check runs in CI.
-6. Open a PR using the template. Link the issue and requirement IDs.
-7. Respond to review; keep the branch rebased on `main`.
-8. Squash-merge when approved and CI is green.
-9. Move to *Verify*; confirm acceptance criteria; move to *Done*.
+4. Implement. Commit early and often, as small logical [Conventional](git-workflow.md#3-commit-messages) commits that cite requirement IDs.
+5. Run the full gate: `scripts/check.sh` (format, lint and type-check, tests, dependency policy, docs, commit messages). The budget gate joins in CI.
+6. Make the branch contain `dev` (`git merge dev`), then land it: `scripts/land.sh <branch>`. This re-runs every gate, creates the merge commit, and (with a remote) publishes only after CI passes on that exact commit.
+7. If the diff needs review (an external contributor's pull request, or the maintainer asks), address feedback on the branch before landing.
+8. Move to *Verify*; confirm acceptance criteria; move to *Done*.
 
 ## 7. Definition of Ready
 
@@ -108,27 +107,27 @@ An item is *Done* only if:
 - [ ] CI is green, including lint, security audit, the **resource budget gate**, and the armv7 cross-build.
 - [ ] No new `unsafe` without a documented safety comment and reviewer sign-off.
 - [ ] Public APIs and protocol changes are documented; spec status updated.
-- [ ] `CHANGELOG.md` updated under *Unreleased* for user-visible changes.
+- [ ] Commit messages are Conventional (the changelog is generated from them at release; do not hand-edit `CHANGELOG.md`).
 - [ ] ADR written if a significant decision was made.
-- [ ] Reviewed and approved by someone other than the author (once there is more than one maintainer; see §10).
-- [ ] Merged to `main` via squash; branch deleted.
+- [ ] Reviewed by someone other than the author when there is more than one maintainer (see §10).
+- [ ] Landed into `dev` with `scripts/land.sh` (merge commit); branch deleted.
 
 ## 9. Releases
 
 - **Cadence:** release when a milestone's exit criteria are met, not on a calendar.
 - **Versioning:** [SemVer](https://semver.org). Pre-1.0, minor versions may break. The **satellite protocol** is versioned independently (`protocol vMAJOR.MINOR`) and its compatibility rules are in its spec.
-- **Process:** release branch is not used; tag `vX.Y.Z` on `main`. CI builds artifacts for all targets, generates checksums and an SBOM, and attaches them to a GitHub Release with notes derived from `CHANGELOG.md`.
-- **Hotfix:** branch from the release tag, fix on `main` first, cherry-pick.
+- **Process:** git flow. `scripts/release.sh start` branches `release/X.Y.Z` from `dev` and regenerates `CHANGELOG.md` from the commits; `finish` fast-forwards `main`, tags `vX.Y.Z`, and back-merges into `dev`. The release workflow builds artifacts, ships `CHANGELOG.md` in the release, generates checksums and an SBOM, and publishes the GitHub Release. Details: [git-workflow.md §6](git-workflow.md#6-releases).
+- **Hotfix:** `hotfix/<name>` from `main`, landed into `main` as a patch release and back-merged into `dev`.
 
 ## 10. Roles
 
 | Role | Responsibility |
 |---|---|
-| **Maintainer** | Owns specs and roadmap, merges PRs, cuts releases, triages. |
-| **Contributor** | Proposes and implements via issues and PRs. |
+| **Maintainer** | Owns specs and roadmap, lands work, merges external pull requests, cuts releases, triages. |
+| **Contributor** | Proposes via issues; implements via pull requests against `dev`. |
 | **Reviewer** | Any maintainer or invited contributor. |
 
-While there is a single maintainer, PR self-approval is allowed **only** after CI is green and a 24-hour cooling-off period for non-trivial changes. The PR template still gets filled in. The goal is an audit trail and discipline, not ceremony. This rule is removed when a second maintainer joins.
+The maintainer and their AI pair programmers do not open pull requests for their own work; the gates in `scripts/land.sh` and CI are the check. A pull request is the path for external contributors. The goal is an audit trail and discipline, not ceremony.
 
 ## 11. Cadences (lightweight)
 
@@ -150,9 +149,9 @@ A process that is too heavy gets skipped, which is worse than a lighter one that
 | Dormant until first external contributor | Active from day one |
 |---|---|
 | DCO sign-off enforcement | Specs, requirement IDs, and ADRs |
-| Monthly flow-metric review | Trunk-based flow with squash merge |
+| Monthly flow-metric review | Git flow, merge commits, gated landing |
 | Per-milestone retrospective files | CI gates (fmt, clippy, tests, deny/audit, cross build, budget) |
-| Review cooling-off rule (§10) | Conventional Commits on PR titles |
-| Required second approver | Definition of Done and the traceability report |
+| Required second approver for pull requests | Conventional Commits on every commit; human-only authorship |
+| | Definition of Done and the traceability report |
 
 Scope control: once a spec is Accepted, new scope enters only via a spec amendment and a roadmap change (see [future-scope.md](../future-scope.md)), never directly into a milestone.
