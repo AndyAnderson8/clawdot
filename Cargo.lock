@@ -36,6 +36,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "clawdot-bridge"
+version = "0.0.0"
+dependencies = [
+ "clawdot-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "clawdot-core"
 version = "0.0.0"
 dependencies = [
@@ -48,6 +56,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "clawdot-e2e"
+version = "0.0.0"
+dependencies = [
+ "clawdot-bridge",
+ "clawdot-core",
+ "clawdot-protocol",
  "tokio",
 ]
 

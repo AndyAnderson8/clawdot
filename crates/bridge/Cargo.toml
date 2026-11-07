@@ -1,0 +1,20 @@
+[package]
+name = "clawdot-bridge"
+description = "ClawDot agent bridge: pulls voice replies from the speaker and resumes the agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "clawdot_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+clawdot-protocol = { path = "../protocol" }
+serde_json = "1"
