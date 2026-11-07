@@ -28,7 +28,9 @@ for f in scripts/*.sh .githooks/* .claude/hooks/*.sh; do
 done
 if command -v shellcheck >/dev/null 2>&1; then
   step "shell scripts: shellcheck"
-  run shellcheck -x scripts/*.sh .githooks/* .claude/hooks/*.sh
+  sc_files=()
+  for f in scripts/*.sh .githooks/* .claude/hooks/*.sh; do [ -f "$f" ] && sc_files+=("$f"); done
+  if [ "${#sc_files[@]}" -gt 0 ]; then run shellcheck -x "${sc_files[@]}"; fi
 else
   echo "note: shellcheck not installed locally (CI runs it)"
 fi
