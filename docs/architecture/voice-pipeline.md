@@ -27,6 +27,15 @@ pure logic, tested with synthetic audio and fake providers, so they run in CI wi
 - **Thinking cue.** Played once if the reply takes longer than `thinking_delay_ms` (default 1000), and never if the
   reply starts sooner.
 
+## Providers
+
+`speech::HttpTranscriber` (batch upload of a WAV to `/audio/transcriptions`) and `speech::HttpSynthesizer`
+(`/audio/speech` as raw PCM, resampled to 16 kHz) speak the OpenAI-compatible API that OpenAI, many hosted services,
+and self-hosted servers such as Whisper and Piper wrappers provide. Audio is sensitive, so plain `http://` is
+accepted only for localhost and private-network hosts (REQ-SEC-001); anything else needs `https://`. Audio is
+never stored or logged, and errors never include it or the key. Verified against a fake server only; no real
+provider has been called.
+
 ## Failure behaviour
 
 - Nothing intelligible heard: no reply, the error cue.
@@ -36,7 +45,7 @@ pure logic, tested with synthetic audio and fake providers, so they run in CI wi
 
 ## Not built yet
 
-- Real providers for speech-to-text and text-to-speech (the traits `Transcriber` and `Synthesizer` are the seam).
+- Provider settings in the configuration file and the satellite that uses them.
 - Wake-word detection, audio capture and playback, and the satellite itself.
 - Opt-in barge-in and adaptive end-of-utterance thresholds (REQ-VOI-005, REQ-VOI-011, both later milestones).
 - Starting synthesis while the model is still streaming: replies are split into sentences after they are complete.
