@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod assistant;
+pub mod config;
 pub mod fastpath;
 pub mod http;
 pub mod inbox;

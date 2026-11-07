@@ -220,3 +220,18 @@ fn a_question_the_fast_path_cannot_answer_goes_through_the_model_and_its_tools()
         "the tool result goes back to the model"
     );
 }
+
+#[test]
+fn a_bad_config_file_stops_startup_and_names_the_problem() {
+    let path = std::env::temp_dir().join(format!("clawdot-bad-config-{}.json", std::process::id()));
+    std::fs::write(&path, r#"{"listn": "127.0.0.1:1"}"#).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args(["--no-console", "--config", path.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("listn"), "got: {err}");
+}

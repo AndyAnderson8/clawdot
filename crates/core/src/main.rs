@@ -7,6 +7,7 @@
 
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, describe_fired};
+use clawdot_core::config::Config;
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::inbox::event::Event;
 use clawdot_core::inbox::summary::{
@@ -33,6 +34,7 @@ USAGE:
     clawdot [options]
 
 OPTIONS:
+    --config FILE              JSON configuration file (flags override it); see docs/architecture/configuration.md
     --data-dir DIR             Where state is kept (default: ./clawdot-data)
     --listen ADDR              Address for the HTTP server (default: 127.0.0.1:8080)
     --public-url URL           How agents reach this device, used in printed snippets
@@ -97,11 +99,20 @@ fn parse() -> Result<Args, String> {
         max_requests: UsageLimits::default().max_requests_per_day,
         daily_spend: None,
     };
-    let mut it = std::env::args().skip(1);
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(i) = argv.iter().position(|x| x == "--config") {
+        let path = argv.get(i + 1).ok_or("--config needs a value")?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        seed_from_config(&mut a, &Config::parse(&text)?)?;
+    }
+    let mut it = argv.into_iter();
     while let Some(flag) = it.next() {
         let mut value = |n: &str| it.next().ok_or_else(|| format!("{n} needs a value"));
         match flag.as_str() {
             "-h" | "--help" => return Err(String::new()),
+            "--config" => {
+                value("--config")?;
+            }
             "--data-dir" => a.data_dir = PathBuf::from(value("--data-dir")?),
             "--listen" => {
                 a.listen = value("--listen")?
@@ -138,6 +149,31 @@ fn parse() -> Result<Args, String> {
         return Err("--llm-url and --llm-model must be given together".into());
     }
     Ok(a)
+}
+
+fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
+    if let Some(d) = &c.data_dir {
+        a.data_dir.clone_from(d);
+    }
+    if let Some(l) = c.listen_addr()? {
+        a.listen = l;
+    }
+    a.public_url.clone_from(&c.public_url);
+    a.zone.clone_from(&c.zone);
+    a.persona_file.clone_from(&c.persona_file);
+    a.create.extend(c.endpoints.iter().cloned());
+    a.llm_url.clone_from(&c.llm.url);
+    a.llm_model.clone_from(&c.llm.model);
+    a.llm_fallback.clone_from(&c.llm.fallback_model);
+    a.summary_model.clone_from(&c.llm.summary_model);
+    if let Some(k) = &c.llm.key_env {
+        a.key_env.clone_from(k);
+    }
+    if let Some(n) = c.limits.max_requests_per_day {
+        a.max_requests = n;
+    }
+    a.daily_spend = c.limits.daily_spend_usd;
+    Ok(())
 }
 
 fn zone_for(name: Option<&str>) -> Result<Box<dyn Zone + Send + Sync>, String> {
