@@ -1,6 +1,8 @@
 # ClawDot
 
-> An open, hardware-agnostic voice assistant harness that runs in under 64 MB of RAM (design target: 48 MB).
+> An open, lightweight, hardware-agnostic voice assistant harness for smart speakers. Wake word, LLM tool-calling, timers/alarms/music, and a spoken inbox to BYOA (bring your own agent).
+>
+> Runs in under 64 MB of RAM (design target: 48 MB).
 >
 > ClawDot is an independent project and is not affiliated with or endorsed by Anthropic. See [ADR-0009](docs/adr/0009-project-name.md).
 
@@ -8,7 +10,7 @@ ClawDot is a smart-speaker software stack with three goals:
 
 1. **Extremely lightweight.** The whole system must run on an Amazon Echo Dot (Gen 2)-class device (quad Cortex-A53, 512 MB RAM). That device is the *reference budget* for every design decision. See [ADR-0003](docs/adr/0003-reference-hardware-budget.md).
 2. **Hardware-agnostic.** A small, versioned satellite protocol separates the brain from the microphone and speaker. A port to a new device only implements the protocol. See [ADR-0005](docs/adr/0005-satellite-core-separation.md).
-3. **Agent-aware.** Any agent (Claude Code, CI, scripts) can post a webhook when it finishes. The speaker plays a tone, announces it, summarises the result, and lets you reply to continue the work or dismiss it.
+3. **Bring your own agent (BYOA).** Any agent, script, or service that can send a webhook (Claude Code, Hermes, CI, a cron job, a Home Assistant automation) can use ClawDot as its voice. When it finishes, the speaker plays a tone, tells you in a sentence or two what happened, and lets you reply by voice to send it back to work, or dismiss it.
 
 It also does the basics: wake word, conversational Q&A over any OpenAI-compatible API (such as OpenRouter), tool calling (including MCP), timers, alarms, reminders, and music.
 
