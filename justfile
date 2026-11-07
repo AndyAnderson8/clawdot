@@ -20,9 +20,10 @@ check-fast:
 land branch:
     scripts/land.sh {{branch}}
 
-# Start / finish a release
-release-start version="":
-    scripts/release.sh start {{version}}
+# Release step 1 (anyone): branch release/X.Y.Z with a regenerated changelog
+release-prepare version="":
+    scripts/release.sh prepare {{version}}
 
-release-finish version:
-    scripts/release.sh finish {{version}}
+# Release step 3 (HUMAN ONLY, interactive terminal): merge dev into main, tag, push the tag
+release-publish version:
+    scripts/release.sh publish {{version}}

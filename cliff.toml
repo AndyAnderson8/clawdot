@@ -1,6 +1,6 @@
 # git-cliff configuration: generates CHANGELOG.md and release notes from Conventional Commits.
 # Docs: https://git-cliff.org/docs/configuration
-# NOTE: written before git-cliff was available locally; first verified when `scripts/release.sh start` runs.
+# NOTE: written before git-cliff was available locally; first verified when `scripts/release.sh prepare` runs.
 
 [changelog]
 header = """

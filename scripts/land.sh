@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Land work with a merge commit, only after every gate passes. This is the ONLY way work reaches dev or main.
-#   scripts/land.sh <branch>                  merge a working branch into dev (merge commit)
-#   scripts/land.sh --tiny                    publish ONE tiny commit made directly on dev
-#   scripts/land.sh <release|hotfix>/<ver> --into main    fast-forward main to a release branch
+# Land work with a MERGE COMMIT, only after every gate passes. The only way work reaches dev (or a hotfix reaches main).
+#   scripts/land.sh <branch>                       merge a working branch into dev
+#   scripts/land.sh --tiny                         publish ONE tiny commit made directly on dev
+#   scripts/land.sh hotfix/<name> --into main      merge a hotfix into main (a human then tags it)
+# Releases are NOT landed here: use scripts/release.sh (prepare, then publish).
 #
-# The merge commit's tree is identical to the tested branch tip because the branch must already
-# contain dev. With a remote, the exact commit is pushed to a candidate ref, CI must pass on it, and
-# only then is it pushed to the protected branch. Without a remote it is a local merge after local checks.
+# The merge commit's tree equals the tested branch tip because the branch must already contain its
+# target. With a remote, the exact merge commit is pushed to a candidate ref, CI must pass on it, and only
+# then is it pushed to the protected branch. Without a remote it is a local merge after local checks.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 # shellcheck source=scripts/lib-git.sh
@@ -28,13 +29,6 @@ done
 [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
 if has_remote; then git fetch --quiet --prune origin; fi
 
-sync_ff() { # fast-forward a local branch from its remote counterpart, if any
-  if has_remote && git rev-parse --verify -q "origin/$1" >/dev/null; then
-    git checkout -q "$1"
-    git merge --ff-only -q "origin/$1" || die "local $1 has diverged from origin/$1"
-  fi
-}
-
 if [ "$tiny" -eq 1 ]; then
   [ "$(current_branch)" = "dev" ] || die "--tiny must be run on dev"
   [ "$(unlanded_commits)" -eq 1 ] || die "--tiny needs exactly one unlanded commit on dev"
@@ -47,7 +41,7 @@ if [ "$tiny" -eq 1 ]; then
   exit 0
 fi
 
-[ -n "$source_branch" ] || die "usage: scripts/land.sh <branch> [--into dev|main] | --tiny"
+[ -n "$source_branch" ] || die "usage: scripts/land.sh <branch> [--into main (hotfix only)] | --tiny"
 git rev-parse --verify -q "$source_branch" >/dev/null || die "no such branch: $source_branch"
 
 case "$target" in
@@ -58,32 +52,27 @@ case "$target" in
       die "$source_branch does not contain dev. Update it first:  git switch $source_branch && git merge dev"
     git checkout -q "$source_branch"
     scripts/check.sh
-    git checkout -q dev
-    prev=$(git rev-parse dev)
-    CLAWDOT_LANDING=1 git merge --no-ff -m "Merge $source_branch into dev" "$source_branch"
-    if ! publish dev; then
-      git reset -q --hard "$prev"
-      die "CI failed; dev was not published and has been reset to its previous commit"
-    fi
+    merge_into dev "$source_branch" "Merge $source_branch into dev" ||
+      die "CI or publishing failed; dev was reset to its previous commit and $source_branch is untouched"
     git branch -d "$source_branch"
     if has_remote; then git push --quiet origin --delete "$source_branch" 2>/dev/null || true; fi
     echo "land: $source_branch -> dev done"
     ;;
   main)
-    case "$source_branch" in release/* | hotfix/*) ;; *) die "only release/* or hotfix/* branches may be landed into main" ;; esac
-    ver="${source_branch#*/}"
+    case "$source_branch" in
+      hotfix/*) ;;
+      *) die "only hotfix/* branches are landed into main here. Releases: scripts/release.sh prepare, land the release branch into dev, then the human runs scripts/release.sh publish X.Y.Z" ;;
+    esac
     sync_ff main
-    git merge-base --is-ancestor main "$source_branch" || die "main is not an ancestor of $source_branch (it must fast-forward)"
+    git merge-base --is-ancestor main "$source_branch" ||
+      die "$source_branch does not contain main. Update it first:  git switch $source_branch && git merge main"
     git checkout -q "$source_branch"
-    scripts/check.sh --release "$ver"
-    git checkout -q main
-    prev=$(git rev-parse main)
-    CLAWDOT_LANDING=1 git merge --ff-only -q "$source_branch"
-    if ! publish main; then
-      git reset -q --hard "$prev"
-      die "CI failed; main was not published and has been reset"
-    fi
-    echo "land: $source_branch -> main done (run scripts/release.sh finish $ver to tag and back-merge)"
+    scripts/check.sh
+    merge_into main "$source_branch" "Merge $source_branch into main" ||
+      die "CI or publishing failed; main was reset to its previous commit"
+    git branch -d "$source_branch"
+    echo "land: $source_branch -> main done."
+    echo "next (human): scripts/release.sh tag X.Y.Z   then back-merge main into dev on a chore/ branch (see docs/process/runbook.md)"
     ;;
   *) die "--into must be dev or main" ;;
 esac
