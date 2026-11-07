@@ -6,7 +6,7 @@
 //! configured.
 
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
-use clawdot_core::assistant::{Assistant, describe_fired};
+use clawdot_core::assistant::{Assistant, Effect, describe_fired};
 use clawdot_core::config::Config;
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
@@ -294,6 +294,71 @@ async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Event)
     fallback_summary(event)
 }
 
+/// Everything needed to answer one thing the user said, whether it was typed or spoken.
+struct Brain {
+    assistant: Assistant,
+    llm: Option<Llm>,
+    conversation: Conversation,
+    usage: UsageTracker,
+    usage_store: JsonStore,
+    http_tools: HttpTools,
+    clock: Arc<dyn Clock + Send + Sync>,
+}
+
+/// What to say and which effects the satellite should carry out.
+struct Reply {
+    say: String,
+    effects: Vec<Effect>,
+}
+
+impl Brain {
+    /// Answer locally if the fast path can, otherwise ask the language model.
+    async fn respond(&mut self, line: &str) -> Reply {
+        if let Some(out) = self.assistant.handle(line) {
+            let say = if out.say.is_empty() {
+                "(done)".to_owned()
+            } else {
+                out.say
+            };
+            return Reply {
+                say,
+                effects: out.effects,
+            };
+        }
+        let Some(l) = &self.llm else {
+            return Reply {
+                say: "(that needs a language model; start with --llm-url and --llm-model)".into(),
+                effects: Vec::new(),
+            };
+        };
+        let (day, now) = (self.assistant.local_day(), self.clock.now());
+        let r = run_turn(
+            &l.backend,
+            &mut WithHttp {
+                inner: &mut self.assistant,
+                http: &self.http_tools,
+            },
+            &mut self.conversation,
+            &l.cfg,
+            &mut self.usage,
+            day,
+            now,
+            line,
+        )
+        .await;
+        if let Err(e) = self.usage.save(&self.usage_store) {
+            eprintln!("clawdot: could not save usage counters: {e}");
+        }
+        if let TurnEnd::Failed(e) = &r.end {
+            eprintln!("clawdot: language model error: {e}");
+        }
+        Reply {
+            say: r.speech,
+            effects: self.assistant.take_effects(),
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let mut args = match parse() {
@@ -366,7 +431,7 @@ async fn main() -> ExitCode {
         args.data_dir.join("usage.json"),
         clawdot_core::usage::SCHEMA,
     );
-    let mut usage = match UsageTracker::load(&usage_store, limits) {
+    let usage = match UsageTracker::load(&usage_store, limits) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("clawdot: cannot load usage counters: {e}");
@@ -406,7 +471,7 @@ async fn main() -> ExitCode {
         },
         None => DEFAULT_PERSONA.to_owned(),
     };
-    let mut conversation = Conversation::new(persona, 20, 24_000, 600);
+    let conversation = Conversation::new(persona, 20, 24_000, 600);
 
     let sched_store = JsonStore::new(
         args.data_dir.join("timers.json"),
@@ -419,7 +484,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mut assistant = Assistant::new(
+    let assistant = Assistant::new(
         clock.clone(),
         zone,
         sched,
@@ -442,6 +507,16 @@ async fn main() -> ExitCode {
         }
     };
 
+    let mut brain = Brain {
+        assistant,
+        llm,
+        conversation,
+        usage,
+        usage_store,
+        http_tools,
+        clock: clock.clone(),
+    };
+
     let listener = match TcpListener::bind(args.listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -453,7 +528,7 @@ async fn main() -> ExitCode {
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         args.listen,
         core.endpoints().len(),
-        if llm.is_some() {
+        if brain.llm.is_some() {
             "connected"
         } else {
             "not configured"
@@ -493,45 +568,21 @@ async fn main() -> ExitCode {
             line = line_rx.recv(), if args.console => {
                 let Some(line) = line else { return ExitCode::SUCCESS };
                 if line.is_empty() { continue; }
-                match assistant.handle(&line) {
-                    Some(out) => {
-                        if out.say.is_empty() {
-                            println!("speaker> (done)");
-                        } else {
-                            println!("speaker> {}", out.say);
-                        }
-                        for e in &out.effects {
-                            println!("satellite> {e:?}");
-                        }
-                    }
-                    None => match &llm {
-                        None => println!("speaker> (that needs a language model; start with --llm-url and --llm-model)"),
-                        Some(l) => {
-                            let (day, now) = (assistant.local_day(), clock.now());
-                            let r = run_turn(&l.backend, &mut WithHttp { inner: &mut assistant, http: &http_tools }, &mut conversation, &l.cfg, &mut usage, day, now, &line).await;
-                            if let Err(e) = usage.save(&usage_store) {
-                                eprintln!("clawdot: could not save usage counters: {e}");
-                            }
-                            if let TurnEnd::Failed(e) = &r.end {
-                                eprintln!("clawdot: language model error: {e}");
-                            }
-                            println!("speaker> {}", r.speech);
-                            for e in assistant.take_effects() {
-                                println!("satellite> {e:?}");
-                            }
-                        }
-                    },
+                let reply = brain.respond(&line).await;
+                println!("speaker> {}", reply.say);
+                for e in &reply.effects {
+                    println!("satellite> {e:?}");
                 }
             }
             _ = tick.tick() => {
-                for fired in assistant.tick() {
+                for fired in brain.assistant.tick() {
                     println!("speaker> {}", describe_fired(&fired));
                 }
-                if let Some(next) = core.next_announcement(true, assistant.minute_of_day()) {
-                    let spoken = match &llm {
+                if let Some(next) = core.next_announcement(true, brain.assistant.minute_of_day()) {
+                    let spoken = match &brain.llm {
                         Some(l) => {
-                            let s = summarise(l, &mut usage, assistant.local_day(), &next.event).await;
-                            if let Err(e) = usage.save(&usage_store) {
+                            let s = summarise(l, &mut brain.usage, brain.assistant.local_day(), &next.event).await;
+                            if let Err(e) = brain.usage.save(&brain.usage_store) {
                                 eprintln!("clawdot: could not save usage counters: {e}");
                             }
                             s
