@@ -38,6 +38,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `tools` | Declarative HTTP tools the model may call; see [http-tools.md](http-tools.md) | none |
 | `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |
 | `speech` | Speech-to-text and text-to-speech provider (`url`, `key_env`, `stt_model`, `tts_model`, `voice`, `language`, `tts_sample_rate`); see [voice-pipeline.md](voice-pipeline.md) | none |
+| `satellite` | Where speakers connect (`listen`, `token_env`, `follow_up_secs`); see [satellite-server.md](satellite-server.md) | off |
 
 ## Rules
 

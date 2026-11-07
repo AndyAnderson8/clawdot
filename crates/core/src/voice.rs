@@ -219,7 +219,7 @@ pub trait Transcriber {
     ///
     /// # Errors
     /// A message describing why it failed.
-    fn transcribe(&self, pcm: &[i16]) -> impl Future<Output = Result<String, String>>;
+    fn transcribe(&self, pcm: &[i16]) -> impl Future<Output = Result<String, String>> + Send;
 }
 
 /// Text to speech. A provider turns one sentence into audio.
@@ -228,7 +228,7 @@ pub trait Synthesizer {
     ///
     /// # Errors
     /// A message describing why it failed.
-    fn synthesize(&self, text: &str) -> impl Future<Output = Result<Vec<i16>, String>>;
+    fn synthesize(&self, text: &str) -> impl Future<Output = Result<Vec<i16>, String>> + Send;
 }
 
 /// The result of one voice turn.
@@ -290,7 +290,7 @@ where
 mod tests {
     use super::*;
     use crate::vad::tests::{silence, tone};
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     fn speak_into(d: &mut Dialog, now: u64) -> Step {
         let mut audio = silence(200);
@@ -433,14 +433,14 @@ mod tests {
 
     struct Voice {
         fail_on: Option<&'static str>,
-        spoken: RefCell<Vec<String>>,
+        spoken: Mutex<Vec<String>>,
     }
     impl Synthesizer for Voice {
         async fn synthesize(&self, text: &str) -> Result<Vec<i16>, String> {
             if self.fail_on.is_some_and(|f| text.contains(f)) {
                 return Err("voice unavailable".into());
             }
-            self.spoken.borrow_mut().push(text.to_owned());
+            self.spoken.lock().unwrap().push(text.to_owned());
             Ok(vec![1; text.len()])
         }
     }
@@ -448,7 +448,7 @@ mod tests {
     fn voice(fail_on: Option<&'static str>) -> Voice {
         Voice {
             fail_on,
-            spoken: RefCell::new(Vec::new()),
+            spoken: Mutex::new(Vec::new()),
         }
     }
 
@@ -467,7 +467,10 @@ mod tests {
         .await;
         assert_eq!(out.transcript.as_deref(), Some("what time is it"));
         assert_eq!(out.reply, "It is noon. Lunch is soon!");
-        assert_eq!(*tts.spoken.borrow(), vec!["It is noon.", "Lunch is soon!"]);
+        assert_eq!(
+            *tts.spoken.lock().unwrap(),
+            vec!["It is noon.", "Lunch is soon!"]
+        );
         assert_eq!(out.audio.len(), 2);
         assert!(out.problems.is_empty());
     }
