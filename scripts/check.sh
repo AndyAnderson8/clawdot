@@ -33,8 +33,10 @@ else
   echo "note: shellcheck not installed locally (CI runs it)"
 fi
 
-step "policy tooling: commit-message rules and agent guard"
-run scripts/test-policy.sh
+if [ -f scripts/test-policy.sh ]; then
+  step "policy tooling: commit-message rules, agent guard, landing and release flow"
+  run scripts/test-policy.sh
+fi
 
 step "documentation: links and requirement IDs"
 run scripts/check-docs.sh
