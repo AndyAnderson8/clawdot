@@ -16,6 +16,10 @@ block() {
 }
 has() { printf '%s' "$h" | LC_ALL=C grep -Eq "$1"; }
 
+# Publishing a release is outward-facing and human-only (the script also needs an interactive terminal).
+has 'scripts/release\.sh[[:space:]]+(publish|tag)' &&
+  block "publishing a release is a human-only step. Run 'scripts/release.sh prepare', land the release branch into dev, then ask the human to run 'scripts/release.sh publish X.Y.Z' in a terminal."
+
 # Only commands that touch git or gh are relevant.
 has '(^|[^a-z])(git|gh)[[:space:]]' || exit 0
 

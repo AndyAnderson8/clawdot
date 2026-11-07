@@ -38,6 +38,7 @@ The Rust gates (format, clippy, tests, cargo-deny), the armv7 cross-build, and t
 |---|---|
 | Board, WIP limits, DoR/DoD | [docs/process/sdlc.md](docs/process/sdlc.md) |
 | Git flow: branches, commits, landing, releases | [docs/process/git-workflow.md](docs/process/git-workflow.md) |
+| Step-by-step commands (humans and agents) | [docs/process/runbook.md](docs/process/runbook.md) |
 | Rules for AI coding agents | [AGENTS.md](AGENTS.md) |
 | Writing a spec | [docs/specs/README.md](docs/specs/README.md) |
 | Testing expectations | [docs/quality/testing-strategy.md](docs/quality/testing-strategy.md) |

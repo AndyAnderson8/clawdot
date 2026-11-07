@@ -53,7 +53,7 @@ has_remote() { git remote get-url origin >/dev/null 2>&1; }
 publish() {
   local br="$1" sha cand id i
   has_remote || { echo "land: no remote configured; integrated locally only (CI gate applies once a remote exists)"; return 0; }
-  command -v gh >/dev/null 2>&1 || die "the gh CLI is required to verify CI before publishing $br"
+  command -v gh >/dev/null 2>&1 || { echo "land: the gh CLI is required to verify CI before publishing $br" >&2; return 1; }
   sha=$(git rev-parse "$br")
   cand="ci/$br/${sha:0:10}"
   CLAWDOT_LANDING=1 git push origin "$sha:refs/heads/$cand"
@@ -74,6 +74,30 @@ publish() {
     git push origin --delete "$cand" || true
   else
     git push origin --delete "$cand" || true
+    return 1
+  fi
+}
+
+# sync_ff <branch>: fast-forward a local branch from origin (no-op without a remote).
+sync_ff() {
+  if has_remote && git rev-parse --verify -q "origin/$1" >/dev/null; then
+    git checkout -q "$1"
+    git merge --ff-only -q "origin/$1" || die "local $1 has diverged from origin/$1"
+  fi
+}
+
+# merge_into <target> <source> <message>: create a MERGE COMMIT on <target> (never a fast-forward),
+# then publish it. If publishing fails, <target> is reset to where it was, so nothing unverified lingers.
+merge_into() {
+  local target="$1" source="$2" msg="$3" prev
+  git checkout -q "$target"
+  prev=$(git rev-parse "$target")
+  CLAWDOT_LANDING=1 git merge --no-ff -q -m "$msg" "$source"
+  if [ "$(git rev-parse "$target")" = "$prev" ]; then
+    die "nothing to merge: $target already contains $source"
+  fi
+  if ! publish "$target"; then
+    git reset -q --hard "$prev"
     return 1
   fi
 }
