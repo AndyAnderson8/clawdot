@@ -13,17 +13,17 @@ ahead of the last published state; the `origin` remote was detached for the sess
 | `crates/e2e` | Six end-to-end tests of the headline loop over real sockets. |
 | Process | Git flow tooling, hooks, agent guard, landing and release scripts, policy tests, budget script. |
 
-Added later in the session (each documented under `docs/architecture/`): a validated JSON config file, an embedded web UI for endpoints and the inbox, declarative HTTP tools, internet radio by voice with a service-agnostic media model, the voice dialog layer (endpointing, mute, half-duplex, follow-up window, speech turn), OpenAI-compatible speech-to-text and text-to-speech clients, a satellite server in the core (handshake, token, a spoken turn, mute, keepalive, announcements, radio with ducking), and a reference satellite client crate with a porting guide. Tests run the real binary against fake providers, including the headline loop over a TCP satellite: an agent event is spoken aloud, a spoken answer is understood, and the instruction reaches the bridge stream. Test count at the end: 309 passing across the workspace; clippy `-D warnings` and rustfmt clean.
+Added later in the session (each documented under `docs/architecture/`): a validated JSON config file, an embedded web UI for endpoints and the inbox, declarative HTTP tools, internet radio by voice with a service-agnostic media model, the voice dialog layer (endpointing, mute, half-duplex, follow-up window, speech turn), OpenAI-compatible speech-to-text and text-to-speech clients, a satellite server in the core (handshake, token, a spoken turn, mute, keepalive, announcements, radio with ducking), a reference satellite client crate with a porting guide, an MCP client, and a status page with a test-speak button in the web UI. Tests run the real binary against fake providers, including the headline loop over a TCP satellite: an agent event is spoken aloud, a spoken answer is understood, and the instruction reaches the bridge stream. Test count at the end: 324 passing across the workspace; clippy `-D warnings` and rustfmt clean.
 
 ## Measured budget (scripts/budget.sh, x86_64 musl, 400 hook posts, after all features below)
 
 | Measure | Result | Limit |
 |---|---|---|
-| Binary, x86_64 | 2.58 MiB | 8 MiB |
-| Binary, armv7 (cross-built) | 2.07 MiB | 8 MiB |
+| Binary, x86_64 | 2.62 MiB | 8 MiB |
+| Binary, armv7 (cross-built) | 2.10 MiB | 8 MiB |
 | Idle RSS | 3.0 MiB | 24 MiB |
-| Peak RSS under load | 3.9 MiB | 48 MiB target, 64 MiB hard |
-| State on disk | 82 KiB | 16 MiB |
+| Peak RSS under load | 4.3 MiB | 48 MiB target, 64 MiB hard |
+| State on disk | 114 KiB | 16 MiB |
 
 Large headroom. The budget ratchet (REQ-NFR-114) should now be tightened from these numbers; I left the limits
 alone because tightening is your call.
@@ -52,6 +52,8 @@ alone because tightening is your call.
 17. **Announcements go to the first satellite that is idle and unmuted**, and an event is only marked announced once a satellite actually spoke it. After an announcement the follow-up window opens so you can answer without the wake word.
 18. **Satellites authenticate with one shared token** (from an environment variable); it is required unless the core listens on loopback. Per-satellite tokens and TLS are not built.
 19. **The reference satellite is blocking std Rust** with a small `Device` trait, written to be read and translated to C or Go.
+20. **MCP: Streamable HTTP only, revision `2025-06-18` pinned**, every tool confirm-gated by default, names prefixed with the server name, descriptions and results clipped. A server on another revision is skipped with a warning rather than guessed at.
+21. **The web UI status page reads a snapshot the main loop publishes once a second**, so the HTTP side never touches the assistant directly and the snapshot contains no secrets or agent text.
 
 ## Not done
 
@@ -59,7 +61,7 @@ alone because tightening is your call.
 - Real audio hardware: microphone and speaker I/O on a device, and wake-word detection (M1). A reference satellite client and the core's satellite server exist and are tested over TCP; no hardware satellite (Raspberry Pi or other) exists. A satellite without a wake word needs a button.
 - Satellite TLS, per-satellite tokens, Opus downlink, a conformance suite for port authors, and showing inbox cards on a satellite display.
 - Web UI pages for provider keys, voice settings, schedules, logs, and "test speak"; mDNS (M4).
-- MCP client, resume positions for podcasts, library search (M5); Wi-Fi provisioning.
+- Resume positions for podcasts, library search (M5); MCP resources, prompts, and OAuth; Wi-Fi provisioning.
 - The tag itself (human-only). `release/0.1.0` was prepared and landed into `dev` with the generated changelog; Cargo versions are still 0.0.0 because `cargo-set-version` is not installed. To publish, run in a terminal: `scripts/release.sh publish 0.1.0`. It merges `dev` into `main`, tags, and pushes, so it is the one step that needs you. Consider whether v0.1.0 is the right first version with no audio yet.
 
 ## Untested or unverified
@@ -73,6 +75,7 @@ alone because tightening is your call.
 - The speech clients, HTTP tools, and radio streams have only been run against fake servers.
 - Energy-based endpointing has only seen synthetic audio; real rooms (television, fans) are untested.
 - The web UI page has never been opened in a browser; the API behind it is tested.
+- The MCP client has only talked to a fake server; no real MCP server (Home Assistant or otherwise) has been tried.
 - The satellite server has only talked to the reference satellite and fakes: no real device, no real microphone audio, no packet loss or Wi-Fi drops.
 - Radio on a satellite is tested with fake players; real stream formats and a real player (for example mpv) are untested.
 
