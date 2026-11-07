@@ -78,4 +78,4 @@ Not started, except: **EXT-001** (no loaded third-party code) holds trivially, *
 | NFR-008 atomic writes | Done | `store` |
 | NFR-010 schema versions | Partial | versioned and refuses newer data; no migrations yet |
 | NFR-110 bounded everything | Done | queues, bodies, connections, streams, replies, history of handled ids |
-| NFR-001, 101..103 budget | Measured 2026-11-07 after the satellite server and radio (x86_64 musl, load of 400 hooks): binary 2.58 MiB (armv7: 2.07 MiB), idle RSS 3.0 MiB, peak RSS 3.9 MiB, state 82 KiB. The load test does not include live audio sessions. ARM memory and all CPU limits unmeasured | `scripts/budget.sh` |
+| NFR-001, 101..103 budget | Measured 2026-11-07 after MCP and the UI status page (x86_64 musl, load of 400 hooks): binary 2.62 MiB (armv7: 2.10 MiB), idle RSS 3.0 MiB, peak RSS 4.3 MiB, state 114 KiB. The load test does not include live audio sessions. ARM memory and all CPU limits unmeasured | `scripts/budget.sh` |
