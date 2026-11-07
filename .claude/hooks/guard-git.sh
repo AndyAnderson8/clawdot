@@ -2,19 +2,48 @@
 # Claude Code PreToolUse guard for the Bash tool. Blocks git/gh actions that violate
 # docs/process/git-workflow.md. Exit 2 = block; stderr is shown to the agent.
 # This is the first of several layers: git hooks (.githooks), CI, and server rules back it up.
-input=$(cat)
+#
+# PERFORMANCE: this runs before every Bash tool call, and process creation is slow on Windows (about
+# 150 ms each). It therefore uses only bash builtins (no grep, sed, tr, cat, or subshells) on the common
+# path. Keep it that way: a regex match here costs microseconds, a spawned tool costs a tenth of a second.
+
+IFS= read -r -d '' input || true
+
 # Scan only the command text. The full payload carries unrelated fields (for example
 # "permission_mode") whose contents must never be matched by the patterns below.
-cmd=$(printf '%s' "$input" | sed -nE 's/.*"tool_input":\{"command":"(([^"\\]|\\.)*)".*/\1/p')
-[ -n "$cmd" ] || cmd="$input"
-h=$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')
+marker='"tool_input":{"command":"'
+rest=${input#*"$marker"}
+if [[ $rest == "$input" ]]; then
+  cmd=$input
+else
+  cmd=""
+  while :; do
+    chunk=${rest%%\"*}
+    if [[ $chunk == "$rest" ]]; then
+      cmd+=$rest
+      break
+    fi
+    cmd+=$chunk
+    rest=${rest#*\"}
+    # An odd number of trailing backslashes means the quote was escaped and the command goes on.
+    t=$chunk
+    n=0
+    while [[ $t == *\\ ]]; do
+      t=${t%\\}
+      n=$((n + 1))
+    done
+    ((n % 2 == 0)) && break
+    cmd+='"'
+  done
+fi
+h=${cmd,,}
 
 block() {
   echo "BLOCKED by the ClawDot git-flow policy: $1" >&2
   echo "Read AGENTS.md and docs/process/git-workflow.md. If you believe this is wrong, ask the human instead of working around it." >&2
   exit 2
 }
-has() { printf '%s' "$h" | LC_ALL=C grep -Eq "$1"; }
+has() { [[ $h =~ $1 ]]; }
 
 # Publishing a release is outward-facing and human-only (the script also needs an interactive terminal).
 has 'scripts/release\.sh[[:space:]]+(publish|tag)' &&
@@ -24,9 +53,20 @@ has 'scripts/release\.sh[[:space:]]+(publish|tag)' &&
 has '(^|[^a-z])(git|gh)[[:space:]]' || exit 0
 
 cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || true
-# shellcheck source=../../scripts/lib-git.sh
+# shellcheck source=scripts/lib-git.sh
 . scripts/lib-git.sh 2>/dev/null || exit 0
-branch=$(current_branch)
+
+# The current branch, read straight from .git/HEAD (no process spawn). Falls back to git for worktrees.
+branch=""
+if [[ -f .git/HEAD ]]; then
+  read -r head <.git/HEAD
+  case $head in
+    "ref: refs/heads/"*) branch=${head#ref: refs/heads/} ;;
+    *) branch="(detached)" ;;
+  esac
+else
+  branch=$(current_branch)
+fi
 
 # 1. Never bypass hooks, signing, or identity controls.
 has '(--no-verify|--no-gpg-sign|git[[:space:]]+commit[^|;&\]*[[:space:]]-[a-z]*n[a-z]*([[:space:]]|\\|"|$))' &&
@@ -34,7 +74,7 @@ has '(--no-verify|--no-gpg-sign|git[[:space:]]+commit[^|;&\]*[[:space:]]-[a-z]*n
 # Reading identity or hook settings (git config --get / --list) is fine; changing them is not.
 reading_config=0
 has 'git[[:space:]]+config[[:space:]]+(--get|--list|-l)' && reading_config=1
-if [ "$reading_config" -eq 0 ] && has 'core\.hookspath|git[[:space:]]+config[^|;&\]*(user\.name|user\.email|user\.signingkey)'; then
+if [[ $reading_config -eq 0 ]] && has 'core\.hookspath|git[[:space:]]+config[^|;&\]*(user\.name|user\.email|user\.signingkey)'; then
   block "do not change git identity or hook configuration (read it with 'git config --get'). Commits are authored by the configured human only."
 fi
 has 'rm[^|;&\]*\.githooks|[[:space:]]-c[[:space:]]+(user\.(name|email)|core\.hookspath)|--author|git_(author|committer)_(name|email)' &&
@@ -73,7 +113,7 @@ if has 'git[[:space:]]+(commit|merge|cherry-pick|revert|rebase|am)([[:space:]"\\
       fi
       ;;
     *)
-      if has 'git[[:space:]]+commit' && [ "$branch" != "(detached)" ] && ! valid_branch_name "$branch"; then
+      if has 'git[[:space:]]+commit' && [[ $branch != "(detached)" ]] && ! valid_branch_name "$branch"; then
         block "branch '$branch' is not a valid git-flow name: (feature|bugfix|hotfix|release|docs|chore|spike)/<kebab-name>."
       fi
       ;;
