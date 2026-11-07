@@ -10,6 +10,7 @@
 | Specs | [specs/](specs/README.md) | What the system must do, with stable requirement IDs |
 | Architecture | [architecture/overview.md](architecture/overview.md) | Components, flows, constraints, risks |
 | Architecture | [architecture/extensibility.md](architecture/extensibility.md) | Core, packs, sidecars; media backends; trust model |
+| Architecture | [architecture/configuration.md](architecture/configuration.md) | The configuration file: keys, defaults, validation |
 | Decisions | [adr/](adr/README.md) | Why we chose what we chose |
 | Quality | [quality/testing-strategy.md](quality/testing-strategy.md) | Test levels, CI gates, review checklist |
 | Quality | [quality/traceability.md](quality/traceability.md) | Requirement-to-test map and measured results |
