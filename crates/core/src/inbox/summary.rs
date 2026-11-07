@@ -166,11 +166,14 @@ pub fn fallback_summary(event: &Event) -> String {
 /// The full announcement: headline, spoken summary, and what the user can do next.
 #[must_use]
 pub fn announcement(event: &Event, spoken: &str, more_waiting: usize) -> String {
-    let mut out = format!(
-        "{}. {}",
-        event.title.trim().trim_end_matches('.'),
-        spoken.trim()
-    );
+    let title = event.title.trim().trim_end_matches('.');
+    let spoken = spoken.trim();
+    // When the "summary" is just the headline again (the no-LLM fallback), say it once.
+    let mut out = if spoken.is_empty() || spoken.trim_end_matches('.') == title {
+        format!("{title}.")
+    } else {
+        format!("{title}. {spoken}")
+    };
     if event.kind.wants_reply() {
         out.push_str(" What would you like to do?");
     } else if event.text.chars().count() > spoken.chars().count().max(200) {
@@ -346,6 +349,20 @@ mod tests {
         let short = event(EventKind::Done, "ok");
         assert!(!announcement(&short, "Fine.", 1).contains("details"));
         assert!(announcement(&short, "Fine.", 1).ends_with("One more is waiting."));
+    }
+
+    #[test]
+    fn a_summary_that_only_repeats_the_headline_is_not_said_twice() {
+        let e = event(EventKind::Done, "ok");
+        assert_eq!(
+            announcement(&e, "clawdot finished.", 0),
+            "clawdot finished."
+        );
+        assert_eq!(announcement(&e, "", 0), "clawdot finished.");
+        assert_eq!(
+            announcement(&e, &fallback_summary(&e), 1),
+            "clawdot finished. One more is waiting."
+        );
     }
 
     #[test]
