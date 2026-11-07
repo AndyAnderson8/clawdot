@@ -6,8 +6,8 @@
 //! configured.
 
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
-use clawdot_core::assistant::{Assistant, describe_fired};
-use clawdot_core::config::Config;
+use clawdot_core::assistant::{Assistant, Effect, describe_fired};
+use clawdot_core::config::{Config, SpeechConfig};
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
 use clawdot_core::inbox::event::Event;
@@ -18,9 +18,11 @@ use clawdot_core::llm::{ChatRequest, Message};
 use clawdot_core::media::Station;
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
 use clawdot_core::session::{ChatBackend, Conversation, ToolHost, TurnConfig, TurnEnd, run_turn};
+use clawdot_core::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
 use clawdot_core::store::JsonStore;
 use clawdot_core::transport::HttpBackend;
 use clawdot_core::usage::{UsageLimits, UsageTracker};
+use clawdot_core::voice::voice_turn;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -44,6 +46,8 @@ OPTIONS:
     --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once
     --rotate-endpoint NAME     Issue a new token for an endpoint
     --rotate-admin-token       Issue a new web UI administrator token (printed once)
+    --voice-in FILE            Answer one recorded utterance (WAV, mono 16-bit 16 kHz) and exit; needs a `speech` config
+    --voice-out FILE           With --voice-in, write the spoken reply to this WAV file
     --no-console               Do not read the console (run as a server only)
 
 LANGUAGE MODEL (optional; without it only the local fast path and fallback summaries work):
@@ -81,6 +85,9 @@ struct Args {
     persona_file: Option<PathBuf>,
     tools: Vec<ToolDef>,
     stations: Vec<Station>,
+    speech: SpeechConfig,
+    voice_in: Option<PathBuf>,
+    voice_out: Option<PathBuf>,
     max_requests: u32,
     daily_spend: Option<f64>,
 }
@@ -105,6 +112,9 @@ fn parse() -> Result<Args, String> {
         persona_file: None,
         tools: Vec::new(),
         stations: Vec::new(),
+        speech: SpeechConfig::default(),
+        voice_in: None,
+        voice_out: None,
         max_requests: UsageLimits::default().max_requests_per_day,
         daily_spend: None,
     };
@@ -133,6 +143,8 @@ fn parse() -> Result<Args, String> {
             "--create-endpoint" => a.create.push(value("--create-endpoint")?),
             "--rotate-endpoint" => a.rotate.push(value("--rotate-endpoint")?),
             "--rotate-admin-token" => a.rotate_admin = true,
+            "--voice-in" => a.voice_in = Some(PathBuf::from(value("--voice-in")?)),
+            "--voice-out" => a.voice_out = Some(PathBuf::from(value("--voice-out")?)),
             "--no-console" => a.console = false,
             "--llm-url" => a.llm_url = Some(value("--llm-url")?),
             "--llm-model" => a.llm_model = Some(value("--llm-model")?),
@@ -173,6 +185,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.persona_file.clone_from(&c.persona_file);
     a.tools.clone_from(&c.tools);
     a.stations.clone_from(&c.stations);
+    a.speech.clone_from(&c.speech);
     a.create.extend(c.endpoints.iter().cloned());
     a.llm_url.clone_from(&c.llm.url);
     a.llm_model.clone_from(&c.llm.model);
@@ -294,6 +307,149 @@ async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Event)
     fallback_summary(event)
 }
 
+/// Everything needed to answer one thing the user said, whether it was typed or spoken.
+struct Brain {
+    assistant: Assistant,
+    llm: Option<Llm>,
+    conversation: Conversation,
+    usage: UsageTracker,
+    usage_store: JsonStore,
+    http_tools: HttpTools,
+    clock: Arc<dyn Clock + Send + Sync>,
+}
+
+/// What to say and which effects the satellite should carry out.
+struct Reply {
+    say: String,
+    effects: Vec<Effect>,
+}
+
+impl Brain {
+    /// Answer locally if the fast path can, otherwise ask the language model.
+    async fn respond(&mut self, line: &str) -> Reply {
+        if let Some(out) = self.assistant.handle(line) {
+            let say = if out.say.is_empty() {
+                "(done)".to_owned()
+            } else {
+                out.say
+            };
+            return Reply {
+                say,
+                effects: out.effects,
+            };
+        }
+        let Some(l) = &self.llm else {
+            return Reply {
+                say: "(that needs a language model; start with --llm-url and --llm-model)".into(),
+                effects: Vec::new(),
+            };
+        };
+        let (day, now) = (self.assistant.local_day(), self.clock.now());
+        let r = run_turn(
+            &l.backend,
+            &mut WithHttp {
+                inner: &mut self.assistant,
+                http: &self.http_tools,
+            },
+            &mut self.conversation,
+            &l.cfg,
+            &mut self.usage,
+            day,
+            now,
+            line,
+        )
+        .await;
+        if let Err(e) = self.usage.save(&self.usage_store) {
+            eprintln!("clawdot: could not save usage counters: {e}");
+        }
+        if let TurnEnd::Failed(e) = &r.end {
+            eprintln!("clawdot: language model error: {e}");
+        }
+        Reply {
+            say: r.speech,
+            effects: self.assistant.take_effects(),
+        }
+    }
+}
+
+/// Answer one recorded utterance: transcribe the WAV, respond, speak the reply into a WAV.
+async fn voice_once(
+    brain: &mut Brain,
+    speech: &SpeechConfig,
+    input: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let missing =
+        |k: &str| format!("speech.{k} is not configured (see docs/architecture/voice-pipeline.md)");
+    let url = speech.url.as_deref().ok_or_else(|| missing("url"))?;
+    let key = speech
+        .key_env
+        .as_deref()
+        .map(|v| std::env::var(v).unwrap_or_default())
+        .unwrap_or_default();
+    let deadline = Duration::from_secs(30);
+    let stt = HttpTranscriber::new(
+        url,
+        &key,
+        speech
+            .stt_model
+            .as_deref()
+            .ok_or_else(|| missing("stt_model"))?,
+        speech.language.as_deref(),
+        deadline,
+    )?;
+    let tts = HttpSynthesizer::new(
+        url,
+        &key,
+        speech
+            .tts_model
+            .as_deref()
+            .ok_or_else(|| missing("tts_model"))?,
+        speech.voice.as_deref().ok_or_else(|| missing("voice"))?,
+        speech.tts_sample_rate.unwrap_or(24_000),
+        deadline,
+    )?;
+    let bytes =
+        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let pcm = parse_wav(&bytes).map_err(|e| format!("{}: {e}", input.display()))?;
+
+    let effects = std::cell::RefCell::new(Vec::new());
+    let out = voice_turn(&stt, &tts, &pcm, |text| {
+        let brain = &mut *brain;
+        let effects = &effects;
+        async move {
+            let r = brain.respond(&text).await;
+            effects.borrow_mut().extend(r.effects);
+            r.say
+        }
+    })
+    .await;
+    match &out.transcript {
+        Some(t) => println!("heard> {t}"),
+        None => println!("heard> (nothing understood)"),
+    }
+    if !out.reply.is_empty() {
+        println!("speaker> {}", out.reply);
+    }
+    for e in effects.into_inner() {
+        println!("satellite> {e:?}");
+    }
+    for p in &out.problems {
+        eprintln!("clawdot: {p}");
+    }
+    if let Some(path) = output {
+        let audio: Vec<i16> = out.audio.concat();
+        std::fs::write(path, wav(&audio))
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        println!(
+            "clawdot: wrote {} sample(s) of speech to {}",
+            audio.len(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let mut args = match parse() {
@@ -366,7 +522,7 @@ async fn main() -> ExitCode {
         args.data_dir.join("usage.json"),
         clawdot_core::usage::SCHEMA,
     );
-    let mut usage = match UsageTracker::load(&usage_store, limits) {
+    let usage = match UsageTracker::load(&usage_store, limits) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("clawdot: cannot load usage counters: {e}");
@@ -406,7 +562,7 @@ async fn main() -> ExitCode {
         },
         None => DEFAULT_PERSONA.to_owned(),
     };
-    let mut conversation = Conversation::new(persona, 20, 24_000, 600);
+    let conversation = Conversation::new(persona, 20, 24_000, 600);
 
     let sched_store = JsonStore::new(
         args.data_dir.join("timers.json"),
@@ -419,7 +575,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mut assistant = Assistant::new(
+    let assistant = Assistant::new(
         clock.clone(),
         zone,
         sched,
@@ -442,6 +598,26 @@ async fn main() -> ExitCode {
         }
     };
 
+    let mut brain = Brain {
+        assistant,
+        llm,
+        conversation,
+        usage,
+        usage_store,
+        http_tools,
+        clock: clock.clone(),
+    };
+
+    if let Some(input) = args.voice_in.clone() {
+        return match voice_once(&mut brain, &args.speech, &input, args.voice_out.as_deref()).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("clawdot: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
     let listener = match TcpListener::bind(args.listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -453,7 +629,7 @@ async fn main() -> ExitCode {
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         args.listen,
         core.endpoints().len(),
-        if llm.is_some() {
+        if brain.llm.is_some() {
             "connected"
         } else {
             "not configured"
@@ -493,45 +669,21 @@ async fn main() -> ExitCode {
             line = line_rx.recv(), if args.console => {
                 let Some(line) = line else { return ExitCode::SUCCESS };
                 if line.is_empty() { continue; }
-                match assistant.handle(&line) {
-                    Some(out) => {
-                        if out.say.is_empty() {
-                            println!("speaker> (done)");
-                        } else {
-                            println!("speaker> {}", out.say);
-                        }
-                        for e in &out.effects {
-                            println!("satellite> {e:?}");
-                        }
-                    }
-                    None => match &llm {
-                        None => println!("speaker> (that needs a language model; start with --llm-url and --llm-model)"),
-                        Some(l) => {
-                            let (day, now) = (assistant.local_day(), clock.now());
-                            let r = run_turn(&l.backend, &mut WithHttp { inner: &mut assistant, http: &http_tools }, &mut conversation, &l.cfg, &mut usage, day, now, &line).await;
-                            if let Err(e) = usage.save(&usage_store) {
-                                eprintln!("clawdot: could not save usage counters: {e}");
-                            }
-                            if let TurnEnd::Failed(e) = &r.end {
-                                eprintln!("clawdot: language model error: {e}");
-                            }
-                            println!("speaker> {}", r.speech);
-                            for e in assistant.take_effects() {
-                                println!("satellite> {e:?}");
-                            }
-                        }
-                    },
+                let reply = brain.respond(&line).await;
+                println!("speaker> {}", reply.say);
+                for e in &reply.effects {
+                    println!("satellite> {e:?}");
                 }
             }
             _ = tick.tick() => {
-                for fired in assistant.tick() {
+                for fired in brain.assistant.tick() {
                     println!("speaker> {}", describe_fired(&fired));
                 }
-                if let Some(next) = core.next_announcement(true, assistant.minute_of_day()) {
-                    let spoken = match &llm {
+                if let Some(next) = core.next_announcement(true, brain.assistant.minute_of_day()) {
+                    let spoken = match &brain.llm {
                         Some(l) => {
-                            let s = summarise(l, &mut usage, assistant.local_day(), &next.event).await;
-                            if let Err(e) = usage.save(&usage_store) {
+                            let s = summarise(l, &mut brain.usage, brain.assistant.local_day(), &next.event).await;
+                            if let Err(e) = brain.usage.save(&brain.usage_store) {
                                 eprintln!("clawdot: could not save usage counters: {e}");
                             }
                             s

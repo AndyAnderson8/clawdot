@@ -71,6 +71,52 @@ pub fn wav(pcm: &[i16]) -> Vec<u8> {
     out
 }
 
+/// Read a WAV file that is already in ClawDot's format: PCM, mono, 16-bit, 16 kHz.
+///
+/// # Errors
+/// A message saying what is wrong with the file.
+pub fn parse_wav(bytes: &[u8]) -> Result<Vec<i16>, String> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("not a WAV file".into());
+    }
+    let mut pos = 12;
+    let mut format_ok = false;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let len = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        let body = pos + 8;
+        let end = body.saturating_add(len).min(bytes.len());
+        if id == b"fmt " {
+            let f = &bytes[body..end];
+            if f.len() < 16 {
+                return Err("the WAV format block is too short".into());
+            }
+            let tag = u16::from_le_bytes([f[0], f[1]]);
+            let channels = u16::from_le_bytes([f[2], f[3]]);
+            let rate = u32::from_le_bytes([f[4], f[5], f[6], f[7]]);
+            let bits = u16::from_le_bytes([f[14], f[15]]);
+            if (tag, channels, rate, bits) != (1, 1, RATE, 16) {
+                return Err(format!(
+                    "the audio must be mono 16-bit PCM at 16000 Hz (this is format {tag}, {channels} channel(s), {rate} Hz, {bits}-bit)"
+                ));
+            }
+            format_ok = true;
+        } else if id == b"data" {
+            if !format_ok {
+                return Err("the WAV data comes before its format".into());
+            }
+            return Ok(decode_pcm16(&bytes[body..end]));
+        }
+        pos = body.saturating_add(len).saturating_add(len & 1);
+    }
+    Err("the WAV file has no audio data".into())
+}
+
 /// Decode little-endian 16-bit samples; a trailing odd byte is dropped.
 #[must_use]
 pub fn decode_pcm16(bytes: &[u8]) -> Vec<i16> {
@@ -346,6 +392,26 @@ mod tests {
         assert!(check_url("http://192.168.1.9:9000/v1").is_ok());
         let e = check_url("http://api.openai.com/v1").unwrap_err();
         assert!(e.contains("https://"), "{e}");
+    }
+
+    #[test]
+    fn wav_files_round_trip_and_wrong_formats_are_explained() {
+        let samples = vec![5, -5, 300, -300];
+        assert_eq!(parse_wav(&wav(&samples)).unwrap(), samples);
+        assert!(parse_wav(b"hello").unwrap_err().contains("not a WAV"));
+        let mut stereo = wav(&samples);
+        stereo[22] = 2;
+        let e = parse_wav(&stereo).unwrap_err();
+        assert!(
+            e.contains("mono 16-bit PCM at 16000 Hz") && e.contains("2 channel"),
+            "{e}"
+        );
+        let mut truncated = wav(&samples);
+        truncated.truncate(30);
+        assert!(parse_wav(&truncated).is_err());
+        let mut no_data = wav(&samples);
+        no_data.truncate(36);
+        assert!(parse_wav(&no_data).unwrap_err().contains("no audio"));
     }
 
     #[test]
