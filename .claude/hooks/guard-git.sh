@@ -3,7 +3,11 @@
 # docs/process/git-workflow.md. Exit 2 = block; stderr is shown to the agent.
 # This is the first of several layers: git hooks (.githooks), CI, and server rules back it up.
 input=$(cat)
-h=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
+# Scan only the command text. The full payload carries unrelated fields (for example
+# "permission_mode") whose contents must never be matched by the patterns below.
+cmd=$(printf '%s' "$input" | sed -nE 's/.*"tool_input":\{"command":"(([^"\\]|\\.)*)".*/\1/p')
+[ -n "$cmd" ] || cmd="$input"
+h=$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')
 
 block() {
   echo "BLOCKED by the ClawDot git-flow policy: $1" >&2

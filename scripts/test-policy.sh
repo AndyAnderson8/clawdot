@@ -52,7 +52,8 @@ S=$(mktemp -d)
 g() { # g <branch> <expected-exit> <command>
   (cd "$S" && { git checkout -q "$1" 2>/dev/null || git checkout -q -b "$1"; })
   local json out got
-  json=$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$3")
+  # Mirrors the real payload, including unrelated fields such as permission_mode.
+  json=$(printf '{"session_id":"s","cwd":"/x","permission_mode":"bypassPermissions","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"%s","description":"d"},"tool_use_id":"t"}' "$3")
   out=$(cd "$S" && printf '%s' "$json" | CLAUDE_PROJECT_DIR="$S" bash .claude/hooks/guard-git.sh 2>&1)
   got=$?
   if [ "$got" = "$2" ]; then ok; else fail "guard exit $got, wanted $2 on $1: $3 ${out:+($out)}"; fi
@@ -69,6 +70,8 @@ g feature/x 0 "git commit -m feat: x"
 g feature/x 0 "git push origin feature/x"
 g feature/x 0 "git tag -l"
 g feature/x 0 "ls -la"
+g feature/x 0 "git checkout -- .githooks"
+g feature/x 0 "git status --short | wc -l && head -3 .githooks/pre-commit"
 g feature/x 2 "git commit $nv -m x"
 g feature/x 2 "git commit -m x --author=a"
 g feature/x 0 "git config --get user.name"
@@ -101,6 +104,16 @@ else ok; fi
 if (cd "$H" && git switch -q -c feature/x && git commit -q --allow-empty -m "chore: on a branch" >/dev/null 2>&1); then
   ok
 else fail "a commit on a feature branch should be allowed by the stubs"; fi
+
+# setup.sh must never overwrite the versioned hooks, even when a hooks-path setting points at them.
+(
+  cd "$H" || exit 1
+  mkdir -p .githooks
+  printf '#!/usr/bin/env bash\necho sentinel\n' >.githooks/pre-commit
+  git config core.hooksPath .githooks
+  bash "$root/scripts/setup.sh" >/dev/null 2>&1
+  grep -q sentinel .githooks/pre-commit
+) && ok || fail "setup.sh overwrote the versioned .githooks directory"
 rm -rf "$H"
 
 echo "policy tests: $pass passed, $failn failed"
