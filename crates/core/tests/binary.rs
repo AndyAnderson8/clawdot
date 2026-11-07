@@ -477,7 +477,7 @@ fn voice_mode_explains_a_missing_speech_setup() {
 }
 
 /// A fake speech provider that answers any number of requests until the test ends.
-fn fake_speech_provider() -> u16 {
+fn fake_speech_provider(heard: &'static str) -> u16 {
     let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = server.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -508,7 +508,7 @@ fn fake_speech_provider() -> u16 {
                                 if path.ends_with("/audio/transcriptions") {
                                     (
                                         "application/json",
-                                        br#"{"text":"set a timer for ten minutes"}"#.to_vec(),
+                                        format!(r#"{{"text":"{heard}"}}"#).into_bytes(),
                                     )
                                 } else {
                                     (
@@ -540,7 +540,7 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
     };
     use clawdot_protocol::{Decoder, Limits, encode};
 
-    let speech_port = fake_speech_provider();
+    let speech_port = fake_speech_provider("set a timer for ten minutes");
     let sat_port = free_port();
     let dir = std::env::temp_dir().join(format!("clawdot-sat-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -668,4 +668,187 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
         got_audio, 1600,
         "0.1 s of 24 kHz speech arrives as 1600 samples at 16 kHz"
     );
+}
+
+fn sat_send(sock: &mut TcpStream, m: &clawdot_protocol::message::Message) {
+    sock.write_all(&clawdot_protocol::encode(&m.to_frame()).unwrap())
+        .unwrap();
+}
+
+/// Next message from the core, answering keepalive pings along the way; `None` on timeout or close.
+fn sat_recv(
+    sock: &mut TcpStream,
+    dec: &mut clawdot_protocol::Decoder,
+    secs: u64,
+) -> Option<clawdot_protocol::message::Message> {
+    use clawdot_protocol::message::Message;
+    let end = Instant::now() + Duration::from_secs(secs);
+    let mut buf = [0u8; 8192];
+    while Instant::now() < end {
+        if let Some(f) = dec.next_frame().unwrap() {
+            match Message::from_frame(f).unwrap() {
+                Message::Ping => sat_send(sock, &Message::Pong),
+                m => return Some(m),
+            }
+            continue;
+        }
+        match sock.read(&mut buf) {
+            Ok(0) => return None,
+            Ok(n) => dec.push(&buf[..n]),
+            Err(_) => {}
+        }
+    }
+    None
+}
+
+#[test]
+fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_bridge() {
+    use clawdot_protocol::message::{
+        AudioFormat, Capabilities, Hello, Indicator, Message, PROTOCOL_VERSION,
+    };
+    use clawdot_protocol::{Decoder, Limits};
+
+    let speech_port = fake_speech_provider("keep going and add tests");
+    let (http_port, sat_port) = (free_port(), free_port());
+    let dir = std::env::temp_dir().join(format!("clawdot-headline-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            r#"{{"speech": {{"url": "http://127.0.0.1:{speech_port}/v1", "stt_model": "w", "tts_model": "t", "voice": "v"}},
+                "satellite": {{"listen": "127.0.0.1:{sat_port}"}}}}"#
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--no-console",
+            "--config",
+            cfg.to_str().unwrap(),
+            "--listen",
+            &format!("127.0.0.1:{http_port}"),
+            "--data-dir",
+            dir.join("state").to_str().unwrap(),
+            "--create-endpoint",
+            "claude-code",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let (mut token, mut ready) = (None, false);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !(token.is_some() && ready) {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            if token.is_none() && line.trim_start().starts_with("cdt_") {
+                token = Some(line.trim().to_owned());
+            }
+            ready |= line.contains("satellites connect to");
+        }
+    }
+    let token = token.expect("endpoint token");
+    assert!(ready);
+
+    // The satellite connects and waits.
+    let mut sock = TcpStream::connect(("127.0.0.1", sat_port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut dec = Decoder::new(Limits::default());
+    sat_send(
+        &mut sock,
+        &Message::Hello(Hello {
+            protocol: PROTOCOL_VERSION,
+            device_id: "kitchen".into(),
+            name: None,
+            token: None,
+            capabilities: Capabilities::default(),
+        }),
+    );
+    assert!(matches!(
+        sat_recv(&mut sock, &mut dec, 10),
+        Some(Message::Welcome(_))
+    ));
+
+    // An agent finishes; the speaker announces it out loud.
+    assert_eq!(post_hook(http_port, &token, STOP), 202);
+    let mut announced = 0usize;
+    loop {
+        match sat_recv(&mut sock, &mut dec, 15).expect("the announcement should be spoken") {
+            Message::AudioChunk { payload, .. } => announced += payload.len() / 2,
+            Message::AudioStop => break,
+            _ => {}
+        }
+    }
+    assert!(announced > 0, "the announcement has audio");
+
+    // The satellite finished playing: listening reopens without the wake word.
+    sat_send(&mut sock, &Message::PlaybackDone { id: None });
+    assert_eq!(
+        sat_recv(&mut sock, &mut dec, 10),
+        Some(Message::SetIndicator(Indicator::Listening))
+    );
+    assert_eq!(
+        sat_recv(&mut sock, &mut dec, 10),
+        Some(Message::StreamStart)
+    );
+
+    // The user answers aloud.
+    let mut samples = vec![0i16; 3200];
+    samples.extend((0..9600).map(|i| (3000.0 * (f64::from(i) * 0.35).sin()) as i16));
+    samples.extend(vec![0i16; 16000]);
+    for chunk in samples.chunks(320) {
+        let payload: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+        sat_send(
+            &mut sock,
+            &Message::AudioChunk {
+                format: AudioFormat::PCM_16K_MONO,
+                timestamp_ms: None,
+                payload,
+            },
+        );
+    }
+    loop {
+        if sat_recv(&mut sock, &mut dec, 15).expect("a spoken confirmation") == Message::AudioStop {
+            break;
+        }
+    }
+
+    // The instruction is waiting for the agent bridge.
+    let mut stream = TcpStream::connect(("127.0.0.1", http_port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /bridge/claude-code/replies HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\n\r\n"
+    )
+    .unwrap();
+    let mut got = String::new();
+    let mut buf = [0u8; 4096];
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end && !got.contains("add tests") {
+        if let Ok(n) = stream.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            got.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        got.contains("add tests"),
+        "the spoken instruction should reach the bridge: {got}"
+    );
+    assert!(got.contains("instruct"), "{got}");
 }

@@ -690,13 +690,17 @@ async fn main() -> ExitCode {
 
     // Satellites (speakers) connect here; their questions come back to this loop through `ask_rx`.
     let (ask_tx, mut ask_rx) = mpsc::channel::<Ask>(8);
+    let announcer = satellite::Announcer::default();
     if let Some(listen) = &args.satellite.listen {
         let started = async {
             let addr: SocketAddr = listen
                 .parse()
                 .map_err(|e| format!("satellite.listen: {e}"))?;
             let (stt, tts) = build_speech(&args.speech)?;
-            let mut settings = satellite::Settings::default();
+            let mut settings = satellite::Settings {
+                announcer: announcer.clone(),
+                ..satellite::Settings::default()
+            };
             if let Some(var) = &args.satellite.token_env {
                 let token = std::env::var(var).unwrap_or_default();
                 if token.is_empty() {
@@ -768,9 +772,17 @@ async fn main() -> ExitCode {
             }
             _ = tick.tick() => {
                 for fired in brain.assistant.tick() {
-                    println!("speaker> {}", describe_fired(&fired));
+                    let line = describe_fired(&fired);
+                    println!("speaker> {line}");
+                    if announcer.connected() > 0 {
+                        // Best effort: a satellite that is busy or muted simply does not speak it.
+                        announcer.announce(&line).await;
+                    }
                 }
-                if let Some(next) = core.next_announcement(true, brain.assistant.minute_of_day()) {
+                let ready = announcer.connected() == 0 || announcer.is_available().await;
+                if !ready {
+                    // A satellite is connected but busy or muted: keep the event queued and try again.
+                } else if let Some(next) = core.next_announcement(true, brain.assistant.minute_of_day()) {
                     let spoken = match &brain.llm {
                         Some(l) => {
                             let s = summarise(l, &mut brain.usage, brain.assistant.local_day(), &next.event).await;
@@ -782,8 +794,12 @@ async fn main() -> ExitCode {
                         // No model: say only the headline and outcome, never raw agent text.
                         None => fallback_summary(&next.event),
                     };
-                    println!("speaker> {}", announcement(&next.event, &spoken, next.more_waiting));
-                    core.mark_announced(&[next.event.id]);
+                    let line = announcement(&next.event, &spoken, next.more_waiting);
+                    println!("speaker> {line}");
+                    let delivered = announcer.connected() == 0 || announcer.announce(&line).await;
+                    if delivered {
+                        core.mark_announced(&[next.event.id]);
+                    }
                 }
                 core.maintain();
             }

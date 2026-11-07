@@ -271,19 +271,31 @@ where
             out.reply = COULD_NOT_UNDERSTAND.into();
         }
     }
+    out.audio = speak_text(tts, &out.reply, &mut out.problems).await;
+    out
+}
+
+/// Synthesise `text` one sentence at a time. Stops at the first failure, keeping what was already made and
+/// recording the problem.
+pub async fn speak_text<S: Synthesizer>(
+    tts: &S,
+    text: &str,
+    problems: &mut Vec<String>,
+) -> Vec<Vec<i16>> {
     let mut splitter = SentenceSplitter::default();
-    let mut sentences = splitter.push(&out.reply);
+    let mut sentences = splitter.push(text);
     sentences.extend(splitter.flush());
+    let mut audio = Vec::new();
     for s in sentences {
         match tts.synthesize(&s).await {
-            Ok(a) => out.audio.push(a),
+            Ok(a) => audio.push(a),
             Err(e) => {
-                out.problems.push(format!("speech synthesis: {e}"));
+                problems.push(format!("speech synthesis: {e}"));
                 break;
             }
         }
     }
-    out
+    audio
 }
 
 #[cfg(test)]
