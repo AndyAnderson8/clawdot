@@ -1,0 +1,79 @@
+{
+  "name": "claude-code",
+  "source": "Claude Code",
+  "rules": [
+    {
+      "when": { "/hook_event_name": "Stop" },
+      "kind": "done",
+      "priority": "normal",
+      "title": "{/cwd | basename} finished",
+      "text": "{/last_assistant_message}",
+      "session_ref": "{/session_id}"
+    },
+    {
+      "when": { "/hook_event_name": "StopFailure" },
+      "kind": "done",
+      "priority": "urgent",
+      "status": "failed",
+      "title": "{/cwd | basename} stopped with an error",
+      "text": "{/error ?? /message ?? 'The turn ended because of an error.'}",
+      "session_ref": "{/session_id}"
+    },
+    {
+      "when": { "/hook_event_name": "Notification", "/notification_type": "permission_prompt" },
+      "kind": "needs_input",
+      "priority": "urgent",
+      "title": "{/cwd | basename} needs permission",
+      "text": "{/message}",
+      "session_ref": "{/session_id}"
+    },
+    {
+      "when": { "/hook_event_name": "Notification", "/notification_type": "agent_needs_input" },
+      "kind": "needs_input",
+      "priority": "urgent",
+      "title": "{/cwd | basename} needs your input",
+      "text": "{/message}",
+      "session_ref": "{/session_id}"
+    },
+    {
+      "when": { "/hook_event_name": "Notification", "/notification_type": "elicitation_dialog" },
+      "kind": "question",
+      "priority": "normal",
+      "title": "{/cwd | basename} has a question",
+      "text": "{/message}",
+      "session_ref": "{/session_id}"
+    },
+    {
+      "when": { "/hook_event_name": "Notification", "/notification_type": "idle_prompt" },
+      "kind": "needs_input",
+      "priority": "normal",
+      "title": "{/cwd | basename} is waiting for you",
+      "text": "{/message}",
+      "session_ref": "{/session_id}"
+    },
+    {
+      "when": { "/hook_event_name": "Notification", "/notification_type": "agent_completed" },
+      "kind": "done",
+      "priority": "normal",
+      "title": "{/cwd | basename} agent completed",
+      "text": "{/message}",
+      "session_ref": "{/session_id}"
+    },
+    {
+      "when": { "/hook_event_name": "SubagentStop" },
+      "kind": "info",
+      "priority": "low",
+      "title": "A subagent in {/cwd | basename} finished",
+      "text": "{/last_assistant_message}",
+      "session_ref": "{/session_id}"
+    },
+    {
+      "when": {},
+      "kind": "info",
+      "priority": "low",
+      "title": "{/hook_event_name ?? 'Event'} from Claude Code",
+      "text": "{/message}",
+      "session_ref": "{/session_id}"
+    }
+  ]
+}

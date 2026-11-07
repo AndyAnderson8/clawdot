@@ -1,0 +1,15 @@
+{
+  "name": "generic",
+  "source": "Webhook",
+  "rules": [
+    {
+      "when": {},
+      "kind": "{/kind ?? 'info'}",
+      "priority": "{/priority ?? 'normal'}",
+      "title": "{/title ?? /subject ?? /name ?? 'Notification'}",
+      "text": "{/summary ?? /text ?? /message ?? /body}",
+      "status": "{/status}",
+      "session_ref": "{/session_ref ?? /session_id}"
+    }
+  ]
+}
