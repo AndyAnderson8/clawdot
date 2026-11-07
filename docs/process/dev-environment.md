@@ -1,6 +1,11 @@
 # Development Environment
 
-Status: Draft. Commands are the intended setup and will be validated when the workspace is created (TASK-001). The host is Windows 11; CI runs on Linux.
+Status: Draft. The host is Windows 11; CI runs on Linux. The WSL path below was validated on 2026-11-07; the audio and cross-run (qemu) parts are still intended, not yet exercised.
+
+## Quick start (Windows + WSL2, no sudo)
+1. Install WSL2 with Ubuntu. From a WSL shell run `bash scripts/setup-wsl.sh`. It installs Rust with rustup in your home directory and uses Zig as the C compiler and linker, so no `build-essential` or `sudo` is needed.
+2. From any shell on the repository (Git Bash on Windows included), `scripts/cargo.sh <args>` runs cargo natively if it exists, and inside WSL otherwise. Build output lives in `~/.cache/clawdot-target` in WSL (fast), not in the repository.
+3. `scripts/check.sh` uses that wrapper, so every gate works from Windows. Install `shellcheck` too (`winget install koalaman.shellcheck`) so local checks match CI.
 
 ## Principle
 Do audio on the host, cross-compilation and budget checks in Linux. The project's own protocol makes this split natural: the core can run in Linux while the desktop satellite runs natively on Windows.
