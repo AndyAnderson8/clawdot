@@ -113,14 +113,18 @@ if (cd "$H" && git switch -q -c feature/x && git commit -q --allow-empty -m "cho
 else fail "a commit on a feature branch should be allowed by the stubs"; fi
 
 # setup.sh must never overwrite the versioned hooks, even when a hooks-path setting points at them.
-(
+if (
   cd "$H" || exit 1
   mkdir -p .githooks
   printf '#!/usr/bin/env bash\necho sentinel\n' >.githooks/pre-commit
   git config core.hooksPath .githooks
   bash "$root/scripts/setup.sh" >/dev/null 2>&1
   grep -q sentinel .githooks/pre-commit
-) && ok || fail "setup.sh overwrote the versioned .githooks directory"
+); then
+  ok
+else
+  fail "setup.sh overwrote the versioned .githooks directory"
+fi
 rm -rf "$H"
 
 # --- landing and release flow, end to end in local mode (scratch repository) --------------------
@@ -134,10 +138,14 @@ out=$(mktemp)
   git config core.autocrlf false
   git commit -q --allow-empty -m "chore: initialize repository"
   git branch dev
-  copy_scripts() { mkdir -p scripts; for f in "$root"/scripts/*.sh; do [ "$(basename "$f")" = test-policy.sh ] || cp "$f" scripts/; done; }
+  copy_scripts() {
+    mkdir -p scripts
+    for f in "$root"/scripts/*.sh; do [ "$(basename "$f")" = test-policy.sh ] || cp "$f" scripts/; done
+    cp "$root/.shellcheckrc" .shellcheckrc
+  }
   git switch -q dev
   copy_scripts
-  git add scripts
+  git add scripts .shellcheckrc
   git commit -q -m "build: add scripts"
 
   # 1. a feature branch lands into dev as a real merge commit, and the branch is deleted
@@ -162,7 +170,7 @@ out=$(mktemp)
 
   # 4. a hotfix merges into main with a merge commit
   git switch -q -c hotfix/h main
-  copy_scripts && git add scripts && git commit -q -m "build: add scripts"
+  copy_scripts && git add scripts .shellcheckrc && git commit -q -m "build: add scripts"
   echo fix >h.txt && git add h.txt && git commit -q -m "fix: hot"
   scripts/land.sh hotfix/h --into main >"$out" 2>&1 || exit 21
   [ "$(git rev-list --parents -n1 main | wc -w)" -eq 3 ] || exit 22

@@ -1,0 +1,4 @@
+# ShellCheck configuration, shared by local runs (scripts/check.sh) and CI.
+# Resolve `# shellcheck source=...` hints relative to the script's own directory.
+external-sources=true
+source-path=SCRIPTDIR

@@ -51,7 +51,7 @@ has_remote() { git remote get-url origin >/dev/null 2>&1; }
 # server accepts because that SHA already has passing checks.
 # With no remote configured (early development) this is a local-only no-op.
 publish() {
-  local br="$1" sha cand id i
+  local br="$1" sha cand id
   has_remote || { echo "land: no remote configured; integrated locally only (CI gate applies once a remote exists)"; return 0; }
   command -v gh >/dev/null 2>&1 || { echo "land: the gh CLI is required to verify CI before publishing $br" >&2; return 1; }
   sha=$(git rev-parse "$br")
@@ -59,7 +59,7 @@ publish() {
   CLAWDOT_LANDING=1 git push origin "$sha:refs/heads/$cand"
   echo "land: waiting for CI on $cand ..."
   id=""
-  for i in $(seq 1 36); do
+  for _ in $(seq 1 36); do
     id=$(gh run list --branch "$cand" --workflow ci --json databaseId,headSha \
       -q ".[] | select(.headSha==\"$sha\") | .databaseId" | head -1)
     [ -n "$id" ] && break
