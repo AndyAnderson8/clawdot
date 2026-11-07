@@ -30,7 +30,11 @@ pub trait ToolHost {
     ///
     /// # Errors
     /// A message describing why the tool failed.
-    fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String>;
+    fn call_tool(
+        &mut self,
+        name: &str,
+        args: &Value,
+    ) -> impl std::future::Future<Output = Result<String, String>>;
 }
 
 /// Longest tool result kept in the conversation.
@@ -257,7 +261,7 @@ pub async fn run_turn<B: ChatBackend, H: ToolHost>(
                     "Not executed. This action needs the user's confirmation: ask them to confirm out loud, then call the tool again with confirmed set to true."
                         .to_owned()
                 }
-                Ok(args) => host.call_tool(&call.name, &args).unwrap_or_else(|e| format!("Error: {e}")),
+                Ok(args) => host.call_tool(&call.name, &args).await.unwrap_or_else(|e| format!("Error: {e}")),
             };
             conv.history
                 .push(Message::tool_result(call.id.clone(), clip(&outcome)));
@@ -323,7 +327,7 @@ mod tests {
         fn needs_confirmation(&self, name: &str) -> bool {
             self.confirm.contains(&name)
         }
-        fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
+        async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
             self.ran.push((name.to_owned(), args.clone()));
             if name == "set_timer" && args.get("seconds").is_none() {
                 return Err("seconds is required".into());
@@ -618,7 +622,7 @@ mod tests {
             fn needs_confirmation(&self, _: &str) -> bool {
                 false
             }
-            fn call_tool(&mut self, _: &str, _: &Value) -> Result<String, String> {
+            async fn call_tool(&mut self, _: &str, _: &Value) -> Result<String, String> {
                 Ok("é".repeat(5_000))
             }
         }
