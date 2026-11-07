@@ -13,7 +13,7 @@ ahead of the last published state; the `origin` remote was detached for the sess
 | `crates/e2e` | Six end-to-end tests of the headline loop over real sockets. |
 | Process | Git flow tooling, hooks, agent guard, landing and release scripts, policy tests, budget script. |
 
-Test count at the end: 217 passing across the workspace; clippy `-D warnings` and rustfmt clean.
+Added after the first draft of this report: a validated JSON config file (`--config`, see [configuration](../architecture/configuration.md)) and a test that runs the real binary against a fake model provider. Test count at the end: 223 passing across the workspace; clippy `-D warnings` and rustfmt clean.
 
 ## Measured budget (scripts/budget.sh, x86_64 musl, 400 hook posts)
 
@@ -46,9 +46,10 @@ alone because tightening is your call.
 
 ## Not done
 
+- Hot reload of the config file (a SHOULD in REQ-CFG-007).
 - Everything audio: satellite, wake word, VAD, STT, TTS (M1). The LLM and inbox work without it via the text console.
 - Web UI (M4), music and MCP (M5), Wi-Fi provisioning.
-- Releases, changelog entry, tags (human-only).
+- The tag itself (human-only). `release/0.1.0` was prepared and landed into `dev` with the generated changelog; Cargo versions are still 0.0.0 because `cargo-set-version` is not installed. To publish, run in a terminal: `scripts/release.sh publish 0.1.0`. It merges `dev` into `main`, tags, and pushes, so it is the one step that needs you. Consider whether v0.1.0 is the right first version with no audio yet.
 
 ## Untested or unverified
 
