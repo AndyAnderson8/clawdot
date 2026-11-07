@@ -79,6 +79,7 @@ dependencies = [
  "clawdot-bridge",
  "clawdot-core",
  "clawdot-protocol",
+ "clawdot-satellite",
  "tokio",
 ]
 
@@ -88,6 +89,13 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "clawdot-satellite"
+version = "0.0.0"
+dependencies = [
+ "clawdot-protocol",
 ]
 
 [[package]]

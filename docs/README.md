@@ -15,6 +15,7 @@
 | Architecture | [architecture/media.md](architecture/media.md) | Music and radio: backend shapes, built-in stations, control recipes |
 | Architecture | [architecture/voice-pipeline.md](architecture/voice-pipeline.md) | Dialog state machine, endpointing, and the speech turn |
 | Architecture | [architecture/satellite-server.md](architecture/satellite-server.md) | How speakers connect: handshake, a spoken turn, mute, limits |
+| Architecture | [architecture/porting-a-satellite.md](architecture/porting-a-satellite.md) | Implementing a satellite on new hardware; the reference client |
 | Decisions | [adr/](adr/README.md) | Why we chose what we chose |
 | Quality | [quality/testing-strategy.md](quality/testing-strategy.md) | Test levels, CI gates, review checklist |
 | Quality | [quality/traceability.md](quality/traceability.md) | Requirement-to-test map and measured results |
