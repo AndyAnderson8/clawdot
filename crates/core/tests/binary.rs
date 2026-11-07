@@ -852,3 +852,156 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
     );
     assert!(got.contains("instruct"), "{got}");
 }
+
+/// A tiny MCP server (Streamable HTTP, plain JSON replies) that records the `tools/call` requests it receives.
+fn fake_mcp_server() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&calls);
+    std::thread::spawn(move || {
+        for conn in server.incoming() {
+            let Ok(mut c) = conn else { break };
+            let log = std::sync::Arc::clone(&log);
+            std::thread::spawn(move || {
+                c.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                loop {
+                    let Ok(n) = c.read(&mut buf) else { return };
+                    if n == 0 {
+                        return;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    let Some(p) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&raw[..p]).to_ascii_lowercase();
+                    let want: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if raw.len() < p + 4 + want {
+                        continue;
+                    }
+                    let msg: serde_json::Value =
+                        serde_json::from_slice(&raw[p + 4..p + 4 + want]).unwrap();
+                    let id = msg["id"].clone();
+                    let (status, body) = match msg["method"].as_str().unwrap_or("") {
+                        "initialize" => ("200 OK", serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"f","version":"1"}}}).to_string()),
+                        "notifications/initialized" => ("202 Accepted", String::new()),
+                        "tools/list" => ("200 OK", serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"turn_on","description":"Turn a light on","inputSchema":{"type":"object","properties":{"room":{"type":"string"}},"required":["room"]}}]}}).to_string()),
+                        "tools/call" => {
+                            log.lock().unwrap().push(msg["params"].to_string());
+                            ("200 OK", serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"the den light is on"}],"isError":false}}).to_string())
+                        }
+                        _ => ("400 Bad Request", String::new()),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = c.write_all(resp.as_bytes());
+                    return;
+                }
+            });
+        }
+    });
+    (port, calls)
+}
+
+#[test]
+fn an_mcp_tool_runs_only_after_the_user_confirms() {
+    let (mcp_port, calls) = fake_mcp_server();
+    let call = |id: &str, args: &str| {
+        sse(&[
+            &format!(
+                r#"{{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"id":"{id}","function":{{"name":"home__turn_on","arguments":{}}}}}]}}}}]}}"#,
+                serde_json::to_string(args).unwrap()
+            ),
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ])
+    };
+    let (llm_port, llm) = fake_llm(vec![
+        call("c1", r#"{"room":"den"}"#),
+        call("c2", r#"{"room":"den","confirmed":true}"#),
+        sse(&[
+            r#"{"choices":[{"delta":{"content":"Done, the den light is on."},"finish_reason":"stop"}]}"#,
+        ]),
+    ]);
+    let dir = std::env::temp_dir().join(format!("clawdot-mcp-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            r#"{{"llm": {{"url": "http://127.0.0.1:{llm_port}", "model": "m"}},
+                "mcp": [{{"name": "home", "url": "http://127.0.0.1:{mcp_port}/mcp"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "--listen",
+            &format!("127.0.0.1:{}", free_port()),
+            "--data-dir",
+            dir.join("state").to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut ready = false;
+    while Instant::now() < deadline && !ready {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            ready = line.contains("console ready");
+        }
+    }
+    assert!(ready);
+    stdin.write_all(b"light up the den for me\n").unwrap();
+    let mut spoken = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && spoken.is_none() {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
+            if line.starts_with("speaker> ") {
+                spoken = Some(line);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(spoken.expect("an answer").contains("the den light is on"));
+    let bodies = llm.join().unwrap();
+    assert!(
+        bodies[0].contains("home__turn_on"),
+        "the MCP tool is offered to the model"
+    );
+    assert!(
+        bodies[1].contains("needs the user's confirmation"),
+        "the unconfirmed call was refused"
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "only the confirmed call reached the server: {calls:?}"
+    );
+    assert!(calls[0].contains(r#""name":"turn_on""#) && calls[0].contains(r#""room":"den""#));
+    assert!(!calls[0].contains("confirmed"), "{}", calls[0]);
+}

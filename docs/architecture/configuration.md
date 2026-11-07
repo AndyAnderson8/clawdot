@@ -36,6 +36,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `limits.max_requests_per_day` | Model requests per local day, at least 1 | 500 |
 | `limits.daily_spend_usd` | Stop calling the model after this much spend | none |
 | `tools` | Declarative HTTP tools the model may call; see [http-tools.md](http-tools.md) | none |
+| `mcp` | MCP servers whose tools the model may call; see [mcp.md](mcp.md) | none |
 | `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |
 | `speech` | Speech-to-text and text-to-speech provider (`url`, `key_env`, `stt_model`, `tts_model`, `voice`, `language`, `tts_sample_rate`); see [voice-pipeline.md](voice-pipeline.md) | none |
 | `satellite` | Where speakers connect (`listen`, `token_env`, `follow_up_secs`); see [satellite-server.md](satellite-server.md) | off |
