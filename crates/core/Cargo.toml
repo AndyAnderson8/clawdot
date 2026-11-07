@@ -16,6 +16,10 @@ default = ["tz"]
 # IANA time-zone support with a bundled database (correct daylight-saving behaviour, no OS tzdata needed).
 tz = ["dep:jiff"]
 
+[[bin]]
+name = "clawdot"
+path = "src/main.rs"
+
 [dependencies]
 clawdot-protocol = { path = "../protocol" }
 serde = { version = "1", features = ["derive"] }
