@@ -5,6 +5,7 @@
 //! the same code serves the core, the reference satellites, and the conformance tests.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod bridge;
 pub mod frame;
 pub mod message;
 
