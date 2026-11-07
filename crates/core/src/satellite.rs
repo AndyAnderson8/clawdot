@@ -14,7 +14,8 @@ use crate::assistant::Effect;
 use crate::inbox::endpoint::verify_token;
 use crate::speech::decode_pcm16;
 use crate::voice::{
-    Config as DialogConfig, Cue, Dialog, Step, Synthesizer, Transcriber, VoiceOutcome, voice_turn,
+    Config as DialogConfig, Cue, Dialog, Phase, Step, Synthesizer, Transcriber, VoiceOutcome,
+    speak_text, voice_turn,
 };
 use clawdot_protocol::frame::{Decoder, Limits, encode};
 use clawdot_protocol::message::{
@@ -22,6 +23,7 @@ use clawdot_protocol::message::{
 };
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -62,6 +64,8 @@ pub struct Settings {
     pub hello_timeout: Duration,
     /// Simultaneous satellites.
     pub max_sessions: usize,
+    /// Lets the rest of the program speak to connected satellites.
+    pub announcer: Announcer,
 }
 
 impl Default for Settings {
@@ -73,7 +77,124 @@ impl Default for Settings {
             dead_after: Duration::from_secs(20),
             hello_timeout: Duration::from_secs(10),
             max_sessions: 4,
+            announcer: Announcer::default(),
         }
+    }
+}
+
+enum Request {
+    /// Would a spoken announcement be accepted right now?
+    Probe,
+    /// Speak this text.
+    Speak(String),
+}
+
+struct Announce {
+    request: Request,
+    answer: oneshot::Sender<bool>,
+}
+
+#[derive(Debug, Default)]
+struct AnnouncerInner {
+    sessions: Mutex<Vec<(u64, mpsc::Sender<Announce>)>>,
+    next: AtomicU64,
+}
+
+/// How the rest of the program speaks to connected satellites (inbox announcements, alarms).
+///
+/// A satellite accepts an announcement only when it is idle and unmuted, so an announcement never interrupts a
+/// conversation or plays into a muted room. After it plays, the follow-up window opens, so the user can answer
+/// ("keep going and add tests") without the wake word.
+#[derive(Debug, Clone, Default)]
+pub struct Announcer {
+    inner: Arc<AnnouncerInner>,
+}
+
+impl std::fmt::Debug for Announce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Announce")
+    }
+}
+
+/// Removes a session from the announcer when it ends.
+struct Registration {
+    announcer: Announcer,
+    id: u64,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let mut g = self
+            .announcer
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        g.retain(|(id, _)| *id != self.id);
+    }
+}
+
+impl Announcer {
+    fn register(&self) -> (Registration, mpsc::Receiver<Announce>) {
+        let (tx, rx) = mpsc::channel(4);
+        let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((id, tx));
+        (
+            Registration {
+                announcer: self.clone(),
+                id,
+            },
+            rx,
+        )
+    }
+
+    /// How many satellites are connected.
+    #[must_use]
+    pub fn connected(&self) -> usize {
+        self.inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    async fn ask(&self, make: impl Fn() -> Request) -> bool {
+        let senders: Vec<_> = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(_, s)| s.clone())
+            .collect();
+        for s in senders {
+            let (tx, rx) = oneshot::channel();
+            if s.send(Announce {
+                request: make(),
+                answer: tx,
+            })
+            .await
+            .is_ok()
+                && rx.await == Ok(true)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether some satellite could speak an announcement right now.
+    pub async fn is_available(&self) -> bool {
+        self.ask(|| Request::Probe).await
+    }
+
+    /// Speak `text` on the first satellite that is free. Returns whether anyone did.
+    pub async fn announce(&self, text: &str) -> bool {
+        self.ask(|| Request::Speak(text.to_owned())).await
     }
 }
 
@@ -192,6 +313,7 @@ where
     .await?;
 
     // ---- conversation ----
+    let (_registration, mut announce_rx) = settings.announcer.register();
     let started = Instant::now();
     let now_ms = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut dialog = Dialog::new(settings.dialog);
@@ -253,7 +375,6 @@ where
                     steps.push(dialog.on_reply_failed());
                 } else {
                     dialog.on_reply_started();
-                    send(&mut wr, &Message::SetIndicator(Indicator::Speaking)).await?;
                     for e in &effects {
                         match e {
                             Effect::StopPlayback => send(&mut wr, &Message::StopPlayback).await?,
@@ -274,20 +395,29 @@ where
                             Effect::PlayStream { .. } | Effect::Media(_) => {}
                         }
                     }
-                    send(&mut wr, &Message::AudioStart(AudioFormat::PCM_16K_MONO)).await?;
-                    for sentence in &outcome.audio {
-                        for chunk in sentence.chunks(DOWNLINK_CHUNK) {
-                            let payload: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
-                            send(&mut wr, &Message::AudioChunk {
-                                format: AudioFormat::PCM_16K_MONO,
-                                timestamp_ms: None,
-                                payload,
-                            }).await?;
-                        }
-                    }
-                    send(&mut wr, &Message::AudioStop).await?;
+                    play_audio(&mut wr, &outcome.audio).await?;
                     playing = true;
                 }
+            }
+            Some(a) = announce_rx.recv() => {
+                let idle = dialog.phase() == Phase::Idle && !dialog.is_muted() && work.is_none() && !playing;
+                let accepted = match a.request {
+                    Request::Probe => idle,
+                    Request::Speak(text) if idle => {
+                        let mut problems = Vec::new();
+                        let audio = speak_text(&*tts, &text, &mut problems).await;
+                        if audio.is_empty() {
+                            false
+                        } else {
+                            dialog.on_reply_started();
+                            play_audio(&mut wr, &audio).await?;
+                            playing = true;
+                            true
+                        }
+                    }
+                    Request::Speak(_) => false,
+                };
+                let _ = a.answer.send(accepted);
             }
             _ = tick.tick() => {
                 if last_heard.elapsed() >= settings.dead_after {
@@ -337,6 +467,27 @@ where
             }
         }
     }
+}
+
+/// Show the speaking state and send a spoken reply: start, audio in pieces, stop.
+async fn play_audio<W: AsyncWrite + Unpin>(w: &mut W, audio: &[Vec<i16>]) -> Result<(), String> {
+    send(w, &Message::SetIndicator(Indicator::Speaking)).await?;
+    send(w, &Message::AudioStart(AudioFormat::PCM_16K_MONO)).await?;
+    for sentence in audio {
+        for chunk in sentence.chunks(DOWNLINK_CHUNK) {
+            let payload: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+            send(
+                w,
+                &Message::AudioChunk {
+                    format: AudioFormat::PCM_16K_MONO,
+                    timestamp_ms: None,
+                    payload,
+                },
+            )
+            .await?;
+        }
+    }
+    send(w, &Message::AudioStop).await
 }
 
 async fn poll_work(work: &mut Option<Work>) -> (VoiceOutcome, Vec<Effect>) {
@@ -833,5 +984,114 @@ mod tests {
                 .unwrap()
                 .is_ok()
         );
+    }
+
+    async fn connect_and_register(s: Settings) -> (Peer, Announcer) {
+        let ann = s.announcer.clone();
+        let (mut p, h) = start(s, "x", "y");
+        std::mem::forget(h);
+        p.hello(None, PROTOCOL_VERSION).await;
+        assert!(matches!(p.recv().await, Message::Welcome(_)));
+        for _ in 0..100 {
+            if ann.connected() == 1 {
+                return (p, ann);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the session never registered");
+    }
+
+    #[tokio::test]
+    async fn announcements_are_spoken_when_idle_and_open_the_follow_up_window() {
+        let s = fast();
+        let ann = s.announcer.clone();
+        assert_eq!(ann.connected(), 0);
+        assert!(
+            !ann.announce("nobody is listening").await,
+            "no satellite, no announcement"
+        );
+
+        let (mut p, ann) = connect_and_register(s).await;
+        assert!(ann.is_available().await);
+        assert!(ann.announce("Claude finished. Want to reply?").await);
+
+        let mut seen = Vec::new();
+        loop {
+            match p.recv().await {
+                Message::Ping => p.send(&Message::Pong).await,
+                m => {
+                    let last = matches!(m, Message::AudioStop);
+                    seen.push(m);
+                    if last {
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(seen[0], Message::SetIndicator(Indicator::Speaking));
+        let samples: usize = seen
+            .iter()
+            .filter_map(|m| match m {
+                Message::AudioChunk { payload, .. } => Some(payload.len() / 2),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            samples,
+            ("Claude finished.".len() + "Want to reply?".len()) * 100
+        );
+        assert!(
+            !ann.is_available().await,
+            "busy while the satellite is playing"
+        );
+
+        // Playback ends: the user can answer straight away, without the wake word.
+        p.send(&Message::PlaybackDone { id: None }).await;
+        loop {
+            match p.recv().await {
+                Message::Ping => p.send(&Message::Pong).await,
+                m => {
+                    assert_eq!(m, Message::SetIndicator(Indicator::Listening));
+                    break;
+                }
+            }
+        }
+        assert_eq!(p.recv().await, Message::StreamStart);
+        assert!(!ann.is_available().await, "listening for the answer");
+    }
+
+    #[tokio::test]
+    async fn announcements_never_play_into_a_muted_room() {
+        let (mut p, ann) = connect_and_register(fast()).await;
+        p.send(&Message::MuteChanged { muted: true }).await;
+        // Wait until the satellite has processed the mute.
+        for _ in 0..100 {
+            if !ann.is_available().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!ann.announce("hello?").await);
+        p.send(&Message::MuteChanged { muted: false }).await;
+        for _ in 0..100 {
+            if ann.is_available().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("unmuting should make the satellite available again");
+    }
+
+    #[tokio::test]
+    async fn a_closed_session_leaves_the_announcer() {
+        let (p, ann) = connect_and_register(fast()).await;
+        drop(p);
+        for _ in 0..100 {
+            if ann.connected() == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the session should deregister when the peer goes away");
     }
 }

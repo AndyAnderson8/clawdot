@@ -43,6 +43,15 @@ mono 16-bit is reported once with an `error` event and dropped; up to four satel
 connections are closed immediately; frames are size-limited by the protocol decoder, so a hostile peer cannot make
 the core allocate without bound; `hello` must arrive within 10 s.
 
+## Announcements
+
+When a satellite is connected, inbox announcements and fired timers or alarms are spoken on it as well as printed.
+A satellite accepts one only when it is idle and unmuted, so an announcement never interrupts a conversation or
+plays into a muted room. If every satellite is busy or muted, the event stays queued and is retried a second later
+(nothing is marked announced until a satellite actually spoke it). Fired timers are best effort: a busy satellite
+skips them, the console still shows them. After an announcement plays, the follow-up window opens, so the user can
+answer ("keep going and add tests") without the wake word, and the instruction goes to the agent bridge.
+
 ## Assistant effects
 
 Replies can carry effects. Volume changes (`VolumeSet`, `VolumeUp`, `VolumeDown`) and `StopPlayback` are sent as
@@ -56,4 +65,3 @@ a `play-url` command) before it works on a satellite.
 - Wake-word detection in the core for satellites that cannot do it themselves (REQ-SAT-013); today those need a
   button, or the satellite must send `wake`.
 - Opus downlink (REQ-SAT-005), TLS, per-satellite tokens, and displaying inbox announcements on a satellite.
-- Announcing inbox events through a connected satellite: announcements still print to the console only.
