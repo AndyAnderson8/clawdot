@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Protect shared branches and tags. Policy: docs/process/git-workflow.md
+root=$(git rev-parse --show-toplevel)
+# shellcheck source=../scripts/lib-git.sh
+. "$root/scripts/lib-git.sh"
+
+zero=0000000000000000000000000000000000000000
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main | refs/heads/dev)
+      [ "${CLAWDOT_LANDING:-}" = "1" ] ||
+        die "pushes to ${remote_ref#refs/heads/} must go through scripts/land.sh or scripts/release.sh"
+      [ "$local_sha" != "$zero" ] || die "deleting ${remote_ref#refs/heads/} is not allowed"
+      ;;
+    refs/heads/release/* | refs/heads/hotfix/*)
+      if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null &&
+        ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+        die "force-pushing $remote_ref is not allowed"
+      fi
+      ;;
+    refs/tags/*)
+      [ "${CLAWDOT_LANDING:-}" = "1" ] || die "tags are created and pushed only by scripts/release.sh"
+      ;;
+  esac
+done
+exit 0

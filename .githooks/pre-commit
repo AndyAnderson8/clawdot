@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Branch discipline and fast checks. Policy: docs/process/git-workflow.md
+root=$(git rev-parse --show-toplevel)
+# shellcheck source=../scripts/lib-git.sh
+. "$root/scripts/lib-git.sh"
+
+# The very first commit in a repository (the base commit) is exempt.
+git rev-parse --verify -q HEAD >/dev/null || exit 0
+
+branch=$(current_branch)
+case "$branch" in
+  main)
+    die "commits to main are never allowed. Releases reach main only through scripts/release.sh."
+    ;;
+  dev)
+    if tiny_staged_ok; then
+      echo "pre-commit: tiny single commit on dev allowed (max $TINY_MAX_LINES lines, $TINY_MAX_FILES files). Publish it with scripts/land.sh --tiny"
+    else
+      die "direct commits to dev are only for ONE tiny change (max $TINY_MAX_LINES changed lines in $TINY_MAX_FILES files, nothing else unlanded). Create a branch instead:  git switch -c feature/<name>  (or bugfix/, docs/, chore/)"
+    fi
+    ;;
+  "(detached)") ;;
+  *)
+    valid_branch_name "$branch" ||
+      die "'$branch' is not a valid git-flow branch name. Use (feature|bugfix|hotfix|release|docs|chore|spike)/<kebab-name>."
+    ;;
+esac
+
+exec "$root/scripts/check.sh" --fast

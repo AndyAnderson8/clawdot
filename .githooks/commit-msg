@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Conventional Commits and human-only attribution. Policy: docs/process/git-workflow.md
+exec "$(git rev-parse --show-toplevel)/scripts/check-commit-msg.sh" --file "$1"
