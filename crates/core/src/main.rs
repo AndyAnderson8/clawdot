@@ -15,6 +15,7 @@ use clawdot_core::inbox::summary::{
     SummaryConfig, announcement, clamp_for_speech, fallback_summary, summary_prompt,
 };
 use clawdot_core::llm::{ChatRequest, Message};
+use clawdot_core::mcp::{McpClient, ServerDef, WithMcp};
 use clawdot_core::media::Station;
 use clawdot_core::satellite::{self, Answer, Ask};
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
@@ -85,6 +86,7 @@ struct Args {
     key_env: String,
     persona_file: Option<PathBuf>,
     tools: Vec<ToolDef>,
+    mcp: Vec<ServerDef>,
     stations: Vec<Station>,
     speech: SpeechConfig,
     satellite: SatelliteConfig,
@@ -113,6 +115,7 @@ fn parse() -> Result<Args, String> {
         key_env: "OPENROUTER_API_KEY".into(),
         persona_file: None,
         tools: Vec::new(),
+        mcp: Vec::new(),
         stations: Vec::new(),
         speech: SpeechConfig::default(),
         satellite: SatelliteConfig::default(),
@@ -187,6 +190,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.zone.clone_from(&c.zone);
     a.persona_file.clone_from(&c.persona_file);
     a.tools.clone_from(&c.tools);
+    a.mcp.clone_from(&c.mcp);
     a.stations.clone_from(&c.stations);
     a.speech.clone_from(&c.speech);
     a.satellite.clone_from(&c.satellite);
@@ -319,6 +323,7 @@ struct Brain {
     usage: UsageTracker,
     usage_store: JsonStore,
     http_tools: HttpTools,
+    mcp: McpClient,
     clock: Arc<dyn Clock + Send + Sync>,
 }
 
@@ -346,9 +351,12 @@ impl Brain {
         let (day, now) = (self.assistant.local_day(), self.clock.now());
         let r = run_turn(
             &l.backend,
-            &mut WithHttp {
-                inner: &mut self.assistant,
-                http: &self.http_tools,
+            &mut WithMcp {
+                inner: &mut WithHttp {
+                    inner: &mut self.assistant,
+                    http: &self.http_tools,
+                },
+                mcp: &self.mcp,
             },
             &mut self.conversation,
             &l.cfg,
@@ -632,6 +640,25 @@ async fn main() -> ExitCode {
         }
     };
 
+    let mut reserved = builtin.clone();
+    reserved.extend(http_tools.specs().into_iter().map(|t| t.name));
+    let mcp = match McpClient::connect(std::mem::take(&mut args.mcp), &reserved, |v| {
+        std::env::var(v).ok()
+    })
+    .await
+    {
+        Ok((client, warnings)) => {
+            for w in warnings {
+                eprintln!("clawdot: {w}");
+            }
+            client
+        }
+        Err(e) => {
+            eprintln!("clawdot: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
     let mut brain = Brain {
         assistant,
         llm,
@@ -639,6 +666,7 @@ async fn main() -> ExitCode {
         usage,
         usage_store,
         http_tools,
+        mcp,
         clock: clock.clone(),
     };
 

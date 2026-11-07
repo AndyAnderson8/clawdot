@@ -16,6 +16,7 @@ pub mod http;
 pub mod httptools;
 pub mod inbox;
 pub mod llm;
+pub mod mcp;
 pub mod media;
 pub mod satellite;
 pub mod sched;

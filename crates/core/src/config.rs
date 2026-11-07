@@ -102,6 +102,9 @@ pub struct Config {
     /// Declarative HTTP tools the model may call (see `docs/architecture/http-tools.md`).
     #[serde(default)]
     pub tools: Vec<crate::httptools::ToolDef>,
+    /// MCP servers whose tools the model may call (Streamable HTTP; see `docs/architecture/mcp.md`).
+    #[serde(default)]
+    pub mcp: Vec<crate::mcp::ServerDef>,
 }
 
 impl Config {
@@ -193,6 +196,9 @@ impl Config {
         }
         for s in &self.stations {
             s.validate().map_err(|e| format!("config: {e}"))?;
+        }
+        for m in &self.mcp {
+            m.validate().map_err(|e| format!("config: {e}"))?;
         }
         for t in &self.tools {
             t.validate().map_err(|e| format!("config: {e}"))?;
