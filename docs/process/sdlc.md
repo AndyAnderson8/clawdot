@@ -116,8 +116,8 @@ An item is *Done* only if:
 
 - **Cadence:** release when a milestone's exit criteria are met, not on a calendar.
 - **Versioning:** [SemVer](https://semver.org). Pre-1.0, minor versions may break. The **satellite protocol** is versioned independently (`protocol vMAJOR.MINOR`) and its compatibility rules are in its spec.
-- **Process:** git flow. `scripts/release.sh start` branches `release/X.Y.Z` from `dev` and regenerates `CHANGELOG.md` from the commits; `finish` fast-forwards `main`, tags `vX.Y.Z`, and back-merges into `dev`. The release workflow builds artifacts, ships `CHANGELOG.md` in the release, generates checksums and an SBOM, and publishes the GitHub Release. Details: [git-workflow.md §6](git-workflow.md#6-releases).
-- **Hotfix:** `hotfix/<name>` from `main`, landed into `main` as a patch release and back-merged into `dev`.
+- **Process:** git flow, in three steps ([runbook](runbook.md#7-cut-a-release)). `scripts/release.sh prepare` branches `release/X.Y.Z` from `dev` and regenerates `CHANGELOG.md` from the commits; the branch is landed into `dev`; the human then runs `publish`, which merges `dev` into `main` with a merge commit and tags it `vX.Y.Z`. The release workflow builds artifacts, ships `CHANGELOG.md` in the release, generates checksums and an SBOM, and publishes the GitHub Release. Details: [git-workflow.md §6](git-workflow.md#6-releases).
+- **Hotfix:** `hotfix/<name>` from `main`, merged into `main` as a patch release (human tags it) and back-merged into `dev` ([runbook](runbook.md#8-hotfix-urgent-fix-to-a-released-version)).
 
 ## 10. Roles
 

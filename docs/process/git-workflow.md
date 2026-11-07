@@ -6,13 +6,15 @@ This is the binding policy for how code moves from an idea to a release. It appl
 
 | Branch | Purpose | Who may change it | How |
 |---|---|---|---|
-| `main` | Released code only. Every commit on `main` is a release. | Nobody directly | `scripts/release.sh` (fast-forward from a release branch) |
+| `main` | Released code only. Each release is a merge commit of `dev`, and that merge commit carries the version tag. | Nobody directly | `scripts/release.sh publish` (merge commit, human only) |
 | `dev` | Integration branch. Always green. | Nobody directly (one exception below) | `scripts/land.sh` (merge commit) |
 | `feature/<name>` | New functionality | Author | Branch from `dev`, land into `dev` |
 | `bugfix/<name>` | Fix for a defect found on `dev` | Author | Branch from `dev`, land into `dev` |
 | `docs/<name>`, `chore/<name>`, `spike/<name>` | Docs, maintenance, time-boxed investigations | Author | Branch from `dev`, land into `dev` |
-| `release/<X.Y.Z>` | Release preparation (version, changelog) | Release manager | Branch from `dev`; fast-forward into `main`; back-merge into `dev` |
-| `hotfix/<name>` | Urgent fix for a released version | Author | Branch from `main`; land into `main` and `dev` |
+| `release/<X.Y.Z>` | Prepares a release (version and changelog commit) | Anyone | `scripts/release.sh prepare` branches from `dev`; land it into `dev`; the human then publishes `dev` to `main` |
+| `hotfix/<name>` | Urgent fix for a released version | Author | Branch from `main`; `scripts/land.sh hotfix/<name> --into main`; the human tags it; back-merge `main` into `dev` |
+
+Step-by-step commands for all of this are in the [runbook](runbook.md).
 
 Names are lowercase kebab-case after the prefix: `feature/timer-tool`, `bugfix/opus-underrun`. Include an issue number when one exists (`feature/42-timer-tool`). Enforced by the `pre-commit` hook and the agent guard.
 
@@ -90,19 +92,23 @@ Rust gates activate automatically when `Cargo.toml` exists; if `Cargo.toml` exis
 
 ## 6. Releases
 
+A release is three steps: **prepare**, **land**, **publish**.
+
 ```
 git switch dev
-scripts/release.sh start            # computes the next SemVer from commits; creates release/X.Y.Z;
+scripts/release.sh prepare          # branches release/X.Y.Z from dev; computes the next SemVer from the commits;
                                     # regenerates CHANGELOG.md with git-cliff; commits "chore(release): vX.Y.Z"
-# review CHANGELOG.md; push the branch if you want CI on it
-scripts/release.sh finish X.Y.Z     # release gate; fast-forward main; tag vX.Y.Z; back-merge main into dev
+scripts/land.sh release/X.Y.Z       # lands the release commit into dev like any other branch
+scripts/release.sh publish X.Y.Z    # HUMAN ONLY: merges dev into main with a merge commit, tags that commit
 ```
+
+`publish` runs the release gate, asks the human to type the tag to confirm (it needs an interactive terminal, so agents cannot run it), merges `dev` into `main` with a **merge commit** pushed only after CI passes on that exact commit, **tags the merge commit** `vX.Y.Z`, and pushes the tag. The tag triggers the `release` workflow.
 
 Release gate (beyond the normal gates): `CHANGELOG.md` has an entry for the version, the working tree is clean, and the Cargo workspace version matches. The `release` workflow then builds the artifacts, **ships `CHANGELOG.md` in the release package**, and publishes the GitHub Release with notes generated from the commits. From v1.0 the changelog is also embedded in the build and shown in the UI "About" page (REQ-CFG-013).
 
-Main only ever receives a **fast-forward** of a release branch that CI has already verified, so every commit on `main` has passed the `gate`. The release branch carries the merge-commit history from `dev`.
+`main` only ever receives merge commits (`dev` into `main` for a release, a `hotfix/*` branch into `main` for a hotfix), and each is pushed only after CI has passed on that exact commit, so every commit on `main` has passed the `gate`. The version tag points at the `Merge dev into main (release vX.Y.Z)` commit.
 
-**Hotfix:** branch `hotfix/<name>` from `main`, fix, land into `main` as a patch release (`scripts/land.sh hotfix/<name> --into main`, then tag), then back-merge into `dev`.
+**Hotfix:** branch `hotfix/<name>` from `main`, fix and regenerate the changelog for the patch version, land it into `main` (`scripts/land.sh hotfix/<name> --into main`), then the human runs `scripts/release.sh tag X.Y.Z`. Finally back-merge `main` into `dev` on a `chore/back-merge-vX.Y.Z` branch. Commands: [runbook section 8](runbook.md#8-hotfix-urgent-fix-to-a-released-version).
 
 ## 7. Versioning and tags
 
@@ -129,7 +135,15 @@ Planned mapping to roadmap milestones (minor version per milestone, patch for fi
 
 ## 8. External contributors
 
-Contributors without write access fork the repository and open a **pull request against `dev`**. CI (`gate`) must pass; the maintainer reviews and merges with a merge commit. The same commit conventions apply to every commit in the PR. The maintainer and their agents do not open PRs for their own work.
+Contributors without write access fork the repository and open a **pull request against `dev`**. CI (`gate`) must pass; the maintainer reviews and merges in the GitHub UI with **Create a merge commit**. The same commit conventions apply to every commit in the PR. The maintainer and their agents do not open PRs for their own work.
+
+The two paths coexist: the maintainer's work reaches `dev` through `scripts/land.sh` (candidate ref, CI, publish), outside contributors' work through pull requests, and both need a passing `gate`.
+
+**If the project grows,** these adjustments are planned (settings, not new machinery; see [repo-settings.md](repo-settings.md)):
+- A pull-request rule on `dev` (one approving review) for everyone except the maintainer, who bypasses it because the landing script is their path.
+- GitHub's "require approval for first-time contributors" before workflows run on a fork PR.
+- DCO sign-off enforcement and a `CODEOWNERS` file (both dormant today; see [SDLC section 13](sdlc.md#13-proportionality-solo-maintainer-mode)).
+- Reconsider squash-merging **outside** PRs only. Requiring Conventional Commits on every contributor commit is friction for newcomers; squashing with a Conventional PR title keeps the changelog clean. If adopted, the `commits` CI check validates the PR title for PR events and every commit for pushes.
 
 ## 9. Enforcement layers
 

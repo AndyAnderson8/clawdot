@@ -15,9 +15,20 @@ If anything here conflicts with a user instruction in the moment, stop and ask. 
 - **Never commit to `main`.** Do not commit to `dev` either, except the human's single tiny change (<= 10 changed lines, <= 2 files). Always `git switch -c <type>/<name>` from an up-to-date `dev` first.
 - Commit small and often, as a human would: one logical change per commit, with tests and docs in the same branch. Keep commits understandable on their own.
 - **Conventional Commits** for every commit: `type(scope): imperative summary` (<= 72 chars, no trailing period). Types: feat, fix, docs, spec, refactor, perf, test, build, ci, chore, revert. Add a body explaining *why*. Reference requirement IDs in the body, e.g. `Refs: REQ-TMR-001`.
-- **Integrate only with `scripts/land.sh <branch>`** (merge commit, all gates run first). Do not run `git merge`, `git push` to `dev`/`main`, `git rebase` on shared branches, or force-push. Do not create tags or releases; `scripts/release.sh` does that for the human.
+- **Integrate only with `scripts/land.sh <branch>`** (merge commit, all gates run first). Do not run `git merge`, `git push` to `dev`/`main`, `git rebase` on shared branches, or force-push. Never create tags or releases yourself. You may run `scripts/release.sh prepare` and land the resulting `release/X.Y.Z` branch into `dev`, but **publishing is human-only**: stop and ask the human to run `scripts/release.sh publish X.Y.Z` in a terminal.
 - Never bypass checks: no `--no-verify`, no editing or removing `.githooks/`, no changing `core.hooksPath`.
 - A branch must contain `dev` before landing: `git switch <branch> && git merge dev`.
+
+## Quick reference (full step-by-step with failure fixes: docs/process/runbook.md)
+
+```
+git switch dev && git pull && git switch -c feature/<name>   # start (also bugfix/ docs/ chore/ spike/)
+git add <files> && git commit -m "type(scope): summary" -m "why. Refs: REQ-..."   # small, often
+git merge dev                       # on your branch, before landing
+scripts/check.sh                    # every gate; must pass
+scripts/land.sh feature/<name>      # merge commit into dev (CI-verified once a remote exists)
+scripts/release.sh prepare          # release step 1; then land release/X.Y.Z; the HUMAN runs "publish"
+```
 
 ## Definition of done for any change
 

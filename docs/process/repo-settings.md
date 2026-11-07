@@ -14,7 +14,7 @@ To apply when the GitHub repository is created. They make the server enforce the
 - Target: `refs/heads/main`.
 - Block deletion. Block force pushes (non-fast-forward).
 - Require status check **`gate`** to pass for the pushed commit.
-- No pull-request rule: the maintainer fast-forwards `main` from a CI-verified release branch, and any commit without a passing `gate` is rejected by the server, which is what makes direct commits to `main` impossible.
+- No pull-request rule: the release script merges `dev` into `main` with a merge commit it first pushed to a candidate ref and verified in CI, so the pushed SHA already has a passing `gate`. Any commit without one is rejected by the server, which is what makes direct commits to `main` impossible.
 - Later: require signed commits once signing keys are configured.
 
 ### `dev`
@@ -31,6 +31,12 @@ The required context is the job named `gate` in `.github/workflows/ci.yml`. If t
 
 ## Secrets
 None required for CI today. A release workflow uses the default `GITHUB_TOKEN` with `contents: write`.
+
+## When outside contributors arrive (not yet needed)
+- Add a pull-request rule to the `dev` ruleset requiring one approving review, with the repository admin (the maintainer) as a bypass actor, since the maintainer's path is `scripts/land.sh`.
+- Settings, Actions, General: require approval to run workflows from first-time contributors' fork pull requests.
+- Enable DCO enforcement and add `CODEOWNERS` (dormant today; see SDLC section 13).
+- Optionally allow squash merges for outside pull requests only, validating the PR title in the `commits` check (see git-workflow.md section 8).
 
 ## Verification checklist after applying
 1. Direct push of a commit to `main` is rejected.
