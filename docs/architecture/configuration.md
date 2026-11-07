@@ -42,3 +42,17 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 - **Validated at startup**, before anything is bound or written.
 - **Hot reload** (a SHOULD in the spec) is not implemented: restart to apply changes. Rotating an endpoint token
   already works without a restart via the HTTP API.
+
+## Web UI
+
+The core serves a small page at `/` and `/ui` (REQ-CFG-001, 008): no external assets, no frameworks, usable on a
+phone. It shows endpoints and the recent inbox, and creates, rotates, and deletes endpoints (REQ-CFG-003, 004).
+
+- **Sign-in** uses an administrator token printed once on first start (`--rotate-admin-token` issues a new one).
+  Only its hash is stored, in `admin-token.hash` in the data directory (REQ-CFG-006). The token lives in the
+  browser tab's session storage only.
+- **Binding.** The default listen address is `127.0.0.1:8080`. Change `listen` to the LAN address deliberately;
+  there is no TLS, so use a trusted network or a VPN (REQ-CFG-005).
+- **Throttling.** Wrong administrator tokens share the authentication rate limit.
+- **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
+- Not yet in the UI: provider keys, voice and wake word settings, scheduled items, logs, and "test speak".

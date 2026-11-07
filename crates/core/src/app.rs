@@ -189,6 +189,7 @@ pub struct Core {
     stores: Option<Stores>,
     inner: Mutex<Inner>,
     notify: Notify,
+    admin_hash: Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -272,7 +273,20 @@ impl Core {
                 },
             }),
             notify: Notify::new(),
+            admin_hash: Mutex::new(None),
         }
+    }
+
+    /// The current time.
+    #[must_use]
+    pub fn now(&self) -> Ts {
+        self.clock.now()
+    }
+
+    /// Whether an adapter with this name exists.
+    #[must_use]
+    pub fn has_adapter(&self, name: &str) -> bool {
+        self.adapters.get(name).is_some()
     }
 
     /// The configured limits.
@@ -477,6 +491,44 @@ impl Core {
         let now = self.clock.now();
         let mut g = self.lock();
         self.authenticate(&mut g, name, token, now).map(|_| ())
+    }
+
+    // ----- web UI administration -----
+
+    /// Set the web UI administrator token by its hash. Until this is called the UI API refuses everyone.
+    pub fn set_admin_token_hash(&self, hash: &str) {
+        *self
+            .admin_hash
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hash.to_owned());
+    }
+
+    /// Whether `token` is the administrator token. Failures share the authentication rate limit.
+    ///
+    /// # Errors
+    /// [`HookError::Unauthorized`] or [`HookError::RateLimited`].
+    pub fn check_admin(&self, token: &str) -> Result<(), HookError> {
+        let stored = self
+            .admin_hash
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if stored.is_some_and(|h| endpoint::verify_token(token, &h)) {
+            return Ok(());
+        }
+        let now = self.clock.now();
+        let mut g = self.lock();
+        let ok = take(
+            &mut g.auth_failures,
+            now,
+            self.limits.auth_fail_burst,
+            self.limits.auth_fail_per_sec,
+        );
+        Err(if ok {
+            HookError::Unauthorized
+        } else {
+            HookError::RateLimited
+        })
     }
 
     // ----- voice side -----
