@@ -3,7 +3,9 @@
 | Area | Document | Purpose |
 |---|---|---|
 | Process | [sdlc.md](process/sdlc.md) | Kanban board, WIP limits, spec-driven workflow, DoR/DoD, releases |
-| Process | [git-workflow.md](process/git-workflow.md) | Trunk-based flow, branch naming, Conventional Commits, signing |
+| Process | [git-workflow.md](process/git-workflow.md) | Git flow, merge commits, gated landing, releases, enforcement layers |
+| Process | [repo-settings.md](process/repo-settings.md) | GitHub rulesets and settings that enforce the git flow server-side |
+| Agents | [../AGENTS.md](../AGENTS.md) | Binding rules for AI coding agents (identity, branches, commits) |
 | Specs | [specs/](specs/README.md) | What the system must do, with stable requirement IDs |
 | Architecture | [architecture/overview.md](architecture/overview.md) | Components, flows, constraints, risks |
 | Architecture | [architecture/extensibility.md](architecture/extensibility.md) | Core, packs, sidecars; media backends; trust model |

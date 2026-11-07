@@ -1,5 +1,6 @@
 ## Summary
-<!-- What changed and why. PR title must follow Conventional Commits: type(scope): summary -->
+<!-- For external contributors: target the `dev` branch. Every commit in this PR must follow Conventional Commits (type(scope): summary). The maintainer and their agents integrate with scripts/land.sh and do not use this template. -->
+<!-- What changed and why. -->
 
 ## Links
 - Issue: Closes #

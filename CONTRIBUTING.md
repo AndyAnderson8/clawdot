@@ -5,11 +5,13 @@ Thanks for your interest. This project is spec-driven and budget-constrained, wh
 ## TL;DR
 
 1. Find or open an issue. For behaviour changes, there must be an **Accepted spec** (or a spec PR) first.
-2. Branch: `<type>/<issue#>-<slug>`.
-3. Write tests (tagged with requirement IDs) and code.
-4. Run `just check` locally.
-5. Open a PR with a Conventional Commit title, and fill in the template.
+2. Fork the repository and branch from `dev`: `feature/<name>`, `bugfix/<name>`, `docs/<name>`, and so on. Never work on `main` or `dev`.
+3. Write tests (tagged with requirement IDs) and code. Commit small and often.
+4. Run `scripts/setup.sh` once (enables the git hooks), then `scripts/check.sh` before pushing.
+5. Every commit must be a [Conventional Commit](docs/process/git-workflow.md#3-commit-messages). Open a pull request **against `dev`** and fill in the template.
 6. Sign off your commits (`git commit -s`).
+
+Maintainers and their AI pair programmers follow the same rules but integrate with `scripts/land.sh` instead of pull requests. The full policy is the [git flow](docs/process/git-workflow.md). AI agents must also follow [AGENTS.md](AGENTS.md).
 
 ## Ground rules
 
@@ -23,18 +25,20 @@ Thanks for your interest. This project is spec-driven and budget-constrained, wh
 Prerequisites (to be finalised in M0): Rust (pinned via `rust-toolchain.toml`), [`just`](https://github.com/casey/just), `cargo-deny`, `cargo-audit`, and `cross` or Zig for cross-compilation.
 
 ```
-just check      # fmt, clippy, unit tests, cargo-deny
-just test       # full test suite
-just cross      # build for armv7-unknown-linux-musleabihf
-just budget     # run the resource budget gate (qemu-user)
+scripts/setup.sh          # once: enable git hooks, verify identity
+scripts/check.sh --fast   # quick gate (what the pre-commit hook runs)
+scripts/check.sh          # every gate (what landing into dev runs)
 ```
+
+The Rust gates (format, clippy, tests, cargo-deny), the armv7 cross-build, and the budget gate activate as the workspace and CI jobs land (TASK-001..003). `just` is an optional convenience wrapper over these scripts.
 
 ## Process links
 
 | Topic | Document |
 |---|---|
 | Board, WIP limits, DoR/DoD | [docs/process/sdlc.md](docs/process/sdlc.md) |
-| Branches, commits, PRs, releases | [docs/process/git-workflow.md](docs/process/git-workflow.md) |
+| Git flow: branches, commits, landing, releases | [docs/process/git-workflow.md](docs/process/git-workflow.md) |
+| Rules for AI coding agents | [AGENTS.md](AGENTS.md) |
 | Writing a spec | [docs/specs/README.md](docs/specs/README.md) |
 | Testing expectations | [docs/quality/testing-strategy.md](docs/quality/testing-strategy.md) |
 | Security | [SECURITY.md](SECURITY.md) |
