@@ -81,5 +81,23 @@ g feature/x 2 "git commit -m x -m Co-Authored-By: $ai <a@b.c>"
 g wip 2 "git commit -m x"
 rm -rf "$S"
 
+# --- hook stubs fail closed on main when the versioned hooks are absent ---------------------------
+H=$(mktemp -d)
+(
+  cd "$H" || exit 1
+  git init -q -b main
+  git config user.name T
+  git config user.email t@example.com
+  git commit -q --allow-empty -m "chore: initialize repository"
+) || { echo "could not build scratch repo for stubs" >&2; exit 2; }
+if (cd "$H" && bash "$root/scripts/setup.sh" >/dev/null 2>&1); then ok; else fail "setup.sh failed in a scratch repo"; fi
+if (cd "$H" && git commit -q --allow-empty -m "chore: direct commit" >/dev/null 2>&1); then
+  fail "a commit on main succeeded even though versioned hooks are absent"
+else ok; fi
+if (cd "$H" && git switch -q -c feature/x && git commit -q --allow-empty -m "chore: on a branch" >/dev/null 2>&1); then
+  ok
+else fail "a commit on a feature branch should be allowed by the stubs"; fi
+rm -rf "$H"
+
 echo "policy tests: $pass passed, $failn failed"
 [ "$failn" -eq 0 ]
