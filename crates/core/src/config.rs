@@ -34,6 +34,26 @@ pub struct LimitsConfig {
     pub daily_spend_usd: Option<f64>,
 }
 
+/// Speech-to-text and text-to-speech provider (OpenAI-compatible).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SpeechConfig {
+    /// Base URL, for example `https://api.openai.com/v1`. Plain `http://` only for local hosts.
+    pub url: Option<String>,
+    /// Name of the environment variable that holds the API key.
+    pub key_env: Option<String>,
+    /// Transcription model, for example `whisper-1`.
+    pub stt_model: Option<String>,
+    /// Speech model, for example `tts-1`.
+    pub tts_model: Option<String>,
+    /// Voice name.
+    pub voice: Option<String>,
+    /// Spoken language hint for transcription, for example `en`.
+    pub language: Option<String>,
+    /// Sample rate of the provider's raw PCM output (default 24000).
+    pub tts_sample_rate: Option<u32>,
+}
+
 /// The whole file.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +77,9 @@ pub struct Config {
     /// Usage caps.
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Speech provider.
+    #[serde(default)]
+    pub speech: SpeechConfig,
     /// Radio stations for the music commands.
     #[serde(default)]
     pub stations: Vec<crate::media::Station>,
@@ -113,6 +136,29 @@ impl Config {
             && (!s.is_finite() || s < 0.0)
         {
             return Err("config: `limits.daily_spend_usd` must be zero or more".into());
+        }
+        let sp = &self.speech;
+        if sp.url.is_some() {
+            for (key, v) in [
+                ("stt_model", &sp.stt_model),
+                ("tts_model", &sp.tts_model),
+                ("voice", &sp.voice),
+            ] {
+                if v.is_none() {
+                    return Err(format!(
+                        "config: `speech.{key}` is needed when `speech.url` is set"
+                    ));
+                }
+            }
+        } else if sp.stt_model.is_some()
+            || sp.tts_model.is_some()
+            || sp.voice.is_some()
+            || sp.key_env.is_some()
+        {
+            return Err("config: `speech.url` is needed for the other `speech` settings".into());
+        }
+        if sp.tts_sample_rate.is_some_and(|r| r < 8_000) {
+            return Err("config: `speech.tts_sample_rate` must be at least 8000".into());
         }
         for s in &self.stations {
             s.validate().map_err(|e| format!("config: {e}"))?;
@@ -172,6 +218,15 @@ mod tests {
             (r#"{"llm": {"summary_model": "m"}}"#, "need"),
             (r#"{"limits": {"max_requests_per_day": 0}}"#, "at least 1"),
             (r#"{"limits": {"daily_spend_usd": -1}}"#, "zero or more"),
+            (r#"{"speech": {"stt_model": "w"}}"#, "speech.url"),
+            (
+                r#"{"speech": {"url": "https://x/v1", "stt_model": "w", "tts_model": "t"}}"#,
+                "speech.voice",
+            ),
+            (
+                r#"{"speech": {"url": "https://x/v1", "stt_model": "w", "tts_model": "t", "voice": "v", "tts_sample_rate": 100}}"#,
+                "sample_rate",
+            ),
             (r#"{"endpoints": [" "]}"#, "empty"),
             ("{", "config"),
         ] {

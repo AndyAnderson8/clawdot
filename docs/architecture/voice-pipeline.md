@@ -45,7 +45,27 @@ provider has been called.
 
 ## Not built yet
 
-- Provider settings in the configuration file and the satellite that uses them.
+- The satellite that feeds live microphone audio and plays the reply.
 - Wake-word detection, audio capture and playback, and the satellite itself.
 - Opt-in barge-in and adaptive end-of-utterance thresholds (REQ-VOI-005, REQ-VOI-011, both later milestones).
 - Starting synthesis while the model is still streaming: replies are split into sentences after they are complete.
+
+## Trying it without a microphone
+
+`clawdot --config clawdot.json --voice-in question.wav [--voice-out answer.wav]` answers one recorded utterance and
+exits: it transcribes the file, answers with the same code as the text console (fast path, then the language
+model and tools), and writes the spoken reply as a WAV. It prints what it heard, what it said, and any satellite
+effects (for example a radio stream to start). The input must be mono 16-bit PCM at 16 kHz; other formats are
+refused with a message saying what was found. The `speech` section of the configuration file is required:
+
+```json
+"speech": {
+  "url": "https://api.openai.com/v1",
+  "key_env": "OPENAI_API_KEY",
+  "stt_model": "whisper-1",
+  "tts_model": "tts-1",
+  "voice": "alloy",
+  "language": "en",
+  "tts_sample_rate": 24000
+}
+```

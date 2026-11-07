@@ -342,3 +342,136 @@ fn a_configured_http_tool_runs_only_after_the_user_confirms() {
     assert!(request.ends_with(r#"{"room":"den"}"#), "{request}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_recorded_utterance_is_transcribed_answered_and_spoken_back() {
+    // A fake speech provider: transcription returns a timer request, speech returns 0.1 s of 24 kHz audio.
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let provider = std::thread::spawn(move || {
+        let mut paths = Vec::new();
+        for _ in 0..2 {
+            let (mut c, _) = server.accept().unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 8192];
+            let head_end = loop {
+                let n = c.read(&mut buf).unwrap();
+                assert!(n > 0);
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(p) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&raw[..p]).to_ascii_lowercase();
+                    let want: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if raw.len() >= p + 4 + want {
+                        break p;
+                    }
+                }
+            };
+            let path = String::from_utf8_lossy(&raw[..head_end])
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .to_owned();
+            let (ctype, body): (&str, Vec<u8>) = if path.ends_with("/audio/transcriptions") {
+                (
+                    "application/json",
+                    br#"{"text":"set a timer for ten minutes"}"#.to_vec(),
+                )
+            } else {
+                (
+                    "audio/pcm",
+                    (0..2400i16).flat_map(|i| (i % 50).to_le_bytes()).collect(),
+                )
+            };
+            let mut resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            resp.extend_from_slice(&body);
+            c.write_all(&resp).unwrap();
+            paths.push(path);
+        }
+        paths
+    });
+
+    let dir = std::env::temp_dir().join(format!("clawdot-voice-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            r#"{{"speech": {{"url": "http://127.0.0.1:{port}/v1", "stt_model": "w", "tts_model": "t", "voice": "v"}}}}"#
+        ),
+    )
+    .unwrap();
+    let input = dir.join("in.wav");
+    std::fs::write(&input, clawdot_core::speech::wav(&vec![1000i16; 8000])).unwrap();
+    let output = dir.join("out.wav");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "--data-dir",
+            dir.join("state").to_str().unwrap(),
+            "--voice-in",
+            input.to_str().unwrap(),
+            "--voice-out",
+            output.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("heard> set a timer for ten minutes"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("speaker> ") && stdout.to_lowercase().contains("timer"),
+        "{stdout}"
+    );
+
+    let paths = provider.join().unwrap();
+    assert_eq!(paths, vec!["/v1/audio/transcriptions", "/v1/audio/speech"]);
+    let spoken = clawdot_core::speech::parse_wav(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(
+        spoken.len(),
+        1600,
+        "0.1 s of 24 kHz audio becomes 1600 samples at 16 kHz"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn voice_mode_explains_a_missing_speech_setup() {
+    let dir = std::env::temp_dir().join(format!("clawdot-voice-missing-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("in.wav");
+    std::fs::write(&input, clawdot_core::speech::wav(&[0i16; 100])).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--data-dir",
+            dir.join("state").to_str().unwrap(),
+            "--voice-in",
+            input.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("speech.url is not configured"));
+}
