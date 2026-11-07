@@ -19,14 +19,18 @@ mkdir -p "$HOME/zig" "$HOME/bin"
 tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
 echo "zig $("$HOME/zig/zig" version)"
 
-# cc and c++ drop the host --target triple (zig rejects "unknown" vendors, e.g. from the ring crate).
+# cc and c++ rewrite arguments zig rejects: the "unknown" vendor in --target and -march=x86-64 (from the cc crate).
 # shellcheck disable=SC2016  # $HOME and "$@" must expand when the wrapper runs, not now
 for tool in cc c++; do
   cat >"$HOME/bin/$tool" <<WRAP
 #!/usr/bin/env bash
 args=()
 for a in "\$@"; do
-  case "\$a" in --target=*-unknown-linux-gnu) ;; *) args+=("\$a") ;; esac
+  case "\$a" in
+    --target=*) a="\${a/-unknown-/-}" ;;
+    -march=x86-64) a=-march=x86_64 ;;
+  esac
+  args+=("\$a")
 done
 exec "\$HOME/zig/zig" $tool "\${args[@]}"
 WRAP
@@ -36,6 +40,25 @@ done
 for tool in ar ranlib; do
   printf '#!/usr/bin/env bash\nexec "$HOME/zig/zig" %s "$@"\n' "$tool" >"$HOME/bin/$tool"
   chmod +x "$HOME/bin/$tool"
+done
+
+# Target-specific wrappers for static musl builds (scripts/budget.sh). Rust's own bundled C startup files
+# are disabled (link-self-contained=no) and zig supplies musl, so the two do not collide.
+# shellcheck disable=SC2016  # as above
+for pair in musl64:x86_64-linux-musl armv7:arm-linux-musleabihf; do
+  name=${pair%%:*}; target=${pair#*:}
+  cat >"$HOME/bin/zcc-$name" <<WRAP
+#!/usr/bin/env bash
+args=()
+for a in "\$@"; do
+  case "\$a" in
+    --target=*|-march=x86-64) ;;
+    *) args+=("\$a") ;;
+  esac
+done
+exec "\$HOME/zig/zig" cc -target $target "\${args[@]}"
+WRAP
+  chmod +x "$HOME/bin/zcc-$name"
 done
 
 cat >"$HOME/.clawdot-env.sh" <<'ENV'
