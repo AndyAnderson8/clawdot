@@ -35,11 +35,13 @@ else
   echo "note: shellcheck not installed locally (CI runs it)"
 fi
 
-# The policy tests spin up scratch repositories and are slow. In the fast (pre-commit) gate they run
-# only when the policy tooling itself is being changed; the full gate and CI always run them.
+# The policy tests spin up scratch repositories and are slow (hundreds of process spawns). Locally they
+# run only when the policy tooling itself changed (staged, or on this branch relative to dev). CI always
+# runs them, which is the authoritative check.
 policy_relevant() {
-  [ "$fast" -eq 0 ] && return 0
-  git diff --cached --name-only | grep -qE '^(scripts/|\.githooks/|\.claude/|\.shellcheckrc)'
+  [ -n "${CI:-}" ] && return 0
+  { git diff --cached --name-only; git diff --name-only dev...HEAD 2>/dev/null; } |
+    grep -qE '^(scripts/|\.githooks/|\.claude/|\.shellcheckrc)'
 }
 if [ -f scripts/test-policy.sh ] && policy_relevant; then
   step "policy tooling: commit-message rules, agent guard, landing and release flow"

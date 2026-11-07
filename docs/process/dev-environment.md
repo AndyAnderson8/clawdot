@@ -41,6 +41,13 @@ Keep the Rust workspace on the WSL2 ext4 filesystem for build performance (not u
 - API keys live in a git-ignored `config.toml` or environment variables.
 - **CI and default tests never use real providers** (see [testing strategy §7](../quality/testing-strategy.md#7-test-cost-policy)).
 
+## Performance: process spawns are expensive on Windows
+On a typical Windows machine every process launch costs about 150 ms (measured 2026-11-07), so a script's speed is set by **how many processes it starts**, not by what it computes. Rules for scripts in this repository:
+- Prefer bash builtins (`[[ =~ ]]`, parameter expansion, `read`) over `grep`, `sed`, `tr`, `cat`, `dirname`, and `$(...)` subshells, especially in loops.
+- Batch work: one `grep -r` over the tree beats one `grep` per file.
+- The agent guard (`.claude/hooks/guard-git.sh`) runs before every shell command an agent issues. It is spawn-free on purpose (0.4 s instead of 2.7 s); keep it that way.
+- Gate steps that spawn hundreds of processes (the policy tests) run only when the policy tooling changes; CI runs them always.
+
 ## Known risks to validate in TASK-001
 - Windows to WSL2 localhost forwarding behaves with raw TCP and long-lived connections.
 - Zig-based linking works with the chosen C dependencies (libopus, TFLite Micro).
