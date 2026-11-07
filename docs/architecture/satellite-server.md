@@ -55,13 +55,20 @@ answer ("keep going and add tests") without the wake word, and the instruction g
 ## Assistant effects
 
 Replies can carry effects. Volume changes (`VolumeSet`, `VolumeUp`, `VolumeDown`) and `StopPlayback` are sent as
-`set-volume` and `stop-playback`. **Radio streams and pause/resume are not sent yet**: the protocol has no way to
-tell a satellite to play a URL, so music needs a decision in spec 0003 (the core relaying the stream as audio, or
-a `play-url` command) before it works on a satellite.
+`set-volume` and `stop-playback` straight away. Radio and media effects need a satellite that declared the
+`media_url` capability (it has its own player):
 
+- `PlayStream` becomes `clawdot.play-url`, and `Pause`/`Resume` become `clawdot.media-control`. They are sent **after
+  the spoken confirmation has finished playing** (on `playback-done`), so music never covers the reply.
+- While the assistant speaks (a reply or an announcement) and music is playing, the core sends `pause` first and
+  `resume` afterwards unless the reply itself changed the music (REQ-MUS-004).
+- A command with nothing to say ("pause", "volume up") is carried out at once and the satellite returns to idle
+  with no error cue.
+- A satellite without `media_url` gets an `error` event with code `media-unsupported` and no stream command. The
+  spoken confirmation still plays, so a radio request to such a satellite is acknowledged but not carried out.
 ## Not built yet
 
 - A Raspberry Pi satellite and the conformance suite (REQ-SAT-012, REQ-SAT-015); the desktop reference satellite exists, see [porting-a-satellite.md](porting-a-satellite.md).
 - Wake-word detection in the core for satellites that cannot do it themselves (REQ-SAT-013); today those need a
   button, or the satellite must send `wake`.
-- Opus downlink (REQ-SAT-005), TLS, per-satellite tokens, and displaying inbox announcements on a satellite.
+- Opus downlink (REQ-SAT-005), TLS, per-satellite tokens, and showing inbox cards on a satellite display.
