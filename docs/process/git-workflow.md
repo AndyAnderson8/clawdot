@@ -139,7 +139,7 @@ No single layer is trusted alone.
 |---|---|---|
 | Agent guard | Claude Code: blocks violating git/gh commands before they run | `.claude/hooks/guard-git.sh`, `.claude/settings.json` |
 | Agent instructions | All AI tools | `AGENTS.md`, `CLAUDE.md` |
-| Local git hooks | Every tool using git: branch names, protected branches, commit messages, fast checks | `.githooks/` (`git config core.hooksPath .githooks`; `scripts/setup.sh`) |
+| Local git hooks | Every tool using git: branch names, protected branches, commit messages, fast checks | `.githooks/`, installed by `scripts/setup.sh` as stubs in `.git/hooks`. The stubs fail closed on `main`, which has no `.githooks/` until the first release. |
 | Landing scripts | The only path into `dev`/`main`; runs all gates | `scripts/land.sh`, `scripts/release.sh` |
 | CI | Re-verifies everything on every branch and candidate ref | `.github/workflows/ci.yml` (`gate`) |
 | Server rulesets | `main`/`dev` need a passing `gate` on the pushed SHA; no force-push or deletion; tags protected | [repo-settings.md](repo-settings.md) |
