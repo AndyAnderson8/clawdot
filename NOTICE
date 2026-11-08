@@ -8,3 +8,9 @@ Licensed under the Apache License, Version 2.0. See the LICENSE file.
 
 Redistributions must retain this NOTICE file, as required by Section 4(d)
 of the Apache License, Version 2.0.
+
+Third-party data
+----------------
+HTTPS support bundles the Mozilla root certificate list through the webpki-roots
+crate, licensed under the Community Data License Agreement Permissive 2.0
+(CDLA-Permissive-2.0). See https://github.com/rustls/webpki-roots.
