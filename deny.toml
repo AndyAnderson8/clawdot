@@ -18,12 +18,17 @@ allow = [
   "Unicode-3.0",
   "Zlib",
   "CC0-1.0",
+  # The Mozilla root certificate list bundled by webpki-roots (needed for HTTPS). A permissive data licence;
+  # it asks only that the licence and attribution travel with the data (see NOTICE).
+  "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace crates depend on each other by path, which cargo-deny otherwise reports as a wildcard version.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
