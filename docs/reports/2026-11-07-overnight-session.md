@@ -1,7 +1,8 @@
 # Overnight session report, 2026-11-07
 
-Written for the maintainer to review in the morning. Nothing was pushed. All work is on the local `dev` branch,
-ahead of the last published state; the `origin` remote was detached for the session and is re-added at the end.
+Written for the maintainer to review in the morning. Everything below was built locally without pushing; the whole
+session was then published to GitHub through `scripts/land.sh` (candidate ref, CI `gate`, then `dev`) on the
+maintainer's explicit instruction. Releases and tags are still the maintainer's to run.
 
 ## What exists now
 
