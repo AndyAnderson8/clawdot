@@ -219,12 +219,16 @@ where
     // The pipeline end of an in-memory pipe runs a normal satellite session.
     let (sat_io, core_io) = tokio::io::duplex(128 * 1024);
     let (mut sat_rd, sat_wr) = tokio::io::split(sat_io);
+    // A voice run cannot start while the assistant is working (REQ-ESP-007), so a wake word is never turned
+    // into a stop capture on this transport (REQ-VOI-020 applies to the native satellite protocol).
+    let mut settings = pipeline.settings.clone();
+    settings.dialog.interrupt_while_working = false;
     let session = Guard(tokio::spawn(satellite::run_session(
         core_io,
         Arc::clone(&pipeline.stt),
         Arc::clone(&pipeline.tts),
         pipeline.asks.clone(),
-        pipeline.settings.clone(),
+        settings,
     )));
     let now = Instant::now();
     let mut bridge = Bridge {
