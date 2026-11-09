@@ -244,6 +244,7 @@ Goal: third-party ESPHome voice satellites (stock T5D or LibreEcho images, a Pi 
 
 - A new optional core feature (`esphome-satellite`) behind the existing satellite interface: frame layer, minimal hand-written protobuf for about 20 messages, voice session, announce-then-listen for the inbox, media player play, optional light command. Estimate about 1,100 to 1,300 lines; not in the default Dot budget
 - Optional Noise encryption on `ring`, with no `snow` and no `prost`; tested against a fake ESPHome server on a PC first, then `aioesphomeapi`
+- **Status (2026-11-09):** the client is built behind the cargo features `esphome-satellite` and `esphome-noise` ([spec 0004](specs/0004-esphome-satellite-client.md), [architecture/esphome-satellite.md](architecture/esphome-satellite.md)) and tested against the fake device in `crates/e2e`. The Noise handshake was also checked once against an independent responder (`noiseprotocol`). Still to do: run against `aioesphomeapi`'s own voice client and then a real satellite (blocked on the B0 trial and the maintainer's go for any device)
 
 **Exit:** a real ESPHome satellite wakes, a voice turn runs through ClawDot's pipeline, and an inbox announcement gets a spoken reply.
 

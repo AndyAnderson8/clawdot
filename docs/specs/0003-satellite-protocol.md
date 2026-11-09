@@ -50,6 +50,8 @@ The satellite protocol is the **only contract** a hardware port must implement. 
 | REQ-SAT-017 | A receiver MUST bound what it buffers: header line at most 16 KiB, data block at most 64 KiB, payload at most 1 MiB by default. A framing violation (oversized part, invalid JSON, a header that is not an object, missing `type`, bad length) is fatal: the receiver closes the connection and does not try to resynchronise. | Must | T |
 | REQ-SAT-018 | A connection that does not send `hello` within 10 s is dropped. A `hello` with an incompatible version, a wrong or missing token (when the core requires one), or a first message that is not `hello` gets a `clawdot.reject` with a reason, and the core closes the connection. A token failure uses the reason `unauthorized` and reveals nothing else. | Must | T |
 
+| REQ-SAT-019 | Speakers that are ESPHome voice-satellite servers (a Dot running a base image, the Home Assistant Voice PE, linux-voice-assistant) SHOULD attach through the optional adapter in [spec 0004](0004-esphome-satellite-client.md), which plays the satellite role on this protocol toward the pipeline. REQ-SAT-014 (Wyoming bridge) covers stock Wyoming satellites only. | Should | T |
+
 ## 5. Wire format
 
 One message is one **frame**:
@@ -164,3 +166,4 @@ A known event whose fields are missing or out of range (for example `level` of 1
 | 0.2 | 2026-11-07 | Framing changed to Wyoming-compatible (pending ADR-0008); audio front-end capabilities; Wyoming bridge requirement |
 | 0.3 | 2026-11-07 | `clawdot.play-url` and `clawdot.media-control` commands and the `media_url` capability for internet radio on satellites with a player (additive; unknown events are still ignored). |
 | 0.3.1 | 2026-11-08 | Wire format, field tables, session behaviour, and limits written down from the implementation; event names corrected to the wire names; REQ-SAT-017 and REQ-SAT-018 added; JSON Schemas and the conformance harness added (section 9). No change to the protocol version number: the wire is unchanged. |
+| 0.3.2 | 2026-11-09 | REQ-SAT-019: ESPHome devices attach through the optional adapter of spec 0004; REQ-SAT-014 is for stock Wyoming satellites. No change to the wire or the protocol version. |
