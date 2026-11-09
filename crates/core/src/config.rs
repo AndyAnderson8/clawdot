@@ -399,4 +399,31 @@ mod tests {
             assert!(e.contains(needle), "{text}: {e}");
         }
     }
+
+    // REQ-AST-019, REQ-AST-023
+    #[test]
+    fn the_agent_section_is_read_and_a_zero_limit_is_refused() {
+        let c = Config::parse(
+            r#"{"agent": {"max_rounds": 4, "max_tool_calls": 6, "deadline_secs": 30,
+                "tool_timeout_secs": 10, "plan_speech": false, "progress_speech": false,
+                "summarize_over_chars": 0, "notes": true}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.agent.max_rounds, Some(4));
+        assert_eq!(c.agent.deadline_secs, Some(30));
+        assert_eq!(c.agent.plan_speech, Some(false));
+        assert_eq!(c.agent.notes, Some(true));
+        assert_eq!(Config::parse("{}").unwrap().agent, AgentConfig::default());
+        for bad in [
+            "max_rounds",
+            "max_tool_calls",
+            "deadline_secs",
+            "tool_timeout_secs",
+        ] {
+            let e = Config::parse(&format!(r#"{{"agent": {{"{bad}": 0}}}}"#)).unwrap_err();
+            assert!(e.contains(bad) && e.contains("at least 1"), "{e}");
+        }
+        // a typo is an error, not a silently ignored setting
+        assert!(Config::parse(r#"{"agent": {"max_round": 4}}"#).is_err());
+    }
 }
