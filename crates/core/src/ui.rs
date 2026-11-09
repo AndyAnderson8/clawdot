@@ -36,6 +36,9 @@ use std::sync::Arc;
 type Resp = Response<BoxBody<Bytes, Infallible>>;
 
 const PAGE: &str = include_str!("ui.html");
+/// The theme (colour, type, spacing tokens) lives in its own plain CSS file so a later toolchain can reuse it;
+/// it is spliced into the page at the `/*@theme*/` marker.
+const THEME: &str = include_str!("ui-theme.css");
 /// Only the page's own inline script and style, and only calls back to this origin.
 const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; \
                    base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -71,7 +74,11 @@ fn error(status: StatusCode, msg: &str) -> Resp {
 /// The static page.
 #[must_use]
 pub fn page() -> Resp {
-    let mut r = reply(StatusCode::OK, "text/html; charset=utf-8", PAGE.to_owned());
+    let mut r = reply(
+        StatusCode::OK,
+        "text/html; charset=utf-8",
+        PAGE.replacen("/*@theme*/", THEME, 1),
+    );
     r.headers_mut()
         .insert("content-security-policy", HeaderValue::from_static(CSP));
     r.headers_mut()

@@ -874,6 +874,11 @@ mod tests {
                 !body.contains("http://") && !body.contains("src=\"https://"),
                 "external reference in page"
             );
+            // The theme is spliced in, in both colour schemes, with reduced motion handled.
+            assert!(!body.contains("/*@theme*/"), "theme marker left in page");
+            assert!(body.contains("--acc:") && body.contains("prefers-color-scheme: dark"));
+            assert!(body.contains("prefers-reduced-motion: reduce"));
+            assert!(!body.contains("url("), "the page loads nothing by URL");
             assert!(
                 !body.contains("innerHTML"),
                 "agent text must only be rendered as text"
