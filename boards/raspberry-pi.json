@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "board": "raspberry-pi",
+  "description": "Raspberry Pi 3 or newer (64-bit OS) with a USB or I2S microphone, a speaker and one gpio-key button. Illustrative: device names depend on the attached audio hardware.",
+  "hardware": { "arch": "aarch64", "ram_mb": 1024, "microphones": 1, "speakers": 1 },
+  "detect": {
+    "files": [
+      { "path": "/proc/device-tree/model", "equals": "Raspberry Pi" }
+    ]
+  },
+  "audio": {
+    "capture": { "kind": "alsa", "device": "plughw:1,0", "rate": 16000, "format": "S16_LE", "channels": 1, "mic_channels": [0] },
+    "playback": { "kind": "alsa", "device": "plughw:0,0", "rate": 48000, "format": "S16_LE", "channels": 2, "volume_control": "PCM", "duck": { "kind": "software", "level_pct": 30 } }
+  },
+  "buttons": [
+    { "name": "action", "source": { "kind": "evdev", "node": "/dev/input/event0", "code": 28 } }
+  ],
+  "actions": {
+    "action.press": "action",
+    "action.long_press": "stop",
+    "action.double_press": "mute_toggle"
+  },
+  "mute": { "kind": "software" },
+  "wifi": { "interface": "wlan0" },
+  "features": { "aec": true, "on_device_wake": true, "bluetooth_sink": true, "spotify_connect": true },
+  "update": { "mode": "manual" }
+}

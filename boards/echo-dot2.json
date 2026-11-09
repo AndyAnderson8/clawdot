@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "board": "echo-dot2",
+  "description": "Amazon Echo Dot 2nd generation (biscuit). Values from R-07; items that need a real button press or a test on the unit are listed in docs/architecture/board-support.md.",
+  "hardware": { "arch": "armv7", "ram_mb": 512, "microphones": 7, "speakers": 1 },
+  "detect": {
+    "files": [
+      { "path": "/sys/bus/i2c/devices/0-003f/name", "equals": "is31fl3236" }
+    ]
+  },
+  "audio": {
+    "capture": {
+      "kind": "alsa",
+      "device": "hw:0,24",
+      "rate": 16000,
+      "format": "S24_3LE",
+      "channels": 9,
+      "mic_channels": [0],
+      "reference_channels": []
+    },
+    "playback": {
+      "kind": "alsa",
+      "device": "hw:0,23",
+      "rate": 48000,
+      "format": "S16_LE",
+      "channels": 2,
+      "volume_control": "PCM Playback Volume",
+      "duck": { "kind": "software", "level_pct": 30 }
+    }
+  },
+  "buttons": [
+    { "name": "volume_up", "source": { "kind": "evdev", "node": "/dev/input/event2", "code": 115 } },
+    { "name": "volume_down", "source": { "kind": "evdev", "node": "/dev/input/event2", "code": 114 } },
+    { "name": "action", "source": { "kind": "evdev", "node": "/dev/input/event1", "code": 138 } },
+    { "name": "mute", "source": { "kind": "evdev", "node": "/dev/input/event1", "code": 113 } }
+  ],
+  "gestures": { "long_press_ms": 700, "double_press_ms": 350 },
+  "actions": {
+    "volume_up.press": "volume_up",
+    "volume_up.long_press": "volume_up",
+    "volume_down.press": "volume_down",
+    "action.press": "action",
+    "action.long_press": "stop",
+    "mute.press": "mute_toggle"
+  },
+  "leds": {
+    "driver": "ledctrl",
+    "count": 12,
+    "brightness_pct": 100,
+    "quiet_brightness_pct": 10,
+    "states": {
+      "wake": "active-start",
+      "listening": "active-on",
+      "thinking": "active-thinking",
+      "speaking": "active-talking",
+      "muted": "mics-off_on",
+      "error": "error",
+      "offline": "setup-mode",
+      "timer": "ready-timer",
+      "alarm": "ready-alarm",
+      "inbox": "notice",
+      "volume": "volume_step-{nn}"
+    },
+    "frame": { "path": "/sys/bus/i2c/devices/0-003f/frame", "encoding": "rgb444_text" }
+  },
+  "mute": { "kind": "software", "state_file": "/sys/devices/soc/10010000.keypad/amz_privacy/state" },
+  "wifi": { "interface": "wlan0", "control_dir": "/data/misc/wifi/sockets" },
+  "clock": { "floor": "2023-11-14", "prefer_verified_by": "https-date" },
+  "features": { "aec": true, "on_device_wake": true, "bluetooth_sink": false, "bluetooth_source": false, "spotify_connect": false },
+  "update": { "mode": "ab" },
+  "takeover": {
+    "stop": [],
+    "forbidden": [
+      "/sys/devices/soc/10010000.keypad/amz_privacy/power_button_state",
+      "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_trigger",
+      "/sys/devices/soc/10010000.keypad/amz_privacy/shutdown_dialog_state",
+      "/sys/bus/iio/devices/iio:device0/calibrated_lux"
+    ]
+  }
+}
