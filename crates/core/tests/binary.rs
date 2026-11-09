@@ -173,6 +173,19 @@ fn fake_llm(responses: Vec<String>) -> (u16, std::thread::JoinHandle<Vec<String>
     (port, handle)
 }
 
+/// The next line the console speaks, or `None` after 20 seconds.
+fn next_speech(rx: &mpsc::Receiver<String>) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
+            if line.starts_with("speaker> ") {
+                return Some(line);
+            }
+        }
+    }
+    None
+}
+
 fn sse(events: &[&str]) -> String {
     let mut s = String::from(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -311,8 +324,8 @@ fn a_configured_http_tool_runs_only_after_the_user_confirms() {
         ])
     };
     let (llm_port, llm) = fake_llm(vec![
-        call("c1", r#"{"room":"den"}"#),
-        call("c2", r#"{"room":"den","confirmed":true}"#),
+        // The model even claims confirmation itself; the host ignores that and asks the user.
+        call("c1", r#"{"room":"den","confirmed":true}"#),
         sse(&[
             r#"{"choices":[{"delta":{"content":"The den light is on."},"finish_reason":"stop"}]}"#,
         ]),
@@ -362,23 +375,22 @@ fn a_configured_http_tool_runs_only_after_the_user_confirms() {
     }
     assert!(ready);
     stdin.write_all(b"make the den bright please\n").unwrap();
-    let mut spoken = None;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && spoken.is_none() {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
-            if line.starts_with("speaker> ") {
-                spoken = Some(line);
-            }
-        }
-    }
+    let asked = next_speech(&rx).expect("the host should ask");
+    assert!(
+        asked.contains("set_light") && asked.contains("Yes or no?"),
+        "got: {asked}"
+    );
+    stdin.write_all(b"yes\n").unwrap();
+    let spoken = next_speech(&rx);
     let _ = child.kill();
     let _ = child.wait();
     let spoken = spoken.expect("the assistant should answer");
     assert!(spoken.contains("The den light is on."), "got: {spoken}");
     let bodies = llm.join().unwrap();
-    assert!(
-        bodies[1].contains("needs the user's confirmation"),
-        "the first call was refused"
+    assert_eq!(
+        bodies.len(),
+        2,
+        "the host asked without calling the model again"
     );
     let request = device_thread.join().unwrap();
     assert!(request.starts_with("POST /light "), "{request}");
@@ -966,8 +978,7 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
         ])
     };
     let (llm_port, llm) = fake_llm(vec![
-        call("c1", r#"{"room":"den"}"#),
-        call("c2", r#"{"room":"den","confirmed":true}"#),
+        call("c1", r#"{"room":"den","confirmed":true}"#),
         sse(&[
             r#"{"choices":[{"delta":{"content":"Done, the den light is on."},"finish_reason":"stop"}]}"#,
         ]),
@@ -1014,15 +1025,13 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
     }
     assert!(ready);
     stdin.write_all(b"light up the den for me\n").unwrap();
-    let mut spoken = None;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && spoken.is_none() {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
-            if line.starts_with("speaker> ") {
-                spoken = Some(line);
-            }
-        }
-    }
+    let asked = next_speech(&rx).expect("the host should ask");
+    assert!(
+        asked.contains("home__turn_on") && asked.contains("Yes or no?"),
+        "got: {asked}"
+    );
+    stdin.write_all(b"yes\n").unwrap();
+    let spoken = next_speech(&rx);
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
@@ -1032,9 +1041,10 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
         bodies[0].contains("home__turn_on"),
         "the MCP tool is offered to the model"
     );
-    assert!(
-        bodies[1].contains("needs the user's confirmation"),
-        "the unconfirmed call was refused"
+    assert_eq!(
+        bodies.len(),
+        2,
+        "the host asked without calling the model again"
     );
     let calls = calls.lock().unwrap();
     assert_eq!(

@@ -28,7 +28,8 @@ It does not expose an MCP server of its own (REQ-EXT-006, later).
 | `name` | Short prefix for this server's tools: lowercase letters, digits, `-`, `_`. A tool `turn_on` appears to the model as `home__turn_on`. |
 | `url` | The server's MCP endpoint (`http://` or `https://`). |
 | `auth_env` | Environment variable holding a bearer token. Never write the token in the file. |
-| `confirm` | Default `true`: every tool needs the user's spoken yes (REQ-AST-008). `false` turns that off for the whole server. |
+| `confirm` | Default `true`: every tool is `costly`, so the host asks and waits for the user's spoken yes (REQ-AST-008, REQ-SEC-010). `false` makes the server's tools `reversible`. |
+| `tiers` | Per-tool tier by the server's own names, for example `{"get_state": "read_only"}`: `read_only`, `reversible`, `costly` or `destructive`. Wins over `confirm` and `no_confirm`. What the server says about itself (such as a read-only hint) is never used. |
 | `no_confirm` | Tools (by the server's own names) that never need confirmation even when `confirm` is true, for read-only tools. |
 | `only` | If set, only these tools are offered to the model. Use it to expose a small, deliberate surface. |
 | `timeout_secs` | 1 to 60, default 10, per request. |
@@ -42,8 +43,8 @@ control, and a compromised server could try to steer the model. So:
   (a clash is skipped with a warning).
 - Descriptions are cut to 300 characters; tools with a schema over 8 KB, a non-object schema, or beyond 32 per
   server are dropped.
-- Confirmation is on by default and enforced by the session loop, not by the prompt. The `confirmed` flag is added
-  to the schema for you and removed before the call, so the server never sees it.
+- Confirmation is on by default and held by the host, not by the prompt: the call waits for a later user turn that says yes (see [action-safety.md](action-safety.md)). The model is given no `confirmed`
+  flag and an undeclared one is dropped, so the server never sees it.
 - Results are cut to 1000 characters; images and other non-text content become a placeholder such as
   `[image content omitted]`. A result is data for the model, never an instruction to it.
 - Startup is not blocked by a broken server: it is skipped with a warning and the rest keep working. An expired
