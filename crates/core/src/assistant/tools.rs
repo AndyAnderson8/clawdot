@@ -10,7 +10,7 @@ use crate::inbox::summary::{details_for_model, status_sentence};
 use crate::llm::ToolSpec;
 use crate::media::{Action as MediaAction, MediaError};
 use crate::sched::{Kind, civil_from_days, days, next_occurrence, weekday};
-use crate::session::ToolHost;
+use crate::session::{Risk, Tier, ToolHost};
 use serde_json::{Value, json};
 
 fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> ToolSpec {
@@ -164,13 +164,19 @@ impl ToolHost for Assistant {
         tools
     }
 
-    fn needs_confirmation(&self, _name: &str) -> bool {
-        false
-    }
-
-    /// Forwarding text to an outside agent is held for the user's yes (REQ-AST-015, REQ-SEC-011).
-    fn requires_confirmation(&self, name: &str, args: &Value) -> bool {
-        name == "inbox_reply" && opt_text(args, "kind") == "instruct"
+    /// The built-in tools declare their own tiers (REQ-SEC-010). Forwarding text to an outside agent is
+    /// costly, so the host holds it for the user's yes (REQ-AST-015, REQ-SEC-011). A name this table does
+    /// not know is costly.
+    fn risk(&self, name: &str, args: &Value) -> Risk {
+        Risk::fixed(match name {
+            "current_time" | "list_timers" | "inbox_status" | "inbox_details" => Tier::ReadOnly,
+            "set_timer" | "cancel_timers" | "set_alarm" | "cancel_alarms" | "set_reminder"
+            | "set_reminder_at" | "play_music" | "music_control" | "inbox_snooze"
+            | "inbox_dismiss" => Tier::Reversible,
+            "inbox_reply" if opt_text(args, "kind") == "instruct" => Tier::Costly,
+            "inbox_reply" => Tier::Reversible,
+            _ => Tier::Costly,
+        })
     }
 
     fn describe_action(&self, name: &str, args: &Value) -> String {
@@ -759,6 +765,35 @@ mod tests {
             core.bridge_pending("claude-code", &token, 0)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    // REQ-SEC-010
+    #[test]
+    fn every_built_in_tool_declares_a_tier_and_only_instruct_replies_are_costly() {
+        let (a, ..) = setup(true);
+        let a = a.with_stations(vec![crate::media::Station {
+            name: "jazz".into(),
+            url: "http://r.example/jazz".into(),
+        }]);
+        for s in a.tool_specs() {
+            let t = a.risk(&s.name, &Value::Null).tier;
+            let expect_read_only = matches!(
+                s.name.as_str(),
+                "current_time" | "list_timers" | "inbox_status" | "inbox_details"
+            );
+            assert_eq!(t == Tier::ReadOnly, expect_read_only, "{}", s.name);
+            assert!(t <= Tier::Reversible, "{} is {t:?}", s.name);
+        }
+        let reply = |kind: &str| a.risk("inbox_reply", &json!({"kind": kind})).tier;
+        assert_eq!(
+            (reply("ack"), reply("instruct")),
+            (Tier::Reversible, Tier::Costly)
+        );
+        assert_eq!(
+            a.risk("format_disk", &json!({})).tier,
+            Tier::Costly,
+            "unknown is costly"
         );
     }
 

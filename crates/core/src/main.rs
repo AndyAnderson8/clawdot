@@ -508,6 +508,7 @@ fn build_llm(
             fallback_model: fallback.map(str::to_owned),
             max_tokens,
             max_tool_loops: 5,
+            allow_destructive: false,
         },
         summary_model: summary.unwrap_or(model).to_owned(),
     }))

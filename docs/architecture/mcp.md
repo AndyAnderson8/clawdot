@@ -28,7 +28,8 @@ It does not expose an MCP server of its own (REQ-EXT-006, later).
 | `name` | Short prefix for this server's tools: lowercase letters, digits, `-`, `_`. A tool `turn_on` appears to the model as `home__turn_on`. |
 | `url` | The server's MCP endpoint (`http://` or `https://`). |
 | `auth_env` | Environment variable holding a bearer token. Never write the token in the file. |
-| `confirm` | Default `true`: every tool needs the user's spoken yes (REQ-AST-008). `false` turns that off for the whole server. |
+| `confirm` | Default `true`: every tool is `costly`, so the host asks and waits for the user's spoken yes (REQ-AST-008, REQ-SEC-010). `false` makes the server's tools `reversible`. |
+| `tiers` | Per-tool tier by the server's own names, for example `{"get_state": "read_only"}`: `read_only`, `reversible`, `costly` or `destructive`. Wins over `confirm` and `no_confirm`. What the server says about itself (such as a read-only hint) is never used. |
 | `no_confirm` | Tools (by the server's own names) that never need confirmation even when `confirm` is true, for read-only tools. |
 | `only` | If set, only these tools are offered to the model. Use it to expose a small, deliberate surface. |
 | `timeout_secs` | 1 to 60, default 10, per request. |

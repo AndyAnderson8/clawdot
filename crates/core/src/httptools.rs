@@ -11,6 +11,7 @@
 //! * Responses are bounded and are data for the model, never instructions.
 
 use crate::llm::ToolSpec;
+use crate::session::{Risk, Tier};
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -71,7 +72,13 @@ pub struct ToolDef {
     /// Parameters the model may supply.
     #[serde(default)]
     pub params: BTreeMap<String, Param>,
-    /// Whether the user must confirm before it runs. Defaults to true.
+    /// How risky the tool is (REQ-SEC-010): `read_only`, `reversible`, `costly` or `destructive`. Only the
+    /// administrator can set it. When absent, the tool is costly, unless the older `confirm: false` is given,
+    /// which counts as reversible.
+    #[serde(default)]
+    pub tier: Option<Tier>,
+    /// Older form of the tier: `true` (the default) means costly, `false` means reversible. Ignored when
+    /// `tier` is set.
     #[serde(default = "yes")]
     pub confirm: bool,
     /// Seconds to wait for the call (1 to 30, default 5).
@@ -88,6 +95,17 @@ fn yes() -> bool {
 }
 
 impl ToolDef {
+    /// The tier in force and the conservative baseline it was lowered from.
+    #[must_use]
+    pub fn risk(&self) -> Risk {
+        let tier = self.tier.unwrap_or(if self.confirm {
+            Tier::Costly
+        } else {
+            Tier::Reversible
+        });
+        Risk::set(tier, Tier::Costly)
+    }
+
     /// Check the definition at startup so mistakes are reported before anything runs.
     ///
     /// # Errors
@@ -352,13 +370,14 @@ impl HttpTools {
         self.defs.iter().map(ToolDef::spec).collect()
     }
 
-    /// Whether a call needs spoken confirmation.
+    /// The risk of a tool: the administrator's tier, over a conservative baseline of costly. An unknown
+    /// name is costly.
     #[must_use]
-    pub fn needs_confirmation(&self, name: &str) -> bool {
+    pub fn risk(&self, name: &str) -> Risk {
         self.defs
             .iter()
             .find(|d| d.name == name)
-            .is_some_and(|d| d.confirm)
+            .map_or(Risk::fixed(Tier::Costly), ToolDef::risk)
     }
 
     /// Call a tool.
@@ -482,19 +501,11 @@ impl<H: crate::session::ToolHost> crate::session::ToolHost for WithHttp<'_, H> {
         v
     }
 
-    fn needs_confirmation(&self, name: &str) -> bool {
+    fn risk(&self, name: &str, args: &Value) -> Risk {
         if self.http.owns(name) {
-            self.http.needs_confirmation(name)
+            self.http.risk(name)
         } else {
-            self.inner.needs_confirmation(name)
-        }
-    }
-
-    fn requires_confirmation(&self, name: &str, args: &Value) -> bool {
-        if self.http.owns(name) {
-            self.http.needs_confirmation(name)
-        } else {
-            self.inner.requires_confirmation(name, args)
+            self.inner.risk(name, args)
         }
     }
 
@@ -586,6 +597,46 @@ mod tests {
         );
     }
 
+    // REQ-SEC-010
+    #[test]
+    fn http_tools_are_costly_unless_the_administrator_lowers_the_tier() {
+        let tier = |extra: &str| {
+            let d = def(&format!(
+                r#"{{"name":"t","description":"d","url":"http://h/x"{extra}}}"#
+            ));
+            d.risk()
+        };
+        assert_eq!(
+            tier(""),
+            Risk::fixed(Tier::Costly),
+            "the default is the conservative tier"
+        );
+        let lowered = tier(r#","confirm":false"#);
+        assert_eq!(
+            (lowered.tier, lowered.baseline),
+            (Tier::Reversible, Tier::Costly)
+        );
+        let read = tier(r#","tier":"read_only""#);
+        assert_eq!((read.tier, read.baseline), (Tier::ReadOnly, Tier::Costly));
+        assert_eq!(
+            tier(r#","tier":"destructive","confirm":false"#).tier,
+            Tier::Destructive
+        );
+        assert!(
+            serde_json::from_str::<ToolDef>(
+                r#"{"name":"t","description":"d","url":"http://h/x","tier":"harmless"}"#
+            )
+            .is_err()
+        );
+        let t = HttpTools::new(
+            vec![def(r#"{"name":"t","description":"d","url":"http://h/x"}"#)],
+            &[],
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(t.risk("nope"), Risk::fixed(Tier::Costly));
+    }
+
     #[test]
     fn the_model_only_gets_the_declared_schema_and_confirmation_is_the_default() {
         let t = HttpTools::new(vec![lights("http://h/x")], &[], |_| None).unwrap();
@@ -598,7 +649,7 @@ mod tests {
             "the model gets no confirmation flag"
         );
         assert!(!props.as_object().unwrap().contains_key("url"));
-        assert!(t.needs_confirmation("set_light"));
+        assert_eq!(t.risk("set_light"), Risk::fixed(Tier::Costly));
         assert!(t.owns("set_light") && !t.owns("other"));
     }
 

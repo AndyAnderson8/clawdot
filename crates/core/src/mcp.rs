@@ -17,7 +17,7 @@
 //! connection state to get wrong.
 
 use crate::llm::ToolSpec;
-use crate::session::ToolHost;
+use crate::session::{Risk, Tier, ToolHost};
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -60,6 +60,11 @@ pub struct ServerDef {
     /// If not empty, only these tools (by the server's own names) are offered to the model.
     #[serde(default)]
     pub only: Vec<String>,
+    /// The administrator's tier for a tool (by the server's own name): `read_only`, `reversible`, `costly` or
+    /// `destructive`. A tool not listed is costly (or reversible if `confirm` is off for it). What the
+    /// server says about its own tools, such as a read-only hint, is never used (REQ-SEC-010).
+    #[serde(default)]
+    pub tiers: BTreeMap<String, Tier>,
     /// Seconds to wait for each request (1 to 60, default 10).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
@@ -77,6 +82,18 @@ fn name_ok(s: &str) -> bool {
 }
 
 impl ServerDef {
+    /// The risk of one of this server's tools, from the administrator's settings only.
+    fn risk_of(&self, remote: &str) -> Risk {
+        let tier = self.tiers.get(remote).copied().unwrap_or(
+            if self.confirm && !self.no_confirm.iter().any(|n| n == remote) {
+                Tier::Costly
+            } else {
+                Tier::Reversible
+            },
+        );
+        Risk::set(tier, Tier::Costly)
+    }
+
     /// Check a definition at startup.
     ///
     /// # Errors
@@ -109,8 +126,8 @@ pub struct McpTool {
     pub description: String,
     /// JSON Schema for the arguments.
     pub schema: Value,
-    /// Whether spoken confirmation is required.
-    pub confirm: bool,
+    /// How risky the tool is: the administrator's tier over a baseline of costly. Never read from the server.
+    pub risk: Risk,
 }
 
 struct Server {
@@ -441,7 +458,7 @@ impl McpClient {
                 exposed,
                 description: clip(t["description"].as_str().unwrap_or(remote), MAX_DESCRIPTION),
                 schema,
-                confirm: def.confirm && !def.no_confirm.iter().any(|n| n == remote),
+                risk: def.risk_of(remote),
             });
         }
         Ok(out)
@@ -460,7 +477,7 @@ impl McpClient {
                     .tools
                     .iter()
                     .filter(|t| t.server == i)
-                    .map(|t| json!({ "name": t.exposed, "description": t.description, "confirm": t.confirm }))
+                    .map(|t| json!({ "name": t.exposed, "description": t.description, "confirm": t.risk.tier >= Tier::Costly, "tier": t.risk.tier }))
                     .collect();
                 let error = self.errors.get(i).cloned().flatten();
                 json!({
@@ -566,10 +583,11 @@ impl McpClient {
         self.find(name).is_some()
     }
 
-    /// Whether a call needs spoken confirmation.
+    /// The risk of a tool. An unknown name is costly.
     #[must_use]
-    pub fn needs_confirmation(&self, name: &str) -> bool {
-        self.find(name).is_some_and(|t| t.confirm)
+    pub fn risk(&self, name: &str) -> Risk {
+        self.find(name)
+            .map_or(Risk::fixed(Tier::Costly), |t| t.risk)
     }
 
     /// Specs to offer the model, as the server declared them. The model is given no confirmation flag:
@@ -645,19 +663,11 @@ impl<H: ToolHost> ToolHost for WithMcp<'_, H> {
         v
     }
 
-    fn needs_confirmation(&self, name: &str) -> bool {
+    fn risk(&self, name: &str, args: &Value) -> Risk {
         if self.mcp.owns(name) {
-            self.mcp.needs_confirmation(name)
+            self.mcp.risk(name)
         } else {
-            self.inner.needs_confirmation(name)
-        }
-    }
-
-    fn requires_confirmation(&self, name: &str, args: &Value) -> bool {
-        if self.mcp.owns(name) {
-            self.mcp.needs_confirmation(name)
-        } else {
-            self.inner.requires_confirmation(name, args)
+            self.inner.risk(name, args)
         }
     }
 
@@ -779,7 +789,7 @@ mod tests {
                         "tools/list" => {
                             let result = json!({"tools":[
                                 {"name":"Turn On","description":"Turn a light on","inputSchema":{"type":"object","properties":{"room":{"type":"string"}},"required":["room"]}},
-                                {"name":"status","description":"What is on","inputSchema":{"type":"object","properties":{}}},
+                                {"name":"status","description":"What is on","annotations":{"readOnlyHint":true},"inputSchema":{"type":"object","properties":{}}},
                                 {"name":"huge","description":"x","inputSchema":{"type":"object","properties":{"p":{"type":"string","description":"y".repeat(9000)}}}},
                                 {"name":"weird/name","description":"d","inputSchema":{"type":"object"}},
                                 {"name":"not_object","description":"d","inputSchema":{"type":"string"}}
@@ -916,6 +926,31 @@ mod tests {
         }
     }
 
+    // REQ-SEC-010
+    #[tokio::test]
+    async fn only_the_administrator_can_lower_a_tier_and_a_server_hint_cannot() {
+        let (port, _seen, _srv) = fake_server(OK).await;
+        let (c, _) = McpClient::connect(vec![def(port)], &[], |_| None)
+            .await
+            .unwrap();
+        // The fake server marks `status` read-only in its own annotations. That is ignored.
+        assert_eq!(c.risk("home__status"), Risk::fixed(Tier::Costly));
+        assert_eq!(c.risk("home__not_a_tool"), Risk::fixed(Tier::Costly));
+
+        let mut d = def(port);
+        d.tiers.insert("status".into(), Tier::ReadOnly);
+        let (c, _) = McpClient::connect(vec![d], &[], |_| None).await.unwrap();
+        let r = c.risk("home__status");
+        assert_eq!((r.tier, r.baseline), (Tier::ReadOnly, Tier::Costly));
+        assert_eq!(
+            c.risk("home__turn_on").tier,
+            Tier::Costly,
+            "the others stay costly"
+        );
+        let listed = c.report()[0]["tools"].to_string();
+        assert!(listed.contains(r#""tier":"read_only""#), "{listed}");
+    }
+
     #[tokio::test]
     async fn tools_need_confirmation_unless_the_administrator_says_otherwise() {
         let (port, _seen, _srv) = fake_server(OK).await;
@@ -923,10 +958,14 @@ mod tests {
         d.no_confirm = vec!["status".into()];
         let (c, _) = McpClient::connect(vec![d], &[], |_| None).await.unwrap();
         assert!(
-            c.needs_confirmation("home__turn_on"),
+            c.risk("home__turn_on").tier == Tier::Costly,
             "confirm is the default"
         );
-        assert!(!c.needs_confirmation("home__status"), "listed as harmless");
+        assert_eq!(
+            c.risk("home__status").tier,
+            Tier::Reversible,
+            "listed as harmless"
+        );
         let specs = c.specs();
         let on = specs.iter().find(|s| s.name == "home__turn_on").unwrap();
         assert!(on.parameters["properties"].get("confirmed").is_none());
@@ -938,7 +977,7 @@ mod tests {
         let mut d = def(port);
         d.confirm = false;
         let (c, _) = McpClient::connect(vec![d], &[], |_| None).await.unwrap();
-        assert!(!c.needs_confirmation("home__turn_on"));
+        assert_eq!(c.risk("home__turn_on").tier, Tier::Reversible);
     }
 
     #[tokio::test]
@@ -1098,8 +1137,8 @@ mod tests {
             fn tool_specs(&self) -> Vec<ToolSpec> {
                 vec![]
             }
-            fn needs_confirmation(&self, _: &str) -> bool {
-                false
+            fn risk(&self, _: &str, _: &Value) -> Risk {
+                Risk::fixed(Tier::Reversible)
             }
             async fn call_tool(&mut self, name: &str, _: &Value) -> Result<String, String> {
                 Ok(format!("base {name}"))
@@ -1125,7 +1164,10 @@ mod tests {
                 .unwrap()
                 .contains("called status")
         );
-        assert!(!host.needs_confirmation("timer") && host.needs_confirmation("home__turn_on"));
+        assert!(
+            host.risk("timer", &Value::Null).tier == Tier::Reversible
+                && host.risk("home__turn_on", &Value::Null).tier == Tier::Costly
+        );
     }
 
     #[test]

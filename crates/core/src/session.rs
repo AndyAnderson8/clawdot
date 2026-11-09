@@ -9,8 +9,71 @@
 use crate::llm::{ChatRequest, Completion, LlmError, Message, Role, ToolCall, ToolSpec};
 use crate::sched::Ts;
 use crate::usage::{LimitReached, UsageTracker};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
+
+/// How much harm a tool call can do (REQ-SEC-010), lowest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    /// Reads only; nothing leaves ClawDot and nothing outside changes.
+    ReadOnly,
+    /// Changes ClawDot's own state or something trivial that one command undoes: a timer, a pause.
+    Reversible,
+    /// Visible to others, costs money or quota, or changes a remote system. Held for the user's yes.
+    Costly,
+    /// Loses data or access. Held for the user's yes and not offered unless the administrator enables it.
+    Destructive,
+}
+
+impl Tier {
+    /// The name used in configuration and in the portal.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Reversible => "reversible",
+            Self::Costly => "costly",
+            Self::Destructive => "destructive",
+        }
+    }
+}
+
+/// A call's tier, and the tier it would have had without an administrator's override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Risk {
+    /// The tier in force.
+    pub tier: Tier,
+    /// The conservative tier for this kind of tool before any override (costly for HTTP and MCP tools).
+    /// Untrusted text in a turn makes a lowered tool behave at this tier again (REQ-SEC-012).
+    pub baseline: Tier,
+}
+
+impl Risk {
+    /// A tier that was not lowered by anyone.
+    #[must_use]
+    pub fn fixed(tier: Tier) -> Self {
+        Self {
+            tier,
+            baseline: tier,
+        }
+    }
+
+    /// A tier the administrator set, over a conservative `baseline`.
+    #[must_use]
+    pub fn set(tier: Tier, baseline: Tier) -> Self {
+        Self {
+            tier,
+            baseline: baseline.max(tier),
+        }
+    }
+
+    /// Whether the call must wait for the user's yes.
+    fn needs_hold(self) -> bool {
+        self.tier >= Tier::Costly
+    }
+}
 
 /// How long a held action waits for the user's answer.
 pub const CONFIRM_WINDOW_SECS: i64 = 120;
@@ -155,12 +218,12 @@ pub trait ChatBackend {
 pub trait ToolHost {
     /// Tools to offer the model.
     fn tool_specs(&self) -> Vec<ToolSpec>;
-    /// Whether the user must confirm before this tool runs (REQ-AST-008).
-    fn needs_confirmation(&self, name: &str) -> bool;
-    /// Whether this particular call must be held for the user's yes. Defaults to the tool-level answer; a
-    /// tool whose risk depends on its arguments (an `ack` versus an `instruct` reply) overrides it.
-    fn requires_confirmation(&self, name: &str, _args: &Value) -> bool {
-        self.needs_confirmation(name)
+    /// How risky a call is (REQ-SEC-010). Declared by whoever wrote the tool host or configured the tool,
+    /// never read from the model's words or from a server's own hints. A tool that does not declare one is
+    /// costly. A tool whose risk depends on its arguments (an `ack` versus an `instruct` reply) looks at
+    /// `args`; the tool list offered to the model is filtered with `Value::Null`.
+    fn risk(&self, _name: &str, _args: &Value) -> Risk {
+        Risk::fixed(Tier::Costly)
     }
     /// What to say to the user when this call is held: a plain sentence built from the arguments, without a
     /// question (the host adds that). Must not rely on anything the model wrote besides the arguments.
@@ -281,6 +344,8 @@ pub struct TurnConfig {
     pub max_tokens: u32,
     /// Most tool rounds per turn (REQ-AST-006).
     pub max_tool_loops: usize,
+    /// Whether destructive tools are offered at all (REQ-SEC-010). Off unless the administrator enables it.
+    pub allow_destructive: bool,
 }
 
 impl Default for TurnConfig {
@@ -290,6 +355,7 @@ impl Default for TurnConfig {
             fallback_model: None,
             max_tokens: 300,
             max_tool_loops: 5,
+            allow_destructive: false,
         }
     }
 }
@@ -368,7 +434,7 @@ pub async fn run_turn<B: ChatBackend, H: ToolHost>(
             return finish_with(conv, result, "Okay, I won't do that.");
         }
         if is_yes(user_text) {
-            let known: Vec<String> = host.tool_specs().into_iter().map(|t| t.name).collect();
+            let known: Vec<String> = offered(host, cfg).into_iter().map(|t| t.name).collect();
             let outcome = if known.contains(&held.tool) {
                 host.call_tool(&held.tool, &held.args)
                     .await
@@ -402,7 +468,7 @@ pub async fn run_turn<B: ChatBackend, H: ToolHost>(
             return result;
         }
 
-        let tools = host.tool_specs();
+        let tools = offered(host, cfg);
         let mut models = vec![cfg.model.as_str()];
         models.extend(cfg.fallback_model.as_deref());
         let mut completion = None;
@@ -461,7 +527,7 @@ pub async fn run_turn<B: ChatBackend, H: ToolHost>(
                     Ok(mut args) => {
                         // `confirmed` means nothing to the host: drop it unless the tool really declares it.
                         drop_confirmed(&mut args, tools.iter().find(|t| t.name == call.name));
-                        if host.requires_confirmation(&call.name, &args) {
+                        if host.risk(&call.name, &args).needs_hold() {
                             let description = host.describe_action(&call.name, &args);
                             held = Some(PendingAction::new(&call.name, args, description, now));
                             "Not run. The user is being asked to confirm; the answer arrives in their next turn."
@@ -485,6 +551,16 @@ pub async fn run_turn<B: ChatBackend, H: ToolHost>(
         }
     }
     result
+}
+
+/// The tools the model is offered: the host's, without destructive ones unless the administrator enabled them.
+fn offered<H: ToolHost>(host: &H, cfg: &TurnConfig) -> Vec<ToolSpec> {
+    host.tool_specs()
+        .into_iter()
+        .filter(|t| {
+            cfg.allow_destructive || host.risk(&t.name, &Value::Null).tier != Tier::Destructive
+        })
+        .collect()
 }
 
 /// End a turn with words the host chose, keeping the history well formed.
@@ -563,12 +639,15 @@ mod tests {
     struct Host {
         ran: Vec<(String, Value)>,
         confirm: Vec<&'static str>,
+        tiers: Vec<(&'static str, Tier)>,
+        extra: Vec<&'static str>,
     }
 
     impl ToolHost for Host {
         fn tool_specs(&self) -> Vec<ToolSpec> {
             ["set_timer", "send_money", "web"]
                 .iter()
+                .chain(self.extra.iter())
                 .map(|n| ToolSpec {
                     name: (*n).into(),
                     description: String::new(),
@@ -576,8 +655,16 @@ mod tests {
                 })
                 .collect()
         }
-        fn needs_confirmation(&self, name: &str) -> bool {
-            self.confirm.contains(&name)
+        fn risk(&self, name: &str, _: &Value) -> Risk {
+            if self.confirm.contains(&name) {
+                return Risk::fixed(Tier::Costly);
+            }
+            Risk::fixed(
+                self.tiers
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(Tier::Reversible, |(_, t)| *t),
+            )
         }
         async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
             self.ran.push((name.to_owned(), args.clone()));
@@ -823,6 +910,72 @@ mod tests {
         }
     }
 
+    // REQ-SEC-010, REQ-SEC-011: confirmation follows the tier.
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_and_reversible_calls_run_and_costly_ones_are_held() {
+        let b = Script::new(vec![calls(&[
+            ("a", "web", "{}"),
+            ("b", "set_timer", r#"{"seconds":60}"#),
+            ("c", "send_money", r#"{"amount":1}"#),
+            ("d", "set_timer", r#"{"seconds":99}"#),
+        ])]);
+        let mut h = Host {
+            tiers: vec![("web", Tier::ReadOnly)],
+            ..money_host()
+        };
+        let (mut c, mut u) = (conv(), UsageTracker::new(UsageLimits::default()));
+        let r = turn(&b, &mut h, &mut c, &mut u, "do things").await;
+        let ran: Vec<&str> = h.ran.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            ran,
+            ["web", "set_timer"],
+            "stopped at the held call: {ran:?}"
+        );
+        assert!(r.speech.contains("send_money"));
+        let tool_msgs: Vec<String> = c
+            .history()
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.clone())
+            .collect();
+        assert!(tool_msgs[3].starts_with("Not run"), "{tool_msgs:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn destructive_tools_are_not_offered_unless_the_administrator_enables_them() {
+        let wipe = |allow| {
+            let b = Script::new(vec![
+                calls(&[("c", "wipe", "{}")]),
+                text("I cannot do that."),
+            ]);
+            let mut h = Host {
+                tiers: vec![("wipe", Tier::Destructive)],
+                ..Host::default()
+            };
+            let cfg = TurnConfig {
+                allow_destructive: allow,
+                ..cfg()
+            };
+            async move {
+                let (mut c, mut u) = (conv(), UsageTracker::new(UsageLimits::default()));
+                // `wipe` is not one of the host's specs; add it.
+                h.extra.push("wipe");
+                let r = run_turn(&b, &mut h, &mut c, &cfg, &mut u, 1, 1000, "wipe it").await;
+                let offered = b.requests()[0].tools.iter().any(|t| t.name == "wipe");
+                (r, h.ran, offered, c.pending().is_some())
+            }
+        };
+        let (r, ran, offered, pending) = wipe(false).await;
+        assert!(!offered && ran.is_empty() && !pending);
+        assert_eq!(r.speech, "I cannot do that.");
+        let (r, ran, offered, pending) = wipe(true).await;
+        assert!(
+            offered && ran.is_empty() && pending,
+            "enabled: offered but still held"
+        );
+        assert!(r.speech.contains("wipe") && r.speech.ends_with("Yes or no?"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn bad_tool_calls_become_errors_the_model_can_see() {
         let b = Script::new(vec![
@@ -979,8 +1132,8 @@ mod tests {
                     parameters: json!({}),
                 }]
             }
-            fn needs_confirmation(&self, _: &str) -> bool {
-                false
+            fn risk(&self, _: &str, _: &Value) -> Risk {
+                Risk::fixed(Tier::ReadOnly)
             }
             async fn call_tool(&mut self, _: &str, _: &Value) -> Result<String, String> {
                 Ok("é".repeat(5_000))
@@ -1007,8 +1160,8 @@ mod tests {
             fn tool_specs(&self) -> Vec<ToolSpec> {
                 Vec::new()
             }
-            fn needs_confirmation(&self, _: &str) -> bool {
-                false
+            fn risk(&self, _: &str, _: &Value) -> Risk {
+                Risk::fixed(Tier::ReadOnly)
             }
             fn begin_turn(&mut self, user_text: &str) {
                 self.0.push(user_text.to_owned());

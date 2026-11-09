@@ -8,7 +8,7 @@ use crate::app::Fail;
 use crate::httptools::{HttpTools, ToolDef};
 use crate::llm::ToolSpec;
 use crate::mcp::{McpClient, ServerDef};
-use crate::session::ToolHost;
+use crate::session::{Risk, Tier, ToolHost};
 use crate::store::JsonStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -579,7 +579,7 @@ impl Extensions {
             let config = self.config_tools.contains(&t.name);
             tools.push(json!({
                 "name": t.name, "description": t.description, "source": "http",
-                "confirm": http.needs_confirmation(&t.name),
+                "confirm": http.risk(&t.name).tier >= Tier::Costly, "tier": http.risk(&t.name).tier,
                 "enabled": !self.tools.disabled.contains(&t.name), "deletable": !config,
                 "origin": if config { "config" } else { "portal" },
             }));
@@ -680,12 +680,8 @@ impl<H: ToolHost> ToolHost for WithPolicy<'_, H> {
         v
     }
 
-    fn needs_confirmation(&self, name: &str) -> bool {
-        self.inner.needs_confirmation(name)
-    }
-
-    fn requires_confirmation(&self, name: &str, args: &Value) -> bool {
-        self.inner.requires_confirmation(name, args)
+    fn risk(&self, name: &str, args: &Value) -> Risk {
+        self.inner.risk(name, args)
     }
 
     fn describe_action(&self, name: &str, args: &Value) -> String {
@@ -1044,8 +1040,8 @@ mod tests {
         fn tool_specs(&self) -> Vec<ToolSpec> {
             self.0.clone()
         }
-        fn needs_confirmation(&self, _: &str) -> bool {
-            false
+        fn risk(&self, _: &str, _: &Value) -> Risk {
+            Risk::fixed(Tier::Reversible)
         }
         async fn call_tool(&mut self, name: &str, _: &Value) -> Result<String, String> {
             Ok(format!("ran {name}"))
