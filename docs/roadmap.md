@@ -12,19 +12,22 @@ Milestones are releasable increments with exit criteria, not dates. Order may sh
 Foundations
 - [ ] Specs 0001 and 0002 reviewed by the maintainer and Accepted; 0003 completed after SPIKE-005
 - [ ] ADRs 0002, 0006, 0008 decided (ADR-0007 licence and ADR-0009 name: done)
-- [ ] `deny.toml` licence allowlist and `license = "Apache-2.0"` in manifests (TASK-002)
+- [x] `deny.toml` licence allowlist and `license = "Apache-2.0"` in manifests (TASK-002)
 - [x] Repo: Cargo workspace, `rust-toolchain.toml`, `justfile`, `.editorconfig`, `.gitattributes`
 - [ ] Dev environment validated ([dev-environment.md](process/dev-environment.md), TASK-001)
 - [x] Git flow enforcement: hooks, agent guard, landing and release scripts, CI skeleton with the `gate` job ([ADR-0011](adr/0011-git-flow-merge-commits.md)). Rust, deny, cross-armv7, and budget jobs activate with the workspace (TASK-001..003).
 - [ ] GitHub repository created; rulesets applied ([repo-settings.md](process/repo-settings.md)); signed commits once keys exist; Project board configured
+  - *Status:* the repository exists with an `origin` remote and the CI `gate` job; `dev` was published through `scripts/land.sh`. Rulesets, signing and the Project board are not verified from the repo.
 - [x] SPIKE-001 (desk phase): specs sourced, no known unlock, see [R-04](research/04-echo-dot-gen2.md). Hands-on teardown is opportunistic.
 
 Feasibility spikes (each ends with a written finding)
-- [ ] SPIKE-003: TLS + HTTP client/server footprint on armv7 (x86_64 musl with rustls measured: idle 2.8 MiB; armv7 run still to do)
+- [ ] SPIKE-003: TLS + HTTP client/server footprint on armv7 (x86_64 musl with rustls measured: idle 2.8 MiB; armv7 run still to do; the full binary has since run on a real Echo Dot at about 1.4 MB idle RSS, see the baseline below, but that is not a spike finding)
 - [ ] SPIKE-002: wake-word runtime footprint on armv7
 - [ ] SPIKE-006: audio capture and playback on armv7 Linux
 - [ ] SPIKE-005: Wyoming-compatible framing with token `hello` and TLS; client code size
-- [x] Baseline budget measurement: x86_64 musl 2.35 MiB binary, 3.8 MiB peak RSS under load, armv7 binary 1.89 MiB (armv7 memory and CPU unmeasured; see the [overnight report](reports/2026-11-07-overnight-session.md))
+- [x] Baseline budget measurement: x86_64 musl 2.35 MiB binary, 3.8 MiB peak RSS under load, armv7 binary 1.89 MiB (see the [overnight report](reports/2026-11-07-overnight-session.md))
+  - *Status, full feature set (`scripts/budget.sh`, x86_64 musl):* binary 2.62 MiB, idle RSS 3.0 MiB, peak 4.3 MiB under load, armv7 binary 2.10 MiB. The ratchet limits have not been tightened yet.
+  - *Status, real hardware (Echo Dot, maintainer's 2026-11 test; not yet written up in `docs/reports/`):* about 1.4 MB idle RSS, 12 MB virtual peak, 2.1 MB binary. The write-up is still to do.
 
 ### Feasibility gate (go/no-go before M1)
 Thresholds are provisional and set at the maintainer's review. Outcomes: **Go** (proceed), **Investigate** (adjust the approach, rerun), **Revise** (amend spec 0002 and/or ADR-0003 through an ADR *before* M1).
@@ -48,6 +51,8 @@ REQ-VOI-001..004, 006..010, 012, REQ-AST-001..003, 006, 007, 009, REQ-CFG-007, R
 
 **Exit:** AC-1 and AC-10 pass; budget gate green; ratchet set.
 
+*Status: partly built.* Done and tested against fakes: in-process and remote (TCP) transport, voice dialog state machine, energy-based endpointing, STT/TTS clients, streaming LLM client, half-duplex, JSON config file and the reference satellite (`crates/core/src/{voice,vad,speech,satellite,transport,config}.rs`, `crates/satellite`, [voice-pipeline](architecture/voice-pipeline.md)). Not done: real microphone and speaker I/O, wake-word detection, a real STT/TTS provider run, and the ratchet. AC-1 and AC-10 are not demonstrated on a device.
+
 ## M2: Agent inbox (the differentiator)
 REQ-INB-001..018, 020, REQ-SEC-004, REQ-EXT-004, 006
 - Minimal HTTP ingress, endpoints and tokens (config-file managed), queue, announce/dismiss/snooze/reply
@@ -57,6 +62,8 @@ REQ-INB-001..018, 020, REQ-SEC-004, REQ-EXT-004, 006
 
 **Exit:** AC-3 and AC-6 pass; a desktop demo of "Claude finishes → speaker announces → voice reply resumes the session".
 
+*Status: mostly built.* Ingress, endpoints with hashed tokens, queue, replies over SSE, adapters (`claude-code`, `generic`), summaries, the bridge that resumes Claude Code, and per-endpoint snippets exist (`crates/core/src/inbox/`, `crates/bridge`), with the headline loop tested over real sockets (`crates/e2e/tests/agent_loop.rs`, `satellite_loop.rs`). Not done: fuzzing of ingress (no fuzz targets in the repo), and the real `claude` CLI resume has not been verified. A live desktop demo is not recorded.
+
 ## M3: Time and local intelligence
 REQ-TMR-001..008, REQ-AST-004, 010..013, REQ-NFR-008, 009, 111
 - Scheduler with fake-clock test suite; atomic JSON store; restart-safety tests
@@ -64,6 +71,8 @@ REQ-TMR-001..008, REQ-AST-004, 010..013, REQ-NFR-008, 009, 111
 - Tool-calling eval set and tested-models list; offline degraded mode
 
 **Exit:** AC-2, AC-4, AC-7, AC-8, and AC-9 pass.
+
+*Status: partly built.* Scheduler (timers, alarms, reminders, DST-aware), atomic versioned JSON store, fast-path matcher, usage limits and a clock-unset guard exist and are tested (`crates/core/src/{sched,store,fastpath,usage}.rs`; commits 9ce871d, db8655f). Not verified or not done: the tool-calling eval set and tested-models list, offline degraded mode and persona config as specified, and the AC pass/fail status.
 
 ## M4: Web UI
 REQ-CFG-001..006, 008, 009, 012, 013, REQ-INB-019, REQ-NFR-006
@@ -78,6 +87,8 @@ REQ-MUS-001..006, REQ-AST-005, 008, 014, REQ-CFG-010, REQ-EXT-005
 - MCP client (Streamable HTTP); declarative HTTP tools; confirm policy
 - Recipes: Spotify control, Home Assistant, Hermes (verified against their docs at this point)
 
+*Status: partly built.* Internet radio by voice with ducking, the media-source model, the MCP client over Streamable HTTP and declarative HTTP tools with confirmation exist (`crates/core/src/{media,mcp,httptools}.rs`; [media](architecture/media.md), [mcp](architecture/mcp.md), [http-tools](architecture/http-tools.md)). Tested only against fake servers and players. Not done: the Spotify, Home Assistant and Hermes recipes (untested, sources secondary).
+
 ## M6: Hardening and Raspberry Pi
 REQ-NFR-004, 010, 108; opt-in REQ-VOI-005, REQ-VOI-011, REQ-NFR-002 tuning
 - **Raspberry Pi satellite** (documented, supported)
@@ -85,6 +96,8 @@ REQ-NFR-004, 010, 108; opt-in REQ-VOI-005, REQ-VOI-011, REQ-NFR-002 tuning
 - Opt-in barge-in/AEC evaluation (SPIKE-004); latency tuning
 
 **Exit:** real-hardware run recorded; Pi satellite passes the conformance suite.
+
+*Status: not started* (no soak, Pi satellite or conformance suite). A first real-hardware run on an Echo Dot exists (see the M0 baseline) but is not yet recorded in `docs/reports/`.
 
 ## Beyond v1.0 (planned, in rough priority order)
 Release early and often: tag `v0.x` releases as M2, M3, M4 land, so the differentiator ships long before v1.0. Items below are *planned for*, meaning v1.0 designs must not preclude them (see [future-scope.md](future-scope.md) for conditions).
@@ -111,6 +124,8 @@ Hardware notes: the Echo Dot Gen 2 **hardware baseline** is normative from M1 on
 - Threat model reviewed; fuzzing in CI; signed releases with SBOM
 - Docs: quick start, protocol guide for porters, agent integration guide, upgrade procedure, [PRIVACY.md](../PRIVACY.md)
 - Licence and governance files in place
+
+*Status:* none of these is fully met. Licence (`LICENSE`, `NOTICE`) and `PRIVACY.md` exist; the budget gate runs as a script, not yet as a required CI job, and the first real-hardware measurement is not yet recorded as a run; fuzzing, signed releases with SBOM, the Raspberry Pi satellite and the quick start are not done. `v0.1.0` is prepared (`CHANGELOG.md`) but no tag has been published.
 
 ## Initial backlog (to be created as issues)
 
@@ -142,3 +157,5 @@ Hardware notes: the Echo Dot Gen 2 **hardware baseline** is normative from M1 on
 | TASK-015 | task | "Connect an agent" flow and per-harness snippet generator |
 | SPIKE-007 | spike | Verify Codex / Gemini CLI / opencode hook and resume mechanisms from primary docs |
 | SPIKE-008 | spike | Verify Home Assistant conversation API / MCP server and Hermes gateway from primary docs |
+
+**Backlog status (as of 2026-11-08).** Built, with tests: TASK-008 (`crates/bridge`), TASK-010 (`fastpath.rs`), TASK-011 and TASK-012 (`inbox/adapter.rs`, `inbox/reply.rs`, `inbox/summary.rs`), TASK-013 (`media.rs`), FEAT-001 (in-process transport, `crates/satellite`), FEAT-002 (`llm.rs`). Partly built: TASK-001 (workspace exists; dev environment validation open), TASK-002 (CI `gate`, Rust and deny jobs run; cross-armv7 still a TODO in `ci.yml`), TASK-003 (`scripts/budget.sh` measures size and RSS; no qemu harness, not a CI gate), TASK-004 (spec 0003 is a skeleton; typed messages in `crates/protocol`), TASK-009 and TASK-015 (snippets are generated per endpoint; the full Connect-an-agent UI flow is not), TASK-014 (HTTP tools built; Home Assistant and Hermes recipes untested). Not found in the repo: SPIKE-002..008 findings, EPIC-001, TASK-005 (conformance harness), TASK-006 (traceability tool), TASK-007 (board and labels not verifiable). SPIKE-001 desk phase is done.
