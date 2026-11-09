@@ -9,6 +9,7 @@ Specs define **what the system does** and the contracts it must honour. Code imp
 | [0001](0001-product-requirements.md) | Product requirements | Draft |
 | [0002](0002-resource-budget.md) | Resource budget | Draft |
 | [0003](0003-satellite-protocol.md) | Satellite protocol | Draft (skeleton) |
+| [0004](0004-esphome-satellite-client.md) | ESPHome voice-satellite client | Draft |
 
 ## Lifecycle
 
@@ -52,6 +53,7 @@ Draft → In Review → Accepted → Implemented
 | `SEC` | Security and privacy |
 | `EXT` | Extensibility (packs, HTTP tools, sidecars) |
 | `BRD` | Board support (buttons, LED ring, mute, Wi-Fi, clock, audio device names) |
+| `ESP` | ESPHome native-API voice-satellite client |
 
 ## Change process
 
