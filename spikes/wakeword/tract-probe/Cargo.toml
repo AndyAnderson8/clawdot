@@ -1,0 +1,26 @@
+# SPIKE-002 probe: can a pure-Rust ONNX/TFLite runtime (tract) run the wake-word models?
+# Not a member of the repository workspace (own empty [workspace]); not built by CI.
+[package]
+name = "tract-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+tract-onnx = "0.23"
+tract-tflite = { version = "0.23", optional = true }
+hound = "3.5"
+anyhow = "1"
+
+[features]
+default = []
+tflite = ["dep:tract-tflite"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
