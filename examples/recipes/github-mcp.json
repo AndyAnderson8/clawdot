@@ -1,0 +1,19 @@
+{
+  "mcp": [
+    {
+      "name": "github",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "auth_env": "GITHUB_TOKEN",
+      "confirm": true,
+      "only": ["list_pull_requests", "get_pull_request", "actions_list", "list_issues", "create_pull_request"],
+      "tiers": {
+        "list_pull_requests": "read_only",
+        "get_pull_request": "read_only",
+        "actions_list": "read_only",
+        "list_issues": "read_only",
+        "create_pull_request": "costly"
+      },
+      "timeout_secs": 15
+    }
+  ]
+}

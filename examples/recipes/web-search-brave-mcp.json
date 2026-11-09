@@ -1,0 +1,15 @@
+{
+  "mcp": [
+    {
+      "name": "brave",
+      "url": "http://127.0.0.1:8080/mcp",
+      "confirm": true,
+      "only": ["brave_web_search", "brave_news_search"],
+      "tiers": {
+        "brave_web_search": "read_only",
+        "brave_news_search": "read_only"
+      },
+      "timeout_secs": 15
+    }
+  ]
+}
