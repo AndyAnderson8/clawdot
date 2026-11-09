@@ -13,6 +13,7 @@ pub mod admin;
 pub mod app;
 pub mod assistant;
 pub mod config;
+pub mod extensions;
 pub mod fastpath;
 pub mod http;
 pub mod httptools;

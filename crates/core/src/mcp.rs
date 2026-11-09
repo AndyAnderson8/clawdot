@@ -22,7 +22,7 @@ use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -41,7 +41,7 @@ const MAX_NAME: usize = 64;
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
 /// One MCP server, as written in the configuration file.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerDef {
     /// Short name, used as a prefix on its tools: lowercase letters, digits, `-` and `_`.
@@ -472,6 +472,78 @@ impl McpClient {
         Value::Array(list)
     }
 
+    /// Whether a server with this name is configured (connected or not).
+    #[must_use]
+    pub fn has_server(&self, name: &str) -> bool {
+        self.servers.iter().any(|s| s.def.name == name)
+    }
+
+    /// Connect one more server while running (the portal, REQ-CFG-033). On failure nothing is added.
+    ///
+    /// # Errors
+    /// An invalid or duplicate definition, a credential variable that is not set, or a server that cannot be
+    /// used, each with a message that says what to fix.
+    pub async fn add_server(
+        &mut self,
+        def: ServerDef,
+        reserved: &[String],
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<usize, String> {
+        def.validate()?;
+        if self.has_server(&def.name) {
+            return Err(format!("mcp server `{}` is listed twice", def.name));
+        }
+        let secret = match &def.auth_env {
+            Some(var) => Some(env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
+                format!(
+                    "mcp server `{}`: environment variable {var} is not set",
+                    def.name
+                )
+            })?),
+            None => None,
+        };
+        self.servers.push(Server {
+            endpoint: Endpoint::parse(&def.url)?,
+            def,
+            secret,
+            session: Mutex::new(None),
+        });
+        self.errors.push(None);
+        let i = self.servers.len() - 1;
+        match self.load(i).await {
+            Ok(mut tools) => {
+                tools.retain(|t| {
+                    !reserved.contains(&t.exposed)
+                        && !self.tools.iter().any(|o| o.exposed == t.exposed)
+                });
+                let n = tools.len();
+                self.tools.extend(tools);
+                Ok(n)
+            }
+            Err(e) => {
+                self.servers.pop();
+                self.errors.pop();
+                Err(clip(&e, 200))
+            }
+        }
+    }
+
+    /// Forget a server and its tools; false if there is none.
+    pub fn remove_server(&mut self, name: &str) -> bool {
+        let Some(i) = self.servers.iter().position(|s| s.def.name == name) else {
+            return false;
+        };
+        self.servers.remove(i);
+        self.errors.remove(i);
+        self.tools.retain(|t| t.server != i);
+        for t in &mut self.tools {
+            if t.server > i {
+                t.server -= 1;
+            }
+        }
+        true
+    }
+
     /// The tools on offer.
     #[must_use]
     pub fn tools(&self) -> &[McpTool] {
@@ -744,6 +816,38 @@ mod tests {
             json!({"name": "home", "url": format!("http://127.0.0.1:{port}/mcp")}),
         )
         .unwrap()
+    }
+
+    // REQ-CFG-033
+    #[tokio::test]
+    async fn servers_can_be_added_and_removed_while_running() {
+        let (port, _seen, _srv) = fake_server(OK).await;
+        let (mut c, _) = McpClient::connect(Vec::new(), &[], |_| None).await.unwrap();
+        assert_eq!(c.add_server(def(port), &[], |_| None).await, Ok(3));
+        assert!(c.has_server("home") && c.owns("home__status"));
+        let again = c.add_server(def(port), &[], |_| None).await;
+        assert!(again.unwrap_err().contains("twice"));
+        assert_eq!(c.report()[0]["tools"].as_array().unwrap().len(), 3);
+        // A second server shifts nothing when the first goes away.
+        let (port2, _s2, _srv2) = fake_server(OK).await;
+        let mut other = def(port2);
+        other.name = "second".into();
+        assert_eq!(c.add_server(other, &[], |_| None).await, Ok(3));
+        assert!(c.remove_server("home"));
+        assert!(!c.remove_server("home"));
+        assert!(c.owns("second__status") && !c.owns("home__status"));
+        assert_eq!(c.tools().len(), 3);
+        assert_eq!(c.report().as_array().unwrap().len(), 1);
+        // A dead server is not added and leaves nothing behind.
+        let mut dead = def(9);
+        dead.name = "dead".into();
+        assert!(c.add_server(dead, &[], |_| None).await.is_err());
+        assert!(!c.has_server("dead"));
+        // A missing credential names the variable.
+        let mut tokened = def(port);
+        tokened.auth_env = Some("NOPE_TOKEN".into());
+        let e = c.add_server(tokened, &[], |_| None).await.unwrap_err();
+        assert!(e.contains("NOPE_TOKEN"), "{e}");
     }
 
     #[test]

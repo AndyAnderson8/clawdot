@@ -51,7 +51,7 @@ On a wide screen the same single column is kept (max 44 rem) so that nothing mov
 | Agents | Inbox | What arrives here is news from your coding agents (Claude Code and others); "Agents" says whose news it is |
 | Tools | n/a | Everything the assistant can do besides talking |
 | Connections | n/a | Outside tool servers (MCP). The page explains MCP in a sentence the first time |
-| Skills | n/a | Bundles of instructions for the assistant (slice 2) |
+| Skills | n/a | Named instructions you write for the assistant, each switchable, with export and import |
 | Webhooks | Endpoints | A webhook is the web address an agent posts to; this tab creates them and gives copy-paste setup |
 | Settings | Admin password | Time zone, language model, voice, addresses, limits, password, and About with the version |
 

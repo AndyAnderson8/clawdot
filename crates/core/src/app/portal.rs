@@ -46,6 +46,8 @@ impl std::fmt::Display for Fail {
 pub enum Op {
     /// Timers, alarms, and reminders.
     Sched(SchedOp),
+    /// Tools, connections, and skills.
+    Ext(crate::extensions::ExtOp),
 }
 
 /// One request and where to send the answer.

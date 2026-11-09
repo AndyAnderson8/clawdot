@@ -49,3 +49,7 @@ file (REQ-AST-014). The core never runs third-party code (REQ-EXT-001); it only 
 - No retries and no redirects: a failed call is reported to the model, which tells the user.
 - Setting `confirm` to `false` is your choice for harmless actions (a light). Keep it on for anything that spends
   money, unlocks something, or cannot be undone.
+
+## Adding tools from the portal
+
+The Tools tab can add, switch off, and delete these tools without a restart (REQ-CFG-032): it takes the same fields as above, but the token is given as the **name** of an environment variable that must already be set on the device. Tools added there are stored in `tools.json` in the data directory, not in the configuration file; tools defined in the file can be switched off in the portal but only removed by editing the file. See [extensibility.md](extensibility.md).
