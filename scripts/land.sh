@@ -140,6 +140,15 @@ case "$target" in
       git checkout -q "$source_branch"
     fi
     scripts/check.sh
+    # The full gate can take a long time. Re-check, right before merging, that dev is still free and that this
+    # branch still contains it (another landing may have happened meanwhile).
+    git checkout -q --detach
+    if has_remote; then git fetch --quiet --prune origin; fi
+    wait_for_branch_free dev "$wait_secs" || exit "$EX_HELD"
+    sync_ff dev
+    if ! git merge-base --is-ancestor dev "$source_branch"; then
+      die "dev moved while the checks ran, so $source_branch no longer contains it. Merge dev into the branch (integration branches: scripts/land.sh --update $source_branch) and land again"
+    fi
     merge_into dev "$source_branch" "Merge $source_branch into dev" || exit $?
     git branch -d "$source_branch" || echo "land: merged, but could not delete $source_branch here (checked out elsewhere?); delete it with: git branch -D $source_branch"
     if has_remote; then git push --quiet origin --delete "$source_branch" 2>/dev/null || true; fi
