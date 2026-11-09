@@ -851,7 +851,7 @@ mod tests {
         let hash = crate::admin::hash_password("adm-secret").unwrap();
         let token = h
             .core
-            .admin_setup_password([127, 0, 0, 1].into(), None, hash)
+            .admin_setup_password([127, 0, 0, 1].into(), hash)
             .unwrap();
         bearer(&token)
     }
@@ -1135,7 +1135,6 @@ mod tests {
         assert_eq!(status, 200);
         let v = json_of(&body);
         assert_eq!(v["mode"], "setup");
-        assert_eq!(v["code_needed"], false, "loopback listen needs no code");
         assert_eq!(v["open_allowed"], true);
         assert_eq!(v["peer_private"], true);
         // Nothing but setup works yet, with or without credentials.
@@ -1302,21 +1301,17 @@ mod tests {
 
     // REQ-CFG-021
     #[tokio::test]
-    async fn setup_asks_for_the_code_when_listening_beyond_loopback() {
+    async fn setup_needs_no_code_when_listening_beyond_loopback() {
         let h = start(Limits::default(), ServeOptions::default()).await;
         h.core.set_listen_ip([192, 168, 1, 20].into());
-        let code = h.core.make_setup_code().unwrap().unwrap();
         let (_, _, body) = call(h.addr, "GET", "/api/auth", &[], "").await;
-        assert_eq!(json_of(&body)["code_needed"], true);
-        assert_eq!(
-            post(&h, "/api/setup", "", r#"{"mode":"open"}"#).await.0,
-            403
-        );
-        let wrong = r#"{"mode":"open","code":"0000-0000"}"#;
-        assert_eq!(post(&h, "/api/setup", "", wrong).await.0, 403);
+        assert!(json_of(&body).get("code_needed").is_none());
+        // A stale client that still sends a code is refused as a malformed request.
+        let old = r#"{"mode":"open","code":"0000-0000"}"#;
+        assert_eq!(post(&h, "/api/setup", "", old).await.0, 400);
         assert_eq!(h.core.admin_state()["mode"], "setup");
-        let ok = format!(r#"{{"mode":"password","password":"with a code","code":"{code}"}}"#);
-        assert_eq!(post(&h, "/api/setup", "", &ok).await.0, 200);
+        let ok = r#"{"mode":"password","password":"no code needed"}"#;
+        assert_eq!(post(&h, "/api/setup", "", ok).await.0, 200);
         assert_eq!(h.core.admin_state()["mode"], "password");
     }
 
@@ -1325,13 +1320,12 @@ mod tests {
     async fn open_mode_is_refused_on_a_public_listen_address() {
         let h = start(Limits::default(), ServeOptions::default()).await;
         h.core.set_listen_ip([203, 0, 113, 9].into());
-        let code = h.core.make_setup_code().unwrap().unwrap();
         let (_, _, body) = call(h.addr, "GET", "/api/auth", &[], "").await;
         assert_eq!(json_of(&body)["open_allowed"], false);
-        let open = format!(r#"{{"mode":"open","code":"{code}"}}"#);
-        assert_eq!(post(&h, "/api/setup", "", &open).await.0, 403);
-        let pw = format!(r#"{{"mode":"password","password":"still fine","code":"{code}"}}"#);
-        assert_eq!(post(&h, "/api/setup", "", &pw).await.0, 200);
+        let open = r#"{"mode":"open"}"#;
+        assert_eq!(post(&h, "/api/setup", "", open).await.0, 403);
+        let pw = r#"{"mode":"password","password":"still fine"}"#;
+        assert_eq!(post(&h, "/api/setup", "", pw).await.0, 200);
     }
 
     // REQ-CFG-019
@@ -1358,7 +1352,7 @@ mod tests {
         let old = crate::inbox::endpoint::generate_token().unwrap();
         let hash = crate::inbox::endpoint::hash_token(&old);
         h.core
-            .admin_setup_password([127, 0, 0, 1].into(), None, hash)
+            .admin_setup_password([127, 0, 0, 1].into(), hash)
             .unwrap();
         let (_, _, body) = call(h.addr, "GET", "/api/auth", &[], "").await;
         let v = json_of(&body);

@@ -1220,10 +1220,10 @@ fn start_and_read(args: &[&str]) -> (std::process::Child, String) {
     (child, seen)
 }
 
-/// A setup code is printed only when other hosts can reach the setup page, and is accepted once
-/// (REQ-CFG-021); loopback prints none (REQ-CFG-018).
+/// No setup code is printed, whatever the listen address: the device may have no visible console
+/// (REQ-CFG-021). The URL and the first-visitor warning are, and setup completes without a code.
 #[test]
-fn the_setup_code_is_printed_only_when_listening_beyond_loopback() {
+fn setup_prints_the_url_and_a_warning_but_no_code() {
     let dir = std::env::temp_dir().join(format!("clawdot-code-{}", std::process::id()));
     let port = free_port();
     let (mut child, seen) = start_and_read(&[
@@ -1232,36 +1232,17 @@ fn the_setup_code_is_printed_only_when_listening_beyond_loopback() {
         "--data-dir",
         dir.to_str().unwrap(),
     ]);
-    let code = seen
-        .lines()
-        .find_map(|l| l.strip_prefix("Setup code"))
-        .and_then(|l| l.split(": ").nth(1))
-        .map(|c| c.trim().to_owned())
-        .unwrap_or_default();
-    assert_eq!(code.len(), 9, "{seen}");
-    assert!(!seen.contains("cdt_"), "{seen}");
-    // Without the code nothing is set up; with it, setup completes.
-    let body = r#"{"mode":"password","password":"correct horse battery"}"#;
-    assert_eq!(http(port, "POST", "/api/setup", "", body).0, 403);
-    let with =
-        format!(r#"{{"mode":"password","password":"correct horse battery","code":"{code}"}}"#);
-    assert_eq!(http(port, "POST", "/api/setup", "", &with).0, 200);
-    let _ = child.kill();
-    let _ = child.wait();
-
-    let dir2 = dir.join("loopback");
-    let (mut child, seen) = start_and_read(&[
-        "--listen",
-        &format!("127.0.0.1:{}", free_port()),
-        "--data-dir",
-        dir2.to_str().unwrap(),
-    ]);
-    let _ = child.kill();
-    let _ = child.wait();
     assert!(
-        seen.contains("first-run setup") && !seen.contains("Setup code"),
+        seen.contains("Web UI: http://") && seen.contains("first-run setup"),
         "{seen}"
     );
+    assert!(seen.contains("first person on a private network"), "{seen}");
+    assert!(!seen.to_lowercase().contains("setup code"), "{seen}");
+    assert!(!seen.contains("cdt_"), "{seen}");
+    let body = r#"{"mode":"password","password":"correct horse battery"}"#;
+    assert_eq!(http(port, "POST", "/api/setup", "", body).0, 200);
+    let _ = child.kill();
+    let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
 

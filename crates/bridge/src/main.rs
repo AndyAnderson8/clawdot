@@ -17,7 +17,7 @@ USAGE:
 The endpoint token is read from the CLAWDOT_TOKEN environment variable (preferred) or --token-file.
 
 OPTIONS:
-    --url URL            The speaker, for example http://clawdot.local:8765 (plain http; use a VPN
+    --url URL            The speaker, for example http://clawdot.local:3335 (plain http; use a VPN
                          such as Tailscale to reach it from elsewhere)
     --endpoint NAME      The endpoint to listen on (default: claude-code)
     --token-file FILE    Read the token from a file

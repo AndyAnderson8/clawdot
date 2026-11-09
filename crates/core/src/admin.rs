@@ -3,7 +3,7 @@
 //!
 //! * [`hash_password`] / [`verify_password`]: PBKDF2-HMAC-SHA256 on the `sha2` crate that is already in the
 //!   build. Constant memory, no new dependency. The iteration count and salt travel with the hash.
-//! * [`Admin`]: the setting (unset, open, or password), the in-memory sessions, and the one-time setup code.
+//! * [`Admin`]: the setting (unset, open, or password), and the in-memory sessions.
 //! * [`is_private`]: which peers may complete setup or use open mode.
 
 use crate::inbox::endpoint::{constant_time_eq, generate_token, hash_token, verify_token};
@@ -156,8 +156,6 @@ pub enum AdminError {
     AlreadySetUp,
     /// Open mode is not allowed with this listen address.
     OpenRefused,
-    /// The setup code is missing or wrong.
-    BadCode,
     /// The password is shorter or longer than allowed.
     BadPassword,
     /// The setting could not be saved.
@@ -175,7 +173,6 @@ impl std::fmt::Display for AdminError {
             Self::NotPrivate => "this is only available from a private network",
             Self::AlreadySetUp => "setup is already complete",
             Self::OpenRefused => "open mode is not allowed on a public listen address",
-            Self::BadCode => "the setup code is wrong",
             Self::BadPassword => "the password must be 8 to 128 characters",
             Self::Storage => "the setting could not be saved",
             Self::NoRandomness => "no randomness available",
@@ -224,14 +221,13 @@ impl Mode {
     }
 }
 
-/// The administrator setting, sessions, and setup code.
+/// The administrator setting and sessions.
 #[derive(Debug)]
 pub struct Admin {
     store: Option<JsonStore>,
     setting: Setting,
     /// (SHA-256 of the session token, expiry)
     sessions: Vec<(String, Ts)>,
-    code: Option<String>,
     listen: IpAddr,
 }
 
@@ -243,7 +239,6 @@ impl Admin {
             store: None,
             setting: Setting::Unset,
             sessions: Vec::new(),
-            code: None,
             listen: IpAddr::from([127, 0, 0, 1]),
         }
     }
@@ -268,7 +263,7 @@ impl Admin {
         Ok(())
     }
 
-    /// Where the core is listening, which decides whether open mode and the setup code apply.
+    /// Where the core is listening, which decides whether open mode is allowed.
     pub fn set_listen_ip(&mut self, ip: IpAddr) {
         self.listen = ip;
     }
@@ -295,47 +290,12 @@ impl Admin {
         self.listen.is_unspecified() || is_private(self.listen)
     }
 
-    /// Whether setup must present a code (the listen address is reachable from other hosts).
-    #[must_use]
-    pub fn code_needed(&self) -> bool {
-        self.code.is_some()
-    }
-
-    /// Create the one-time setup code if setup is pending and the listen address is not loopback.
-    /// Returns it so the caller can print it.
-    ///
-    /// # Errors
-    /// If the OS cannot supply random bytes.
-    pub fn make_setup_code(&mut self) -> Result<Option<String>, AdminError> {
-        if self.mode() != Mode::Setup || self.listen.is_loopback() {
-            self.code = None;
-            return Ok(None);
-        }
-        let mut b = [0u8; 8];
-        getrandom::fill(&mut b).map_err(|_| AdminError::NoRandomness)?;
-        let n = u64::from_le_bytes(b) % 100_000_000;
-        let code = format!("{:04}-{:04}", n / 10_000, n % 10_000);
-        self.code = Some(code.clone());
-        Ok(Some(code))
-    }
-
-    fn code_ok(&self, given: Option<&str>) -> bool {
-        match &self.code {
-            None => true,
-            Some(want) => given.is_some_and(|g| {
-                let g: String = g.chars().filter(char::is_ascii_digit).collect();
-                let w: String = want.chars().filter(char::is_ascii_digit).collect();
-                constant_time_eq(&g, &w)
-            }),
-        }
-    }
-
     /// Complete setup with open mode.
     ///
     /// # Errors
     /// See [`AdminError`].
-    pub fn setup_open(&mut self, peer: IpAddr, code: Option<&str>) -> Result<(), AdminError> {
-        self.check_setup(peer, code)?;
+    pub fn setup_open(&mut self, peer: IpAddr) -> Result<(), AdminError> {
+        self.check_setup(peer)?;
         if !self.open_allowed() {
             return Err(AdminError::OpenRefused);
         }
@@ -350,29 +310,25 @@ impl Admin {
     pub fn setup_password(
         &mut self,
         peer: IpAddr,
-        code: Option<&str>,
         hash: String,
         now: Ts,
     ) -> Result<String, AdminError> {
-        self.check_setup(peer, code)?;
+        self.check_setup(peer)?;
         self.setting = Setting::Password { hash };
         self.finish_setup()?;
         self.new_session(now)
     }
 
-    /// Whether setup may proceed from `peer` with `code`.
+    /// Whether setup may proceed from `peer`.
     ///
     /// # Errors
-    /// [`AdminError::AlreadySetUp`], [`AdminError::NotPrivate`], [`AdminError::BadCode`].
-    pub fn check_setup(&self, peer: IpAddr, code: Option<&str>) -> Result<(), AdminError> {
+    /// [`AdminError::AlreadySetUp`] or [`AdminError::NotPrivate`].
+    pub fn check_setup(&self, peer: IpAddr) -> Result<(), AdminError> {
         if self.mode() != Mode::Setup {
             return Err(AdminError::AlreadySetUp);
         }
         if !is_private(peer) {
             return Err(AdminError::NotPrivate);
-        }
-        if !self.code_ok(code) {
-            return Err(AdminError::BadCode);
         }
         Ok(())
     }
@@ -382,7 +338,6 @@ impl Admin {
             self.setting = Setting::Unset;
             return Err(e);
         }
-        self.code = None;
         Ok(())
     }
 
@@ -602,40 +557,16 @@ mod tests {
 
     // REQ-CFG-021
     #[test]
-    fn setup_needs_a_private_peer_and_the_code_when_not_on_loopback() {
+    fn setup_needs_a_private_peer_but_no_code() {
         let mut a = Admin::new();
         a.set_listen_ip(ip("192.168.1.20"));
-        let code = a.make_setup_code().unwrap().unwrap();
-        assert_eq!(code.len(), 9);
-        assert!(a.code_needed());
-        assert_eq!(
-            a.setup_open(ip("8.8.8.8"), Some(&code)),
-            Err(AdminError::NotPrivate)
-        );
-        assert_eq!(
-            a.setup_open(ip("192.168.1.5"), None),
-            Err(AdminError::BadCode)
-        );
-        assert_eq!(
-            a.setup_open(ip("192.168.1.5"), Some("0000-0000x")),
-            Err(AdminError::BadCode)
-        );
-        // Digits are enough; the dash is optional.
-        let bare: String = code.chars().filter(char::is_ascii_digit).collect();
-        a.setup_open(ip("192.168.1.5"), Some(&bare)).unwrap();
+        assert_eq!(a.setup_open(ip("8.8.8.8")), Err(AdminError::NotPrivate));
+        a.setup_open(ip("192.168.1.5")).unwrap();
         assert_eq!(a.mode(), Mode::Open);
-        assert!(!a.code_needed(), "the code is used up");
         assert_eq!(
-            a.setup_open(ip("192.168.1.5"), None),
+            a.setup_open(ip("192.168.1.5")),
             Err(AdminError::AlreadySetUp)
         );
-    }
-
-    #[test]
-    fn loopback_listening_needs_no_code() {
-        let mut a = Admin::new();
-        assert_eq!(a.make_setup_code().unwrap(), None);
-        a.setup_open(ip("127.0.0.1"), None).unwrap();
     }
 
     // REQ-CFG-020
@@ -643,15 +574,13 @@ mod tests {
     fn open_mode_is_refused_on_a_public_listen_address_and_for_public_peers() {
         let mut a = Admin::new();
         a.set_listen_ip(ip("203.0.113.9"));
-        a.make_setup_code().unwrap();
         assert_eq!(
-            a.setup_open(ip("192.168.1.5"), a.code.clone().as_deref()),
+            a.setup_open(ip("192.168.1.5")),
             Err(AdminError::OpenRefused)
         );
         let mut a = Admin::new();
         a.set_listen_ip(ip("0.0.0.0"));
-        let code = a.make_setup_code().unwrap().unwrap();
-        a.setup_open(ip("10.0.0.2"), Some(&code)).unwrap();
+        a.setup_open(ip("10.0.0.2")).unwrap();
         assert_eq!(a.authorize(None, ip("10.0.0.3"), 0), Ok(()));
         assert_eq!(
             a.authorize(None, ip("8.8.8.8"), 0),
@@ -663,9 +592,7 @@ mod tests {
     #[test]
     fn sessions_expire_are_capped_and_can_end() {
         let mut a = Admin::new();
-        let t = a
-            .setup_password(ip("127.0.0.1"), None, "h".into(), 100)
-            .unwrap();
+        let t = a.setup_password(ip("127.0.0.1"), "h".into(), 100).unwrap();
         assert_eq!(a.authorize(Some(&t), ip("127.0.0.1"), 101), Ok(()));
         assert_eq!(
             a.authorize(Some("nope"), ip("127.0.0.1"), 101),
@@ -695,9 +622,7 @@ mod tests {
     #[test]
     fn a_new_password_ends_other_sessions() {
         let mut a = Admin::new();
-        let old = a
-            .setup_password(ip("127.0.0.1"), None, "h1".into(), 0)
-            .unwrap();
+        let old = a.setup_password(ip("127.0.0.1"), "h1".into(), 0).unwrap();
         let fresh = a.set_password("h2".into(), 1).unwrap();
         assert!(!a.session_ok(&old, 2));
         assert!(a.session_ok(&fresh, 2));
@@ -710,7 +635,7 @@ mod tests {
         let store = JsonStore::new(dir.0.join("admin.json"), SCHEMA);
         let mut a = Admin::open(store.clone()).unwrap();
         assert_eq!(a.mode(), Mode::Setup);
-        a.setup_open(ip("127.0.0.1"), None).unwrap();
+        a.setup_open(ip("127.0.0.1")).unwrap();
         assert_eq!(Admin::open(store).unwrap().mode(), Mode::Open);
         assert!(reset(&dir.0).unwrap());
         assert!(!reset(&dir.0).unwrap());

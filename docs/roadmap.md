@@ -76,7 +76,7 @@ REQ-TMR-001..008, REQ-AST-004, 010..013, REQ-NFR-008, 009, 111
 
 ## M4: Web UI
 REQ-CFG-001..006, 008, 009, 012, 013, REQ-INB-019, REQ-NFR-006
-- Embedded static UI; **first-run setup**: choose a single admin password (hashed, light parameters) or deliberately leave the UI open on a private network, with an "unprotected" banner, a console setup code when listening beyond loopback, and a `--reset-admin` CLI recovery (REQ-CFG-018..024, [ADR-0013](adr/0013-first-run-admin-setup.md)); webhook tokens stay required either way; no multi-user accounts; provider keys, voice and persona; endpoint management; history; test speak; health
+- Embedded static UI; **first-run setup**: choose a single admin password (hashed, light parameters) or deliberately leave the UI open on a private network, with an "unprotected" banner, private-address-only setup (no setup code: the device has no console), and a `--reset-admin` CLI recovery (REQ-CFG-018..024, [ADR-0013](adr/0013-first-run-admin-setup.md)); webhook tokens stay required either way; no multi-user accounts; provider keys, voice and persona; endpoint management; history; test speak; health
 - **Connect an agent** flow (generates per-harness snippets, token, bridge command); mDNS (`clawdot.local`); headless Wi-Fi docs for Pi
 
 **Exit:** a new user can set up from the UI alone.
