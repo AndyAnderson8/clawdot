@@ -1,6 +1,6 @@
 # ClawDot brand and theme
 
-Status: Accepted (design guidance, not a requirement). Applies to the logo files in [`assets/brand/`](../../assets/brand) and to the theme in `crates/core/src/ui-theme.css`.
+Status: Accepted (design guidance, not a requirement). Applies to the logo files in [`assets/brand/`](../../assets/brand) and to the theme in `portal/src/theme.css`.
 
 ## The mark
 

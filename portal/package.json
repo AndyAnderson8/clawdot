@@ -1,0 +1,27 @@
+{
+  "name": "clawdot-portal",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Source of the ClawDot web portal. Built to crates/core/src/ui.html (committed); see docs/adr/0016-portal-typescript-stack.md.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "build": "node build.mjs",
+    "check-build": "node build.mjs --check",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "node --test test/unit/*.test.ts",
+    "test:browser": "node test/browser/smoke.ts",
+    "licenses": "node scripts/licenses.mjs",
+    "audit": "npm audit --omit=dev --audit-level=high",
+    "check": "npm run typecheck && npm test && npm run check-build"
+  },
+  "dependencies": {
+    "preact": "11.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}
