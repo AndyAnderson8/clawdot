@@ -14,3 +14,17 @@ Third-party data
 HTTPS support bundles the Mozilla root certificate list through the webpki-roots
 crate, licensed under the Community Data License Agreement Permissive 2.0
 (CDLA-Permissive-2.0). See https://github.com/rustls/webpki-roots.
+
+Protocol references (nothing copied)
+------------------------------------
+The optional ESPHome voice-satellite client (spec 0004) implements the client side of the ESPHome native API.
+Message numbers, field numbers, and the Noise framing are facts about a wire format, read from:
+
+* esphome/aioesphomeapi, `aioesphomeapi/api.proto`, `api_options.proto` and `_frame_helper/noise.py`
+  (commit 9d32b21582cf4ed7b0a6a4390d4a4df9ca37f4d2, 2026-11-09), MIT License, Copyright (c) 2018 Otto Winter.
+* esphome/esphome, `esphome/components/api/api.proto` (commit 46f532e2bdcc8a8cae9dae1e4930a7ecbf0fc283), the
+  ESPHome License: the repository states that C/C++ sources (.c, .cpp, .h, .hpp, .tcc, .ino) are GPLv3 and
+  "the python codebase and all other parts" are MIT.
+
+No file or generated code from either repository is included. The message encoder and decoder are written
+independently from the documented wire behaviour. If a `.proto` file is ever vendored, add its MIT notice here.

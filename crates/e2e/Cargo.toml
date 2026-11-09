@@ -15,7 +15,7 @@ workspace = true
 clawdot-protocol = { path = "../protocol" }
 
 [dev-dependencies]
-clawdot-core = { path = "../core" }
+clawdot-core = { path = "../core", features = ["esphome-noise"] }
 clawdot-bridge = { path = "../bridge" }
 clawdot-satellite = { path = "../satellite" }
-tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util"] }
