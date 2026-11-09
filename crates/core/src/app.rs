@@ -4,7 +4,7 @@
 
 use crate::admin::{Admin, AdminError, Mode as AdminMode};
 use crate::inbox::adapter::Adapter;
-use crate::inbox::endpoint::{self, Endpoint, Endpoints};
+use crate::inbox::endpoint::{self, Endpoint, Endpoints, QuietHours};
 use crate::inbox::event::{Event, EventState};
 use crate::inbox::queue::{FilterReason, Inbox, InboxLimits, Ingest, SourceStatus};
 use crate::inbox::reply::{self, Reply, ReplyKind, ReplyQueue};
@@ -705,6 +705,12 @@ impl Core {
             event,
             more_waiting: plan.rest.len(),
         })
+    }
+
+    /// Set or clear the device-wide quiet-hours window (REQ-INB-040): while it lasts, only urgent events
+    /// are announced. Takes effect on the next check, so no restart is needed.
+    pub fn set_quiet_hours(&self, quiet: Option<QuietHours>) {
+        self.lock().inbox.set_quiet(quiet);
     }
 
     /// Record that events were spoken.
