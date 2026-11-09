@@ -15,6 +15,10 @@ workspace = true
 name = "clawdot_device"
 path = "src/lib.rs"
 
+[[bin]]
+name = "clawdot-device"
+path = "src/main.rs"
+
 [dependencies]
 clawdot-protocol = { path = "../protocol" }
 clawdot-satellite = { path = "../satellite" }
