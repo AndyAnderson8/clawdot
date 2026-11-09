@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.6 |
+| **Version** | 0.7 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006 |
 
@@ -118,6 +118,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-TMR-006 | If the clock is unsynchronised at boot, the system MUST NOT fire time-based items until time is valid, and MUST report the state. | Must | M3 | T |
 | REQ-TMR-007 | Alarms MUST sound without depending on any remote provider (local tone). | Must | M3 | T |
 | REQ-TMR-008 | The user SHOULD be able to list, edit, and cancel items by voice and via the web UI. | Should | M3 | T |
+| REQ-TMR-009 | The clock counts as unsynchronised (REQ-TMR-006) when the system time is earlier than a fixed known-good floor (14 November 2023, compiled in). While it is, the core MUST log a warning at startup and show `clock_valid: false` in the UI status; and the fast path and the built-in tools MUST NOT answer time or date questions, set timers, alarms, or reminders, or report time left, and MUST instead say that the clock is not set. Cancelling items and every command that does not depend on the time keep working. | Must | M3 | T |
 
 ### 4.5 Music (`MUS`)
 
@@ -229,3 +230,4 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | 0.4 | 2026-11-07 | Extension model (ADR-0010) and new section 4.9 (EXT-001..006); declarative HTTP tools (AST-014); media-source interface with playback/control shapes (MUS-002/003/005/006); reply stream over SSE replaces device-initiated callbacks (INB-008); reply types and bounded spoken summaries (INB-017/018); event `kind`; portal extension management, mDNS, `/display` page, headless Wi-Fi docs (CFG-009..012); AC-11/12; MCP server deferred to v1.x |
 | 0.5 | 2026-11-07 | v1.0 trim: pack installation (EXT-002/003), `/display` page (CFG-011) deferred to v1.x; added TTS voice to persona config (AST-013), "Connect an agent" flow (INB-019), pluggable harness adapters in the bridge (INB-020); open questions 10-11 (multi-profile routing, harness verification) |
 | 0.6 | 2026-11-07 | Changelog shipped in the build and shown on the About page (CFG-013), following the git-flow release process (ADR-0011) |
+| 0.7 | 2026-11-08 | Hardware test on an Echo Dot with no network time: unsynchronised-clock behaviour defined (TMR-009) |

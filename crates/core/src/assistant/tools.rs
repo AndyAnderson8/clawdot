@@ -198,6 +198,19 @@ impl Assistant {
 
     fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let now = self.clock.now();
+        if !self.clock.wall_clock_valid()
+            && matches!(
+                name,
+                "set_timer"
+                    | "list_timers"
+                    | "set_alarm"
+                    | "set_reminder"
+                    | "set_reminder_at"
+                    | "current_time"
+            )
+        {
+            return Err(super::CLOCK_UNSET.to_owned());
+        }
         match name {
             "set_timer" => {
                 let secs = int(args, "seconds")?;
@@ -395,7 +408,7 @@ impl Assistant {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::setup;
+    use super::super::tests::{setup, utc};
     use super::*;
 
     fn call(a: &mut Assistant, name: &str, args: Value) -> Result<String, String> {
@@ -425,6 +438,25 @@ mod tests {
                 .any(|s| s.name.starts_with("inbox_")),
             "no inbox tools without an inbox"
         );
+    }
+
+    #[test]
+    fn time_dependent_tools_refuse_an_unset_clock() {
+        // REQ-TMR-009
+        let (mut a, clock, _) = setup(false);
+        clock
+            .0
+            .store(utc(2010, 1, 1, 0, 3), std::sync::atomic::Ordering::Relaxed);
+        for (tool, args) in [
+            ("set_timer", json!({"seconds": 60})),
+            ("list_timers", json!({})),
+            ("set_alarm", json!({"hour": 7, "minute": 0})),
+            ("set_reminder", json!({"seconds": 60, "text": "x"})),
+            ("current_time", json!({})),
+        ] {
+            let e = call(&mut a, tool, args).unwrap_err();
+            assert!(e.contains("clock isn't set"), "{tool}: {e}");
+        }
     }
 
     #[test]

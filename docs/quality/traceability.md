@@ -39,6 +39,7 @@ Legend: **Done** = implemented and tested. **Partial** = some of the requirement
 | TMR-004 recurrence, dismiss, snooze | Partial | recurrence and snooze API done; no voice "snooze" for a ringing alarm | |
 | TMR-005 time zone and DST | Done | `IanaZone` with bundled database | DST test across the 2026 spring-forward |
 | TMR-006 no firing until the clock is valid | Done | `Clock::wall_clock_valid` | `nothing_fires_until_the_wall_clock_is_valid` |
+| TMR-009 unset clock is admitted, not answered from | Done | `assistant::CLOCK_UNSET`, startup warning, status `clock_valid` | `an_unset_clock_is_admitted_not_read_out_as_the_time`, `time_dependent_tools_refuse_an_unset_clock` |
 | TMR-007 alarm sounds without providers | Not started | needs a satellite | |
 | TMR-008 list, edit, cancel by voice and UI | Partial | list and cancel by voice; no edit, no UI | |
 
