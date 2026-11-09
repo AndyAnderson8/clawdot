@@ -88,4 +88,4 @@ phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, 
 - **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
 - **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), and the clock state. It contains no secrets and no agent text. Radio and music are not shown in the portal.
 - **Test speak** makes the speaker say a short phrase (up to 200 characters, a few at a time) on the console and on any free satellite, a quick way to check the speaker end to end.
-- Not yet in the UI: editing settings (the Settings tab shows them; change the file and restart), adding or removing tools, connections, and skills (REQ-CFG-031 coming-soon states), provider keys, wake word settings, logs, and history search.
+- Not yet in the UI: editing settings (the Settings tab shows them; change the file and restart), editing a tool or connection in place (delete and add it again), provider keys, wake word settings, logs, and history search. Tools, connections, and skills are managed from their tabs (REQ-CFG-032..036).
