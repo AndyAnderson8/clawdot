@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.4 |
+| **Version** | 0.5 |
 | **Created** | 2026-11-07 |
 | **Related** | ADR-0003, [0001](0001-product-requirements.md) REQ-NFR-001 |
 
@@ -22,7 +22,8 @@ Defines the hard resource limits for the complete system and how CI enforces the
 | Flash | 4 GB eMMC, shared | Teardowns |
 | Network | 802.11 Wi-Fi | Teardowns |
 | Audio | 7 microphones into four ADCs; AEC/beamforming not provided by dedicated hardware | EEVblog teardown |
-| Unlock status | **No known unlock or custom firmware.** Port is opportunistic only. | R-04 |
+| Unlock status | **No known unlock or custom firmware for retail units.** One adb-root unit exists ([R-07](../research/07-echo-dot-gen2-hardware.md)); a firmware port is still opportunistic, but a ClawDot process can run on that unit today. | R-04, R-07 |
+| Measured on the adb-root unit | 489,064 kB `MemTotal`; about 290 MB `MemAvailable` beside the idle stock stack; 4 cores (Cortex-A53, 32-bit kernel and userland); `/data` 1.2 GB free | R-07 |
 
 Real-device RSS and CPU baselines are still to be measured (SPIKE-001, hands-on phase, if hardware becomes available). Until then the CI qemu-user and cgroup-limited runs on an armv7 target are the benchmark.
 
@@ -52,6 +53,7 @@ Because the OS and drivers consume part of the 512 MB, the harness's share is bu
 | REQ-NFR-110 | The process MUST use bounded queues and buffers everywhere. Unbounded growth from input is a defect. | Must | I/T |
 | REQ-NFR-114 | **Ratchet.** After the M1 walking skeleton is measured, the hard gates (RSS, binary size, storage) MUST be re-set to ≈ 1.5× the measured values, never above the limits in this spec. Gates may only be tightened afterwards; loosening one requires an ADR. | Must | I |
 | REQ-NFR-113 | The **default configuration** (all-in-one, cloud providers, half-duplex audio, batch STT, shipped features enabled by default) MUST meet every limit in this spec. Any optional feature that would exceed a limit (e.g. software AEC, streaming STT, extra decoders) MUST be off by default and its measured cost documented. | Must | T |
+| REQ-NFR-115 | Board support (REQ-BRD-001..016) is optional-feature code under REQ-NFR-113. The default build MUST contain no board code beyond the `NullBoard`. The `dot2` build (the default configuration plus `board-dot2`) MUST meet every limit in this spec, and each board feature's binary-size and RSS delta MUST be measured and recorded in the budget report. A new dependency used only by a board needs the size justification required by the dependency gate (section 5). | Must | T |
 | REQ-NFR-111 | The local fast-path intent matcher (REQ-AST-010) MUST resolve or reject an utterance in ≤ 20 ms on the reference CPU and use ≤ 2 MB of heap including its grammar. | Must | T |
 | REQ-NFR-112 | Audio decoders (Opus/MP3, if used) MUST be budgeted explicitly; prefer requesting PCM from TTS providers to avoid decode cost. | Should | I |
 
@@ -92,3 +94,4 @@ Because the OS and drivers consume part of the 512 MB, the harness's share is bu
 | 0.2 | 2026-11-07 | Reference device table sourced from teardowns (R-04); added fast-path matcher and decoder budgets (NFR-111/112) |
 | 0.3 | 2026-11-07 | Stated the Echo Dot Gen 2 hardware package as the normative baseline for the default configuration; added NFR-113 (default config meets the budget; heavier options are opt-in) |
 | 0.4 | 2026-11-07 | Peak RSS: 48 MB design target (warn) and 64 MB hard gate (fail); added the ratchet rule (NFR-114). The 48 MB figure was a judgment call, not derived; M0 spikes and the M1 skeleton replace it with measured values |
+| 0.5 | 2026-11-08 | Hands-on measurements of an adb-root Echo Dot added to the reference table (R-07); board support is optional-feature code and the `dot2` build must meet every limit (NFR-115) |
