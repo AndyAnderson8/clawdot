@@ -277,7 +277,7 @@ REQ-BRD-001..014
 **Exit:** the desktop board drives the core on a PC through the trait; ADR-0012 Accepted; budget impact measured, not estimated.
 
 ## B2. Device contract and the portable daemon, on PC and Pi first
-REQ-DEV-001..012 (proposed in [ADR-0015](adr/0015-own-the-device-layer.md); a new spec `0006-device-layer-contract.md` lands with this step)
+REQ-DEV-001..012 (proposed in [ADR-0015](adr/0015-own-the-device-layer.md); drafted as [spec 0006](specs/0006-device-layer-contract.md), with the board-file schema in `schemas/board/`)
 
 - The **device layer contract** as a spec, the **board-file JSON Schema** (mixer routes, LED frame format, button codes, mic channel map, forbidden paths) and a **device conformance suite** that runs against a fake board on a PC
 - The **portable device daemon** (Rust): ALSA in and out, tones, ducking, buttons and LED states driven only from the board file, local stop without the wake word, quiet-hours hook, native satellite protocol. **No per-device code paths**

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "board": "desktop",
+  "description": "A PC for development and tests: audio through ffmpeg, sox or arecord found on PATH, push-to-talk and stop from the terminal, LED states printed to the console.",
+  "hardware": { "arch": "x86_64", "ram_mb": 4096, "microphones": 1, "speakers": 1 },
+  "audio": {
+    "capture": { "kind": "default", "rate": 16000, "format": "S16_LE", "channels": 1, "mic_channels": [0] },
+    "playback": { "kind": "default", "rate": 16000, "format": "S16_LE", "channels": 1, "duck": { "kind": "software", "level_pct": 30 } }
+  },
+  "buttons": [
+    { "name": "action", "source": { "kind": "key", "key": "t" } },
+    { "name": "mute", "source": { "kind": "key", "key": "m" } },
+    { "name": "stop", "source": { "kind": "key", "key": "s" } }
+  ],
+  "actions": {
+    "action.press": "action",
+    "mute.press": "mute_toggle",
+    "stop.press": "stop"
+  },
+  "leds": { "driver": "console" },
+  "mute": { "kind": "software" },
+  "features": { "aec": false, "on_device_wake": true },
+  "update": { "mode": "manual" }
+}

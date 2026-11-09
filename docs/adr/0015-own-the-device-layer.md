@@ -99,9 +99,9 @@ What the daemon and image together provide on every supported board. Absent hard
 | Transport | Satellite protocol with token authentication (REQ-SAT-010) and TLS where the network is untrusted; reconnect with backoff (REQ-SAT-008) | Daemon |
 | Safety | Never log secrets or audio; forbidden-paths list from the board file (REQ-BRD-013) | Daemon + board file |
 
-#### Proposed spec text (to land with a spec amendment)
+#### Proposed spec text
 
-Spec files are being edited elsewhere in parallel, so the text lives here and moves into a new spec (working name `0006-device-layer-contract.md`) when this ADR is accepted. Area code `DEV`.
+**Moved and refined on 2026-11-09:** the contract is now [spec 0006](../specs/0006-device-layer-contract.md) (Draft), REQ-DEV-001..024, with the capability model, the minimum hardware profile and the board-file schema ([`schemas/board/`](../../schemas/board/README.md)). The list below is the original proposal, kept for the record; the spec governs where they differ.
 
 - REQ-DEV-001 (Must): the device daemon MUST run unchanged on every supported board; all per-device differences MUST be in the board file or the image recipe.
 - REQ-DEV-002 (Must): the daemon MUST implement the satellite protocol natively and declare every capability it lacks.

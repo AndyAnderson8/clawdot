@@ -10,6 +10,7 @@ Specs define **what the system does** and the contracts it must honour. Code imp
 | [0002](0002-resource-budget.md) | Resource budget | Draft |
 | [0003](0003-satellite-protocol.md) | Satellite protocol | Draft (skeleton) |
 | [0004](0004-esphome-satellite-client.md) | ESPHome voice-satellite client | Draft |
+| [0006](0006-device-layer-contract.md) | Device layer contract (portable daemon, board files, capabilities) | Draft |
 
 ## Lifecycle
 
@@ -54,6 +55,7 @@ Draft → In Review → Accepted → Implemented
 | `EXT` | Extensibility (packs, HTTP tools, sidecars) |
 | `BRD` | Board support (buttons, LED ring, mute, Wi-Fi, clock, audio device names) |
 | `ESP` | ESPHome native-API voice-satellite client |
+| `DEV` | Device layer contract: the portable device daemon, board files, capability model, conformance |
 
 ## Change process
 

@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AndyAnderson8/clawdot/schemas/board/board-1.schema.json",
+  "title": "ClawDot board file, schema version 1",
+  "description": "Data that describes one device to the portable device daemon (spec 0006). Data only: no commands assembled from text, no secrets. Every object is closed: an unknown key is an error that stops startup and names the key (REQ-DEV-008).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "board", "hardware", "audio", "update"],
+  "properties": {
+    "schema": { "const": 1, "description": "Board-file schema version. A breaking change makes a new file name (board-2.schema.json)." },
+    "board": { "$ref": "#/$defs/name", "description": "Board id, for example echo-dot2. Shown in status; not a path." },
+    "description": { "type": "string", "maxLength": 300 },
+    "hardware": {
+      "description": "The minimum-contract facts (spec 0006 section 6). A file that claims less than the minimum is invalid.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["arch", "ram_mb", "microphones", "speakers"],
+      "properties": {
+        "arch": { "enum": ["armv7", "aarch64", "x86_64", "riscv64"] },
+        "ram_mb": { "type": "integer", "minimum": 256, "maximum": 1048576, "description": "Total RAM. Below 256 the board is unsupported (REQ-DEV-012)." },
+        "microphones": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "speakers": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
+    "detect": {
+      "description": "Optional fingerprints for board = auto. Every listed file must match.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files"],
+      "properties": {
+        "files": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["path", "equals"],
+            "properties": {
+              "path": { "$ref": "#/$defs/path" },
+              "equals": { "type": "string", "maxLength": 128 }
+            }
+          }
+        }
+      }
+    },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capture", "playback"],
+      "properties": {
+        "capture": { "$ref": "#/$defs/capture" },
+        "playback": { "$ref": "#/$defs/playback" },
+        "mixer_routes": {
+          "description": "Controls set once at start, in order, before audio opens. Fixed text only.",
+          "type": "array", "maxItems": 64,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["control", "value"],
+            "properties": {
+              "control": { "$ref": "#/$defs/token" },
+              "value": { "$ref": "#/$defs/token" }
+            }
+          }
+        }
+      }
+    },
+    "buttons": {
+      "description": "Raw inputs mapped to logical button names. Absent or empty means no buttons.",
+      "type": "array", "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["name", "source"],
+        "properties": {
+          "name": { "enum": ["action", "volume_up", "volume_down", "mute", "stop"] },
+          "source": {
+            "oneOf": [
+              {
+                "type": "object", "additionalProperties": false, "required": ["kind", "node", "code"],
+                "properties": {
+                  "kind": { "const": "evdev" },
+                  "node": { "$ref": "#/$defs/path" },
+                  "code": { "type": "integer", "minimum": 1, "maximum": 767 }
+                }
+              },
+              {
+                "type": "object", "additionalProperties": false, "required": ["kind", "key"],
+                "properties": {
+                  "kind": { "const": "key" },
+                  "key": { "type": "string", "pattern": "^[a-z0-9]$", "description": "A key typed on the terminal (desktop board)." }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "gestures": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "long_press_ms": { "type": "integer", "minimum": 200, "maximum": 3000, "default": 700 },
+        "double_press_ms": { "type": "integer", "minimum": 100, "maximum": 1000, "default": 350 }
+      }
+    },
+    "actions": {
+      "description": "Maps <button>.<gesture> to a logical action. An unmapped gesture does nothing.",
+      "type": "object",
+      "propertyNames": { "pattern": "^(action|volume_up|volume_down|mute|stop)\\.(press|long_press|double_press)$" },
+      "additionalProperties": { "enum": ["volume_up", "volume_down", "mute_toggle", "action", "stop"] }
+    },
+    "leds": {
+      "description": "Absent means no LEDs: every state uses its documented equivalent (spec 0006 section 5).",
+      "type": "object", "additionalProperties": false, "required": ["driver"],
+      "properties": {
+        "driver": { "enum": ["console", "ledctrl", "frame", "sysfs"], "description": "How states are shown. console prints state changes (desktop and test boards); the others are device drivers." },
+        "count": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "brightness_pct": { "type": "integer", "minimum": 0, "maximum": 100, "default": 100 },
+        "quiet_brightness_pct": { "type": "integer", "minimum": 0, "maximum": 100, "default": 10, "description": "Brightness during quiet hours (REQ-DEV-006)." },
+        "states": {
+          "description": "Logical state to device pattern name. A state with no entry is a no-op, never an error. The one placeholder allowed is {nn}, replaced by a two-digit integer.",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/led_state" },
+          "additionalProperties": { "type": "string", "pattern": "^[A-Za-z0-9_.-]*(\\{nn\\})?[A-Za-z0-9_.-]*$", "maxLength": 64 }
+        },
+        "frame": {
+          "description": "Direct frame writes (route B). Unverified on the Dot until bring-up.",
+          "type": "object", "additionalProperties": false, "required": ["path", "encoding"],
+          "properties": {
+            "path": { "$ref": "#/$defs/path" },
+            "encoding": { "enum": ["rgb444_text", "rgb888_text", "rgb888_binary"] }
+          }
+        }
+      }
+    },
+    "mute": {
+      "description": "Absent is the same as kind none: the daemon still offers software mute through the protocol (REQ-DEV-015).",
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["none", "software", "hardware"], "description": "hardware only when the microphone path is proved cut. Never claimed otherwise." },
+        "state_file": { "$ref": "#/$defs/path" }
+      }
+    },
+    "wifi": {
+      "type": "object", "additionalProperties": false, "required": ["interface"],
+      "properties": {
+        "interface": { "$ref": "#/$defs/token" },
+        "control_dir": { "$ref": "#/$defs/path" }
+      }
+    },
+    "clock": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "floor": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "description": "A date before which the clock is treated as unset." },
+        "prefer_verified_by": { "enum": ["none", "https-date"], "default": "none" }
+      }
+    },
+    "features": {
+      "description": "What this board can afford or carry beyond the required set. Absent means false.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "aec": { "type": "boolean", "description": "Software echo cancellation fits the CPU." },
+        "on_device_wake": { "type": "boolean", "description": "A wake engine fits the CPU. Otherwise wake detection is core-side (REQ-SAT-013)." },
+        "bluetooth_sink": { "type": "boolean" },
+        "bluetooth_source": { "type": "boolean" },
+        "spotify_connect": { "type": "boolean", "description": "The board may offer a Connect receiver. It is still off until the user enables it." }
+      }
+    },
+    "update": {
+      "type": "object", "additionalProperties": false, "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["ab", "manual"], "description": "ab: signed A/B with rollback (REQ-DEV-007). manual: declared; the user updates by hand." }
+      }
+    },
+    "takeover": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "stop": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/token" }, "description": "Service names to stop while the daemon owns the audio. Restored on a clean exit." },
+        "forbidden": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/path" }, "description": "Paths the daemon must never read or write (REQ-DEV-019)." }
+      }
+    }
+  },
+  "$defs": {
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,31}$" },
+    "token": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.:+/@=,-]{0,127}$", "description": "Fixed text: letters, digits, space and . _ : + / @ = , -. No quotes and no shell characters." },
+    "arg": { "type": "string", "pattern": "^[A-Za-z0-9 _.:+/@=,-]{1,128}$", "description": "One program argument: fixed text as for a token, but it may start with - or /. No quotes and no shell characters." },
+    "path": { "type": "string", "pattern": "^/[A-Za-z0-9_.:@+/=-]{1,255}$", "description": "An absolute path without spaces or shell characters; no .. segment (checked by the loader)." },
+    "led_state": { "enum": ["idle", "wake", "listening", "thinking", "speaking", "muted", "error", "offline", "timer", "alarm", "inbox", "volume", "updating", "setup"] },
+    "pcm_format": { "enum": ["S16_LE", "S24_3LE", "S32_LE"] },
+    "capture": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "rate", "format", "channels", "mic_channels"],
+      "properties": {
+        "kind": { "enum": ["default", "command", "alsa"], "description": "default: find a known program on PATH. command: run the argv below. alsa: open the ALSA device directly (reserved; the first daemon reports it as not available)." },
+        "device": { "$ref": "#/$defs/token" },
+        "command": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/arg" }, "description": "Program and arguments, no shell, no placeholders. The program writes raw PCM to stdout." },
+        "rate": { "enum": [16000, 32000, 44100, 48000] },
+        "format": { "$ref": "#/$defs/pcm_format" },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "mic_channels": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 15 }, "description": "Zero-based capture channels that are microphones. More than one is mixed down." },
+        "reference_channels": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 15 }, "description": "Zero-based capture channels that carry the playback reference (for AEC). May be empty." }
+      }
+    },
+    "playback": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "rate", "format", "channels"],
+      "properties": {
+        "kind": { "enum": ["default", "command", "alsa"] },
+        "device": { "$ref": "#/$defs/token" },
+        "command": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/arg" } },
+        "rate": { "enum": [16000, 32000, 44100, 48000] },
+        "format": { "$ref": "#/$defs/pcm_format" },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "volume_control": { "$ref": "#/$defs/token" },
+        "duck": {
+          "type": "object", "additionalProperties": false, "required": ["kind"],
+          "properties": {
+            "kind": { "enum": ["none", "software", "mixer"], "description": "software scales the daemon's own audio only. mixer lowers the whole output through volume_control." },
+            "level_pct": { "type": "integer", "minimum": 0, "maximum": 100, "default": 30 }
+          }
+        }
+      }
+    }
+  }
+}
