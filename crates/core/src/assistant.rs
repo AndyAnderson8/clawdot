@@ -211,6 +211,19 @@ impl std::fmt::Debug for Assistant {
     }
 }
 
+/// What the speaker says instead of answering from a clock that was never set (REQ-TMR-009).
+pub const CLOCK_UNSET: &str =
+    "My clock isn't set yet, so I can't do that. It needs to get the time from the network.";
+
+/// Fast-path intents whose answer or effect depends on the wall clock being right.
+fn needs_valid_clock(intent: &str) -> bool {
+    matches!(
+        intent,
+        "time.query" | "date.query" | "timer.set" | "timer.query"
+    ) || intent.starts_with("alarm.set")
+        || intent.starts_with("reminder.set")
+}
+
 impl Assistant {
     /// Build a dispatcher.
     #[must_use]
@@ -340,6 +353,9 @@ impl Assistant {
     pub fn handle(&mut self, utterance: &str) -> Option<Outcome> {
         let m = self.matcher.matches(utterance)?;
         let now = self.clock.now();
+        if !self.clock.wall_clock_valid() && needs_valid_clock(&m.intent) {
+            return Outcome::say(CLOCK_UNSET);
+        }
         match m.intent.as_str() {
             "stop" => {
                 self.player.stop();
@@ -704,6 +720,34 @@ mod tests {
             say(&mut a, "what's the date"),
             "Today is Saturday, November 7th."
         );
+    }
+
+    #[test]
+    fn an_unset_clock_is_admitted_not_read_out_as_the_time() {
+        // REQ-TMR-009: a Dot with no RTC and no network boots at 2010-01-01.
+        let (mut a, clock, _) = setup(false);
+        clock.0.store(utc(2010, 1, 1, 0, 3), Ordering::Relaxed);
+        for u in [
+            "what time is it",
+            "what's the date",
+            "set a timer for ten minutes",
+            "set an alarm for 7 am",
+            "set an alarm for 7 am every day",
+            "remind me in 5 minutes to stretch",
+            "remind me to call mum at 5 pm",
+            "how much time is left",
+        ] {
+            assert_eq!(say(&mut a, u), CLOCK_UNSET, "{u}");
+        }
+        assert!(a.scheduled().is_empty(), "nothing may be scheduled");
+        // Commands that do not depend on the time still work.
+        assert_eq!(
+            say(&mut a, "cancel the timer"),
+            "There are no timers to cancel."
+        );
+        // Once the clock is set, the same questions are answered.
+        clock.0.store(utc(2026, 11, 7, 14, 42), Ordering::Relaxed);
+        assert_eq!(say(&mut a, "what time is it"), "It's 2:42 PM.");
     }
 
     #[test]

@@ -358,6 +358,7 @@ impl Brain {
                 "max_requests_per_day": self.usage.limits().max_requests_per_day,
                 "spend_today": self.usage.spend_today(),
             },
+            "clock_valid": self.clock.wall_clock_valid(),
             "satellites": satellites,
             "tools": tools,
             "stations": stations,
@@ -545,6 +546,11 @@ async fn main() -> ExitCode {
     };
 
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
+    if !clock.wall_clock_valid() {
+        eprintln!(
+            "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and              reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
+        );
+    }
     let core = match Core::open(
         clock.clone(),
         Adapters::builtin(),
