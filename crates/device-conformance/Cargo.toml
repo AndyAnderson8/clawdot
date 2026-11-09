@@ -1,0 +1,18 @@
+[package]
+name = "clawdot-device-conformance"
+description = "ClawDot device conformance suite: runs the device layer contract (spec 0006) against any board with a fake core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+clawdot-device = { path = "../device" }
+clawdot-protocol = { path = "../protocol" }
+clawdot-satellite = { path = "../satellite" }
+serde_json = "1"
