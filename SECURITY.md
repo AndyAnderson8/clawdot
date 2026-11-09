@@ -30,5 +30,7 @@ Out of scope: third-party provider services, physical attacks, and deployments e
 ## Hardening notes for users
 
 - Keep the device on a trusted LAN; use a VPN/tunnel for remote agents.
-- Use a unique token per inbox endpoint and revoke unused ones.
+- Choose the admin password at first run (or deliberately leave the page open on a private network; it shows a banner). Finish setup right after the first start, before others on the network can reach it.
+- Use a unique token per inbox endpoint and revoke unused ones. Endpoint tokens are required even when the page is open.
+- Locked out? Run `clawdot --reset-admin` on the device with the server stopped.
 - Run agents under their own permission policies. Replies spoken to the speaker may influence them.

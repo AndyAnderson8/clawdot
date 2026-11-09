@@ -1,7 +1,12 @@
-//! The embedded web UI and its JSON API (REQ-CFG-001, 003, 004, 005, 006, 008).
+//! The embedded web UI and its JSON API (REQ-CFG-001, 003..006, 008, 018..024).
 //!
 //! * `GET /` and `GET /ui`: one static page. No external assets, no frameworks, works on a phone. It holds no
 //!   data, so it needs no credentials; everything it shows comes from the API below.
+//! * `GET  /api/auth`                          mode (setup, password, open), whether a setup code is needed (no sign-in)
+//! * `POST /api/setup`                         first run: `{"mode":"password","password":..}` or `{"mode":"open"}`, plus `"code"` when asked
+//! * `POST /api/login`                         `{"password":..}`; returns a session token
+//! * `POST /api/logout`                        ends the session
+//! * `POST /api/admin/password`                `{"password":..}`; sets a new password
 //! * `GET  /api/overview`                      endpoints and recent inbox events
 //! * `GET  /api/status`                        what the assistant is doing (model, satellites, tools, usage, schedule)
 //! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
@@ -9,12 +14,14 @@
 //! * `POST /api/endpoints/{name}/rotate`       a new token, returned once
 //! * `DELETE /api/endpoints/{name}`
 //!
-//! The API needs the administrator token as `Authorization: Bearer ...`. Failed attempts share the
-//! authentication rate limit. Secrets are write-only: tokens are stored hashed and shown only when created.
+//! The rest needs a session token as `Authorization: Bearer ...` (password mode) or a private-network peer
+//! (open mode). Failed attempts, sign-ins, and setup tries share the
+//! authentication rate limit. Secrets are write-only: tokens and the password are stored hashed.
 //! Text from agents is untrusted: the page renders it with `textContent` only, and the response carries a
 //! strict Content-Security-Policy as a second line of defence.
 
-use crate::app::{Core, HookError};
+use crate::admin::{self, AdminError};
+use crate::app::Core;
 use crate::inbox::endpoint::EndpointError;
 use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
 use hyper::body::{Bytes, Incoming};
@@ -23,6 +30,8 @@ use hyper::{Method, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::convert::Infallible;
+use std::net::IpAddr;
+use std::sync::Arc;
 
 type Resp = Response<BoxBody<Bytes, Infallible>>;
 
@@ -78,21 +87,31 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
 }
 
-fn auth_error(e: &HookError) -> Resp {
+fn admin_error(e: AdminError) -> Resp {
+    let status = match e {
+        AdminError::Unauthorized => StatusCode::UNAUTHORIZED,
+        AdminError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        AdminError::SetupRequired
+        | AdminError::NotPrivate
+        | AdminError::OpenRefused
+        | AdminError::BadCode => StatusCode::FORBIDDEN,
+        AdminError::AlreadySetUp => StatusCode::CONFLICT,
+        AdminError::BadPassword => StatusCode::BAD_REQUEST,
+        AdminError::Storage | AdminError::NoRandomness => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let mut r = error(status, &e.to_string());
     match e {
-        HookError::RateLimited => {
-            let mut r = error(StatusCode::TOO_MANY_REQUESTS, "too many attempts");
+        AdminError::RateLimited => {
             r.headers_mut()
                 .insert(hyper::header::RETRY_AFTER, HeaderValue::from_static("5"));
-            r
         }
-        _ => {
-            let mut r = error(StatusCode::UNAUTHORIZED, "administrator token required");
+        AdminError::Unauthorized => {
             r.headers_mut()
                 .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-            r
         }
+        _ => {}
     }
+    r
 }
 
 fn endpoint_error(e: &EndpointError) -> Resp {
@@ -158,10 +177,11 @@ struct NewEndpoint {
 
 /// Handle `/`, `/ui`, and `/api/...`. Returns `None` for any other path so the caller can continue routing.
 pub async fn handle(
-    core: &Core,
+    core: &Arc<Core>,
     method: &Method,
     segs: &[&str],
     headers: &HeaderMap,
+    peer: IpAddr,
     body: Incoming,
 ) -> Option<Resp> {
     let is_page = matches!(segs, [""] | ["ui"]);
@@ -174,6 +194,23 @@ pub async fn handle(
     let ["api", rest @ ..] = segs else {
         return None;
     };
+    // The few calls that work without being signed in: what to show, setup, and sign-in.
+    match (method, rest) {
+        (&Method::GET, ["auth"]) => {
+            let mut state = core.admin_state();
+            state["peer_private"] = json!(admin::is_private(peer));
+            return Some(json_reply(StatusCode::OK, &state));
+        }
+        (&Method::POST, ["setup"]) => return Some(setup(core, peer, body).await),
+        (&Method::POST, ["login"]) => return Some(login(core, body).await),
+        (&Method::POST, ["logout"]) => {
+            if let Some(t) = bearer(headers) {
+                core.admin_logout(t);
+            }
+            return Some(json_reply(StatusCode::OK, &json!({ "signed_out": true })));
+        }
+        _ => {}
+    }
     let known = matches!(
         rest,
         ["overview"]
@@ -182,16 +219,14 @@ pub async fn handle(
             | ["endpoints"]
             | ["endpoints", _]
             | ["endpoints", _, "rotate"]
+            | ["admin", "password"]
     );
     if !known {
         return Some(error(StatusCode::NOT_FOUND, "not found"));
     }
     // Authenticate before reading any body.
-    let Some(token) = bearer(headers) else {
-        return Some(auth_error(&HookError::Unauthorized));
-    };
-    if let Err(e) = core.check_admin(token) {
-        return Some(auth_error(&e));
+    if let Err(e) = core.check_admin(bearer(headers), peer) {
+        return Some(admin_error(e));
     }
     Some(match (method, rest) {
         (&Method::GET, ["overview"]) => overview(core),
@@ -209,8 +244,123 @@ pub async fn handle(
             Ok(()) => json_reply(StatusCode::OK, &json!({ "deleted": name })),
             Err(e) => endpoint_error(&e),
         },
+        (&Method::POST, ["admin", "password"]) => change_password(core, body).await,
         _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     })
+}
+
+async fn read_json<T: serde::de::DeserializeOwned>(
+    body: Incoming,
+) -> Result<T, (StatusCode, &'static str)> {
+    let bytes = match Limited::new(body, MAX_BODY).collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => return Err((StatusCode::PAYLOAD_TOO_LARGE, "body too large")),
+    };
+    serde_json::from_slice(&bytes).map_err(|_| (StatusCode::BAD_REQUEST, "bad request body"))
+}
+
+/// Hashing is deliberately slow; keep it off the async thread.
+async fn hash_in_background(password: String) -> Result<String, AdminError> {
+    tokio::task::spawn_blocking(move || admin::hash_password(&password))
+        .await
+        .unwrap_or(Err(AdminError::NoRandomness))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Setup {
+    mode: String,
+    password: Option<String>,
+    code: Option<String>,
+}
+
+/// First-run setup (REQ-CFG-018): a password or open mode, from a private address only.
+async fn setup(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
+    let req: Setup = match read_json(body).await {
+        Ok(r) => r,
+        Err((s, m)) => return error(s, m),
+    };
+    let code = req.code.as_deref();
+    // Refuse strangers and wrong codes before any expensive work.
+    if let Err(e) = core.admin_check_setup(peer, code) {
+        return admin_error(e);
+    }
+    match req.mode.as_str() {
+        "open" => match core.admin_setup_open(peer, code) {
+            Ok(()) => json_reply(StatusCode::OK, &json!({ "mode": "open" })),
+            Err(e) => admin_error(e),
+        },
+        "password" => {
+            let Some(pw) = req.password.filter(|p| admin::password_ok(p)) else {
+                return admin_error(AdminError::BadPassword);
+            };
+            let hash = match hash_in_background(pw).await {
+                Ok(h) => h,
+                Err(e) => return admin_error(e),
+            };
+            match core.admin_setup_password(peer, code, hash) {
+                Ok(token) => json_reply(
+                    StatusCode::OK,
+                    &json!({ "mode": "password", "token": token }),
+                ),
+                Err(e) => admin_error(e),
+            }
+        }
+        _ => error(StatusCode::BAD_REQUEST, "mode must be password or open"),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Login {
+    password: String,
+}
+
+/// Sign in with the password (or, after an upgrade, the old administrator token); returns a session token.
+async fn login(core: &Arc<Core>, body: Incoming) -> Resp {
+    let req: Login = match read_json(body).await {
+        Ok(r) => r,
+        Err((s, m)) => return error(s, m),
+    };
+    if core.admin_mode() == admin::Mode::Open {
+        return error(StatusCode::CONFLICT, "no password is set");
+    }
+    let stored = match core.admin_login_begin() {
+        Ok(h) => h,
+        Err(e) => return admin_error(e),
+    };
+    let ok = tokio::task::spawn_blocking(move || admin::verify_password(&req.password, &stored))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        return admin_error(AdminError::Unauthorized);
+    }
+    match core.admin_login_finish() {
+        Ok(token) => json_reply(StatusCode::OK, &json!({ "token": token })),
+        Err(e) => admin_error(e),
+    }
+}
+
+/// Set a new administrator password (REQ-CFG-024). The caller is already authenticated.
+async fn change_password(core: &Arc<Core>, body: Incoming) -> Resp {
+    let req: Login = match read_json(body).await {
+        Ok(r) => r,
+        Err((s, m)) => return error(s, m),
+    };
+    if !admin::password_ok(&req.password) {
+        return admin_error(AdminError::BadPassword);
+    }
+    let hash = match hash_in_background(req.password).await {
+        Ok(h) => h,
+        Err(e) => return admin_error(e),
+    };
+    match core.admin_set_password(hash) {
+        Ok(token) => json_reply(
+            StatusCode::OK,
+            &json!({ "mode": "password", "token": token }),
+        ),
+        Err(e) => admin_error(e),
+    }
 }
 
 #[derive(Deserialize)]
