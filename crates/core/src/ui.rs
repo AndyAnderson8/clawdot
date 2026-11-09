@@ -13,7 +13,7 @@
 //! * `GET  /api/tools`, `/api/settings`, `/api/about`   what the Tools, Connections, Settings tabs show
 //! * `PUT  /api/settings`                      body `{key: value|null, ..}`; saves some settings (admin only)
 //! * `GET  /api/audit`                         what the assistant did, newest first (filters and paging in `audit`)
-//! * `GET  /api/notes`, `DELETE /api/notes[/{id}]`   the notes the user asked to keep (REQ-CFG-044)
+//! * `GET  /api/notes`, `POST /api/notes`, `DELETE /api/notes[/{id}]`   the notes the user asked to keep (REQ-CFG-044, 061)
 //! * `GET  /api/status`                      what the assistant is doing (model, satellites, tools, usage, schedule)
 //! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
 //! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
@@ -362,6 +362,7 @@ pub async fn handle(
         },
         (&Method::GET, ["audit"]) => audit(core, query),
         (&Method::GET, ["notes"]) => notes_list(core),
+        (&Method::POST, ["notes"]) => notes_add(core, body).await,
         (&Method::DELETE, ["notes"]) => notes_forget(core, None),
         (&Method::DELETE, ["notes", id]) => match id.parse::<u64>() {
             Ok(id) => notes_forget(core, Some(id)),
@@ -450,6 +451,35 @@ fn notes_list(core: &Core) -> Resp {
     )
 }
 
+/// `POST /api/notes` with `{"text":..}`: the administrator writes a note. It goes through the same store checks
+/// as a spoken "remember that" (REQ-CFG-061), and the answer is the new list.
+async fn notes_add(core: &Core, body: Incoming) -> Resp {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NewNote {
+        text: String,
+    }
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+    };
+    let req = match read_json::<NewNote>(body).await {
+        Ok(r) => r,
+        Err((s, _)) => return error(s, "expected {\"text\":..} with the note to keep"),
+    };
+    match store.add(&req.text, core.now()) {
+        Ok(_) => notes_list(core),
+        Err(e) => {
+            use crate::notes::NoteError::{Duplicate, Full, Off, Storage};
+            let status = match e {
+                Off | Duplicate | Full => StatusCode::CONFLICT,
+                Storage => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            error(status, &e.plain())
+        }
+    }
+}
+
 /// `DELETE /api/notes/{id}` forgets one note, `DELETE /api/notes` forgets all of them.
 fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     let Some(store) = core.notes() else {
@@ -462,7 +492,7 @@ fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     match done {
         Ok(n) => json_reply(StatusCode::OK, &json!({ "forgotten": n })),
         Err(crate::notes::NoteError::Missing) => error(StatusCode::NOT_FOUND, "no such note"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.spoken()),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.plain()),
     }
 }
 
