@@ -103,3 +103,12 @@ Resource picture on the device: the stock stack leaves about 290 MB free and Cla
 - Resolve the unknowns in [R-07](../research/07-echo-dot-gen2-hardware.md) §11 (buttons with real presses, `frame` format, audio takeover, autostart) before the `board-dot2` milestone.
 - Update the satellite-porting guide when the first board lands.
 - Roadmap items 1 and 2 under "Beyond v1.0" carry the implementation.
+
+## Amendment 2026-11-09: Dot board is data only; takeover plan superseded
+
+The text above is kept as written. Since it was written, [R-08](../research/08-existing-echo-dot-projects.md) found two active projects (TECHO5 Dot and EchoMuse) that already solve Dot audio, LED ring, buttons, Wi-Fi and clock, and recommended against repeating that work on Fire OS. Consequences for this ADR:
+
+- **The Dot board is data only until the base-image trial (roadmap B0) is done.** `boards/echo-dot2.json` records names, key codes, the LED `frame` format and the `forbidden` paths (including `power_button_state` and `calibrated_lux`). The `board-dot2` code module (button readers, `ledctrl` route A or B, Wi-Fi and clock control) is not built until B0 shows the base cannot supply those features.
+- **The audio and LED takeover plan is superseded by R-08.** The `Takeover` row of the interface table, the Dot audio takeover, the LED routes and the staged Alexa removal describe the old plan. Alexa is removed by installing the base image (B0), with each device write gated on the maintainer's go.
+- The `Board` trait, `NullBoard`, the desktop board, gesture and mapping code, JSON data files and auto-detection (roadmap B1) are unchanged. A board may later be realised remotely through ESPHome entities; the REQ-BRD wording for that is a follow-up (R-08 section 10).
+- Status stays Proposed; B1 still moves it to Accepted.
