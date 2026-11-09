@@ -136,6 +136,32 @@ impl Peer {
     }
 }
 
+impl Drop for Peer {
+    /// Hang up politely. Closing a TCP socket that still has unread input makes the OS send RST instead of FIN,
+    /// and the other side's pending read then fails with `ECONNRESET` rather than seeing a clean end. Whether
+    /// unread input exists depends on thread timing (e.g. a satellite's `wake` sent just after `welcome`), so a
+    /// test that merely finishes a conversation would fail at random. Send FIN first, then drain until the other
+    /// side closes (bounded), so the close is always orderly. Tests wanting an abrupt hang-up send malformed
+    /// bytes instead.
+    fn drop(&mut self) {
+        let _ = self.sock.shutdown(std::net::Shutdown::Write);
+        let end = Instant::now() + Duration::from_millis(500);
+        let mut buf = [0u8; 8192];
+        while Instant::now() < end {
+            match self.sock.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 /// The satellite's side of a conversation, connected to a core.
 #[derive(Debug)]
 pub struct FakeSatellite;
