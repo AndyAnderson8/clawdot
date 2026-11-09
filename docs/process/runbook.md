@@ -60,7 +60,9 @@ scripts/check.sh --fast           # the quicker subset that the commit hook runs
 scripts/land.sh feature/timer-tool
 ```
 
-What it does: runs all gates on your branch, creates a **merge commit** on `dev`, and (once a remote exists) pushes that exact commit to a CI candidate branch, waits for CI to pass, then publishes it. Your branch is deleted afterward.
+What it does: runs all gates on your branch, creates a **merge commit** on `dev`, and (once a remote exists) pushes that exact commit to a CI candidate branch, waits for CI to pass, then publishes it. After the push, it fetches and checks that `origin/dev` contains the merge commit; only then does it print `done` and delete your branch.
+
+Exit codes: `0` landed and verified, `1` other error, `3` `dev` held by another worktree, `4` merge exists only in local `dev`, `5` CI or publishing failed. `--wait SECONDS` (default 0) retries while another worktree holds `dev`.
 
 If it fails:
 
@@ -69,7 +71,9 @@ If it fails:
 | `does not contain dev` | `git switch <branch> && git merge dev`, then land again |
 | `working tree is not clean` | commit or stash your changes |
 | a gate fails | fix it on your branch, commit, land again |
-| `CI failed ... dev was reset` | open the failing CI run, fix on your branch, land again. `dev` is unchanged. |
+| `CI or publishing failed; dev was reset` (exit 5) | open the failing CI run, fix on your branch, land again. `dev` is unchanged. If it says `dev` could not be reset, run the `git reset --hard` it prints. |
+| `NOT LANDED ... exists only in your LOCAL dev` (exit 4) | the push to `origin/dev` was rejected or not confirmed. Your branch and the CI candidate ref are kept. Read the server message, restore local `dev` with the `git switch dev && git reset --hard <sha>` it prints, then land again. |
+| `dev is checked out in another worktree` (exit 3) | only one worktree can hold `dev`. Ask the holder to release it (`git -C <path> switch --detach`), or run `scripts/land.sh <branch> --wait 300` to retry for up to 300 seconds. |
 | `gh CLI is required` | install and sign in to GitHub's CLI (`gh auth login`) |
 
 ## 6. The tiny-change exception
