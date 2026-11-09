@@ -26,6 +26,9 @@ pub trait ToolHost {
     fn tool_specs(&self) -> Vec<ToolSpec>;
     /// Whether the user must confirm before this tool runs (REQ-AST-008).
     fn needs_confirmation(&self, name: &str) -> bool;
+    /// Called once at the start of every user turn with the user's own words, so a tool can tell
+    /// which turn it is running in and what the user actually said (REQ-AST-015).
+    fn begin_turn(&mut self, _user_text: &str) {}
     /// Run a tool. `Err` text is shown to the model, not hidden.
     ///
     /// # Errors
@@ -186,6 +189,7 @@ pub async fn run_turn<B: ChatBackend, H: ToolHost>(
     user_text: &str,
 ) -> TurnResult {
     conv.expire_if_idle(now);
+    host.begin_turn(user_text);
     conv.history.push(Message::user(user_text));
     let mut result = TurnResult {
         speech: String::new(),
@@ -637,5 +641,31 @@ mod tests {
             .content
             .clone();
         assert!(tool.len() < 2_100 && tool.ends_with("(cut)"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_host_is_told_the_users_words_at_the_start_of_every_turn() {
+        #[derive(Default)]
+        struct Spy(Vec<String>);
+        impl ToolHost for Spy {
+            fn tool_specs(&self) -> Vec<ToolSpec> {
+                Vec::new()
+            }
+            fn needs_confirmation(&self, _: &str) -> bool {
+                false
+            }
+            fn begin_turn(&mut self, user_text: &str) {
+                self.0.push(user_text.to_owned());
+            }
+            async fn call_tool(&mut self, _: &str, _: &Value) -> Result<String, String> {
+                Ok(String::new())
+            }
+        }
+        let b = Script::new(vec![text("a"), text("b")]);
+        let (mut c, mut u) = (conv(), UsageTracker::new(UsageLimits::default()));
+        let mut spy = Spy::default();
+        run_turn(&b, &mut spy, &mut c, &cfg(), &mut u, 1, 1000, "one").await;
+        run_turn(&b, &mut spy, &mut c, &cfg(), &mut u, 1, 1001, "two").await;
+        assert_eq!(spy.0, ["one", "two"]);
     }
 }
