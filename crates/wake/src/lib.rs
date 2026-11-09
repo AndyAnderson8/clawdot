@@ -14,9 +14,12 @@
 
 pub mod error;
 pub mod flat;
+pub mod frontend;
 pub mod model;
+pub mod sha256;
 
 pub use error::Error;
+pub use frontend::{Frontend, NUM_CHANNELS};
 pub use model::Model;
 
 /// Sample rate the models are trained for.
