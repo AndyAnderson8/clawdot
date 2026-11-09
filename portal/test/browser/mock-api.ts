@@ -13,15 +13,18 @@ export const PASSWORD = "correct horse battery";
 export interface Logged {
   method: string;
   path: string;
-  body: any;
+  body: unknown;
   auth: string;
 }
+// The fake device keeps whatever JSON the page sends, so its bodies and state are deliberately untyped. eslint.config.mjs
+// relaxes the no-explicit-any and no-unsafe-* rules for this one file.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = Record<string, any>;
 
 export interface Mock {
   url: string;
   log: Logged[];
-  state: Json;
+  state: Record<string, unknown>;
   reset(mode: "setup" | "password" | "open"): void;
   close(): void;
 }
@@ -155,7 +158,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
     close() {
       server.close();
     },
-  } as Mock;
+  };
 
   const ext = () => ({ tools: st["tools"], mcp: st["mcp"], skills: st["skills"], problems: st["problems"] });
   const sched = () => ({ now: now(), clock_valid: true, items: st["schedule"] });

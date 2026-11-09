@@ -21,15 +21,29 @@ export function findChrome(): string | null {
 }
 
 type Params = Record<string, unknown>;
-export interface CdpEvent {
-  method: string;
-  params: any;
+interface CdpException {
+  text?: string;
+  exception?: { description?: string };
+}
+/** The parts of a DevTools protocol message (an answer or an event) that this driver reads. */
+export interface CdpMessage {
+  id?: number;
+  error?: { message?: string };
+  result?: { exceptionDetails?: CdpException; result?: { value?: unknown }; data?: string };
+  method?: string;
+  params?: {
+    type?: string;
+    request?: { url: string };
+    exceptionDetails?: CdpException;
+    args?: { value?: unknown; description?: string }[];
+    entry?: { level: string; text: string; url?: string };
+  };
 }
 
 export class Browser {
   private ws!: WebSocket;
   private seq = 0;
-  private pending = new Map<number, (m: any) => void>();
+  private pending = new Map<number, (m: CdpMessage) => void>();
   private proc!: ChildProcess;
   private dir = "";
   /** Every request the page made, every console error, and every uncaught exception. */
@@ -69,9 +83,12 @@ export class Browser {
     let page: { webSocketDebuggerUrl: string } | undefined;
     for (let i = 0; i < 50 && !page; i++) {
       try {
-        page = ((await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as any[]).find(
-          (t) => t.type === "page",
-        );
+        page = (
+          (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as {
+            type: string;
+            webSocketDebuggerUrl: string;
+          }[]
+        ).find((t) => t.type === "page");
       } catch {
         /* retry */
       }
@@ -86,7 +103,7 @@ export class Browser {
       b.ws.onopen = () => r();
       b.ws.onerror = () => j(new Error("devtools socket"));
     });
-    b.ws.onmessage = (e) => b.onMessage(JSON.parse(String(e.data)));
+    b.ws.onmessage = (e) => b.onMessage(JSON.parse(String(e.data)) as CdpMessage);
     await b.send("Page.enable");
     await b.send("Runtime.enable");
     await b.send("Network.enable");
@@ -94,31 +111,31 @@ export class Browser {
     return b;
   }
 
-  private onMessage(m: any) {
-    if (m.id && this.pending.has(m.id)) {
-      this.pending.get(m.id)!(m);
+  private onMessage(m: CdpMessage): void {
+    const waiting = m.id ? this.pending.get(m.id) : undefined;
+    if (m.id && waiting) {
+      waiting(m);
       this.pending.delete(m.id);
       return;
     }
-    const e = m as CdpEvent;
-    if (e.method === "Page.loadEventFired") this.onLoad();
-    if (e.method === "Network.requestWillBeSent") this.requests.push(e.params.request.url);
-    else if (e.method === "Runtime.exceptionThrown")
+    const p = m.params ?? {};
+    if (m.method === "Page.loadEventFired") this.onLoad();
+    if (m.method === "Network.requestWillBeSent") this.requests.push(p.request?.url ?? "");
+    else if (m.method === "Runtime.exceptionThrown")
+      this.problems.push("exception: " + (p.exceptionDetails?.exception?.description ?? p.exceptionDetails?.text));
+    else if (m.method === "Runtime.consoleAPICalled" && p.type === "error")
       this.problems.push(
-        "exception: " + (e.params.exceptionDetails.exception?.description ?? e.params.exceptionDetails.text),
+        "console.error: " +
+          (p.args ?? [])
+            .map((a) => (typeof a.value === "string" ? a.value : (a.description ?? JSON.stringify(a.value))))
+            .join(" "),
       );
-    else if (e.method === "Runtime.consoleAPICalled" && e.params.type === "error")
-      this.problems.push("console.error: " + e.params.args.map((a: any) => a.value ?? a.description).join(" "));
     // A 4xx answer is a normal part of some flows (wrong password, expired session); the page handles those.
-    else if (
-      e.method === "Log.entryAdded" &&
-      e.params.entry.level === "error" &&
-      !/status of 4\d\d/.test(e.params.entry.text)
-    )
-      this.problems.push("log: " + e.params.entry.text + " " + (e.params.entry.url ?? ""));
+    else if (m.method === "Log.entryAdded" && p.entry?.level === "error" && !/status of 4\d\d/.test(p.entry.text))
+      this.problems.push("log: " + p.entry.text + " " + (p.entry.url ?? ""));
   }
 
-  send(method: string, params: Params = {}): Promise<any> {
+  send(method: string, params: Params = {}): Promise<CdpMessage> {
     return new Promise((resolve) => {
       const id = ++this.seq;
       this.pending.set(id, resolve);
@@ -139,11 +156,12 @@ export class Browser {
   /** Evaluate an expression in the page; promises are awaited. */
   async ev<T = unknown>(expr: string): Promise<T> {
     const r = await this.send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true });
-    if (r.error || r.result?.exceptionDetails)
+    const failure = r.result?.exceptionDetails;
+    if (r.error || failure)
       throw new Error(
-        `evaluating ${expr.slice(0, 80)}: ${r.error?.message ?? r.result.exceptionDetails.exception?.description ?? r.result.exceptionDetails.text}`,
+        `evaluating ${expr.slice(0, 80)}: ${r.error?.message ?? failure?.exception?.description ?? failure?.text}`,
       );
-    return r.result.result.value as T;
+    return r.result?.result?.value as T;
   }
 
   async until(expr: string, what: string, ms = 4000): Promise<void> {
@@ -171,7 +189,7 @@ export class Browser {
     });
     await sleep(120);
     const r = await this.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: !!o.full });
-    writeFileSync(file, Buffer.from(r.result.data, "base64"));
+    writeFileSync(file, Buffer.from(r.result?.data ?? "", "base64"));
   }
 
   close() {

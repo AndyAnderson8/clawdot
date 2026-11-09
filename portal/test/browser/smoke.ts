@@ -38,7 +38,7 @@ const HELPERS = `(() => {
 })()`;
 
 const results: { name: string; ok: boolean; why?: string }[] = [];
-async function step(name: string, fn: () => Promise<void>) {
+async function step(name: string, fn: () => void | Promise<void>): Promise<void> {
   try {
     await fn();
     results.push({ name, ok: true });
@@ -152,7 +152,7 @@ await step("an expired session sends you back to sign in", async () => {
   await T(`set('#pw', ${JSON.stringify(PASSWORD)})`);
   await T(`submit('#loginform')`);
   await b.until(`!!T.q('#band')`, "portal");
-  (mock.state as any).session = "other"; // the device forgot us
+  mock.state["session"] = "other"; // the device forgot us
   await b.ev(`location.hash = '#/reminders'`); // the tab's first fetch is refused
   await b.until(`!!T.q('#login')`, "sign-in screen after a 401");
   await eq(`T.text('#msg')`, "Please sign in again.", "explanation");
@@ -234,8 +234,7 @@ await step("Reminders: list, edit, cancel, add timer and alarm, validation", asy
   await b.until(`T.rows()[0].startsWith('tea')`, "edit saved");
   const put = mock.log.find((l) => l.method === "PUT")!;
   assert.equal(put.path, "/api/schedule/1");
-  assert.equal(put.body.seconds, 1200);
-  assert.equal(put.body.label, "tea");
+  assert.deepEqual(put.body, { kind: "timer", label: "tea", seconds: 1200 });
   await eq(`T.text('#panel form h3')`, "Add a timer, alarm, or reminder", "form left edit mode");
   await T(`clickText('#panel ul.rows > li:nth-child(2)', 'Cancel')`);
   await b.until(`T.rows().length === 1`, "cancelled");
@@ -427,7 +426,7 @@ await step("a 10-second refresh keeps what you typed", async () => {
   await open("open", "#/reminders");
   await b.until(`T.rows().length === 2`, "rows");
   await T(`set('#rlabel', 'half typed')`);
-  (mock.state as any).schedule.push({
+  (mock.state["schedule"] as unknown[]).push({
     id: 9,
     kind: "timer",
     label: "new one",
@@ -439,7 +438,7 @@ await step("a 10-second refresh keeps what you typed", async () => {
   await eq(`T.q('#rlabel').value`, "half typed", "the form was not reset");
 });
 
-await step("the page stays inside its own origin and CSP", async () => {
+await step("the page stays inside its own origin and CSP", () => {
   const outside = b.requests.filter(
     (u) => !u.startsWith(mock.url) && !u.startsWith("about:") && !u.startsWith("data:"),
   );
