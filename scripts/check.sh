@@ -84,8 +84,12 @@ if [ -d portal ] && portal_relevant; then
     echo "FAILED: the portal changed but Node and npm are not installed (see portal/package.json engines)" >&2
     fail=1
   else
-    step "portal: install, type-check, unit tests, built page is current"
+    step "portal: install, lint, formatting, type-check, unit tests, built page is current"
     [ -d portal/node_modules ] || run npm --prefix portal ci --ignore-scripts --no-audit --no-fund
+    # The lint toolchain is a separate install (portal/lint/package.json) because it needs the TypeScript 6 API.
+    [ -d portal/lint/node_modules ] || run npm --prefix portal/lint ci --ignore-scripts --no-audit --no-fund
+    run npm --prefix portal run --silent lint
+    run npm --prefix portal run --silent format:check
     run npm --prefix portal run --silent typecheck
     run npm --prefix portal test --silent
     run npm --prefix portal run --silent check-build

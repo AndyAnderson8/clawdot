@@ -1,0 +1,18 @@
+{
+  "name": "clawdot-portal-lint",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Lint toolchain of the portal. A workspace of its own because typescript-eslint needs the TypeScript 6 JavaScript API, which the native TypeScript 7 compiler used by the portal does not ship.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "eslint": "9.39.5",
+    "eslint-plugin-jsx-a11y": "6.10.2",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.14.0",
+    "ts-api-utils": "2.5.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1"
+  }
+}
