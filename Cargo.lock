@@ -84,8 +84,10 @@ dependencies = [
 name = "clawdot-device"
 version = "0.0.0"
 dependencies = [
+ "clawdot-device",
  "clawdot-protocol",
  "clawdot-satellite",
+ "clawdot-wake",
  "serde_json",
 ]
 
