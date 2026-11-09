@@ -1,0 +1,21 @@
+# Settings for clawdot_bridges.discord_bridge. No secrets here: CLAWDOT_TOKEN (the ClawDot endpoint token)
+# and DISCORD_TOKEN (the bot token) are environment variables.
+
+clawdot_url = "http://clawdot.local:3335"
+source = "Discord"                    # spoken as "From Discord: ..."; fixed here, never taken from a message
+
+# Required. Turn on Developer Mode in Discord, then right-click a channel and choose Copy Channel ID.
+channels = [123456789012345678]
+users = []                            # optional: only these author ids are spoken (empty means anyone in the channel)
+ignore_bots = true
+require_mention = false               # true: only messages that mention the bot
+
+include_keywords = []
+exclude_keywords = ["spoiler"]
+urgent_keywords = ["outage", "down"]  # ask for "urgent" when one appears ...
+max_priority = "normal"               # ... but never more than this
+
+per_minute = 6
+burst = 3
+ttl_secs = 900
+max_chars = 300

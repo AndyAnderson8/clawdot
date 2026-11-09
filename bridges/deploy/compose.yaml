@@ -1,0 +1,33 @@
+# docker compose up -d   (run from bridges/deploy; relative paths are relative to this file)
+# Create ntfy.env and discord.env next to this file (mode 0600, never committed):
+#   ntfy.env:     CLAWDOT_TOKEN=cdt_...   and, for a protected server, NTFY_TOKEN=tk_...
+#   discord.env:  CLAWDOT_TOKEN=cdt_...   DISCORD_TOKEN=...
+# Copy ../examples/ntfy.toml and ../examples/discord.toml next to it and edit them.
+services:
+  ntfy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["clawdot_bridges.ntfy", "--config", "/config/bridge.toml"]
+    env_file: ./ntfy.env
+    volumes:
+      - ./ntfy.toml:/config/bridge.toml:ro
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    mem_limit: 64m
+
+  discord:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        WITH_DISCORD: "1"
+    command: ["clawdot_bridges.discord_bridge", "--config", "/config/bridge.toml"]
+    env_file: ./discord.env
+    volumes:
+      - ./discord.toml:/config/bridge.toml:ro
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    mem_limit: 192m
