@@ -6,8 +6,8 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 ```json
 {
   "data_dir": "/var/lib/clawdot",
-  "listen": "0.0.0.0:8765",
-  "public_url": "http://dot.local:8765",
+  "listen": "0.0.0.0:3335",
+  "public_url": "http://dot.local:3335",
   "zone": "America/Chicago",
   "persona_file": "/etc/clawdot/persona.txt",
   "endpoints": ["claude-code", "ci:generic"],
@@ -25,7 +25,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | Key | Meaning | Default |
 |---|---|---|
 | `data_dir` | Where state is kept | `./clawdot-data` |
-| `listen` | HTTP address; bind to the LAN only (REQ-CFG-005) | `127.0.0.1:8765` |
+| `listen` | HTTP address; bind to the LAN only (REQ-CFG-005) | `127.0.0.1:3335` |
 | `public_url` | URL printed in integration snippets | derived from `listen` (`0.0.0.0` and `[::]` become `clawdot.local`) |
 | `zone` | IANA time zone | UTC |
 | `persona_file` | Replaces the default system prompt | built-in persona |
@@ -77,7 +77,7 @@ phone. It shows endpoints and the recent inbox, and creates, rotates, and delete
 - **Upgrading** (REQ-CFG-023). If `admin-token.hash` exists from an earlier version, it is converted on the first
   start: the old token keeps working, typed into the password field, and the page invites you to set a real
   password (which retires the token). `--rotate-admin-token` is gone; use `--reset-admin`.
-- **Binding.** The default listen address is `127.0.0.1:8765` (not 8080, which Amazon's `oobed` service holds on an Echo Dot; REQ-CFG-014). Change `listen` to the LAN address deliberately;
+- **Binding.** The default listen address is `127.0.0.1:3335` (not 8080, which Amazon's `oobed` service holds on an Echo Dot; REQ-CFG-014). Change `listen` to the LAN address deliberately;
   there is no TLS, so use a trusted network or a VPN (REQ-CFG-005).
 - **Start-up order.** The listening address is bound first; only then is the administrator
   setting written (REQ-CFG-015). `--create-endpoint` and `--rotate-endpoint` print their token and exit without starting

@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.10 |
+| **Version** | 0.11 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006 |
 
@@ -148,7 +148,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-011 | The core SHOULD serve a read-only `/display` page (state, transcript, now-playing, timers, inbox cards) so a satellite with a screen can show it in a browser without new protocol work. | Should | v1.x | D |
 | REQ-CFG-012 | Documentation MUST cover headless network setup for the supported Raspberry Pi path (pre-seeded Wi-Fi). An on-device provisioning portal is post-1.0. | Must | M4 | I |
 | REQ-CFG-013 | The build MUST include the project changelog; the UI "About" page SHOULD show the running version, build information, and the release notes for that version. | Should | M4 | T |
-| REQ-CFG-014 | The default listen address MUST be `127.0.0.1:8765`: loopback only (REQ-CFG-005) and a port that does not collide with services on the reference device (Amazon's `oobed` holds 8080 on an Echo Dot). If the address cannot be bound, the error MUST name the address and tell the user to choose another with `--listen` or the `listen` setting. | Must | M4 | T |
+| REQ-CFG-014 | The default listen address MUST be `127.0.0.1:3335`: loopback only (REQ-CFG-005) and a port that does not collide with services on the reference device (Amazon's `oobed` holds 8080 on an Echo Dot). If the address cannot be bound, the error MUST name the address and tell the user to choose another with `--listen` or the `listen` setting. | Must | M4 | T |
 | REQ-CFG-015 | The core MUST bind its listening address before it writes any administrator setting (REQ-CFG-018), so a server that never started never reveals a secret. `--create-endpoint` and `--rotate-endpoint` are management commands: they print the token once and exit without starting the server (endpoints listed in the configuration file are still created at every start). | Must | M4 | T |
 | REQ-CFG-016 | Printed integration snippets MUST use `--public-url` when given, otherwise a URL derived from the listen address. An unspecified listen host (`0.0.0.0`, `[::]`) is not reachable as written, so the default name `clawdot.local` (REQ-CFG-009) is used with the listen port, and the core says the address was assumed. | Must | M4 | T |
 | REQ-CFG-017 | The text console (the stand-in for a satellite until audio ships) MUST end the program on `quit` or `exit` as well as on end of input. | Should | M1 | T |
@@ -245,3 +245,4 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | 0.8 | 2026-11-08 | Hardware test findings: default listen port, bind-before-token ordering, endpoint management commands exit, snippet URLs derived from the listen address, console `quit` (CFG-014..017) |
 | 0.9 | 2026-11-08 | First-run admin setup replaces the printed administrator token: one password or deliberate open mode on a private network, session sign-in, setup code, `--reset-admin`, legacy token migration (CFG-018..024; CFG-005 and CFG-015 amended) |
 | 0.10 | 2026-11-08 | The console-printed setup code is removed because the device has no visible console; CFG-021 now accepts first-visitor setup from private addresses as a documented residual risk (T15); CFG-015 amended |
+| 0.11 | 2026-11-08 | Default listen port changed from 8765 to 3335 at the maintainer's request (CFG-014 amended) |

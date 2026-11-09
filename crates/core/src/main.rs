@@ -42,7 +42,7 @@ USAGE:
 OPTIONS:
     --config FILE              JSON configuration file (flags override it); see docs/architecture/configuration.md
     --data-dir DIR             Where state is kept (default: ./clawdot-data)
-    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:8765)
+    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:3335)
     --public-url URL           How agents reach this device, used in printed snippets (default: from --listen)
     --zone NAME                IANA time zone, for example America/New_York (default: UTC)
     --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once and exits
@@ -102,7 +102,7 @@ struct Args {
 fn parse() -> Result<Args, String> {
     let mut a = Args {
         data_dir: PathBuf::from("clawdot-data"),
-        listen: "127.0.0.1:8765"
+        listen: "127.0.0.1:3335"
             .parse()
             .map_err(|_| "internal: bad default address".to_owned())?,
         public_url: None,
@@ -282,7 +282,7 @@ fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
     }
 }
 
-const DEFAULT_PORT: u16 = 8765;
+const DEFAULT_PORT: u16 = 3335;
 
 /// An actionable message for a failed bind (REQ-CFG-014).
 fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
@@ -1013,6 +1013,6 @@ mod tests {
         let e = std::io::Error::from(std::io::ErrorKind::AddrInUse);
         let m = bind_error(addr("0.0.0.0:8080"), &e);
         assert!(m.contains("0.0.0.0:8080"), "{m}");
-        assert!(m.contains("--listen 0.0.0.0:8765"), "{m}");
+        assert!(m.contains("--listen 0.0.0.0:3335"), "{m}");
     }
 }
