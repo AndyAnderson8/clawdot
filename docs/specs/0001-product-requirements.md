@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.13 |
+| **Version** | 0.14 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -96,7 +96,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-INB-007 | The user MUST be able to: hear the summary, ask for details, dismiss, snooze, and reply to continue the agent's work. | Must | M2 | D |
 | REQ-INB-008 | Replies and acknowledgements MUST be delivered to agents through an authenticated, per-endpoint **reply stream** (SSE) that the agent bridge opens to the device. The device MUST NOT initiate connections to agent hosts. Each reply carries an id, the event's `session_ref`, a reply type, and text; delivery is at-least-once with bridge acknowledgement, a bounded queue, and expiry. | Must | M2 | T |
 | REQ-INB-009 | The system MUST also support device-initiated sources (outbound subscribe via SSE, or periodic poll with a configurable interval), for agents unreachable from the device. | Should | M2 | T |
-| REQ-INB-010 | Inbox event text MUST be treated as untrusted data: it MUST NOT directly trigger tool execution without a user turn (see threat model). | Must | M2 | T |
+| REQ-INB-010 | Inbox event text MUST be treated as untrusted data: it MUST NOT directly trigger tool execution without a user turn (see threat model). This covers every event field (source, title, status and text), not only the text: each is sanitised before it reaches a prompt or is spoken, and none can close the prompt fence. | Must | M2 | T |
 | REQ-INB-011 | Notification latency from event receipt to tone SHOULD be ≤ 3 s (push) when idle. | Should | M2 | T |
 | REQ-INB-012 | The system SHOULD support quiet hours and per-endpoint priority/mute settings. | Should | M2 | T |
 | REQ-INB-013 | The project SHOULD provide copy-paste integration snippets (Claude Code native `http` hooks, Home Assistant, Hermes, shell, GitHub Actions). Shipped hook snippets MUST run asynchronously so a slow or offline speaker can never stall an agent. | Should | M2 | I |
@@ -104,7 +104,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-INB-015 | The project MUST provide a reference **agent bridge** (starting with Claude Code, using headless resume) that receives replies and resumes the agent session on the developer machine. | Must | M2 | T/D |
 | REQ-INB-016 | The user MUST be able to ask by voice what their agents are doing or have finished (e.g. "what are my agents up to?"), answered from recent inbox events grouped by source, without replaying every announcement. | Should | M2 | T/D |
 | REQ-INB-017 | Replies MUST have a type: `ack` (user will handle it), `instruct` (free-text instruction), `snooze`, `dismiss`, and `details` (answered locally from the stored event without contacting the agent). The assistant classifies the user's utterance into a type via a tool call; `ack` and `instruct` are delivered over the reply stream (INB-008). | Must | M2 | T/D |
-| REQ-INB-018 | Announcements MUST be spoken as **bounded summaries**: a default cap of about two sentences (≈ 15 s of speech), progressive disclosure (tone, then headline, then "want details?"), source-aware phrasing (for coding agents: what was done, what is left, anything needing attention, without file paths), and a configurable verbosity. Summaries use a separately configurable, cheaper `summary_model`. If the LLM is unreachable, the system MUST speak only the event's title and status and MUST NOT read long raw text aloud. The summariser MUST treat event text as data and MUST NOT be able to call tools. | Must | M2 | T/D |
+| REQ-INB-018 | Announcements MUST always name the source first ("From Claude Code: ..."), and the title and status MUST be sanitised and bounded like the summary. Announcements MUST be spoken as **bounded summaries**: a default cap of about two sentences (≈ 15 s of speech), progressive disclosure (tone, then headline, then "want details?"), source-aware phrasing (for coding agents: what was done, what is left, anything needing attention, without file paths), and a configurable verbosity. Summaries use a separately configurable, cheaper `summary_model`. If the LLM is unreachable, the system MUST speak only the event's title and status and MUST NOT read long raw text aloud. The summariser MUST treat event text as data and MUST NOT be able to call tools. | Must | M2 | T/D |
 | REQ-INB-019 | The UI SHOULD include a **Connect an agent** flow that creates an endpoint and generates ready-to-paste setup snippets for supported harnesses (Claude Code first; Codex, Gemini CLI, opencode, and others as each adapter is verified), including endpoint URL, token, and the bridge command. | Should | M4 | D |
 | REQ-INB-020 | The reference agent bridge MUST be structured with pluggable per-harness adapters (how to resume or message a session). Only the Claude Code adapter is a v1.0 deliverable; other harnesses are added as their hook and resume mechanisms are verified. Webhook/SSE transport is harness-agnostic. | Must | M2 | I |
 
@@ -274,3 +274,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.11 | 2026-11-08 | Default listen port changed from 8765 to 3335 at the maintainer's request (CFG-014 amended) |
 | 0.12 | 2026-11-08 | Board support layer (section 4.10, BRD-001..016, ADR-0012): one `Board` interface for buttons, LED ring, mute, Wi-Fi, clock trust and audio devices; null, desktop and Echo Dot Gen 2 boards chosen by Cargo feature and the `board` setting; per-device JSON; honest mute and clock reporting; AC-13. Evidence in R-07 |
 | 0.13 | 2026-11-09 | Security review F1: spoken confirmation of the exact text before an `instruct` reply is forwarded, and fencing of untrusted tool-result text (AST-015) |
+| 0.14 | 2026-11-09 | Security review F3: every event field is untrusted (INB-010), and announcements always name the source and sanitise title and status (INB-018) |
