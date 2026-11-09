@@ -176,6 +176,7 @@
   "$defs": {
     "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,31}$" },
     "token": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.:+/@=,-]{0,127}$", "description": "Fixed text: letters, digits, space and . _ : + / @ = , -. No quotes and no shell characters." },
+    "arg": { "type": "string", "pattern": "^[A-Za-z0-9 _.:+/@=,-]{1,128}$", "description": "One program argument: fixed text as for a token, but it may start with - or /. No quotes and no shell characters." },
     "path": { "type": "string", "pattern": "^/[A-Za-z0-9_.:@+/=-]{1,255}$", "description": "An absolute path without spaces or shell characters; no .. segment (checked by the loader)." },
     "led_state": { "enum": ["idle", "wake", "listening", "thinking", "speaking", "muted", "error", "offline", "timer", "alarm", "inbox", "volume", "updating", "setup"] },
     "pcm_format": { "enum": ["S16_LE", "S24_3LE", "S32_LE"] },
@@ -184,7 +185,7 @@
       "properties": {
         "kind": { "enum": ["default", "command", "alsa"], "description": "default: find a known program on PATH. command: run the argv below. alsa: open the ALSA device directly (reserved; the first daemon reports it as not available)." },
         "device": { "$ref": "#/$defs/token" },
-        "command": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/token" }, "description": "Program and arguments, no shell, no placeholders. The program writes raw PCM to stdout." },
+        "command": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/arg" }, "description": "Program and arguments, no shell, no placeholders. The program writes raw PCM to stdout." },
         "rate": { "enum": [16000, 32000, 44100, 48000] },
         "format": { "$ref": "#/$defs/pcm_format" },
         "channels": { "type": "integer", "minimum": 1, "maximum": 16 },
@@ -197,7 +198,7 @@
       "properties": {
         "kind": { "enum": ["default", "command", "alsa"] },
         "device": { "$ref": "#/$defs/token" },
-        "command": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/token" } },
+        "command": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/arg" } },
         "rate": { "enum": [16000, 32000, 44100, 48000] },
         "format": { "$ref": "#/$defs/pcm_format" },
         "channels": { "type": "integer", "minimum": 1, "maximum": 8 },

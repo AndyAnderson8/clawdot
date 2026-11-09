@@ -117,7 +117,7 @@ Version 1 of the set (the board file's `leds.states` keys). Unknown names MUST b
 | `updating` | An update is installing | local (image) | Portal status |
 | `setup` | Waiting for Wi-Fi setup | local (image) | Spoken or tone prompt where audio works, otherwise the install guide |
 
-Precedence when several apply (highest first): `updating`, `setup`, `error`, `volume` (transient), `muted`, `alarm`, `timer`, `listening`, `speaking`, `thinking`, `inbox`, `idle`. The daemon implements this once; boards do not reorder it.
+Precedence when several apply (highest first): `updating`, `setup`, `offline`, `error`, `volume` (transient), `muted`, `alarm`, `timer`, `wake`, `listening`, `speaking`, `thinking`, `inbox`, `idle`. The daemon implements this once; boards do not reorder it.
 
 ### 5.3 Missing-capability rule
 
