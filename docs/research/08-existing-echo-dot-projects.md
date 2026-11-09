@@ -100,7 +100,7 @@ Fire OS 6 detail: a stock boot slot image carries `skip_initramfs`, so a custom 
 
 ### 3.9 Unlock status (R-04 correction)
 
-R-04 concluded "no unlock known for retail units". Since then `amonet-biscuit` (v1.1.0, then v2.0.0 on 2026-09-10) has been published on XDA by R0rt1z2 and is automated by `bboe/firebreak` (BSD-2-Clause, 77 stars, last push 2026-11-09): `uvx firebreak@latest unlock`, over the Dot 2's micro-USB port, no case opening for the Dot 2. The Echo 2nd gen and Dot 3 need soldered USB pads (T5D `README.md`). `amonet`'s repository carries `LICENSE.GPL2` and `LICENSE.MIT` side by side (per file; I did not map which is which). **Neither project redistributes the unlock.** A correction note belongs on R-04 (section 10).
+R-04 concluded "no unlock known for retail units". Since then `amonet-biscuit` (v1.1.0, then v2.0.0 on 2026-09-10) has been published on XDA by R0rt1z2 and is automated by `bboe/firebreak` (BSD-2-Clause, 77 stars, last push 2026-11-09): `uvx firebreak@latest unlock`, over the Dot 2's micro-USB port, no case opening for the Dot 2. The Echo 2nd gen and Dot 3 need soldered USB pads (T5D `README.md`). `amonet`'s repository carries `LICENSE.GPL2` and `LICENSE.MIT` side by side (per file; I did not map which is which). **Neither project redistributes the unlock.** A correction note belongs on R-04 (section 10). The history and mechanism of the unlock are written up separately in [R-09](09-echo-unlock-history.md).
 
 ## 4. How audio and wake word reach the brain
 
