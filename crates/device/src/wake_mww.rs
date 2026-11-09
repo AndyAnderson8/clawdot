@@ -198,10 +198,77 @@ impl WakeEngine for MwwEngine {
     }
 }
 
+/// Read a word from a model file and the manifest beside it (`okay_nabu.tflite` and `okay_nabu.json`), as the PC
+/// voice loop is configured (REQ-DEV-029). Every error names the file.
+///
+/// # Errors
+/// A file cannot be read, or the manifest is not acceptable (see [`MwwWord::from_manifest`]).
+pub fn load_word(id: WordId, model: &std::path::Path, licence: &str) -> Result<MwwWord, String> {
+    let bytes =
+        std::fs::read(model).map_err(|e| format!("wake word model {}: {e}", model.display()))?;
+    let manifest_path = model.with_extension("json");
+    let manifest = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        format!(
+            "wake word manifest {} (it must sit beside the model): {e}",
+            manifest_path.display()
+        )
+    })?;
+    MwwWord::from_manifest(id, &manifest, bytes, licence)
+        .map_err(|e| format!("{}: {e}", manifest_path.display()))
+}
+
+/// The engine as the audio front end's [`WakeSink`] (REQ-DEV-025): 20 ms frames in, the phrase out.
+#[derive(Debug)]
+pub struct MwwSink {
+    engine: MwwEngine,
+    scratch: Vec<Detection>,
+    name: String,
+}
+
+impl MwwSink {
+    /// Wrap an engine. Its words, in order, are what the user is told to say.
+    #[must_use]
+    pub fn new(engine: MwwEngine) -> Self {
+        let name = engine
+            .words()
+            .iter()
+            .map(|w| w.phrase.to_lowercase())
+            .collect::<Vec<_>>()
+            .join("\" or \"");
+        Self {
+            engine,
+            scratch: Vec::new(),
+            name,
+        }
+    }
+}
+
+impl clawdot_satellite::front::WakeSink for MwwSink {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn feed(&mut self, pcm: &[i16]) -> Option<String> {
+        self.scratch.clear();
+        self.engine.process(pcm, &mut self.scratch);
+        let d = self.scratch.first()?;
+        self.engine
+            .words()
+            .iter()
+            .find(|w| w.id == d.word)
+            .map(|w| w.phrase.to_lowercase())
+    }
+
+    fn reset(&mut self) {
+        self.engine.reset();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wake::WakeRouter;
+    use clawdot_satellite::front::WakeSink;
 
     const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../wake/tests/golden");
 
@@ -363,5 +430,47 @@ mod tests {
         e.process(&pcm("phrase_b.s16"), &mut out);
         assert!(out.iter().any(|d| d.word == WordId(1)));
         assert!(e.memory_bytes() > 100_000 && e.memory_bytes() < 400_000);
+    }
+
+    #[test]
+    fn req_dev_029_words_load_from_a_path_with_the_manifest_beside_it() {
+        let model = std::path::Path::new(DIR).join("models/okay_nabu.tflite");
+        let w = load_word(WordId(1), &model, "Apache-2.0").unwrap();
+        assert_eq!(w.phrase, "Okay Nabu");
+        assert_eq!(w.model.len(), 60_264);
+        let missing = std::path::Path::new(DIR).join("models/nope.tflite");
+        let e = load_word(WordId(1), &missing, "Apache-2.0").unwrap_err();
+        assert!(e.contains("nope.tflite"), "{e}");
+        let dir = std::env::temp_dir().join(format!("clawdot-mww-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("w.tflite"), b"x").unwrap();
+        let e = load_word(WordId(1), &dir.join("w.tflite"), "Apache-2.0").unwrap_err();
+        assert!(e.contains("w.json") && e.contains("beside"), "{e}");
+        std::fs::write(dir.join("w.json"), b"{}").unwrap();
+        let e = load_word(WordId(1), &dir.join("w.tflite"), "Apache-2.0").unwrap_err();
+        assert!(e.contains("w.json"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn req_dev_025_the_sink_hears_the_phrase_in_20_ms_frames_and_forgets_on_reset() {
+        let mut sink = MwwSink::new(engine());
+        assert_eq!(sink.name(), "okay nabu");
+        let audio = pcm("phrase_a.s16");
+        let hits = |sink: &mut MwwSink| {
+            audio
+                .chunks(320)
+                .filter_map(|c| sink.feed(c))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hits(&mut sink), ["okay nabu"], "one hit for one utterance");
+        // The refractory period holds the second utterance back until a reset.
+        sink.reset();
+        assert_eq!(hits(&mut sink), ["okay nabu"]);
+        let mut quiet = MwwSink::new(engine());
+        let silence = vec![0i16; 320];
+        for _ in 0..500 {
+            assert_eq!(quiet.feed(&silence), None);
+        }
     }
 }

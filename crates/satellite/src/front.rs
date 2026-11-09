@@ -305,6 +305,13 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> AudioDevice<I, O, T> {
         self
     }
 
+    /// Like [`AudioDevice::with_wake`] for a sink that is already boxed.
+    #[must_use]
+    pub fn with_wake_boxed(mut self, sink: Box<dyn WakeSink>) -> Self {
+        self.wake = Some(sink);
+        self
+    }
+
     /// Read time from this clock instead of the system's (tests).
     #[must_use]
     pub fn with_clock(mut self, clock: impl Fn() -> Instant + Send + 'static) -> Self {
