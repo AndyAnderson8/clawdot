@@ -51,6 +51,7 @@ Draft → In Review → Accepted → Implemented
 | `NFR` | Non-functional (performance, budget, reliability) |
 | `SEC` | Security and privacy |
 | `EXT` | Extensibility (packs, HTTP tools, sidecars) |
+| `BRD` | Board support (buttons, LED ring, mute, Wi-Fi, clock, audio device names) |
 
 ## Change process
 
