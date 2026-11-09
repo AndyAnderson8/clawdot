@@ -204,10 +204,6 @@ pub struct Assistant {
     core: Option<Arc<Core>>,
     player: Player,
     effects: Vec<Effect>,
-    /// An `instruct` reply the model proposed and the user has not yet confirmed: text and time (REQ-AST-015).
-    pending_instruct: Option<(String, i64)>,
-    /// The user said yes in this turn to a proposal made in an earlier turn.
-    instruct_confirmed: bool,
 }
 
 impl std::fmt::Debug for Assistant {
@@ -248,8 +244,6 @@ impl Assistant {
             core,
             player: Player::default(),
             effects: Vec::new(),
-            pending_instruct: None,
-            instruct_confirmed: false,
         }
     }
 

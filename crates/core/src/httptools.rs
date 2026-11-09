@@ -179,12 +179,6 @@ impl ToolDef {
                 required.push(p.clone());
             }
         }
-        if self.confirm {
-            props.insert(
-                "confirmed".into(),
-                json!({"type": "boolean", "description": "Set to true only after the user has said yes out loud."}),
-            );
-        }
         ToolSpec {
             name: self.name.clone(),
             description: self.description.clone(),
@@ -225,16 +219,13 @@ fn scalar(v: &Value) -> String {
     }
 }
 
-/// Check `args` against the schema; returns the validated arguments (without `confirmed`).
+/// Check `args` against the schema; returns the validated arguments (a `confirmed` key is refused like any unknown one).
 fn check_args(def: &ToolDef, args: &Value) -> Result<Map<String, Value>, String> {
     let given = args
         .as_object()
         .ok_or("the arguments must be a JSON object")?;
     let mut out = Map::new();
     for (k, v) in given {
-        if k == "confirmed" && def.confirm {
-            continue;
-        }
         let Some(d) = def.params.get(k) else {
             return Err(format!("`{k}` is not a parameter of this tool"));
         };
@@ -499,6 +490,22 @@ impl<H: crate::session::ToolHost> crate::session::ToolHost for WithHttp<'_, H> {
         }
     }
 
+    fn requires_confirmation(&self, name: &str, args: &Value) -> bool {
+        if self.http.owns(name) {
+            self.http.needs_confirmation(name)
+        } else {
+            self.inner.requires_confirmation(name, args)
+        }
+    }
+
+    fn describe_action(&self, name: &str, args: &Value) -> String {
+        if self.http.owns(name) {
+            crate::session::describe_generic(name, args)
+        } else {
+            self.inner.describe_action(name, args)
+        }
+    }
+
     fn begin_turn(&mut self, user_text: &str) {
         self.inner.begin_turn(user_text);
     }
@@ -586,7 +593,10 @@ mod tests {
         assert_eq!(spec.name, "set_light");
         let props = &spec.parameters["properties"];
         assert!(props["room"]["enum"].is_array());
-        assert!(props["confirmed"].is_object());
+        assert!(
+            !props.as_object().unwrap().contains_key("confirmed"),
+            "the model gets no confirmation flag"
+        );
         assert!(!props.as_object().unwrap().contains_key("url"));
         assert!(t.needs_confirmation("set_light"));
         assert!(t.owns("set_light") && !t.owns("other"));
@@ -618,7 +628,12 @@ mod tests {
     #[test]
     fn arguments_are_validated_and_unknown_ones_rejected() {
         let d = lights("http://h/x");
-        assert!(check_args(&d, &json!({"room":"den","level":3,"confirmed":true})).is_ok());
+        assert!(check_args(&d, &json!({"room":"den","level":3})).is_ok());
+        assert!(
+            check_args(&d, &json!({"room":"den","confirmed":true}))
+                .unwrap_err()
+                .contains("not a parameter")
+        );
         for (args, needle) in [
             (json!({"level":3}), "required"),
             (json!({"room":"attic"}), "one of"),
@@ -699,10 +714,7 @@ mod tests {
         d.headers.insert("X-Home".into(), "main".into());
         let t = HttpTools::new(vec![d], &[], |_| Some("sekret".into())).unwrap();
         let out = t
-            .call(
-                "set_light",
-                &json!({"room":"den","level":2,"confirmed":true}),
-            )
+            .call("set_light", &json!({"room":"den","level":2}))
             .await
             .unwrap();
         assert_eq!(out, r#"HTTP 200: {"ok":true}"#);
@@ -727,7 +739,7 @@ mod tests {
         )
         .unwrap();
         let e = t
-            .call("set_light", &json!({"room":"den","confirmed":true}))
+            .call("set_light", &json!({"room":"den"}))
             .await
             .unwrap_err();
         assert_eq!(e, "HTTP 500: boom");

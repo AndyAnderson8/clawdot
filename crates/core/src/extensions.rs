@@ -684,6 +684,14 @@ impl<H: ToolHost> ToolHost for WithPolicy<'_, H> {
         self.inner.needs_confirmation(name)
     }
 
+    fn requires_confirmation(&self, name: &str, args: &Value) -> bool {
+        self.inner.requires_confirmation(name, args)
+    }
+
+    fn describe_action(&self, name: &str, args: &Value) -> String {
+        self.inner.describe_action(name, args)
+    }
+
     fn begin_turn(&mut self, user_text: &str) {
         self.inner.begin_turn(user_text);
     }

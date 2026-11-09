@@ -38,8 +38,8 @@ file (REQ-AST-014). The core never runs third-party code (REQ-EXT-001); it only 
 - It cannot choose the URL, host, headers, or credential.
 - Placeholder values are percent-encoded, so a value cannot add path segments or query parameters.
 - For `GET` and `DELETE` the other parameters go in the query string; for `POST` and `PUT` they go in a JSON body.
-- With `confirm` on, the session loop refuses to run the tool until the model calls it again with `confirmed: true`
-  after the user agreed (REQ-AST-008). The flag is not forwarded to the server.
+- With `confirm` on, the host holds the call: it speaks the tool and exact arguments, and runs them only after the user says yes in a later turn
+  (REQ-AST-008, REQ-SEC-011; see [action-safety.md](action-safety.md)). The model gets no `confirmed` parameter; a `confirmed` argument is dropped.
 - Responses are clipped to 1000 characters and are treated as data, not instructions.
 
 ## Limits

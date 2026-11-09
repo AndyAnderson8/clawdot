@@ -42,8 +42,8 @@ control, and a compromised server could try to steer the model. So:
   (a clash is skipped with a warning).
 - Descriptions are cut to 300 characters; tools with a schema over 8 KB, a non-object schema, or beyond 32 per
   server are dropped.
-- Confirmation is on by default and enforced by the session loop, not by the prompt. The `confirmed` flag is added
-  to the schema for you and removed before the call, so the server never sees it.
+- Confirmation is on by default and held by the host, not by the prompt: the call waits for a later user turn that says yes (see [action-safety.md](action-safety.md)). The model is given no `confirmed`
+  flag and an undeclared one is dropped, so the server never sees it.
 - Results are cut to 1000 characters; images and other non-text content become a placeholder such as
   `[image content omitted]`. A result is data for the model, never an instruction to it.
 - Startup is not blocked by a broken server: it is skipped with a warning and the rest keep working. An expired

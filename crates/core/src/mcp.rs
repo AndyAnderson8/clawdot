@@ -572,28 +572,16 @@ impl McpClient {
         self.find(name).is_some_and(|t| t.confirm)
     }
 
-    /// Specs to offer the model. Confirming tools get a `confirmed` flag added to their schema.
+    /// Specs to offer the model, as the server declared them. The model is given no confirmation flag:
+    /// confirmation is held by the host (REQ-SEC-011).
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools
             .iter()
-            .map(|t| {
-                let mut schema = t.schema.clone();
-                if t.confirm {
-                    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-                        props.insert(
-                            "confirmed".into(),
-                            json!({"type": "boolean", "description": "Set to true only after the user has said yes out loud."}),
-                        );
-                    } else {
-                        schema["properties"] = json!({"confirmed": {"type": "boolean"}});
-                    }
-                }
-                ToolSpec {
-                    name: t.exposed.clone(),
-                    description: t.description.clone(),
-                    parameters: schema,
-                }
+            .map(|t| ToolSpec {
+                name: t.exposed.clone(),
+                description: t.description.clone(),
+                parameters: t.schema.clone(),
             })
             .collect()
     }
@@ -604,8 +592,7 @@ impl McpClient {
     /// A message for the model: unknown tool, transport failure, or the server reporting the call failed.
     pub async fn call(&self, name: &str, args: &Value) -> Result<String, String> {
         let t = self.find(name).ok_or("unknown tool")?;
-        let mut arguments = args.as_object().cloned().unwrap_or_default();
-        arguments.remove("confirmed");
+        let arguments = args.as_object().cloned().unwrap_or_default();
         let params = json!({ "name": t.remote, "arguments": arguments });
         let mut result = self
             .rpc(t.server, Some(3), "tools/call", params.clone())
@@ -663,6 +650,22 @@ impl<H: ToolHost> ToolHost for WithMcp<'_, H> {
             self.mcp.needs_confirmation(name)
         } else {
             self.inner.needs_confirmation(name)
+        }
+    }
+
+    fn requires_confirmation(&self, name: &str, args: &Value) -> bool {
+        if self.mcp.owns(name) {
+            self.mcp.needs_confirmation(name)
+        } else {
+            self.inner.requires_confirmation(name, args)
+        }
+    }
+
+    fn describe_action(&self, name: &str, args: &Value) -> String {
+        if self.mcp.owns(name) {
+            crate::session::describe_generic(name, args)
+        } else {
+            self.inner.describe_action(name, args)
         }
     }
 
@@ -926,7 +929,7 @@ mod tests {
         assert!(!c.needs_confirmation("home__status"), "listed as harmless");
         let specs = c.specs();
         let on = specs.iter().find(|s| s.name == "home__turn_on").unwrap();
-        assert!(on.parameters["properties"]["confirmed"].is_object());
+        assert!(on.parameters["properties"].get("confirmed").is_none());
         assert!(on.parameters["properties"]["room"].is_object());
         let status = specs.iter().find(|s| s.name == "home__status").unwrap();
         assert!(status.parameters["properties"].get("confirmed").is_none());
@@ -951,13 +954,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_sends_the_arguments_not_the_confirmation_flag_and_clips_the_result() {
+    async fn a_call_sends_the_arguments_and_clips_the_result() {
         let (port, seen, _srv) = fake_server(OK).await;
         let (c, _) = McpClient::connect(vec![def(port)], &[], |_| None)
             .await
             .unwrap();
         let out = c
-            .call("home__turn_on", &json!({"room":"den","confirmed":true}))
+            .call("home__turn_on", &json!({"room":"den"}))
             .await
             .unwrap();
         assert!(
