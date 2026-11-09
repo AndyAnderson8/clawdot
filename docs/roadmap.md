@@ -26,7 +26,7 @@ Work is now in three phases: **A** (PC loop, hardware-agnostic core), **B** (boa
 | M4 Web UI | A6 | Device auto-detection moves to B1 |
 | M5 Tools and music | A7 (radio, recipes) | Radio and MCP/HTTP tools are built |
 | M6 Hardening and Raspberry Pi | C; the Pi item is B6 | |
-| (new) | A1 process and safety; B1 to B5 Echo Dot Gen 2 | |
+| (new) | A1 process and safety; B0 to B5 Echo Dot Gen 2 | |
 
 Release mapping in [git-workflow.md](process/git-workflow.md#7-versioning-and-tags) uses the old milestone names; read it through this table.
 
@@ -47,7 +47,7 @@ Foundations
 Feasibility spikes (each ends with a written finding)
 - [ ] SPIKE-003: TLS + HTTP client/server footprint on armv7 (x86_64 musl with rustls measured: idle 2.8 MiB; armv7 run still to do; the full binary has since run on a real Echo Dot at about 1.4 MB idle RSS, see the baseline below, but that is not a spike finding)
 - [ ] SPIKE-002: wake-word runtime footprint on armv7 (PC evaluation in A3 first)
-- [ ] SPIKE-006: audio capture and playback on armv7 Linux (PC in A2 first, device in B3)
+- [ ] SPIKE-006: audio capture and playback on armv7 Linux (PC in A2 first, device in B0/B5, if the base leaves any audio to us)
 - [ ] SPIKE-005: Wyoming-compatible framing with token `hello` and TLS; client code size. The frame JSON Schemas and the conformance harness now exist (TASK-004, TASK-005, below), which narrows what is left to the size and TLS measurements
 - [x] Baseline budget measurement: x86_64 musl 2.35 MiB binary, 3.8 MiB peak RSS under load, armv7 binary 1.89 MiB (see the [overnight report](reports/2026-11-07-overnight-session.md))
   - *Status, full feature set (`scripts/budget.sh`, x86_64 musl):* binary 2.62 MiB, idle RSS 3.0 MiB, peak 4.3 MiB under load, armv7 binary 2.10 MiB. The ratchet limits have not been tightened yet.
@@ -161,57 +161,74 @@ Announce and integrations
 
 # Phase B: Board layer and the Echo Dot Gen 2
 
-Starts after the PC loop works (A4 and A5 at least) and the feasibility gate for the device spikes is Go. Hardware facts are in [R-07](research/07-echo-dot-gen2-hardware.md); the design is [ADR-0012](adr/0012-board-support-layer.md), [board-support](architecture/board-support.md) and spec REQ-BRD (all Proposed). **Every step that changes the device needs the maintainer's explicit go.**
+*Reworked 2026-11-09 from the recommendation in [R-08](research/08-existing-echo-dot-projects.md) section 9. The earlier plan (own audio, own LED ring, staged Alexa removal on Fire OS) is superseded; see the note at the end of this phase. Nothing here is decided beyond what the maintainer approves; the open points are in [open-questions.md](open-questions.md).*
 
-## B1. Board crate
+Starts after the PC loop works (A4 and A5 at least) and the feasibility gate for the device spikes is Go. Hardware facts are in [R-07](research/07-echo-dot-gen2-hardware.md), the unlock history in [R-09](research/09-echo-unlock-history.md), and the existing Dot projects in R-08. The board design is [ADR-0012](adr/0012-board-support-layer.md), [board-support](architecture/board-support.md) and spec REQ-BRD (all Proposed). **Every step that changes the device, and every single device write inside a step, needs the maintainer's explicit go. Stop and ask before each one.**
+
+The maintainer's unit is a Dot 2 that is already unlocked: rooted Fire OS with TWRP. It is the test unit for B0 and the entry state for B3.
+
+## B0. Trial of the TECHO5 Dot base image (spike)
+Goal: find out whether a ready-made Dot image can be ClawDot's front end, instead of ClawDot owning the Dot's audio and LEDs.
+
+- Trial the TECHO5 Dot (T5D) base image on the maintainer's unit, which is rooted Fire OS with TWRP. Installing it writes to the recovery partition and replaces the system, so **each device write waits for the maintainer's explicit go**
+- Before any write: full partition backups taken and checked, and the installer's `--dry-run` read first
+- **Rollback path, recorded before the trial:** recovery is the XDA procedure ([Unlock, root, TWRP, unbrick Echo Dot 2nd gen "biscuit"](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)) with the TWRP backup and the partition backups from this step, restoring the rooted Fire OS state ([R-09](research/09-echo-unlock-history.md)). Restoring is proved on paper before the first write and written into the spike finding
+- Measure idle RSS, CPU and boot time; check whether the base's `echod` serves an ESPHome client that is not Home Assistant (voice subscribe, announce, ring entity); check how the Noise key is handled
+- This trial is also how Alexa gets wiped: **removing Alexa is achieved by installing the base image, not by our own staged removal on Fire OS**, and every step of it is gated on the maintainer's go
+
+**Exit:** a written spike finding and an ADR-0013 proposal "Dot front end base" (Proposed). If `echod` cannot serve a non-Home-Assistant client at all, fall back to the EchoMuse controller route for early testing and to replacing `echod` on the T5D rootfs as the long-term plan (R-08 section 4.5), reusing B1.
+
+## B1. Board crate (reduced)
 REQ-BRD-001..014
 
 - `crates/board`: the `Board` trait, `NullBoard`, a desktop board, shared gesture and mapping code, the JSON data-file schema (board files are JSON, decided 2026-11-09)
-- **Hardware auto-detection:** `board = "auto"` fingerprints the hardware against each compiled-in board's `detect` rules (device tree, `/proc/cpuinfo`, sysfs such as the LED controller, `getprop` on Android-based units). A single confident match selects it. **With no confident match the board stays unset and the settings page asks the user to pick from a list, showing the detection evidence.** Users never edit mapping files unless they want to
+- **Hardware auto-detection:** `board = "auto"` fingerprints the hardware against each compiled-in board's `detect` rules (device tree, `/proc/cpuinfo`, sysfs, `/proc/idme/device_type_id` on the Dot). A single confident match selects it. **With no confident match the board stays unset and the settings page asks the user to pick from a list, showing the detection evidence.** Users never edit mapping files unless they want to
+- **The Dot board is data only until the base trial (B0) is done:** names, key codes, the LED `frame` format and a `forbidden` list of paths the board must never touch, including `power_button_state` and `calibrated_lux`. No Dot code that opens audio, LED or button devices
 - ADR-0012 moved from Proposed to **Accepted**; the settings page gets its board section
-- Default build unaffected (REQ-NFR-115); a CI feature matrix (`default`, `desktop`, `dot2`)
+- Default build unaffected (REQ-NFR-115); a CI feature matrix (`default`, `desktop`)
 
 **Exit:** the desktop board drives the core on a PC through the trait; ADR-0012 Accepted; budget impact measured, not estimated.
 
-## B2. Dot 2 build, autostart and install guide
-- `[profile.dot2]` and `scripts/build-dot2.sh` (target `armv7-unknown-linux-musleabihf`, size gate, stages `clawdot` and `boards/echo-dot2.json`)
-- **Autostart on boot**, including the **firewall rule for the listen port**: Amazon's iptables INPUT policy drops unlisted ports, so the port (default 3335) must be opened or the UI is unreachable from the LAN. The boot hook is an open unknown in R-07 (system partition read-only)
-- A per-device install guide, **docs/guides/install-on-echo-dot-2.md**, based on the unlock thread on XDA ([Unlock, root, TWRP, unbrick Echo Dot 2nd gen "biscuit"](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)) and R-07; plus a **guide template** for other devices
-- [R-04](research/04-echo-dot-gen2.md) says no unlock is known for retail units; revisit it against the XDA thread and record the result
+## B2. ESPHome native-API voice-satellite client
+Goal: a Dot running a base image (or any ESPHome voice satellite, such as a Pi running linux-voice-assistant) can use ClawDot as its brain without Home Assistant. Spec-level item: see the [future-scope](future-scope.md) row and R-08 sections 4.2 and 4.3.
 
-**Exit:** a fresh unlocked Dot starts ClawDot at boot and serves the UI on the LAN, following only the guide.
+- A new optional core feature (`esphome-satellite`) behind the existing satellite interface: frame layer, minimal hand-written protobuf for about 20 messages, voice session (subscribe, wake, audio, events, TTS return, abort, reconnect), announce-then-listen for the inbox, media player play, optional light command
+- Estimate **about 1,100 to 1,300 lines**. Not in the default Dot budget unless chosen
+- **Optional Noise encryption on `ring`** (the `Noise_NNpsk0_25519_ChaChaPoly_SHA256` initiator, tested with published vectors), with no `snow` and no `prost` so the dependency budget is protected. Revisit with measured binary size once code exists
+- **Test against a fake ESPHome server on a PC first**, then against `aioesphomeapi` as the peer, before any real device is involved
 
-## B3. Audio, buttons and the LED ring on the Dot
-- Stop Amazon's audio stack (explicitly reported, restored on exit), then capture and playback with `tinycap` and `tinyplay` through the A2 trait (SPIKE-006 on the device)
-- Buttons: `event2` and `event1` plain evdev reads; verified button map with real presses
-- LED ring: `ledctrl` route A first (preloaded patterns), then direct control (route B, the `frame` format to be verified) behind the same logical states
+**Exit:** a desktop run in which a real ESPHome satellite wakes, a voice turn runs through ClawDot's pipeline, and an inbox announcement gets a spoken reply.
 
-**Exit:** a voice turn (A4) on the Dot using hotkey or button; wake word (A3) if SPIKE-002 passes on armv7. First point at which audio on the device may be claimed.
+## B3. Per-device install guide
+- **docs/guides/install-on-echo-dot-2.md**, plus a guide template for other devices
+- **Starts from the already-unlocked state** (adb root, TWRP), the state R-07 found. It links the unlock procedure and does not redistribute it
+- **Pins the firebreak version** the guide was tested with (v1.0.0 is current at the time of writing), links the upstream projects and **credits** the people involved (R-09 section 9)
+- Install the base image, pair ClawDot, open the firewall rule for the ClawDot listener (default port 3335), and the restore path from B0
+- A short frozen developer path for rooted Fire OS, as R-07 describes it
 
-## B4. Wi-Fi, clock and mute
-- Wi-Fi join and status through the supplicant (`wpa_cli` or the control socket); DHCP stays with `dhcpcd`
-- Clock: `sntp` and a verified clock (stock clock restores stale after reboot), feeding `clock_valid` (REQ-TMR-009)
-- Mic-mute semantics: declare `software` mute until an electrical cut is proven; never say "disconnected" before then (REQ-BRD-008)
+**Exit:** a fresh unlocked Dot reaches a voice turn following only the guide.
 
-**Exit:** headless first boot on a new network, with a trustworthy clock, without adb.
+## B4. Dot features through the base
+- LED states (`inbox`, `listening`, `error`) through ring entities if the base exposes them; mute state from the entity; volume; clock trust via an HTTPS `Date` check
+- **Wake word choice with licence-clean models.** **No pretrained openWakeWord models are bundled** (their licence is not clean); the guide says how to pick or train one, and the choice is recorded with licence provenance (EPIC-001)
+- Anything the base cannot do becomes a documented gap or an upstream request, not our code
 
-## B5. Alexa removal (staged, reversible first)
-Each step needs the maintainer's explicit go; stop and ask before each.
-1. Block Alexa's network access (firewall)
-2. Disable services (`pm disable`, stop)
-3. Block OTA updates
-4. Take a TWRP backup
-5. Only after ClawDot has run stable on its own for a soak period, remove the packages
+**Exit:** the Dot shows the inbox, listening and error states; no ClawDot code opens ALSA.
 
-Hazards from R-07 section 10 (for example the sysfs file that panics the kernel) apply to every step.
+## B5. ClawDot running on the Dot itself
+- ClawDot as a service on the base's rootfs, dialling `127.0.0.1:6053` (static armv7 musl build via `[profile.dot2]`, size gate, firewall rule)
+- Autostart on boot
 
-**Exit:** ClawDot is the only voice stack on the device, with a restore path documented and tested.
+**Exit:** a single-box Dot run recorded, with the budget gates green.
 
 ## B6. Raspberry Pi board and guide (old M6 Pi item)
-- Board for the Pi (GPIO buttons, optional ring), guide from the B2 template, satellite passes the conformance suite
+- Board for the Pi (GPIO buttons, optional ring), guide from the B3 template, satellite passes the conformance suite
+- **Wyoming satellites stay for the Pi** (REQ-SAT-014); ESPHome is the integration surface for the Dot
 - Headless Wi-Fi documented (shared with A6)
 
 **Exit:** Pi satellite passes the conformance suite; real-hardware run recorded.
+
+**What was superseded.** The former B3 (own audio, buttons and LED ring on Fire OS), B4 (Wi-Fi, clock and mute on Fire OS) and B5 (staged Alexa removal) are replaced by B0, B4 and B5 above, and the Fire OS route is frozen as a developer path only. The reasons are in R-08 section 9.1. The hazards in R-07 section 10 (for example the sysfs file that panics the kernel) still apply to any work on the stock system.
 
 ---
 
