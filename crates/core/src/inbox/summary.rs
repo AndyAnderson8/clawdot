@@ -108,6 +108,28 @@ pub fn summary_prompt(event: &Event, cfg: &SummaryConfig) -> (String, String) {
     (system, user)
 }
 
+/// The longest one-way announcement spoken as it is, with no model call.
+pub const SHORT_ANNOUNCEMENT_CHARS: usize = 200;
+
+/// A short one-way announcement ("dinner is ready") needs no summary and no model call: it is cleaned for
+/// speech like any model output and spoken as it is. Anything else, and anything that allows a reply,
+/// goes through the summariser (REQ-INB-022).
+#[must_use]
+pub fn short_announcement(event: &Event) -> Option<String> {
+    if !event.no_reply
+        || event.kind != EventKind::Info
+        || event.text.chars().count() > SHORT_ANNOUNCEMENT_CHARS
+    {
+        return None;
+    }
+    let cfg = SummaryConfig {
+        max_sentences: 4,
+        max_chars: 320,
+    };
+    let spoken = clamp_for_speech(&one_line(&event.text, SHORT_ANNOUNCEMENT_CHARS), &cfg);
+    (!spoken.is_empty()).then_some(spoken)
+}
+
 /// Strip markdown and links, collapse whitespace, and cut to the sentence and character limits. Applied
 /// to whatever the model returns, because a model can ignore its instructions.
 #[must_use]
@@ -300,9 +322,43 @@ mod tests {
             status: None,
             priority: Priority::Normal,
             session_ref: Some("s".into()),
+            no_reply: false,
+            expires_at: None,
             received_at: 0,
             state: EventState::New,
         }
+    }
+
+    fn one_way(text: &str) -> Event {
+        Event {
+            no_reply: true,
+            session_ref: None,
+            ..event(EventKind::Info, text)
+        }
+    }
+
+    #[test]
+    fn a_short_one_way_announcement_is_spoken_as_it_is_without_a_model() {
+        assert_eq!(
+            short_announcement(&one_way("Dinner is ready. Come down.")).as_deref(),
+            Some("Dinner is ready. Come down.")
+        );
+        // Markup, links and control characters are cleaned exactly as model output is.
+        let s = short_announcement(&one_way("**Door** open [here](http://evil.example/x)\u{7}"))
+            .unwrap();
+        assert!(
+            !s.contains('*') && !s.contains("http") && !s.contains('\u{7}'),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn long_replyable_or_agent_events_still_go_through_the_summariser() {
+        assert!(short_announcement(&one_way(&"word ".repeat(60))).is_none());
+        assert!(short_announcement(&event(EventKind::Info, "short")).is_none());
+        let mut asks = one_way("short");
+        asks.kind = EventKind::Question;
+        assert!(short_announcement(&asks).is_none());
     }
 
     #[test]

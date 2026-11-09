@@ -18,7 +18,8 @@ use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
 use clawdot_core::inbox::endpoint::QuietHours;
 use clawdot_core::inbox::event::Event;
 use clawdot_core::inbox::summary::{
-    SummaryConfig, announcement, clamp_for_speech, fallback_summary, summary_prompt,
+    SummaryConfig, announcement, clamp_for_speech, fallback_summary, short_announcement,
+    summary_prompt,
 };
 use clawdot_core::llm::{ChatRequest, Message};
 use clawdot_core::mcp::{McpClient, ServerDef, WithMcp};
@@ -49,6 +50,7 @@ clawdot: ClawDot core with a text console (pre-alpha; no audio yet)
 
 USAGE:
     clawdot [options]
+    clawdot say TEXT [options]   Speak a message on a running ClawDot (see: clawdot say --help)
 
 OPTIONS:
     --config FILE              JSON configuration file (flags override it); see docs/architecture/configuration.md
@@ -780,6 +782,9 @@ fn apply_live(
 /// A spoken summary: from the summary model if possible, else the headline and outcome only.
 async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Event) -> String {
     let cfg = SummaryConfig::default();
+    if let Some(spoken) = short_announcement(event) {
+        return spoken;
+    }
     if usage.check(day).is_ok() {
         let (system, user) = summary_prompt(event, &cfg);
         let req = ChatRequest {
@@ -1069,8 +1074,47 @@ async fn voice_once(
     Ok(())
 }
 
+/// `clawdot say TEXT ...`: speak a message on a running ClawDot (REQ-INB-026).
+async fn say_command(rest: &[String]) -> ExitCode {
+    let say_args = match clawdot_core::say::parse(rest, |k| std::env::var(k).ok()) {
+        Ok(a) => a,
+        Err(m) if m.is_empty() => {
+            print!("{}", clawdot_core::say::HELP);
+            return ExitCode::SUCCESS;
+        }
+        Err(m) => {
+            eprintln!("clawdot say: {m}");
+            return ExitCode::from(2);
+        }
+    };
+    let token = std::env::var(&say_args.token_env)
+        .ok()
+        .filter(|t| !t.is_empty());
+    if token.is_none() && say_args.body.get("endpoint").is_none() {
+        eprintln!(
+            "clawdot say: set the environment variable {} to an endpoint token (or choose another with --token-env)",
+            say_args.token_env
+        );
+        return ExitCode::from(2);
+    }
+    match clawdot_core::say::run(&say_args, token.as_deref()).await {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(m) => {
+            eprintln!("clawdot say: {m}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("say") {
+        return say_command(&argv[1..]).await;
+    }
     let mut args = match parse() {
         Ok(a) => a,
         Err(m) if m.is_empty() => {
@@ -1545,7 +1589,8 @@ async fn main() -> ExitCode {
                             s
                         }
                         // No model: say only the headline and outcome, never raw agent text.
-                        None => fallback_summary(&next.event),
+                        None => short_announcement(&next.event)
+                            .unwrap_or_else(|| fallback_summary(&next.event)),
                     };
                     let line = announcement(&next.event, &spoken, next.more_waiting);
                     if args.console || args.echo_speech {

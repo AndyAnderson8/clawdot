@@ -5,6 +5,7 @@
 //!
 //! * `GET  /healthz`
 //! * `POST /hook/{endpoint}`                      an agent posts its native hook payload
+//! * `POST /api/announce`                         a script says something (REQ-INB-021); endpoint token or admin
 //! * `GET  /bridge/{endpoint}/replies`            SSE stream of replies for the agent bridge
 //! * `POST /bridge/{endpoint}/replies/{id}/ack`   the bridge confirms it handled a reply
 //!
@@ -148,7 +149,7 @@ fn valid_name(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
-fn token_from(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn token_from(headers: &HeaderMap) -> Option<String> {
     if let Some(v) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         let (scheme, rest) = v.split_once(' ')?;
         return scheme
@@ -216,6 +217,13 @@ async fn route(
         },
         ["hook", name] if valid_name(name) => match parts.method {
             Method::POST => hook(&core, &parts.headers, name, body, opts.body_timeout).await,
+            _ => method_not_allowed(),
+        },
+        ["api", "announce"] => match parts.method {
+            Method::POST => {
+                crate::announce_api::handle(&core, &parts.headers, peer, body, opts.body_timeout)
+                    .await
+            }
             _ => method_not_allowed(),
         },
         ["bridge", name, "replies"] if valid_name(name) => match parts.method {
