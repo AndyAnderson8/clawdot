@@ -1,4 +1,4 @@
-# R-10: Open-source Echo and voice-satellite feature landscape (seven projects)
+# R-11: Open-source Echo and voice-satellite feature landscape (seven projects)
 
 Date: 2026-11-09 · Feeds: roadmap Phase B (B0 trial, B2 ESPHome client, B4 features through the base), [future scope](../future-scope.md), the Dot base decision (TECHO5 preferred) · Refines: [R-08](08-existing-echo-dot-projects.md) (which this note partly corrects, section 3)
 
