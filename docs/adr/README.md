@@ -15,6 +15,7 @@ An ADR captures one significant decision, its context, and its consequences, so 
 | [0009](0009-project-name.md) | Project name: ClawDot | Accepted |
 | [0010](0010-extension-model.md) | Extension model: no loadable code; MCP, HTTP tools, packs, sidecars | Proposed |
 | [0011](0011-git-flow-merge-commits.md) | Git flow with merge commits and gated landing | Accepted |
+| [0012](0012-board-support-layer.md) | Board support layer: a small `Board` trait, optional boards, per-device data | Proposed |
 | [0013](0013-first-run-admin-setup.md) | First-run administrator setup instead of a printed token | Proposed |
 
 ## Rules

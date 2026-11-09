@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.11 |
+| **Version** | 0.12 |
 | **Created** | 2026-11-07 |
-| **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006 |
+| **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
 ## 1. Summary
 
@@ -42,6 +42,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | **Pack** | A versioned, hash-pinned bundle of declarative data (adapter mappings, grammar, tool presets, prompt snippets). Never executable code. |
 | **Sidecar** | A separate process, normally off the device, that integrates through the documented core API. |
 | **Media backend** | A source or controller for audio, in the *playback* or *control* shape ([extensibility](../architecture/extensibility.md)). |
+| **Board** | Device-specific code and data that exposes a speaker's buttons, LED ring, mute, Wi-Fi, clock check and audio device names to the core (section 4.10, [ADR-0012](../adr/0012-board-support-layer.md)). |
 
 ## 4. Requirements
 
@@ -200,6 +201,29 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | REQ-EXT-005 | The core API surface for sidecars (inbox ingress, reply stream, status) MUST be documented and versioned. | Must | M5 | I |
 | REQ-EXT-006 | A ClawDot MCP server (agents calling `announce`/`ask_user`) is **not** part of v1.0. The inbox event model (`kind`, reply types) MUST NOT preclude it. | Must | M2 | I |
 
+### 4.10 Board support (`BRD`)
+
+See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architecture/board-support.md) and the hardware evidence in [R-07](../research/07-echo-dot-gen2-hardware.md). A **board** is the device-specific code and data that exposes a speaker's physical features (buttons, LED ring, microphone mute, Wi-Fi, clock, audio device names) to a hardware-agnostic core. It is separate from the satellite protocol, which carries audio and events; a board runs on the same device as the satellite or core that uses it.
+
+| ID | Requirement | Pri | Ms | Ver |
+|---|---|---|---|---|
+| REQ-BRD-001 | Device-specific hardware (buttons, LED ring, microphone mute, Wi-Fi, clock check, audio device names) MUST be reached only through one `Board` interface. The core and the reference satellites MUST NOT contain device-specific paths, key codes, or driver names. | Must | v1.x | I |
+| REQ-BRD-002 | Every board capability MUST be optional and declared (present or absent, in the style of REQ-SAT-003). The core MUST behave correctly, and remain fully usable, on a board that declares none. | Must | v1.x | T |
+| REQ-BRD-003 | The default build MUST include only a `NullBoard` (all capabilities absent). A `desktop` board (keyboard keys for buttons, a terminal indicator for LEDs) SHOULD exist for development and tests behind an optional feature. | Must | v1.x | T |
+| REQ-BRD-004 | A board MUST be compiled in by a Cargo feature and chosen at run time by the `board` setting (`none` by default, `auto`, or a board name). `auto` MUST choose only among compiled-in boards, by probing for the device. Naming a board that is not compiled in or not present MUST stop startup with a message that names the setting. | Must | v1.x | T |
+| REQ-BRD-005 | A board's button, LED and takeover behaviour MUST come from a per-device data file (JSON) validated at startup (unknown keys and impossible values stop startup and name the key), embedded in the binary and overridable with the `board_file` setting. The file holds data only: it MUST NOT contain code, shell commands built from untrusted text, or secrets. | Must | v1.x | T |
+| REQ-BRD-006 | The core MUST express LED feedback as a fixed set of logical states (`idle`, `wake`, `listening`, `thinking`, `speaking`, `muted`, `error`, `offline`, `timer`, `alarm`, `inbox`, `volume`); the board file maps each state to a device pattern. A state with no mapping MUST be a no-op, never an error. | Must | v1.x | T |
+| REQ-BRD-007 | A board MUST deliver raw button events (button, down, up, repeat, monotonic timestamp). The board file maps buttons and gestures (press, long press, double press) to logical actions (`volume_up`, `volume_down`, `mute_toggle`, `action`, `stop`). Gesture timing MUST be computed by shared board code, not per device, and MUST be testable without hardware. | Must | v1.x | T |
+| REQ-BRD-008 | The board MUST report the microphone mute state and whether the mute is `hardware` (the board can show the microphone path is cut) or `software` (capture is simply discarded). The core MUST treat a reported mute as authoritative (REQ-VOI-008, REQ-SEC-003) and MUST NOT state or imply the microphone is disconnected unless the board declared `hardware` mute. | Must | v1.x | T/I |
+| REQ-BRD-009 | A board that can manage Wi-Fi SHOULD report status (disconnected, connecting, connected, with signal strength and address) and accept a join request (network name and secret). The secret MUST NOT be logged, echoed in the API, or stored by ClawDot beyond handing it to the platform; join requests MUST be accepted only through the authenticated administrator path (REQ-CFG-005). | Should | v1.x | T |
+| REQ-BRD-010 | The board MUST report the clock as `unset`, `unverified` (restored from a saved value or otherwise not proven current) or `synced`. The core MUST treat `unset` and `unverified` like an unsynchronised clock (REQ-TMR-006, REQ-TMR-009) until the clock is `synced`, and MAY attempt verification by other means (for example an HTTPS `Date` check against a configured provider). | Must | v1.x | T |
+| REQ-BRD-011 | A board MUST describe its audio devices (capture and playback device names, sample rate, format, channel count, and which capture channels are microphones or echo reference) so the satellite can open them without device knowledge. | Must | v1.x | T |
+| REQ-BRD-012 | A board that must stop or reconfigure other software to own a device (for example a vendor voice stack) MUST list those actions in its board file as `takeover`, MUST perform them only when the board is enabled, and MUST restore them on a clean exit. The list MUST be shown in the UI status and logged at startup. | Must | v1.x | T/I |
+| REQ-BRD-013 | A board implementation MUST NOT read or write platform files known to be hazardous (listed in the board's research note and board file `forbidden` list); the shared board code MUST refuse such paths. | Must | v1.x | T |
+| REQ-BRD-014 | The Echo Dot Gen 2 board MUST ship as the optional feature `board-dot2`, with `boards/echo-dot2.json`, built by the `dot2` profile and `scripts/build-dot2.sh` for `armv7-unknown-linux-musleabihf`. It MUST add no mandatory dependency to the default build. | Must | v1.x | T/I |
+| REQ-BRD-015 | The Echo Dot Gen 2 board SHOULD drive the LED ring and read the buttons while the vendor LED and button daemons keep running, and SHOULD document which vendor services must be stopped for audio. Boards MUST report which parts they could not initialise (for example audio devices still held by another process) rather than failing the whole board. | Should | v1.x | T |
+| REQ-BRD-016 | Board events (buttons, mute changes, Wi-Fi changes) and board commands (LED states, volume) MUST be bounded: input queues have a fixed size and drop the oldest event on overflow (REQ-NFR-110). | Must | v1.x | T |
+
 ## 5. Key user scenarios (acceptance)
 
 - **AC-1 Q&A:** Given the device idle, when the user says the wake word and "what's the capital of Australia", then a spoken answer begins ≤ 2.5 s after speech ends.
@@ -214,6 +238,7 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 - **AC-10 Half-duplex:** Given the default configuration, when the assistant is speaking, then speech from the room is not transcribed, and the device does not trigger on its own output.
 - **AC-11 Summary:** Given a coding agent finishes with a 2,000-word final message, when the device announces it, then it plays a tone and speaks a summary of at most about two sentences without file paths, and "give me details" answers from the stored event without contacting the agent.
 - **AC-12 Integrations without code:** Given an HTTP tool configured for Home Assistant's conversation API, when the user says "turn off the living room lights", then the tool is called with the schema-validated utterance and the response is spoken. Given a Spotify control-shape backend, then "play some jazz" starts playback on the configured Connect device and the assistant states which device it is playing on.
+- **AC-13 Board:** Given an Echo Dot Gen 2 build with `board = "echo-dot2"`, when the user presses the mute button, then the microphone is discarded, the ring shows the `muted` pattern within 200 ms, and the status page reports mute as `software` or `hardware` exactly as the board declared. Given the same binary with `board = "none"`, the assistant works with no LED or button response and no error.
 
 ## 6. Open questions
 
@@ -246,3 +271,4 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | 0.9 | 2026-11-08 | First-run admin setup replaces the printed administrator token: one password or deliberate open mode on a private network, session sign-in, setup code, `--reset-admin`, legacy token migration (CFG-018..024; CFG-005 and CFG-015 amended) |
 | 0.10 | 2026-11-08 | The console-printed setup code is removed because the device has no visible console; CFG-021 now accepts first-visitor setup from private addresses as a documented residual risk (T15); CFG-015 amended |
 | 0.11 | 2026-11-08 | Default listen port changed from 8765 to 3335 at the maintainer's request (CFG-014 amended) |
+| 0.12 | 2026-11-08 | Board support layer (section 4.10, BRD-001..016, ADR-0012): one `Board` interface for buttons, LED ring, mute, Wi-Fi, clock trust and audio devices; null, desktop and Echo Dot Gen 2 boards chosen by Cargo feature and the `board` setting; per-device JSON; honest mute and clock reporting; AC-13. Evidence in R-07 |

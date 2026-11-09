@@ -30,5 +30,8 @@ Security and unlock:
 - Roadmap M7: relabel "Echo Dot Gen 2 port" as *opportunistic, not planned*.
 - A cheaper, accessible stand-in for validating the budget: any 512 MB armv7 Linux board or a constrained VM/cgroup (CI already plans qemu-user).
 
+## Correction (2026-11-08)
+A hands-on inspection ([R-07](07-echo-dot-gen2-hardware.md)) of one Dot that is reachable over `adb` as root found Fire OS 6.5.7.5 (Android 7.1.2, 32-bit kernel and userland), not 5.5.0.3, with an unlocked kernel flag and dm-verity disabled. So "no ADB" and "no unlock" describe retail units as reported by the sources above, not every unit in the maintainer's hands. The budget conclusions are unchanged; RAM measured at about 477 MiB total.
+
 ## Confidence
 Specs: medium-high (several teardowns agree). Unlock status: medium ("not found" ≠ "impossible").
