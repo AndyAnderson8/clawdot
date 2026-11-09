@@ -84,8 +84,10 @@ dependencies = [
 name = "clawdot-device"
 version = "0.0.0"
 dependencies = [
+ "clawdot-device",
  "clawdot-protocol",
  "clawdot-satellite",
+ "clawdot-wake",
  "serde_json",
 ]
 
@@ -134,6 +136,10 @@ version = "0.0.0"
 dependencies = [
  "clawdot-protocol",
 ]
+
+[[package]]
+name = "clawdot-wake"
+version = "0.0.0"
 
 [[package]]
 name = "cpufeatures"

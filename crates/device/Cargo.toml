@@ -23,3 +23,19 @@ path = "src/main.rs"
 clawdot-protocol = { path = "../protocol" }
 clawdot-satellite = { path = "../satellite" }
 serde_json = "1"
+clawdot-wake = { path = "../wake", optional = true }
+
+# Off by default: the microWakeWord engine (spec 0007). The default build links none of it.
+[features]
+default = []
+mww = ["dep:clawdot-wake"]
+
+[[example]]
+name = "wake_wav"
+path = "examples/wake_wav.rs"
+required-features = ["mww"]
+
+# Lets `cargo test --workspace` (the gate and CI) build and test the optional engine without a feature flag: a
+# package may depend on itself in tests. A normal build of the daemon does not see this.
+[dev-dependencies]
+clawdot-device = { path = ".", features = ["mww"] }

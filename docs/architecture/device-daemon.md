@@ -29,6 +29,7 @@ flowchart LR
 | `tone` | Built-in tones | REQ-DEV-014 |
 | `quiet` | Quiet-hours window, volume ceiling, LED dimming, announcement deferral | REQ-DEV-006 |
 | `wake` | `WakeEngine` seam, refractory filter, sensitivity, router, test engine | REQ-DEV-017 |
+| `wake_mww` (feature `mww`, off by default) | The microWakeWord engine over `clawdot-wake` ([runtime](wake-word-runtime.md)) | REQ-DEV-017, REQ-WAK-008 |
 | `daemon` | `DaemonDevice`, `GainOut` (software volume and ducking), `run_forever` (reconnect, local functions while offline) | REQ-DEV-005, 006, 014, 015, 016, 020 |
 
 ## What exists and what does not
@@ -39,7 +40,7 @@ flowchart LR
 | Command and default audio backends (`ffmpeg`, `sox`, `arecord`, `aplay`) from the satellite crate | Used; the board file selects them with `kind: default` or `command` |
 | `alsa` audio kind, input-device (`evdev`) buttons, `ledctrl`, `frame` and `sysfs` LED drivers | Accepted by the schema, **not implemented**: LEDs and buttons degrade to absent with a reported problem; audio stops startup with a message naming the key |
 | Console LEDs, terminal-key buttons, push-to-talk | Built (the desktop board) |
-| Wake engine | **None.** The seam exists. Always-on capture for an engine needs a change to the audio front end and arrives with the first engine |
+| Wake engine | Built (feature `mww`, off by default) but **not fed**: the seam exists and `MwwEngine` implements it. Always-on capture for an engine needs a change to the audio front end and arrives with the first engine |
 | Echo cancellation | **None** |
 | Ducking of other sources, Bluetooth, Spotify Connect, Wi-Fi setup, clock trust, updates | Not built; declared absent with the equivalent |
 | Quiet-hours settings from the core | Not on the wire yet (spec 0006 section 8); set with `--quiet` |
