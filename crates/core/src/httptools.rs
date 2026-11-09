@@ -509,6 +509,10 @@ impl<H: crate::session::ToolHost> crate::session::ToolHost for WithHttp<'_, H> {
         }
     }
 
+    fn returns_untrusted_text(&self, name: &str) -> bool {
+        self.http.owns(name) || self.inner.returns_untrusted_text(name)
+    }
+
     fn describe_action(&self, name: &str, args: &Value) -> String {
         if self.http.owns(name) {
             crate::session::describe_generic(name, args)

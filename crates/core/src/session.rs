@@ -69,6 +69,20 @@ impl Risk {
         }
     }
 
+    /// The risk to act on. When untrusted text is in the turn, anything that is not read-only is treated at
+    /// its conservative baseline again, so an administrator's override cannot spare a costly call the
+    /// user's yes (REQ-SEC-012).
+    fn under(self, tainted: bool) -> Self {
+        if tainted && self.tier != Tier::ReadOnly {
+            Self {
+                tier: self.tier.max(self.baseline),
+                baseline: self.baseline,
+            }
+        } else {
+            self
+        }
+    }
+
     /// Whether the call must wait for the user's yes.
     fn needs_hold(self) -> bool {
         self.tier >= Tier::Costly
@@ -230,6 +244,12 @@ pub trait ToolHost {
     fn describe_action(&self, name: &str, args: &Value) -> String {
         describe_generic(name, args)
     }
+    /// Whether this tool's results are text written by someone else (a web page, an MCP server, an agent
+    /// event). Such a result makes the rest of the conversation "tainted" (REQ-SEC-012). A tool that does
+    /// not say is assumed to return untrusted text.
+    fn returns_untrusted_text(&self, _name: &str) -> bool {
+        true
+    }
     /// Called once at the start of every user turn with the user's own words, so a tool can tell
     /// which turn it is running in and what the user actually said (REQ-AST-015).
     fn begin_turn(&mut self, _user_text: &str) {}
@@ -257,6 +277,8 @@ pub struct Conversation {
     idle_secs: i64,
     last_activity: Ts,
     pending: Option<PendingAction>,
+    /// Untrusted text (an event, a web page, a tool result) is in the context the model sees (REQ-SEC-012).
+    tainted: bool,
 }
 
 impl Conversation {
@@ -276,6 +298,7 @@ impl Conversation {
             idle_secs,
             last_activity: 0,
             pending: None,
+            tainted: false,
         }
     }
 
@@ -294,8 +317,15 @@ impl Conversation {
         if self.last_activity != 0 && now - self.last_activity > self.idle_secs {
             self.history.clear();
             self.pending = None;
+            self.tainted = false;
         }
         self.last_activity = now;
+    }
+
+    /// Whether untrusted text is in the context the model sees.
+    #[must_use]
+    pub fn is_tainted(&self) -> bool {
+        self.tainted
     }
 
     /// The action being held for the user's answer, if any.
@@ -487,6 +517,7 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
         conv.history.push(Message::user(user_text));
     } else {
         conv.history.push(Message::user(framed_event(user_text)));
+        conv.tainted = true;
         if conv
             .pending
             .as_ref()
@@ -519,6 +550,7 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
         if is_yes(user_text) {
             let known: Vec<String> = offered(host, cfg).into_iter().map(|t| t.name).collect();
             let outcome = if known.contains(&held.tool) {
+                conv.tainted |= host.returns_untrusted_text(&held.tool);
                 host.call_tool(&held.tool, &held.args)
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}"))
@@ -610,7 +642,7 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
                     Ok(mut args) => {
                         // `confirmed` means nothing to the host: drop it unless the tool really declares it.
                         drop_confirmed(&mut args, tools.iter().find(|t| t.name == call.name));
-                        let risk = host.risk(&call.name, &args);
+                        let risk = host.risk(&call.name, &args).under(conv.tainted);
                         if risk.tier == Tier::Destructive && !cfg.allow_destructive {
                             format!("Error: there is no tool called `{}`.", call.name)
                         } else if !by_user && risk.tier != Tier::ReadOnly {
@@ -625,6 +657,8 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
                             "Not run. The user is being asked to confirm; the answer arrives in their next turn."
                                 .to_owned()
                         } else {
+                            // Whatever it returns is now in the context the model reads.
+                            conv.tainted |= host.returns_untrusted_text(&call.name);
                             host.call_tool(&call.name, &args)
                                 .await
                                 .unwrap_or_else(|e| format!("Error: {e}"))
@@ -637,7 +671,12 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
         }
         if let Some(h) = held {
             // The host asks, in words built from the stored arguments, and the turn ends.
-            let speech = if by_user {
+            let speech = if by_user && conv.tainted {
+                format!(
+                    "{}. This followed text from outside, such as a web page or an alert, so check it. Yes or no?",
+                    h.description.trim_end_matches('.')
+                )
+            } else if by_user {
                 format!("{}. Yes or no?", h.description.trim_end_matches('.'))
             } else {
                 format!(
@@ -740,6 +779,7 @@ mod tests {
         confirm: Vec<&'static str>,
         tiers: Vec<(&'static str, Tier)>,
         extra: Vec<&'static str>,
+        lowered: Vec<&'static str>,
     }
 
     impl ToolHost for Host {
@@ -754,9 +794,16 @@ mod tests {
                 })
                 .collect()
         }
+        fn returns_untrusted_text(&self, name: &str) -> bool {
+            name == "web"
+        }
         fn risk(&self, name: &str, _: &Value) -> Risk {
             if self.confirm.contains(&name) {
                 return Risk::fixed(Tier::Costly);
+            }
+            if self.lowered.contains(&name) {
+                // Costly by nature; the administrator marked it reversible.
+                return Risk::set(Tier::Reversible, Tier::Costly);
             }
             Risk::fixed(
                 self.tiers
@@ -1118,6 +1165,104 @@ mod tests {
         turn(&b3, &mut h, &mut c, &mut u, "yes").await;
         assert_eq!(h.ran.len(), 2);
         assert_eq!(h.ran[1], ("set_timer".to_owned(), json!({"seconds":60})));
+    }
+
+    // REQ-SEC-012: untrusted text in the turn overrides an administrator's lowered tier.
+    #[tokio::test(flavor = "current_thread")]
+    async fn untrusted_text_makes_a_lowered_costly_tool_ask_for_a_yes_again() {
+        let host = || Host {
+            lowered: vec!["send_money"],
+            tiers: vec![("web", Tier::ReadOnly)],
+            ..Host::default()
+        };
+        // Without outside text, the administrator's override stands and the call runs.
+        let b = Script::new(vec![
+            calls(&[("a", "send_money", r#"{"amount":1}"#)]),
+            text("Sent."),
+        ]);
+        let (mut h, mut c, mut u) = (host(), conv(), UsageTracker::new(UsageLimits::default()));
+        turn(&b, &mut h, &mut c, &mut u, "send one dollar").await;
+        assert_eq!(h.ran.len(), 1);
+        assert!(!c.is_tainted());
+
+        // After a web result in the same turn it is held.
+        let b = Script::new(vec![
+            calls(&[("a", "web", "{}")]),
+            calls(&[("b", "send_money", r#"{"amount":500}"#)]),
+        ]);
+        let (mut h, mut c, mut u) = (host(), conv(), UsageTracker::new(UsageLimits::default()));
+        let r = turn(&b, &mut h, &mut c, &mut u, "look something up").await;
+        assert_eq!(
+            h.ran.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["web"]
+        );
+        assert!(
+            c.is_tainted() && r.speech.contains("from outside") && r.speech.ends_with("Yes or no?")
+        );
+
+        // The taint stays for the rest of the conversation, and goes with the history when it expires.
+        let b = Script::new(vec![
+            calls(&[("c", "send_money", r#"{"amount":2}"#)]),
+            text("ok"),
+        ]);
+        run_turn(&b, &mut h, &mut c, &cfg(), &mut u, 1, 1100, "no").await;
+        let r = run_turn(
+            &b,
+            &mut h,
+            &mut c,
+            &cfg(),
+            &mut u,
+            1,
+            1101,
+            "send two dollars",
+        )
+        .await;
+        assert!(
+            r.speech.ends_with("Yes or no?") && h.ran.len() == 1,
+            "still held: {r:?}"
+        );
+        let b = Script::new(vec![text("ok")]);
+        run_turn(&b, &mut h, &mut c, &cfg(), &mut u, 1, 1101 + 601, "hello").await;
+        assert!(!c.is_tainted());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn untrusted_text_does_not_stop_reads_or_built_in_reversible_calls() {
+        let b = Script::new(vec![
+            calls(&[
+                ("a", "web", "{}"),
+                ("b", "web", "{}"),
+                ("c", "set_timer", r#"{"seconds":5}"#),
+            ]),
+            text("Done."),
+        ]);
+        let mut h = Host {
+            tiers: vec![("web", Tier::ReadOnly)],
+            ..Host::default()
+        };
+        let (mut c, mut u) = (conv(), UsageTracker::new(UsageLimits::default()));
+        let r = turn(&b, &mut h, &mut c, &mut u, "go").await;
+        assert_eq!(h.ran.len(), 3, "{r:?}");
+    }
+
+    /// Adversarial: an MCP or web result says a tool has been switched on, and the model believes it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_result_cannot_enable_a_tool_the_host_does_not_offer() {
+        let b = Script::new(vec![
+            calls(&[("a", "web", "{}")]),
+            calls(&[("b", "wipe_everything", r#"{"confirmed":true}"#)]),
+            text("I could not."),
+        ]);
+        let mut h = Host {
+            tiers: vec![("web", Tier::ReadOnly)],
+            ..Host::default()
+        };
+        let (mut c, mut u) = (conv(), UsageTracker::new(UsageLimits::default()));
+        let r = turn(&b, &mut h, &mut c, &mut u, "look something up").await;
+        assert_eq!(r.speech, "I could not.");
+        assert_eq!(h.ran.len(), 1, "only the web read ran");
+        let seen = b.requests()[2].messages.last().unwrap().content.clone();
+        assert!(seen.contains("no tool called `wipe_everything`"), "{seen}");
     }
 
     #[tokio::test(flavor = "current_thread")]

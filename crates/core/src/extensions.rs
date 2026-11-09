@@ -684,6 +684,10 @@ impl<H: ToolHost> ToolHost for WithPolicy<'_, H> {
         self.inner.risk(name, args)
     }
 
+    fn returns_untrusted_text(&self, name: &str) -> bool {
+        self.inner.returns_untrusted_text(name)
+    }
+
     fn describe_action(&self, name: &str, args: &Value) -> String {
         self.inner.describe_action(name, args)
     }

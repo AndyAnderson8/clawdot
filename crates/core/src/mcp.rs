@@ -671,6 +671,10 @@ impl<H: ToolHost> ToolHost for WithMcp<'_, H> {
         }
     }
 
+    fn returns_untrusted_text(&self, name: &str) -> bool {
+        self.mcp.owns(name) || self.inner.returns_untrusted_text(name)
+    }
+
     fn describe_action(&self, name: &str, args: &Value) -> String {
         if self.mcp.owns(name) {
             crate::session::describe_generic(name, args)

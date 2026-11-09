@@ -179,6 +179,27 @@ impl ToolHost for Assistant {
         })
     }
 
+    /// Only the inbox reads return text that someone else wrote; the timers and the clock return words the
+    /// core made up itself.
+    fn returns_untrusted_text(&self, name: &str) -> bool {
+        !matches!(
+            name,
+            "set_timer"
+                | "list_timers"
+                | "cancel_timers"
+                | "set_alarm"
+                | "cancel_alarms"
+                | "set_reminder"
+                | "set_reminder_at"
+                | "current_time"
+                | "play_music"
+                | "music_control"
+                | "inbox_reply"
+                | "inbox_snooze"
+                | "inbox_dismiss"
+        )
+    }
+
     fn describe_action(&self, name: &str, args: &Value) -> String {
         if name == "inbox_reply" {
             let text = opt_text(args, "text").replace('"', "'");
@@ -795,6 +816,22 @@ mod tests {
             Tier::Costly,
             "unknown is costly"
         );
+    }
+
+    // REQ-SEC-012
+    #[test]
+    fn only_agent_text_and_unknown_tools_count_as_untrusted_results() {
+        let (a, ..) = setup(true);
+        for s in a.tool_specs() {
+            let untrusted = a.returns_untrusted_text(&s.name);
+            assert_eq!(
+                untrusted,
+                matches!(s.name.as_str(), "inbox_status" | "inbox_details"),
+                "{}",
+                s.name
+            );
+        }
+        assert!(a.returns_untrusted_text("some_new_tool"));
     }
 
     #[test]

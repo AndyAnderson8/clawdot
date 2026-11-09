@@ -42,6 +42,16 @@ Who said yes is unknown: ClawDot does not identify speakers, so a guest or a tel
 
 Nothing in the product starts an LLM turn from an event yet (announcements are spoken without the model); this is the gate that any such feature, and the rules of agentic-scope UC9, must go through.
 
+## Untrusted text in the turn (REQ-SEC-012)
+
+A conversation is *tainted* once text written by someone else is in what the model reads: an event turn's text, or the result of a tool that `ToolHost::returns_untrusted_text` says returns outside text. The built-in timers, alarms, reminders and music tools do not; `inbox_status`, `inbox_details`, every HTTP tool and every MCP tool do, and so does any tool that does not say (the default is untrusted).
+
+While tainted, a call that is not `read_only` is judged at its `baseline` tier instead of the one the administrator set (`Risk::under`). So an HTTP or MCP tool that the administrator lowered to `reversible` (for a light, say) is held for a yes again once a web page or an alert has been read; a `read_only` tool and the built-in reversible tools are not affected. The host's read-back then adds that the request followed outside text, so the user knows to listen carefully.
+
+The taint lasts as long as the conversation's history does (it is cleared when the history expires after 600 seconds idle), because the text stays in the context the model reads. A later turn in the same conversation is therefore held to the same rule.
+
+Not done here: fencing every tool result in angle brackets and naming which argument came from outside text (agentic-scope G6 and the read-back rule in section 3.4). The `Risk` baseline and `tainted` flag are the hooks for the second.
+
 ## Not built here (follow-ups)
 
 The audit log of every call and decision (REQ-SEC-014), the evaluation harness (REQ-AST-012), per-day caps and dry-run (REQ-SEC-015, REQ-SEC-016) are separate branches in the P0 and P1 list of agentic-scope.md. Until the audit log exists, the console is the only record of a held action.
