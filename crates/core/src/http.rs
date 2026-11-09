@@ -226,7 +226,16 @@ async fn route(
             Method::POST => ack(&core, &parts.headers, name, id),
             _ => method_not_allowed(),
         },
-        _ => match crate::ui::handle(&core, &parts.method, &segs, &parts.headers, peer, body).await
+        _ => match crate::ui::handle(
+            &core,
+            &parts.method,
+            &segs,
+            parts.uri.query(),
+            &parts.headers,
+            peer,
+            body,
+        )
+        .await
         {
             Some(r) => r,
             None => json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#),

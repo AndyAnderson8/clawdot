@@ -450,3 +450,77 @@ async fn the_served_page_negotiates_the_encoding() {
         }
     }
 }
+
+// REQ-SEC-014
+#[tokio::test]
+async fn the_audit_log_is_read_through_an_authenticated_paged_endpoint() {
+    use crate::audit::{Act, AuditConfig, AuditLog, decision};
+    use crate::session::Tier;
+    let p = start(false).await;
+    // nothing to read until the assistant has a log; and never without a sign-in
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    let s = call(&p, "GET", "/api/audit", "", "").await.0;
+    assert!(s == 401 || s == 429, "{s}");
+    let s = call(&p, "GET", "/api/audit", "Bearer not-the-token", "")
+        .await
+        .0;
+    assert!(s == 401 || s == 429, "{s}");
+    assert_eq!(call(&p, "GET", "/api/audit", &session, "").await.0, 503);
+    let log = Arc::new(AuditLog::in_memory(AuditConfig::default()));
+    p.core.set_audit(Arc::clone(&log));
+    for i in 0..6_i64 {
+        let (tool, tier, d) = if i % 2 == 0 {
+            ("set_timer", Tier::Reversible, decision::RAN)
+        } else {
+            ("docker__restart", Tier::Costly, decision::HELD)
+        };
+        let args = json!({"n": i, "api_key": "sk-secret-0123456789"});
+        let a = Act {
+            tool,
+            tier: Some(tier),
+            args: &args,
+            decision: d,
+            held_id: None,
+            outcome: None,
+            note: None,
+        };
+        log.record(1000 + i, 1, 1, "voice", None, &a);
+    }
+    async fn audit_get(p: &Portal, session: &str, q: &str) -> (u16, Value) {
+        call(p, "GET", &format!("/api/audit{q}"), session, "").await
+    }
+    let get = |q: &'static str| audit_get(&p, &session, q);
+    let (s, v) = get("?limit=2").await;
+    assert_eq!(s, 200);
+    let ids: Vec<u64> = v["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, [6, 5]);
+    assert_eq!(v["next_before"], 5);
+    assert_eq!(v["policy"]["dry_run"], false);
+    assert!(!v.to_string().contains("sk-secret"), "{v}");
+    let (_, v) = get("?limit=2&before=5").await;
+    assert_eq!(v["records"][0]["id"], 4);
+    let (_, v) = get("?tool=docker__restart&decision=held").await;
+    assert_eq!(v["records"].as_array().unwrap().len(), 3);
+    let (_, v) = get("?tier=reversible&since=1004").await;
+    assert_eq!(v["records"].as_array().unwrap().len(), 1);
+    let (_, v) = get("?trigger=voice&decision=blocked%3A").await;
+    assert_eq!(v["records"].as_array().unwrap().len(), 0);
+    let (s, v) = get("?limit=lots").await;
+    assert_eq!(s, 400);
+    assert!(v["error"].as_str().unwrap().contains("limit"));
+    // read-only: the log cannot be changed or cleared through the API
+    for m in ["POST", "PUT", "DELETE"] {
+        assert_eq!(
+            call(&p, m, "/api/audit", &session, "{}").await.0,
+            405,
+            "{m}"
+        );
+    }
+}
