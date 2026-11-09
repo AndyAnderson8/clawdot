@@ -181,6 +181,8 @@ impl Inbox {
             status: mapped.status,
             priority: mapped.priority,
             session_ref: mapped.session_ref,
+            no_reply: mapped.no_reply,
+            expires_at: mapped.ttl_secs.map(|t| now.saturating_add(t)),
             received_at: now,
             state: EventState::New,
         });
@@ -226,7 +228,23 @@ impl Inbox {
         });
     }
 
+    /// Drop events whose time to live ran out before they were spoken (REQ-INB-023). Returns how many.
+    pub fn expire(&mut self, now: Ts) -> usize {
+        let before = self.state.events.len();
+        self.state.events.retain(|e| !Self::lapsed(e, now));
+        before - self.state.events.len()
+    }
+
+    /// Unspoken and past its time to live.
+    fn lapsed(e: &Event, now: Ts) -> bool {
+        matches!(e.state, EventState::New | EventState::Snoozed { .. })
+            && e.expires_at.is_some_and(|t| t <= now)
+    }
+
     fn announceable(&self, e: &Event, now: Ts, minute_of_day: u16, endpoints: &Endpoints) -> bool {
+        if Self::lapsed(e, now) {
+            return false;
+        }
         let due = match e.state {
             EventState::New => true,
             EventState::Snoozed { until } => until <= now,
@@ -312,7 +330,9 @@ impl Inbox {
         }
     }
 
-    /// The event a spoken reply should go to: the most recently announced one still open.
+    /// The event a spoken reply should go to: the most recently announced one still open. A one-way
+    /// announcement is never a target, and it does not hand the reply to an older event either, so an
+    /// answer meant for a doorbell message cannot land on a coding agent (REQ-INB-023).
     #[must_use]
     pub fn reply_target(&self) -> Option<&Event> {
         self.state
@@ -320,6 +340,7 @@ impl Inbox {
             .iter()
             .rev()
             .find(|e| e.state == EventState::Announced)
+            .filter(|e| !e.no_reply)
     }
 
     /// Per-source roll-up of what is open (REQ-INB-016), busiest first.
@@ -375,6 +396,8 @@ mod tests {
             status: None,
             priority,
             session_ref: session.map(str::to_owned),
+            no_reply: false,
+            ttl_secs: None,
         }
     }
 

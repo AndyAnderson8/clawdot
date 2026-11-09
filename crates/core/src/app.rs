@@ -15,7 +15,9 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Notify;
 
+mod announce;
 mod portal;
+pub use announce::{AnnounceError, Announcement, Caller, outcome_json};
 pub use portal::{Fail, Job, Op, SchedOp};
 
 /// Adapters available to endpoints, by name.
@@ -795,7 +797,8 @@ impl Core {
         let mut g = self.lock();
         let expired = g.replies.expire(now);
         g.inbox.prune(now, 24 * 3600);
-        if expired > 0 {
+        let lapsed = g.inbox.expire(now);
+        if expired > 0 || lapsed > 0 {
             self.persist(&g);
         }
     }

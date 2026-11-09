@@ -63,6 +63,8 @@ pub mod decision {
     pub const SKIPPED: &str = "blocked:pending";
     /// The user cancelled the turn: the call was dropped, or a held call was discarded (REQ-AST-022).
     pub const CANCELLED: &str = "cancelled";
+    /// An announcement the endpoint's filter dropped (REQ-INB-024).
+    pub const FILTERED: &str = "blocked:filtered";
     /// A turn limit, the deadline or a failure streak stopped the turn before this call (REQ-AST-019).
     pub const STOPPED: &str = "blocked:limit";
 }
