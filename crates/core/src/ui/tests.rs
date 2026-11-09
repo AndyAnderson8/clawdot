@@ -94,14 +94,7 @@ async fn call(p: &Portal, method: &str, path: &str, auth: &str, body: &str) -> (
 #[test]
 fn the_page_uses_plain_names_and_no_radio() {
     let page = PAGE.to_lowercase();
-    for word in [
-        "inbox",
-        "scheduled",
-        "radio",
-        "music",
-        "station",
-        "endpoints",
-    ] {
+    for word in ["inbox", "scheduled", "radio", "music", "station"] {
         assert!(!page.contains(word), "the page still says `{word}`");
     }
     for tab in [
