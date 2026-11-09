@@ -1169,6 +1169,118 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
     assert!(spoken, "the test phrase should be spoken");
 }
 
+/// Saved settings sit between the configuration file and flags, and a live change reaches the running
+/// assistant without a restart (REQ-CFG-038, REQ-CFG-039).
+#[test]
+fn saved_settings_layer_under_flags_and_apply_live() {
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!("clawdot-settings-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("settings.json"),
+        r#"{"schema":1,"data":{"zone":"America/Phoenix","device_name":"Den"}}"#,
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--no-console",
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--zone",
+            "America/Chicago",
+            "--data-dir",
+            dir.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut listening = false;
+    while Instant::now() < deadline && !listening {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            listening |= line.contains("listening on");
+        }
+    }
+    assert!(listening, "the server should start");
+    let (_, b) = http(
+        port,
+        "POST",
+        "/api/setup",
+        "",
+        r#"{"mode":"password","password":"correct horse battery"}"#,
+    );
+    let admin = b
+        .split("\"token\":\"")
+        .nth(1)
+        .and_then(|t| t.split('"').next())
+        .expect("a session token")
+        .to_owned();
+    // Not signed in: a change is refused and the file is untouched.
+    let before = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+    assert_eq!(
+        http(
+            port,
+            "PUT",
+            "/api/settings",
+            "wrong",
+            r#"{"device_name":"X"}"#
+        )
+        .0,
+        401
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("settings.json")).unwrap(),
+        before
+    );
+
+    let (s, b) = http(port, "GET", "/api/settings", &admin, "");
+    assert_eq!(s, 200, "{b}");
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(
+        v["fields"]["zone"]["value"], "America/Chicago",
+        "a flag beats a saved value"
+    );
+    assert_eq!(v["fields"]["zone"]["source"], "flag");
+    assert_eq!(v["fields"]["zone"]["ignored"], true);
+    assert_eq!(v["fields"]["device_name"]["value"], "Den");
+    assert_eq!(v["fields"]["device_name"]["source"], "saved");
+
+    // A live change shows up in the running assistant's status.
+    let (s, b) = http(
+        port,
+        "PUT",
+        "/api/settings",
+        &admin,
+        r#"{"max_requests_per_day":7}"#,
+    );
+    assert_eq!(s, 200, "{b}");
+    let mut seen = false;
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end && !seen {
+        let (_, b) = http(port, "GET", "/api/status", &admin, "");
+        seen = b.contains(r#""max_requests_per_day":7"#);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(seen, "the new limit should reach the running assistant");
+    assert!(
+        saved.contains("max_requests_per_day") && saved.contains("Den"),
+        "{saved}"
+    );
+}
+
 /// A taken port stops startup with a message that names `--listen`, and no administrator token is
 /// created or printed for a server that never started (REQ-CFG-014, REQ-CFG-015).
 #[test]
