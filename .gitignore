@@ -31,3 +31,8 @@ Thumbs.db
 
 # Stray build directories from older scripts/cargo.sh runs in linked worktrees
 /-agent-*
+
+# Local voice loop runs
+/clawdot-pc.json
+/clawdot-data/
+/clawdot-core.log*
