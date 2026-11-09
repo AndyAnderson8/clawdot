@@ -84,7 +84,7 @@ export function usePolled(fn: () => void | Promise<void>): void {
 
 // ----- small helpers the components share -----
 
-export function sv(key: string): string | number | null {
+export function sv(key: string): string | number | boolean | null {
   const f = state.settings?.fields[key];
   return f ? f.value : null;
 }

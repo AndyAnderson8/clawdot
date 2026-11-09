@@ -15,6 +15,7 @@ use clawdot_core::esphome_cfg::EsphomeConfig;
 use clawdot_core::extensions::{ExtOp, Extensions, WithPolicy};
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
+use clawdot_core::inbox::endpoint::QuietHours;
 use clawdot_core::inbox::event::Event;
 use clawdot_core::inbox::summary::{
     SummaryConfig, announcement, clamp_for_speech, fallback_summary, short_announcement,
@@ -27,7 +28,8 @@ use clawdot_core::notes::NoteStore;
 use clawdot_core::satellite::{self, Answer, Ask};
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
 use clawdot_core::session::{
-    ChatBackend, Conversation, ToolHost, TurnConfig, TurnCtl, TurnEnd, run_turn_ctl,
+    ChatBackend, Conversation, MAX_CALLS_CEILING, MAX_DEADLINE_CEILING_SECS, MAX_ROUNDS_CEILING,
+    ToolHost, TurnConfig, TurnCtl, TurnEnd, run_turn_ctl,
 };
 use clawdot_core::settings::{self, Layer, SettingsState, public_url_from_listen};
 use clawdot_core::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
@@ -121,10 +123,12 @@ struct Args {
     voice_out: Option<PathBuf>,
     max_requests: u32,
     daily_spend: Option<f64>,
-    /// Daily action caps and the dry-run switch (REQ-SEC-015, REQ-SEC-016); from the file and flags only.
+    /// Daily action caps and the dry-run switch (REQ-SEC-015, REQ-SEC-016); the effective settings (REQ-CFG-062).
     actions: ActionPolicy,
-    /// Turn limits, speech while working and notes (REQ-AST-019..025); from the file only.
+    /// Turn limits, speech while working and notes (REQ-AST-019..025); the effective settings (REQ-CFG-062).
     agent: AgentConfig,
+    /// The device-wide quiet-hours window (REQ-INB-040).
+    quiet: Option<QuietHours>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -160,6 +164,7 @@ fn parse() -> Result<Args, String> {
         esphome: EsphomeConfig::default(),
         voice_in: None,
         voice_out: None,
+        quiet: None,
         max_requests: UsageLimits::default().max_requests_per_day,
         daily_spend: None,
         actions: ActionPolicy::default(),
@@ -249,7 +254,9 @@ fn parse() -> Result<Args, String> {
                     .map_err(|e| format!("bad number: {e}"))?;
                 a.flag_layer.insert("max_requests_per_day".into(), n.into());
             }
-            "--dry-run" => a.actions.dry_run = true,
+            "--dry-run" => {
+                a.flag_layer.insert("dry_run".into(), true.into());
+            }
             "--daily-spend-usd" => {
                 let x: f64 = value("--daily-spend-usd")?
                     .parse()
@@ -302,15 +309,46 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
     put("voice", c.speech.voice.clone().map(Into::into));
     a.agent = c.agent.clone();
-    let d = ActionPolicy::default();
-    a.actions = ActionPolicy {
-        dry_run: c.limits.dry_run.unwrap_or(d.dry_run),
-        max_actions_per_day: c
-            .limits
-            .max_actions_per_day
-            .unwrap_or(d.max_actions_per_day),
-        max_costly_per_day: c.limits.max_costly_per_day.unwrap_or(d.max_costly_per_day),
-    };
+    // The agent and limit settings join the layers so the portal can show and change them (REQ-CFG-062).
+    // A value above its ceiling is shown at the ceiling it will be held to.
+    let ceil =
+        |v: Option<u64>, lo: u64, hi: u64| v.map(|n| serde_json::Value::from(n.clamp(lo, hi)));
+    put(
+        "agent_max_rounds",
+        ceil(
+            c.agent.max_rounds.map(|n| n as u64),
+            1,
+            MAX_ROUNDS_CEILING as u64,
+        ),
+    );
+    put(
+        "agent_max_tool_calls",
+        ceil(
+            c.agent.max_tool_calls.map(|n| n as u64),
+            1,
+            MAX_CALLS_CEILING as u64,
+        ),
+    );
+    put(
+        "agent_deadline_secs",
+        ceil(c.agent.deadline_secs, 5, MAX_DEADLINE_CEILING_SECS),
+    );
+    put(
+        "agent_tool_timeout_secs",
+        ceil(c.agent.tool_timeout_secs, 1, 120),
+    );
+    put("plan_speech", c.agent.plan_speech.map(Into::into));
+    put("progress_speech", c.agent.progress_speech.map(Into::into));
+    put("notes", c.agent.notes.map(Into::into));
+    put(
+        "max_actions_per_day",
+        c.limits.max_actions_per_day.map(Into::into),
+    );
+    put(
+        "max_costly_per_day",
+        c.limits.max_costly_per_day.map(Into::into),
+    );
+    put("dry_run", c.limits.dry_run.map(Into::into));
     Ok(())
 }
 
@@ -329,6 +367,8 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
         };
         layer.insert("persona".into(), text.into());
     }
+    let turn = TurnConfig::default();
+    let policy = ActionPolicy::default();
     let defaults: Layer = [
         ("device_name", serde_json::json!(device_name())),
         ("zone", "UTC".into()),
@@ -340,6 +380,19 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
             UsageLimits::default().max_requests_per_day.into(),
         ),
         ("board", "none".into()),
+        ("agent_max_rounds", turn.max_tool_loops.into()),
+        ("agent_max_tool_calls", turn.max_tool_calls.into()),
+        ("agent_deadline_secs", turn.deadline_secs.into()),
+        (
+            "agent_tool_timeout_secs",
+            turn.tool_timeout.as_secs().into(),
+        ),
+        ("plan_speech", turn.plan_speech.into()),
+        ("progress_speech", turn.progress_speech.into()),
+        ("notes", false.into()),
+        ("max_actions_per_day", policy.max_actions_per_day.into()),
+        ("max_costly_per_day", policy.max_costly_per_day.into()),
+        ("dry_run", policy.dry_run.into()),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))
@@ -373,7 +426,62 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
     if let Some(v) = text("voice") {
         args.speech.voice = Some(v);
     }
+    let live = state.live_values();
+    args.agent = agent_from(&live, args.agent.summarize_over_chars);
+    args.actions = policy_from(&live);
+    args.quiet = quiet_from(&live);
     Ok((state, warnings))
+}
+
+/// The agent settings among the live values (REQ-CFG-062).
+fn agent_from(
+    live: &serde_json::Map<String, serde_json::Value>,
+    summarize: Option<usize>,
+) -> AgentConfig {
+    let num = |k: &str| live.get(k).and_then(serde_json::Value::as_u64);
+    let flag = |k: &str| live.get(k).and_then(serde_json::Value::as_bool);
+    AgentConfig {
+        max_rounds: num("agent_max_rounds").and_then(|n| usize::try_from(n).ok()),
+        max_tool_calls: num("agent_max_tool_calls").and_then(|n| usize::try_from(n).ok()),
+        deadline_secs: num("agent_deadline_secs"),
+        tool_timeout_secs: num("agent_tool_timeout_secs"),
+        plan_speech: flag("plan_speech"),
+        progress_speech: flag("progress_speech"),
+        summarize_over_chars: summarize,
+        notes: flag("notes"),
+    }
+}
+
+/// The daily caps and the dry-run switch among the live values.
+fn policy_from(live: &serde_json::Map<String, serde_json::Value>) -> ActionPolicy {
+    let d = ActionPolicy::default();
+    let num = |k: &str, or: u32| {
+        live.get(k)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(or)
+    };
+    ActionPolicy {
+        dry_run: live
+            .get("dry_run")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(d.dry_run),
+        max_actions_per_day: num("max_actions_per_day", d.max_actions_per_day),
+        max_costly_per_day: num("max_costly_per_day", d.max_costly_per_day),
+    }
+}
+
+/// The quiet-hours window among the live values, when both ends are set (REQ-INB-040).
+fn quiet_from(live: &serde_json::Map<String, serde_json::Value>) -> Option<QuietHours> {
+    let at = |k: &str| {
+        live.get(k)
+            .and_then(serde_json::Value::as_str)
+            .and_then(settings::minute_of_day)
+    };
+    Some(QuietHours {
+        start: at("quiet_start")?,
+        end: at("quiet_end")?,
+    })
 }
 
 /// `--reset-admin`: forget the administrator setting so first-run setup shows again (REQ-CFG-022).
@@ -523,11 +631,22 @@ fn agent_turn_config(
     max_tokens: u32,
     agent: &AgentConfig,
 ) -> TurnConfig {
+    with_agent(
+        TurnConfig {
+            model: model.to_owned(),
+            fallback_model: fallback.map(str::to_owned),
+            max_tokens,
+            summary_model: Some(summary.unwrap_or(model).to_owned()),
+            ..TurnConfig::default()
+        },
+        agent,
+    )
+}
+
+/// `cfg` with the limits and speech switches the `agent` settings give (the defaults where they say nothing).
+fn with_agent(cfg: TurnConfig, agent: &AgentConfig) -> TurnConfig {
     let d = TurnConfig::default();
     TurnConfig {
-        model: model.to_owned(),
-        fallback_model: fallback.map(str::to_owned),
-        max_tokens,
         max_tool_loops: agent.max_rounds.unwrap_or(d.max_tool_loops),
         max_tool_calls: agent.max_tool_calls.unwrap_or(d.max_tool_calls),
         deadline_secs: agent.deadline_secs.unwrap_or(d.deadline_secs),
@@ -537,8 +656,7 @@ fn agent_turn_config(
         plan_speech: agent.plan_speech.unwrap_or(d.plan_speech),
         progress_speech: agent.progress_speech.unwrap_or(d.progress_speech),
         summarize_over: agent.summarize_over_chars.unwrap_or(d.summarize_over),
-        summary_model: Some(summary.unwrap_or(model).to_owned()),
-        allow_destructive: false,
+        ..cfg
     }
 }
 
@@ -567,6 +685,7 @@ fn build_llm(
 /// what is already in effect, so only real changes do any work.
 fn apply_live(
     brain: &mut Brain,
+    core: &Core,
     live: &serde_json::Map<String, serde_json::Value>,
     applied: &mut serde_json::Map<String, serde_json::Value>,
 ) {
@@ -597,6 +716,41 @@ fn apply_live(
             .get("daily_spend_usd")
             .and_then(serde_json::Value::as_f64);
         brain.usage.set_limits(l);
+    }
+    if [
+        "agent_max_rounds",
+        "agent_max_tool_calls",
+        "agent_deadline_secs",
+        "agent_tool_timeout_secs",
+        "plan_speech",
+        "progress_speech",
+    ]
+    .iter()
+    .any(|k| changed(k))
+    {
+        brain.agent = agent_from(live, brain.agent.summarize_over_chars);
+        if let Some(llm) = &mut brain.llm {
+            llm.cfg = with_agent(llm.cfg.clone(), &brain.agent);
+        }
+    }
+    if changed("notes")
+        && let Some(n) = core.notes()
+    {
+        n.set_enabled(
+            live.get("notes")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        );
+    }
+    if ["dry_run", "max_actions_per_day", "max_costly_per_day"]
+        .iter()
+        .any(|k| changed(k))
+        && let Some(a) = core.audit()
+    {
+        a.set_policy(policy_from(live));
+    }
+    if changed("quiet_start") || changed("quiet_end") {
+        core.set_quiet_hours(quiet_from(live));
     }
     if [
         "llm_url",
@@ -1113,6 +1267,7 @@ async fn main() -> ExitCode {
     };
     conversation.set_audit(Arc::clone(&audit));
     core.set_audit(audit);
+    core.set_quiet_hours(args.quiet);
     // Notes the user asks for (REQ-AST-023); off unless the `agent` section turns them on.
     let notes = match NoteStore::open(&args.data_dir, args.agent.notes.unwrap_or(false)) {
         Ok(n) => Arc::new(n),
@@ -1362,7 +1517,7 @@ async fn main() -> ExitCode {
                 let answer = match job.op {
                     Op::Sched(op) => brain.assistant.admin_sched(op),
                     Op::Settings(live) => {
-                        apply_live(&mut brain, &live, &mut applied);
+                        apply_live(&mut brain, &core, &live, &mut applied);
                         Ok(serde_json::json!({ "applied": true }))
                     }
                     Op::Ext(op) => {

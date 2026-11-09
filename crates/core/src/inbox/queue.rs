@@ -2,7 +2,7 @@
 //! (REQ-INB-004..007, 012, 014, 016).
 
 use super::adapter::Mapped;
-use super::endpoint::{Endpoint, Endpoints};
+use super::endpoint::{Endpoint, Endpoints, QuietHours};
 use super::event::{Event, EventKind, EventState, Priority};
 use crate::sched::Ts;
 use crate::store::{JsonStore, StoreError};
@@ -87,6 +87,8 @@ pub struct SourceStatus {
 pub struct Inbox {
     state: InboxState,
     limits: InboxLimits,
+    /// The device-wide quiet-hours window (REQ-INB-040), on top of each endpoint's own.
+    quiet: Option<QuietHours>,
 }
 
 impl Inbox {
@@ -96,7 +98,14 @@ impl Inbox {
         Self {
             state: InboxState::default(),
             limits,
+            quiet: None,
         }
+    }
+
+    /// Set or clear the device-wide quiet-hours window: until it ends, only urgent events are announced
+    /// (REQ-INB-040).
+    pub fn set_quiet(&mut self, quiet: Option<QuietHours>) {
+        self.quiet = quiet;
     }
 
     /// Restore from a store.
@@ -107,6 +116,7 @@ impl Inbox {
         Ok(Self {
             state: store.load()?,
             limits,
+            quiet: None,
         })
     }
 
@@ -253,10 +263,11 @@ impl Inbox {
         if !due {
             return false;
         }
-        let quiet = endpoints
-            .get(&e.endpoint)
-            .and_then(|ep| ep.filter.quiet_hours)
-            .is_some_and(|q| q.contains(minute_of_day));
+        let quiet = self.quiet.is_some_and(|q| q.contains(minute_of_day))
+            || endpoints
+                .get(&e.endpoint)
+                .and_then(|ep| ep.filter.quiet_hours)
+                .is_some_and(|q| q.contains(minute_of_day));
         !quiet || e.priority == Priority::Urgent
     }
 
@@ -685,6 +696,48 @@ mod tests {
         assert!(
             inbox.plan(10, true, 12 * 60, &eps).unwrap().rest.len() == 1,
             "normal is released in the morning"
+        );
+    }
+
+    // REQ-INB-040
+    #[test]
+    fn the_device_wide_window_holds_back_everything_but_urgent_and_can_be_cleared() {
+        let (mut inbox, eps) = setup();
+        let e = ep(&eps);
+        inbox.ingest(
+            1,
+            &e,
+            mapped(EventKind::Done, Priority::Normal, "normal", Some("a")),
+        );
+        let night = 23 * 60;
+        assert!(inbox.plan(10, true, night, &eps).is_some(), "no window yet");
+        inbox.set_quiet(Some(QuietHours {
+            start: 22 * 60,
+            end: 7 * 60,
+        }));
+        assert!(inbox.plan(10, true, night, &eps).is_none(), "held at night");
+        assert!(
+            inbox.plan(10, true, 3 * 60, &eps).is_none(),
+            "the window spans midnight"
+        );
+        inbox.ingest(
+            2,
+            &e,
+            mapped(EventKind::NeedsInput, Priority::Urgent, "urgent", Some("b")),
+        );
+        let plan = inbox.plan(10, true, night, &eps).unwrap();
+        assert_eq!(inbox.get(plan.lead).unwrap().title, "urgent");
+        assert!(plan.rest.is_empty(), "the normal one waits");
+        assert_eq!(
+            inbox.plan(10, true, 12 * 60, &eps).unwrap().rest.len(),
+            1,
+            "released after the window"
+        );
+        inbox.set_quiet(None);
+        assert_eq!(
+            inbox.plan(10, true, night, &eps).unwrap().rest.len(),
+            1,
+            "cleared at once"
         );
     }
 

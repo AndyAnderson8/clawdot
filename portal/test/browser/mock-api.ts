@@ -41,6 +41,9 @@ const pageFile = join(
 );
 const now = () => Math.floor(Date.now() / 1000);
 
+// What a setting goes back to when it is cleared.
+const DEFAULTS: Json = { plan_speech: true, progress_speech: true, agent_max_rounds: 8 };
+
 function auditSeed(t: number): Json[] {
   const rec = (id: number, o: Json): Json => ({
     v: 1,
@@ -109,6 +112,18 @@ function seed(mode: string): Json {
       max_requests_per_day: { value: 100, source: "default", live: true },
       daily_spend_usd: { value: null, source: "default", live: true },
       board: { value: "none", source: "default", live: false },
+      agent_max_rounds: { value: 8, source: "default", live: true },
+      agent_max_tool_calls: { value: 12, source: "file", live: true },
+      agent_deadline_secs: { value: 60, source: "default", live: true },
+      agent_tool_timeout_secs: { value: 45, source: "default", live: true },
+      plan_speech: { value: true, source: "default", live: true },
+      progress_speech: { value: true, source: "default", live: true },
+      notes: { value: false, source: "default", live: true },
+      max_actions_per_day: { value: 100, source: "default", live: true },
+      max_costly_per_day: { value: 20, source: "default", live: true },
+      dry_run: { value: true, source: "flag", live: true, saved: false },
+      quiet_start: { value: null, source: "default", live: true },
+      quiet_end: { value: null, source: "default", live: true },
     },
     restart: ["listen"],
     schedule: [
@@ -304,8 +319,32 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
       if (m === "PUT" && path === "/api/settings") {
         if (body.llm_url === "http://insecure.example.com")
           return err(400, "The language model address must start with https:// unless it is on your own network.");
-        for (const [k, v] of Object.entries(body))
-          st["settings"][k] = { value: v, source: v === null ? "default" : "saved", live: true };
+        const ranges: Record<string, [number, number, string]> = {
+          agent_max_rounds: [1, 20, "Rounds per request"],
+          max_actions_per_day: [0, 100000, "Actions per day"],
+        };
+        for (const [k, v] of Object.entries(body)) {
+          const r = ranges[k];
+          if (r && v !== null && !(Number.isInteger(v) && (v as number) >= r[0] && (v as number) <= r[1]))
+            return err(400, `${r[2]} must be a whole number from ${r[0]} to ${r[1]}.`);
+        }
+        if (
+          ("quiet_start" in body || "quiet_end" in body) &&
+          !(body.quiet_start && body.quiet_end) &&
+          !(body.quiet_start === null && body.quiet_end === null)
+        )
+          return err(400, "Set both the quiet hours start and end, or clear both.");
+        for (const [k, v] of Object.entries(body)) {
+          const was = st["settings"][k] ?? {};
+          st["settings"][k] = {
+            ...was,
+            value: v === null ? (DEFAULTS[k] ?? null) : v,
+            source: was.source === "flag" ? "flag" : v === null ? "default" : "saved",
+            saved: v !== null,
+            ignored: was.source === "flag",
+            live: true,
+          };
+        }
         return send(200, settingsJson("Saved."));
       }
       if (m === "POST" && path === "/api/admin/password") {

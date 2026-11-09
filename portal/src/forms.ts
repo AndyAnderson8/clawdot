@@ -171,6 +171,18 @@ export const LABEL: Record<string, string> = {
   max_requests_per_day: "Requests per day",
   daily_spend_usd: "Daily spend limit",
   board: "Board",
+  agent_max_rounds: "Rounds per request",
+  agent_max_tool_calls: "Tool calls per request",
+  agent_deadline_secs: "Seconds per request",
+  agent_tool_timeout_secs: "Seconds per tool call",
+  plan_speech: "Say the plan first",
+  progress_speech: "Say progress while working",
+  notes: "Keep notes",
+  max_actions_per_day: "Actions per day",
+  max_costly_per_day: "Actions that ask first, per day",
+  dry_run: "Dry run",
+  quiet_start: "Quiet from",
+  quiet_end: "Quiet until",
 };
 export const FROM: Record<string, string> = {
   default: "Default",
@@ -179,12 +191,15 @@ export const FROM: Record<string, string> = {
   flag: "Command-line flag",
 };
 
-export type SettingKind = "text" | "zone" | "area" | "board" | "number";
+export type SettingKind = "text" | "zone" | "area" | "board" | "number" | "bool" | "time";
 export interface SettingSpec {
   key: string;
   kind: SettingKind;
   hint?: string;
   off?: boolean;
+  /** For a whole number: the range the device accepts (shown to the browser as min and max). */
+  min?: number;
+  max?: number;
 }
 
 export function labelOf(key: string): string {
@@ -202,14 +217,14 @@ export function settingsPatch(
   specs: SettingSpec[],
   current: Record<string, string>,
   edited: Record<string, string>,
-): Record<string, string | number | null> {
-  const body: Record<string, string | number | null> = {};
+): Record<string, string | number | boolean | null> {
+  const body: Record<string, string | number | boolean | null> = {};
   for (const sp of specs) {
     if (sp.off) continue;
     const was = (current[sp.key] ?? "").trim();
     const v = (edited[sp.key] ?? "").trim();
     if (v === was) continue;
-    body[sp.key] = v === "" ? null : sp.kind === "number" ? Number(v) : v;
+    body[sp.key] = v === "" ? null : sp.kind === "number" ? Number(v) : sp.kind === "bool" ? v === "true" : v;
   }
   return body;
 }

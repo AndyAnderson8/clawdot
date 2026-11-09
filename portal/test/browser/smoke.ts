@@ -538,6 +538,66 @@ await step("Settings: save one group, errors stay in their form, restart notice,
   await b.until(`T.text('#notes')?.includes('First release')`, "release notes loaded");
 });
 
+await step("Settings: agent settings show their source, validate, and save booleans and times", async () => {
+  await open("open", "#/settings");
+  await b.until(`!!T.q('#f-agent_max_rounds')`, "agent settings form");
+  await eq(
+    `T.q('#f-agent_max_rounds').getAttribute('min') + '-' + T.q('#f-agent_max_rounds').getAttribute('max')`,
+    "1-20",
+    "range is offered to the browser",
+  );
+  await eq(
+    `T.q('#f-agent_max_tool_calls').closest('div').textContent.includes('Configuration file. Applies right away.')`,
+    true,
+    "source and liveness shown",
+  );
+  await eq(`T.q('#f-plan_speech').tagName`, "SELECT", "a toggle is a list of On and Off");
+  await eq(`T.q('#f-plan_speech').value`, "true", "current value");
+  await eq(`T.q('#f-quiet_start').type`, "time", "quiet hours use a time box");
+  await eq(
+    `T.q('#f-dry_run').closest('div').textContent.includes('Command-line flag. Applies right away.')`,
+    true,
+    "a value set by a flag says so",
+  );
+  // out of range: the browser stops it before anything is sent
+  await T(`set('#f-agent_max_rounds', '99')`);
+  await b.ev(`T.q('#f-agent_max_rounds').form.requestSubmit()`);
+  await eq(`T.q('#f-agent_max_rounds').validity.rangeOverflow`, true, "the range is enforced in the page");
+  assert.ok(!mock.log.some((l) => l.method === "PUT" && l.path === "/api/settings"), "nothing was sent");
+  // a good change sends only what changed, with real booleans and numbers
+  await T(`set('#f-agent_max_rounds', '5')`);
+  await T(`set('#f-plan_speech', 'false')`);
+  await b.ev(`T.q('#f-agent_max_rounds').form.requestSubmit()`);
+  await b.until(`T.text('#msg') === 'Saved.'`, "saved");
+  const put = mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!;
+  assert.deepEqual(put.body, { agent_max_rounds: 5, plan_speech: false });
+  await eq(`T.q('#f-agent_max_rounds').closest('div').textContent.includes('Saved here.')`, true, "source follows");
+  // quiet hours need both ends
+  await T(`set('#f-quiet_start', '22:00')`);
+  await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
+  await b.until(
+    `T.all('.errtext').some((e) => e.textContent.startsWith('Set both the quiet hours'))`,
+    "needs both ends",
+  );
+  await T(`set('#f-quiet_end', '07:00')`);
+  await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
+  await b.until(`T.text('#msg') === 'Saved.'`, "quiet hours saved");
+  assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, {
+    quiet_start: "22:00",
+    quiet_end: "07:00",
+  });
+  // a saved toggle can go back to its default
+  await eq(
+    `[...T.q('#f-plan_speech').options].map((o) => o.value)`,
+    ["true", "false", ""],
+    "default option once saved",
+  );
+  await T(`set('#f-plan_speech', '')`);
+  await b.ev(`T.q('#f-plan_speech').form.requestSubmit()`);
+  await b.until(`T.q('#f-plan_speech').value === 'true'`, "back to the default");
+  assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { plan_speech: null });
+});
+
 await step("a 10-second refresh keeps what you typed", async () => {
   await open("open", "#/reminders");
   await b.until(`T.rows().length === 2`, "rows");

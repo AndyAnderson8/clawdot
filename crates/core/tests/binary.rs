@@ -1291,6 +1291,101 @@ fn saved_settings_layer_under_flags_and_apply_live() {
     );
 }
 
+/// The agent settings are layered (a flag beats a saved value), are validated, and reach the running assistant
+/// without a restart: the daily caps show in the audit policy, and a bad value changes nothing (REQ-CFG-062).
+#[test]
+fn agent_settings_are_layered_validated_and_applied_live() {
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!("clawdot-agent-settings-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (mut child, _) = start_and_read(&[
+        "--no-console",
+        "--dry-run",
+        "--listen",
+        &format!("127.0.0.1:{port}"),
+        "--data-dir",
+        dir.to_str().unwrap(),
+    ]);
+    let (_, b) = http(
+        port,
+        "POST",
+        "/api/setup",
+        "",
+        r#"{"mode":"password","password":"correct horse battery"}"#,
+    );
+    let admin = b
+        .split("\"token\":\"")
+        .nth(1)
+        .and_then(|t| t.split('"').next())
+        .expect("a session token")
+        .to_owned();
+    let get = |path: &str| -> serde_json::Value {
+        let (s, b) = http(port, "GET", path, &admin, "");
+        assert_eq!(s, 200, "{b}");
+        serde_json::from_str(&b).unwrap()
+    };
+    let v = get("/api/settings");
+    assert_eq!(v["fields"]["agent_max_rounds"]["value"], 8, "the default");
+    assert_eq!(v["fields"]["agent_max_rounds"]["source"], "default");
+    assert_eq!(v["fields"]["dry_run"]["value"], true);
+    assert_eq!(v["fields"]["dry_run"]["source"], "flag");
+    assert_eq!(get("/api/audit")["policy"]["dry_run"], true);
+
+    let (s, b) = http(
+        port,
+        "PUT",
+        "/api/settings",
+        &admin,
+        r#"{"max_actions_per_day":3,"max_costly_per_day":1,"agent_max_rounds":5,"plan_speech":false,"quiet_start":"22:00","quiet_end":"07:00","notes":true,"dry_run":false}"#,
+    );
+    assert_eq!(s, 200, "{b}");
+    let v = get("/api/settings");
+    assert_eq!(v["fields"]["agent_max_rounds"]["source"], "saved");
+    assert_eq!(
+        v["fields"]["dry_run"]["source"], "flag",
+        "a flag beats a saved value"
+    );
+    assert_eq!(v["fields"]["dry_run"]["ignored"], true);
+    // The caps reach the running audit policy; the flag keeps dry run on.
+    let mut policy = serde_json::Value::Null;
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end && policy["max_actions_per_day"] != 3 {
+        policy = get("/api/audit")["policy"].clone();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(policy["max_actions_per_day"], 3, "{policy}");
+    assert_eq!(policy["max_costly_per_day"], 1);
+    assert_eq!(policy["dry_run"], true, "the flag still wins");
+    // Notes are on now, so the administrator can add one.
+    let (s, b) = http(
+        port,
+        "POST",
+        "/api/notes",
+        &admin,
+        r#"{"text":"the spare key is under the pot"}"#,
+    );
+    assert_eq!(s, 200, "{b}");
+    // A bad value is refused with a reason and changes nothing.
+    let (s, b) = http(
+        port,
+        "PUT",
+        "/api/settings",
+        &admin,
+        r#"{"agent_max_rounds":99,"max_actions_per_day":4}"#,
+    );
+    assert_eq!(s, 400, "{b}");
+    assert!(b.contains("1 to 20"), "{b}");
+    assert_eq!(get("/api/audit")["policy"]["max_actions_per_day"], 3);
+    let _ = child.kill();
+    let _ = child.wait();
+    let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        saved.contains("quiet_start") && !saved.contains("\"agent_max_rounds\":99"),
+        "{saved}"
+    );
+}
+
 /// A taken port stops startup with a message that names `--listen`, and no administrator token is
 /// created or printed for a server that never started (REQ-CFG-014, REQ-CFG-015).
 #[test]
