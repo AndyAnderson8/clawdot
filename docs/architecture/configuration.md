@@ -9,6 +9,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
   "listen": "0.0.0.0:3335",
   "public_url": "http://dot.local:3335",
   "zone": "America/Chicago",
+  "name": "Kitchen Dot",
   "persona_file": "/etc/clawdot/persona.txt",
   "endpoints": ["claude-code", "ci:generic"],
   "llm": {
@@ -28,6 +29,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `listen` | HTTP address; bind to the LAN only (REQ-CFG-005) | `127.0.0.1:3335` |
 | `public_url` | URL printed in integration snippets | derived from `listen` (`0.0.0.0` and `[::]` become `clawdot.local`) |
 | `zone` | IANA time zone | UTC |
+| `name` | Device name shown in the portal header | the host name |
 | `persona_file` | Replaces the default system prompt | built-in persona |
 | `endpoints` | Inbox endpoints to create at startup (`NAME` or `NAME:ADAPTER`) | none |
 | `llm.url`, `llm.model` | Language model; set together or not at all. `https://` is required unless the host is localhost, `.local` or a private-network address (REQ-SEC-001) | none (fast path only) |
@@ -41,11 +43,38 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `speech` | Speech-to-text and text-to-speech provider (`url`, `key_env`, `stt_model`, `tts_model`, `voice`, `language`, `tts_sample_rate`); see [voice-pipeline.md](voice-pipeline.md) | none |
 | `satellite` | Where speakers connect (`listen`, `token_env`, `follow_up_secs`); see [satellite-server.md](satellite-server.md) | off |
 
+## Settings saved from the portal
+
+The Settings tab (REQ-CFG-037..042) saves changes to `settings.json` in the data directory (atomic JSON, mode 0600).
+Values are layered, lowest first: **built-in defaults, the configuration file, `settings.json`, command-line
+flags**. The effective value and the layer it came from are shown next to each setting. A flag beats a saved value;
+the page says so. Clearing a saved value (leave the box empty) falls back to the layer below. Unknown keys or a newer
+schema in `settings.json` stop startup with a message; a saved value that no longer validates is skipped with a
+warning so a headless device still starts.
+
+| Setting | Key in `settings.json` | Applies |
+|---|---|---|
+| Device name, time zone, personality (the text itself) | `device_name`, `zone`, `persona` | right away |
+| Language model address, model, backup model, summary model, key variable name | `llm_url`, `llm_model`, `llm_fallback_model`, `summary_model`, `llm_key_env` | right away (the model client is rebuilt) |
+| Requests per day, daily spend | `max_requests_per_day`, `daily_spend_usd` | right away |
+| Voice | `voice` | after a restart (needs the `speech` section of the configuration file) |
+| Listen address, public address | `listen`, `public_url` | after a restart |
+| Board | `board` (`auto` or `none`) | after a restart; nothing reads it yet |
+
+A change is validated as a whole before anything is saved; an error says what is wrong and how to fix it. The page
+lists saved values that are not yet running and gives the restart instruction; it has no Restart button because the
+core cannot restart itself safely (it may run under systemd, a container, or a terminal). The admin password is
+changed separately and is stored hashed in `admin.json`. `PUT /api/settings` needs the administrator, like every
+mutating endpoint.
+
 ## Rules
 
-- **Secrets are never in the file.** The API key comes from the environment variable named by `llm.key_env`.
+- **Secrets are never in the file, and never in `settings.json`.** The API key comes from the environment variable
+  named by `llm.key_env` (or the portal's "Key variable" setting, which holds the NAME). Naming a variable that is not
+  set is refused with that name. There is no stored-key option (see docs/open-questions.md).
 - **Validated at startup**, before anything is bound or written.
-- **Hot reload** (a SHOULD in the spec) is not implemented: restart to apply changes. Rotating an endpoint token
+- **Hot reload** of the configuration file (a SHOULD in the spec) is not implemented: restart to apply file changes.
+  Settings saved from the portal apply live where the table above says so. Rotating an endpoint token
   already works without a restart via the HTTP API.
 
 ## Web UI
