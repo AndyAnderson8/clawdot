@@ -73,7 +73,7 @@ scripts/land.sh feature/timer-tool
 2. Runs **every gate** on the branch tip (`scripts/check.sh`): formatting, lint and type-check, unit/integration tests, documentation checks, commit-message and identity checks, shell checks, and dependency policy.
 3. Creates the merge commit on `dev` (`git merge --no-ff`).
 4. **With a remote:** pushes that exact commit to a candidate ref `ci/dev/<sha>`, waits for the `gate` job to pass, and only then pushes it to `dev` (the server accepts it because that SHA already has a passing check). On failure `dev` is reset locally and nothing is published.
-5. Deletes the merged branch.
+5. Fetches and verifies that `origin/dev` contains the merge commit; only then does it delete the merged branch and the candidate ref and report success. If the final push is rejected or unverified it exits `4`, keeps the branch and candidate ref, leaves local `dev` as it is and prints the recovery command. If another worktree holds `dev` it exits `3` naming that worktree (`--wait SECONDS` retries for a bounded time). A CI failure exits `5`.
 
 The tiny-commit exception: make the single commit on `dev` (the `pre-commit` hook verifies the size), then run `scripts/land.sh --tiny`.
 

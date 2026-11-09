@@ -70,8 +70,7 @@ case "$cmd" in
     git checkout -q dev
     scripts/check.sh --release "$ver"
     confirm_human
-    merge_into main dev "Merge dev into main (release v$ver)" ||
-      die "CI or publishing failed; main was reset to its previous commit"
+    merge_into main dev "Merge dev into main (release v$ver)" || exit $?
     tag_main
     git checkout -q dev
     ;;

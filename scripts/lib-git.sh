@@ -45,10 +45,53 @@ tiny_staged_ok() {
 
 has_remote() { git remote get-url origin >/dev/null 2>&1; }
 
+# Exit codes of scripts/land.sh (documented in docs/process/runbook.md). 1 is any other error.
+EX_HELD=3        # the target branch is checked out in another worktree
+EX_LOCAL_ONLY=4  # the merge exists only in the local target branch; origin does not contain it
+EX_CI_FAILED=5   # CI or the pre-publish steps failed; the target was restored (or recovery was printed)
+
+# branch_holder <branch>: path of ANOTHER worktree that has <branch> checked out (empty if none).
+branch_holder() {
+  local here path="" line
+  here=$(git rev-parse --show-toplevel)
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) path=${line#worktree } ;;
+      "branch refs/heads/$1")
+        if [ "$path" != "$here" ]; then echo "$path"; return 0; fi
+        ;;
+    esac
+  done < <(git worktree list --porcelain)
+}
+
+# wait_for_branch_free <branch> <seconds>: succeed when no other worktree holds <branch>. Waits up to
+# <seconds> (re-checking every LAND_WAIT_INTERVAL seconds, default 10); 0 means fail at once.
+wait_for_branch_free() {
+  local br="$1" limit="${2:-0}" deadline holder interval="${LAND_WAIT_INTERVAL:-10}"
+  deadline=""
+  while :; do
+    holder=$(branch_holder "$br")
+    [ -n "$holder" ] || return 0
+    # The clock starts once the branch is first seen held, so a slow first check cannot eat the wait.
+    [ -n "$deadline" ] || deadline=$((SECONDS + limit))
+    if [ "$limit" -eq 0 ] || [ "$SECONDS" -ge "$deadline" ]; then
+      echo "error: '$br' is checked out in another worktree: $holder" >&2
+      echo "       Only one worktree can hold '$br'. Ask whoever uses it to release it (git -C \"$holder\" switch --detach)," >&2
+      echo "       or retry with:  scripts/land.sh <branch> --wait SECONDS" >&2
+      return 1
+    fi
+    echo "land: '$br' is held by $holder; retrying in ${interval}s ..."
+    sleep "$interval"
+  done
+}
+
 # publish <branch>: make a locally integrated branch public ONLY after CI passed on the exact commit.
 # The commit is first pushed to a candidate ref (ci/<branch>/<sha>) that triggers CI. When the
 # required `gate` check is green, the same commit is pushed to the protected branch, which the
-# server accepts because that SHA already has passing checks.
+# server accepts because that SHA already has passing checks. Success is claimed only after a fetch
+# shows that origin/<branch> contains the commit.
+# Returns 0 on success, 1 when nothing reached the protected branch (CI failed or never started), and
+# 2 when CI passed but the push or its verification failed (the candidate ref is then kept).
 # With no remote configured (early development) this is a local-only no-op.
 publish() {
   local br="$1" sha cand id
@@ -56,48 +99,81 @@ publish() {
   command -v gh >/dev/null 2>&1 || { echo "land: the gh CLI is required to verify CI before publishing $br" >&2; return 1; }
   sha=$(git rev-parse "$br")
   cand="ci/$br/${sha:0:10}"
-  CLAWDOT_LANDING=1 git push origin "$sha:refs/heads/$cand"
+  CLAWDOT_LANDING=1 git push origin "$sha:refs/heads/$cand" || return 1
   echo "land: waiting for CI on $cand ..."
   id=""
   for _ in $(seq 1 36); do
     id=$(gh run list --branch "$cand" --workflow ci --json databaseId,headSha \
       -q ".[] | select(.headSha==\"$sha\") | .databaseId" | head -1)
     [ -n "$id" ] && break
-    sleep 5
+    sleep "${LAND_CI_POLL:-5}"
   done
-  if [ -z "$id" ]; then
+  if [ -z "$id" ] || ! gh run watch "$id" --exit-status; then
     git push origin --delete "$cand" || true
     return 1
   fi
-  if gh run watch "$id" --exit-status; then
-    CLAWDOT_LANDING=1 git push origin "$br"
-    git push origin --delete "$cand" || true
-  else
-    git push origin --delete "$cand" || true
-    return 1
+  if ! CLAWDOT_LANDING=1 git push origin "$br"; then
+    echo "land: CI passed on $cand, but the push of $br to origin was rejected. Candidate ref $cand kept." >&2
+    return 2
   fi
+  if ! git fetch --quiet origin || ! git merge-base --is-ancestor "$sha" "origin/$br"; then
+    echo "land: the push of $br reported success, but origin/$br does not contain $sha. Candidate ref $cand kept." >&2
+    return 2
+  fi
+  echo "land: verified: origin/$br contains ${sha:0:10}"
+  git push origin --delete "$cand" || true
 }
 
 # sync_ff <branch>: fast-forward a local branch from origin (no-op without a remote).
 sync_ff() {
   if has_remote && git rev-parse --verify -q "origin/$1" >/dev/null; then
-    git checkout -q "$1"
+    git checkout -q "$1" || die "cannot switch to $1 (is another worktree holding it?)"
     git merge --ff-only -q "origin/$1" || die "local $1 has diverged from origin/$1"
   fi
 }
 
 # merge_into <target> <source> <message>: create a MERGE COMMIT on <target> (never a fast-forward),
-# then publish it. If publishing fails, <target> is reset to where it was, so nothing unverified lingers.
+# then publish it. Returns 0 on success, otherwise one of the EX_* codes after printing what happened:
+#  - CI failed / not published: <target> is reset to where it was (verified; else exact manual steps).
+#  - published but the push was rejected or unverified: the merge stays in local <target> and is NOT
+#    reset automatically; the message says how to recover.
 merge_into() {
-  local target="$1" source="$2" msg="$3" prev
-  git checkout -q "$target"
+  local target="$1" source="$2" msg="$3" prev merge rc=0
+  if ! git checkout -q "$target"; then
+    echo "error: cannot switch to $target (is another worktree holding it?)" >&2
+    return "$EX_HELD"
+  fi
+  [ "$(current_branch)" = "$target" ] || { echo "error: not on $target after switching" >&2; return "$EX_HELD"; }
   prev=$(git rev-parse "$target")
   CLAWDOT_LANDING=1 git merge --no-ff -q -m "$msg" "$source"
   if [ "$(git rev-parse "$target")" = "$prev" ]; then
     die "nothing to merge: $target already contains $source"
   fi
-  if ! publish "$target"; then
-    git reset -q --hard "$prev"
-    return 1
-  fi
+  merge=$(git rev-parse "$target")
+  publish "$target" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2)
+      {
+        echo "error: NOT LANDED. The merge commit ${merge:0:10} exists only in your LOCAL $target; origin/$target does not contain it."
+        echo "       Nothing was deleted: $source and the CI candidate ref are kept, and local $target was not reset."
+        echo "       Find out why the push was refused (see the message above), then recover local $target with:"
+        echo "         git switch $target && git reset --hard $prev"
+        echo "       and run scripts/land.sh $source again."
+      } >&2
+      return "$EX_LOCAL_ONLY"
+      ;;
+    *)
+      git reset -q --hard "$prev" 2>/dev/null || true
+      if [ "$(git rev-parse "$target")" = "$prev" ]; then
+        echo "error: CI or publishing failed; $target was reset to $prev and $source is untouched" >&2
+      else
+        {
+          echo "error: CI or publishing failed AND $target could not be reset automatically."
+          echo "       Restore it with:  git switch $target && git reset --hard $prev"
+        } >&2
+      fi
+      return "$EX_CI_FAILED"
+      ;;
+  esac
 }
