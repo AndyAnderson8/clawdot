@@ -132,7 +132,7 @@ await step("header, status, tabs, titles, keyboard", async () => {
   await eq(`T.all('#tabs a[aria-selected="true"]').map((a) => a.id)`, ["tab-home"], "home selected first");
   await eq(`T.all('#tabs a').map((a) => a.tabIndex)`, [0, -1, -1, -1, -1, -1, -1, -1], "roving tab index");
   await eq(`T.q('#panel').getAttribute('aria-labelledby')`, "tab-home", "panel labelled by its tab");
-  await eq(`document.title`, "Home - ClawDot", "title");
+  await b.until(`document.title === "Home - ClawDot"`, "the Home title");
   // arrow keys move through the tabs, wrapping, and focus follows
   const key = async (k: string, hash: string) => {
     await b.ev(`T.q('#tabs').dispatchEvent(new KeyboardEvent('keydown', { key: '${k}', bubbles: true }))`);
@@ -143,7 +143,7 @@ await step("header, status, tabs, titles, keyboard", async () => {
   await key("End", "#/settings");
   await key("ArrowRight", "#/home");
   await key("ArrowLeft", "#/settings");
-  await eq(`document.title`, "Settings - ClawDot", "title follows the tab");
+  await b.until(`document.title === "Settings - ClawDot"`, "the title follows the tab");
   await b.ev(`location.hash = '#/nonsense'`);
   await b.until(`T.text('#panel h2') === 'Home'`, "an unknown tab falls back to Home");
   await eq(`T.text('#ver')`, "ClawDot 0.1.0-test", "footer version");
