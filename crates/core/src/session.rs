@@ -1000,7 +1000,13 @@ fn drop_confirmed(args: &mut Value, spec: Option<&ToolSpec>) {
 /// The read-back for a tool with no description of its own: its name and exact arguments.
 #[must_use]
 pub fn describe_generic(name: &str, args: &Value) -> String {
-    format!("I will run {name} with {}", clip_to(&canonical(args), 200))
+    // The audit log's redaction plus a short form for long values: the arguments are spoken, may be shown in
+    // the portal and logged (REQ-SEC-011). The stored action keeps the exact arguments.
+    let spoken = crate::audit::spoken_args(args);
+    format!(
+        "I will run {name} with {}",
+        clip_to(&canonical(&spoken), 200)
+    )
 }
 
 fn clip_to(s: &str, max: usize) -> String {
@@ -1237,6 +1243,35 @@ mod tests {
             (last.role, last.content.as_str()),
             (Role::Tool, "send_money ok")
         );
+    }
+
+    /// REQ-SEC-011, REQ-SEC-014: the spoken read-back hides secret-looking values and shortens long ones,
+    /// while the stored action keeps the exact arguments and runs them after a yes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_read_back_hides_secrets_but_the_stored_action_is_exact() {
+        let args = json!({
+            "to": "sam",
+            "note": "use Bearer abcdefghijklmnop1234",
+            "token": "ghp_0123456789abcdefghij",
+            "memo": "a very long memo that goes on and on and on and on and on and on",
+        });
+        let b = Script::new(vec![
+            calls(&[("c1", "send_money", &args.to_string())]),
+            text("Sent."),
+        ]);
+        let (mut h, mut c, mut u) = fresh();
+        let r1 = turn(&b, &mut h, &mut c, &mut u, "send sam some money").await;
+        for leak in ["abcdefghijklmnop1234", "ghp_0123", "goes on and on"] {
+            assert!(!r1.speech.contains(leak), "{leak} spoken: {}", r1.speech);
+        }
+        assert!(
+            r1.speech.contains("a long value") && r1.speech.contains("sam"),
+            "{}",
+            r1.speech
+        );
+        assert!(!c.pending().unwrap().description().contains("abcdefghij"));
+        turn(&b, &mut h, &mut c, &mut u, "yes").await;
+        assert_eq!(h.ran, vec![("send_money".to_owned(), args)]);
     }
 
     /// Adversarial: the model sets `confirmed: true` itself, in the same turn.
