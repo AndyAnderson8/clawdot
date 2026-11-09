@@ -102,6 +102,11 @@ impl UsageTracker {
         store.save(&self.state)
     }
 
+    /// Replace the limits; the counters for today are kept.
+    pub fn set_limits(&mut self, limits: UsageLimits) {
+        self.limits = limits;
+    }
+
     /// The configured limits.
     #[must_use]
     pub fn limits(&self) -> &UsageLimits {

@@ -32,6 +32,22 @@ async fn start(with_main_loop: bool) -> Portal {
         Adapters::builtin(),
         Limits::default(),
     ));
+    let defaults = [
+        ("device_name", json!("Test Dot")),
+        ("zone", json!("UTC")),
+        ("listen", json!("127.0.0.1:3335")),
+        ("llm_key_env", json!("OPENROUTER_API_KEY")),
+        ("max_requests_per_day", json!(500)),
+        ("board", json!("none")),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect();
+    core.set_settings(crate::settings::SettingsState::in_memory(
+        defaults,
+        false,
+        Box::new(|n| (n == "MY_KEY").then(|| "x".to_owned())),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, rx) = tokio::sync::oneshot::channel::<()>();
@@ -62,6 +78,7 @@ async fn start(with_main_loop: bool) -> Portal {
             while let Some(job) = jobs.recv().await {
                 let r = match job.op {
                     Op::Sched(op) => assistant.admin_sched(op),
+                    Op::Settings(live) => Ok(Value::Object(live)),
                     Op::Ext(op) => ext
                         .apply(op, &mut http, &mut mcp, &builtin, |n| {
                             (n == "HA_TOKEN").then(|| "x".to_owned())
@@ -179,6 +196,7 @@ async fn every_portal_listing_needs_a_sign_in() {
         ("DELETE", "/api/schedule/1"),
         ("GET", "/api/tools"),
         ("GET", "/api/settings"),
+        ("PUT", "/api/settings"),
         ("GET", "/api/about"),
         ("POST", "/api/tools"),
         ("DELETE", "/api/tools/x"),
@@ -200,14 +218,14 @@ async fn every_portal_listing_needs_a_sign_in() {
     }
     p.core
         .set_ui_tools(json!({"tools": [{"name": "set_timer"}], "mcp": []}));
-    p.core.set_ui_settings(json!({"zone": "America/Chicago"}));
     let (s, v) = call(&p, "GET", "/api/tools", &session, "").await;
     assert_eq!(
         (s, v["tools"][0]["name"].as_str()),
         (200, Some("set_timer"))
     );
     let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
-    assert_eq!(v["zone"], "America/Chicago");
+    assert_eq!(v["fields"]["zone"]["value"], "UTC");
+    assert_eq!(v["fields"]["zone"]["source"], "default");
     let (_, v) = call(&p, "GET", "/api/about", &session, "").await;
     assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
     assert!(v["changelog"].as_str().unwrap().contains("Changelog"));
@@ -313,4 +331,68 @@ async fn the_portal_manages_tools_connections_and_skills() {
     assert_eq!((s, v["skills"].as_array().unwrap().len()), (200, 1));
     let huge = format!(r#"{{"name":"x","instructions":"{}"}}"#, "a".repeat(70_000));
     assert_eq!(call(&p, "POST", "/api/skills", "", &huge).await.0, 413);
+}
+
+// REQ-CFG-037, REQ-CFG-038, REQ-CFG-039, REQ-CFG-040, REQ-CFG-041
+#[tokio::test]
+async fn settings_are_saved_validated_and_need_the_administrator() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    let change = r#"{"zone":"America/Phoenix","max_requests_per_day":20}"#;
+    // Not signed in, or signed in with a wrong token: refused, and nothing changes.
+    for auth in ["", "Bearer wrong"] {
+        let s = call(&p, "PUT", "/api/settings", auth, change).await.0;
+        assert!(s == 401 || s == 429, "{auth}: {s}");
+    }
+    let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
+    assert_eq!(v["fields"]["zone"]["value"], "UTC");
+    // A bad value says what is wrong, and the good half is not applied.
+    let bad = r#"{"zone":"America/Phoenix","listen":"everywhere"}"#;
+    let (s, v) = call(&p, "PUT", "/api/settings", &session, bad).await;
+    assert_eq!(s, 400);
+    assert!(
+        v["error"].as_str().unwrap().contains("127.0.0.1:3335"),
+        "{v}"
+    );
+    let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
+    assert_eq!(v["fields"]["zone"]["value"], "UTC");
+    // A good change is saved; the answer is the new listing, with what needs a restart.
+    let (s, v) = call(&p, "PUT", "/api/settings", &session, change).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["fields"]["zone"]["value"], "America/Phoenix");
+    assert_eq!(v["fields"]["zone"]["source"], "saved");
+    assert_eq!(v["restart_needed"], json!([]));
+    let (s, v) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        r#"{"listen":"0.0.0.0:4000"}"#,
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["restart_needed"], json!(["listen", "public_url"]));
+    // A secret value in a key field is refused with the rule, and never echoed back.
+    let (s, v) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        r#"{"llm_key_env":"sk-live-123"}"#,
+    )
+    .await;
+    assert_eq!(s, 400);
+    assert!(!v.to_string().contains("sk-live-123"));
+    assert!(v["error"].as_str().unwrap().contains("NAME"), "{v}");
+    let (s, v) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        r#"{"llm_key_env":"MY_KEY"}"#,
+    )
+    .await;
+    assert_eq!((s, v["llm"]["key_present"].as_bool()), (200, Some(true)));
 }

@@ -10,6 +10,7 @@
 //! * `GET  /api/overview`                      endpoints and recent agent events
 //! * `GET  /api/schedule`, `POST /api/schedule`, `PUT|DELETE /api/schedule/{id}`   timers, alarms, reminders
 //! * `GET  /api/tools`, `/api/settings`, `/api/about`   what the Tools, Connections, Settings tabs show
+//! * `PUT  /api/settings`                      body `{key: value|null, ..}`; saves some settings (admin only)
 //! * `GET  /api/status`                        what the assistant is doing (model, satellites, tools, usage, schedule)
 //! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
 //! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
@@ -312,6 +313,10 @@ pub async fn handle(
             Err((s, m)) => error(s, m),
         },
         (&Method::GET, ["settings"]) => json_reply(StatusCode::OK, &core.ui_settings()),
+        (&Method::PUT, ["settings"]) => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
+            Ok(v) => change_settings(core, &v).await,
+            Err((s, m)) => error(s, m),
+        },
         (&Method::GET, ["about"]) => json_reply(
             StatusCode::OK,
             &json!({ "version": env!("CARGO_PKG_VERSION"), "changelog": CHANGELOG }),
@@ -353,6 +358,20 @@ async fn schedule(core: &Core, op: SchedOp) -> Resp {
         Ok(v) => json_reply(StatusCode::OK, &v),
         Err(f) => fail_reply(&f),
     }
+}
+
+/// Save a change to settings, then tell the main loop to apply what can apply now (REQ-CFG-037..040).
+async fn change_settings(core: &Core, patch: &Value) -> Resp {
+    let (mut listing, live) = match core.change_settings(patch) {
+        Ok(r) => r,
+        Err(f) => return fail_reply(&f),
+    };
+    if let Err(f) = core.portal_call(Op::Settings(live)).await {
+        listing["note"] = json!(format!(
+            "Saved. {f} The live settings will apply the next time ClawDot starts."
+        ));
+    }
+    json_reply(StatusCode::OK, &listing)
 }
 
 /// Run a change to tools, connections, or skills in the main loop; the answer is the new listing.

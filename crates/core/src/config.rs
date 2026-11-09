@@ -77,6 +77,8 @@ pub struct Config {
     pub listen: Option<String>,
     /// URL used in the integration snippets.
     pub public_url: Option<String>,
+    /// Device name shown in the portal header (default: the host name).
+    pub name: Option<String>,
     /// IANA time zone, for example `America/Chicago`.
     pub zone: Option<String>,
     /// File holding the assistant's persona text.
@@ -135,6 +137,11 @@ impl Config {
 
     fn validate(&self) -> Result<(), String> {
         self.listen_addr()?;
+        if let Some(n) = &self.name
+            && (n.trim().is_empty() || n.chars().count() > 40 || n.chars().any(char::is_control))
+        {
+            return Err("config: `name` must be 1 to 40 characters with no line breaks".into());
+        }
         if self.llm.url.is_some() != self.llm.model.is_some() {
             return Err("config: `llm.url` and `llm.model` must be set together".into());
         }
@@ -224,7 +231,7 @@ mod tests {
         let c = Config::parse(
             r#"{
               "data_dir": "/var/lib/clawdot", "listen": "0.0.0.0:8080", "zone": "America/Chicago",
-              "public_url": "http://dot.local:8080", "persona_file": "persona.txt",
+              "public_url": "http://dot.local:8080", "persona_file": "persona.txt", "name": "Kitchen",
               "endpoints": ["claude-code", "ci:generic"],
               "llm": {"url": "https://openrouter.ai/api/v1", "model": "a/b", "fallback_model": "c/d",
                       "summary_model": "e/f", "key_env": "MY_KEY"},
@@ -272,6 +279,7 @@ mod tests {
                 "sample_rate",
             ),
             (r#"{"endpoints": [" "]}"#, "empty"),
+            (r#"{"name": ""}"#, "`name`"),
             ("{", "config"),
         ] {
             let e = Config::parse(text).unwrap_err();
