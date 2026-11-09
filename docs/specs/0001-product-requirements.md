@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.12 |
+| **Version** | 0.13 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -81,6 +81,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-AST-012 | The project SHOULD maintain a tested-models list and a tool-calling evaluation set so that recommended models are verified to call the built-in tools reliably. | Should | M3 | T |
 | REQ-AST-013 | The assistant's persona, system prompt, and TTS voice MUST be configurable (with safe defaults), and the configured prompt MUST NOT be able to disable the confirm policy or the untrusted-text handling required elsewhere in this spec. | Must | M3 | T |
 | REQ-AST-014 | The system MUST support **declarative HTTP tools**: an admin-configured URL, method, auth, and parameter schema, exposed to the LLM as a tool. The LLM supplies only schema-validated parameters and MUST NOT choose URLs or headers. The confirm policy and usage limits apply. | Must | M5 | T |
+| REQ-AST-015 | A tool that forwards text to an external agent (the `instruct` reply) MUST NOT send it until the user has confirmed the exact text out loud in a later turn than the one that proposed it; the model cannot supply that confirmation. Untrusted text returned by any tool (for example agent event details) MUST be fenced and labelled as untrusted data. | Must | M2 | T |
 
 ### 4.3 Agent inbox (`INB`)
 
@@ -272,3 +273,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.10 | 2026-11-08 | The console-printed setup code is removed because the device has no visible console; CFG-021 now accepts first-visitor setup from private addresses as a documented residual risk (T15); CFG-015 amended |
 | 0.11 | 2026-11-08 | Default listen port changed from 8765 to 3335 at the maintainer's request (CFG-014 amended) |
 | 0.12 | 2026-11-08 | Board support layer (section 4.10, BRD-001..016, ADR-0012): one `Board` interface for buttons, LED ring, mute, Wi-Fi, clock trust and audio devices; null, desktop and Echo Dot Gen 2 boards chosen by Cargo feature and the `board` setting; per-device JSON; honest mute and clock reporting; AC-13. Evidence in R-07 |
+| 0.13 | 2026-11-09 | Security review F1: spoken confirmation of the exact text before an `instruct` reply is forwarded, and fencing of untrusted tool-result text (AST-015) |
