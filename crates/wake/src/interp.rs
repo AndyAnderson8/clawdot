@@ -1119,15 +1119,26 @@ impl Plan<'_> {
 /// Split one buffer into disjoint mutable slices, one per range, in the order given. `None` if two overlap or one
 /// runs past the end.
 fn carve<'a>(buf: &'a mut [i8], ranges: &[&Range<usize>]) -> Option<[&'a mut [i8]; 2 * FAN]> {
-    if ranges.len() > 2 * FAN {
+    let n = ranges.len();
+    if n > 2 * FAN {
         return None;
     }
-    let mut order: Vec<usize> = (0..ranges.len()).collect();
-    order.sort_by_key(|&i| ranges[i].start);
+    // Order by start with an insertion sort on a fixed array, so nothing is allocated while processing audio.
+    let mut order = [0usize; 2 * FAN];
+    for (i, o) in order.iter_mut().enumerate().take(n) {
+        *o = i;
+    }
+    for i in 1..n {
+        let mut j = i;
+        while j > 0 && ranges[order[j - 1]].start > ranges[order[j]].start {
+            order.swap(j - 1, j);
+            j -= 1;
+        }
+    }
     let mut slots: [Option<&'a mut [i8]>; 2 * FAN] = std::array::from_fn(|_| None);
     let mut rest = buf;
     let mut cursor = 0usize;
-    for i in order {
+    for &i in order.iter().take(n) {
         let r = ranges[i];
         if r.start < cursor || r.end < r.start {
             return None;
@@ -1194,6 +1205,9 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
         }
         Step::Copy { src, dst } => {
             let [s, d, ..] = carve(arena, &[src, dst]).ok_or_else(overlap)?;
+            if s.len() != d.len() {
+                return Err(overlap());
+            }
             d.copy_from_slice(s);
         }
         Step::Concat {
@@ -1201,22 +1215,23 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
             output,
             outer,
         } => {
-            let mut ranges: Vec<&Range<usize>> = inputs.iter().map(|(r, _)| r).collect();
-            ranges.push(output);
-            let slots = carve(arena, &ranges).ok_or_else(overlap)?;
             let n = inputs.len();
+            let mut ranges: [&Range<usize>; 2 * FAN] = [output; 2 * FAN];
+            for (slot, (r, _)) in ranges.iter_mut().zip(inputs.iter()) {
+                *slot = r;
+            }
+            ranges[n] = output;
+            let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
             let total: usize = inputs.iter().map(|(_, c)| *c).sum();
-            let mut slots = slots.into_iter();
-            let ins: Vec<&mut [i8]> = slots.by_ref().take(n).collect();
-            // The output slot sits after the inputs in the array order we asked for.
-            let out = slots.next().ok_or_else(overlap)?;
-            let _ = ins.len();
-            let ins_ref: Vec<&[i8]> = ins.iter().map(|s| &**s).collect();
+            // The inputs come first in the array order asked for, the output after them.
+            let (ins, rest) = slots.split_at_mut(n);
+            let out = rest.first_mut().ok_or_else(overlap)?;
             for o in 0..*outer {
                 let mut at = o * total;
                 for (k, (_, chunk)) in inputs.iter().enumerate() {
-                    let src = ins_ref[k]
-                        .get(o * chunk..(o + 1) * chunk)
+                    let src = ins
+                        .get(k)
+                        .and_then(|s| s.get(o * chunk..(o + 1) * chunk))
                         .ok_or_else(overlap)?;
                     out.get_mut(at..at + chunk)
                         .ok_or_else(overlap)?
@@ -1230,19 +1245,21 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
             outputs,
             outer,
         } => {
-            let mut ranges: Vec<&Range<usize>> = vec![input];
-            ranges.extend(outputs.iter().map(|(r, _)| r));
-            let slots = carve(arena, &ranges).ok_or_else(overlap)?;
-            let mut slots = slots.into_iter();
-            let inp = slots.next().ok_or_else(overlap)?;
+            let n = outputs.len();
+            let mut ranges: [&Range<usize>; 2 * FAN] = [input; 2 * FAN];
+            for (slot, (r, _)) in ranges.iter_mut().skip(1).zip(outputs.iter()) {
+                *slot = r;
+            }
+            let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
             let total: usize = outputs.iter().map(|(_, c)| *c).sum();
-            let mut outs: Vec<&mut [i8]> = slots.take(outputs.len()).collect();
+            let (head, outs) = slots.split_at_mut(1);
+            let inp = head.first().ok_or_else(overlap)?;
             for o in 0..*outer {
                 let mut at = o * total;
                 for (k, (_, chunk)) in outputs.iter().enumerate() {
                     let src = inp.get(at..at + chunk).ok_or_else(overlap)?;
-                    outs[k]
-                        .get_mut(o * chunk..(o + 1) * chunk)
+                    outs.get_mut(k)
+                        .and_then(|s| s.get_mut(o * chunk..(o + 1) * chunk))
                         .ok_or_else(overlap)?
                         .copy_from_slice(src);
                     at += chunk;
@@ -1298,14 +1315,19 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
         }
         Step::ReadVar { var, dst } => {
             let v = vars.get(*var).ok_or_else(overlap)?;
-            arena
-                .get_mut(dst.clone())
-                .ok_or_else(overlap)?
-                .copy_from_slice(v);
+            let d = arena.get_mut(dst.clone()).ok_or_else(overlap)?;
+            if d.len() != v.len() {
+                return Err(overlap());
+            }
+            d.copy_from_slice(v);
         }
         Step::AssignVar { var, src } => {
             let v = vars.get_mut(*var).ok_or_else(overlap)?;
-            v.copy_from_slice(arena.get(src.clone()).ok_or_else(overlap)?);
+            let s = arena.get(src.clone()).ok_or_else(overlap)?;
+            if s.len() != v.len() {
+                return Err(overlap());
+            }
+            v.copy_from_slice(s);
         }
     }
     Ok(())

@@ -240,6 +240,27 @@ fn req_wak_007_the_cutoff_is_clamped() {
 }
 
 #[test]
+fn req_wak_003_memory_comes_from_the_model_and_is_small() {
+    for (name, arena_and_state_limit) in [("okay_nabu", 16_000), ("hey_mycroft", 16_000)] {
+        let interp = Interpreter::new(model(name)).unwrap();
+        let file = interp.model_bytes();
+        let working = interp.working_bytes();
+        println!("{name}: model file {file} bytes, arena plus streaming state {working} bytes");
+        assert!(working < arena_and_state_limit, "{name}: {working}");
+        // The reference arena (TFLite Micro) for the same model is 23 to 26 KB; ours is smaller because tensors
+        // share space by lifetime and there is no allocator overhead.
+        assert!(working < 23_000);
+        // Memory does not grow with use.
+        let mut i = Interpreter::new(model(name)).unwrap();
+        let input = vec![-100i8; i.input_len()];
+        for _ in 0..100 {
+            i.invoke(&input).unwrap();
+        }
+        assert_eq!(i.working_bytes(), working);
+    }
+}
+
+#[test]
 fn bad_word_settings_are_refused() {
     let w = |cutoff: f32, window: usize| {
         Engine::new(vec![WordConfig::new(model("okay_nabu"), cutoff, window)])
