@@ -456,7 +456,20 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> AudioDevice<I, O, T> {
     fn playback_over(&mut self) {
         if std::mem::replace(&mut self.playing, false) {
             self.hold_off();
+            if self.cfg.always_on {
+                // The core says nothing more when the follow-up window is off: tell the user it is listening.
+                self.say_ready();
+            }
         }
+    }
+
+    /// The status line that says how to talk (REQ-DEV-030).
+    fn say_ready(&self) {
+        let how = self.wake.as_ref().map_or_else(
+            || "press Enter to talk".to_owned(),
+            |w| format!("say \"{}\" or press Enter to talk", w.name()),
+        );
+        self.say(&format!("ready: {how}; q then Enter to quit"));
     }
 
     /// Keep the microphone open between turns, reopening it after a fault.
@@ -696,13 +709,7 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> Device for AudioDevice<I, O, T> {
             self.leds.show(l);
         }
         match state {
-            Indicator::Idle => {
-                let how = self.wake.as_ref().map_or_else(
-                    || "press Enter to talk".to_owned(),
-                    |w| format!("say \"{}\" or press Enter to talk", w.name()),
-                );
-                self.say(&format!("ready: {how}; q then Enter to quit"));
-            }
+            Indicator::Idle => self.say_ready(),
             Indicator::Listening => self.say("listening: speak now"),
             Indicator::Thinking => self.say("thinking..."),
             Indicator::Speaking => self.say("speaking"),

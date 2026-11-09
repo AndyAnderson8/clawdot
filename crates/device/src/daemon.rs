@@ -479,8 +479,9 @@ impl Device for DaemonDevice {
 
     fn playback_idle(&mut self) -> bool {
         let idle = self.inner.playback_idle();
-        if idle {
-            self.playing = false;
+        if idle && std::mem::replace(&mut self.playing, false) {
+            // The core says nothing more when the follow-up window is off; if it does, its state replaces this.
+            self.leds.turn(LedState::Idle);
         }
         idle
     }
