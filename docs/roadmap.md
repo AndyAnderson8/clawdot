@@ -51,6 +51,8 @@ REQ-VOI-001..004, 006..010, 012, REQ-AST-001..003, 006, 007, 009, REQ-CFG-007, R
 
 **Exit:** AC-1 and AC-10 pass; budget gate green; ratchet set.
 
+*Status: partly built.* Done and tested against fakes: in-process and remote (TCP) transport, voice dialog state machine, energy-based endpointing, STT/TTS clients, streaming LLM client, half-duplex, JSON config file and the reference satellite (`crates/core/src/{voice,vad,speech,satellite,transport,config}.rs`, `crates/satellite`, [voice-pipeline](architecture/voice-pipeline.md)). Not done: real microphone and speaker I/O, wake-word detection, a real STT/TTS provider run, and the ratchet. AC-1 and AC-10 are not demonstrated on a device.
+
 ## M2: Agent inbox (the differentiator)
 REQ-INB-001..018, 020, REQ-SEC-004, REQ-EXT-004, 006
 - Minimal HTTP ingress, endpoints and tokens (config-file managed), queue, announce/dismiss/snooze/reply
@@ -60,6 +62,8 @@ REQ-INB-001..018, 020, REQ-SEC-004, REQ-EXT-004, 006
 
 **Exit:** AC-3 and AC-6 pass; a desktop demo of "Claude finishes → speaker announces → voice reply resumes the session".
 
+*Status: mostly built.* Ingress, endpoints with hashed tokens, queue, replies over SSE, adapters (`claude-code`, `generic`), summaries, the bridge that resumes Claude Code, and per-endpoint snippets exist (`crates/core/src/inbox/`, `crates/bridge`), with the headline loop tested over real sockets (`crates/e2e/tests/agent_loop.rs`, `satellite_loop.rs`). Not done: fuzzing of ingress (no fuzz targets in the repo), and the real `claude` CLI resume has not been verified. A live desktop demo is not recorded.
+
 ## M3: Time and local intelligence
 REQ-TMR-001..008, REQ-AST-004, 010..013, REQ-NFR-008, 009, 111
 - Scheduler with fake-clock test suite; atomic JSON store; restart-safety tests
@@ -67,6 +71,8 @@ REQ-TMR-001..008, REQ-AST-004, 010..013, REQ-NFR-008, 009, 111
 - Tool-calling eval set and tested-models list; offline degraded mode
 
 **Exit:** AC-2, AC-4, AC-7, AC-8, and AC-9 pass.
+
+*Status: partly built.* Scheduler (timers, alarms, reminders, DST-aware), atomic versioned JSON store, fast-path matcher, usage limits and a clock-unset guard exist and are tested (`crates/core/src/{sched,store,fastpath,usage}.rs`; commits 9ce871d, db8655f). Not verified or not done: the tool-calling eval set and tested-models list, offline degraded mode and persona config as specified, and the AC pass/fail status.
 
 ## M4: Web UI
 REQ-CFG-001..006, 008, 009, 012, 013, REQ-INB-019, REQ-NFR-006
@@ -81,6 +87,8 @@ REQ-MUS-001..006, REQ-AST-005, 008, 014, REQ-CFG-010, REQ-EXT-005
 - MCP client (Streamable HTTP); declarative HTTP tools; confirm policy
 - Recipes: Spotify control, Home Assistant, Hermes (verified against their docs at this point)
 
+*Status: partly built.* Internet radio by voice with ducking, the media-source model, the MCP client over Streamable HTTP and declarative HTTP tools with confirmation exist (`crates/core/src/{media,mcp,httptools}.rs`; [media](architecture/media.md), [mcp](architecture/mcp.md), [http-tools](architecture/http-tools.md)). Tested only against fake servers and players. Not done: the Spotify, Home Assistant and Hermes recipes (untested, sources secondary).
+
 ## M6: Hardening and Raspberry Pi
 REQ-NFR-004, 010, 108; opt-in REQ-VOI-005, REQ-VOI-011, REQ-NFR-002 tuning
 - **Raspberry Pi satellite** (documented, supported)
@@ -88,6 +96,8 @@ REQ-NFR-004, 010, 108; opt-in REQ-VOI-005, REQ-VOI-011, REQ-NFR-002 tuning
 - Opt-in barge-in/AEC evaluation (SPIKE-004); latency tuning
 
 **Exit:** real-hardware run recorded; Pi satellite passes the conformance suite.
+
+*Status: not started* (no soak, Pi satellite or conformance suite). A first real-hardware run on an Echo Dot exists (see the M0 baseline) but is not yet recorded in `docs/reports/`.
 
 ## Beyond v1.0 (planned, in rough priority order)
 Release early and often: tag `v0.x` releases as M2, M3, M4 land, so the differentiator ships long before v1.0. Items below are *planned for*, meaning v1.0 designs must not preclude them (see [future-scope.md](future-scope.md) for conditions).
