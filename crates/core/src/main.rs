@@ -840,11 +840,19 @@ struct Reply {
 impl Brain {
     /// What the Tools, Connections, and Skills tabs show (REQ-CFG-029, 036). Holds no secrets.
     fn listing(&self) -> serde_json::Value {
-        self.ext.listing(
-            &ToolHost::tool_specs(&self.assistant),
-            &self.http_tools,
-            &self.mcp,
-        )
+        let specs = ToolHost::tool_specs(&self.assistant);
+        // The declared tier of each built-in tool (a tool whose tier depends on its arguments is asked with none).
+        let tiers = specs
+            .iter()
+            .map(|t| {
+                (
+                    t.name.clone(),
+                    ToolHost::risk(&self.assistant, &t.name, &serde_json::json!({})).tier,
+                )
+            })
+            .collect();
+        self.ext
+            .listing_with(&specs, &tiers, &self.http_tools, &self.mcp)
     }
 
     /// Carry out a change from the portal and refresh what the page shows.
