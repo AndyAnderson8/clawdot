@@ -70,6 +70,17 @@ pub trait Device {
     fn playback_idle(&mut self) -> bool {
         true
     }
+    /// What this device declares in `hello` (REQ-SAT-003). The default is the mandatory set only. `wake_on_connect`
+    /// and `supports_streams` are added to it.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
+    /// A mute change made on the device itself (a button), to be reported to the core as `clawdot.mute-changed`.
+    /// Polled on every pass of the loop; `None` when there is nothing to report. A mute the core asked for is not
+    /// reported back.
+    fn poll_mute_change(&mut self) -> Option<bool> {
+        None
+    }
 }
 
 /// Connection settings.
@@ -176,10 +187,11 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
             device_id: cfg.device_id.clone(),
             name: None,
             token: cfg.token.clone(),
-            capabilities: Capabilities {
-                wake_word: cfg.wake_on_connect,
-                media_url: device.supports_streams(),
-                ..Capabilities::default()
+            capabilities: {
+                let mut caps = device.capabilities();
+                caps.wake_word |= cfg.wake_on_connect;
+                caps.media_url |= device.supports_streams();
+                caps
             },
         }),
     )?;
@@ -221,6 +233,10 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
         }
         if closed || device.finished() {
             return Ok(report);
+        }
+        if let Some(m) = device.poll_mute_change() {
+            muted = m;
+            send(&mut sock, &Message::MuteChanged { muted: m })?;
         }
         if device.poll_wake() {
             send(
@@ -456,6 +472,75 @@ mod tests {
         let e = run(sock, &mut FileDevice::new(vec![]), &cfg).unwrap_err();
         assert!(e.contains("stopped responding"), "{e}");
         assert!(!is_refusal(&e), "a dead link is worth retrying");
+        h.join().unwrap();
+    }
+
+    /// A device that declares LEDs and reports one local mute press.
+    struct Pressing {
+        mute: Option<bool>,
+    }
+
+    impl Device for Pressing {
+        fn read_mic(&mut self) -> Option<Vec<i16>> {
+            None
+        }
+        fn begin_playback(&mut self) {}
+        fn play(&mut self, _: &[i16]) {}
+        fn end_playback(&mut self) {}
+        fn stop_playback(&mut self) {}
+        fn indicator(&mut self, _: Indicator) {}
+        fn set_volume(&mut self, _: u8) {}
+        fn set_mute(&mut self, _: bool) {}
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                leds: true,
+                buttons: true,
+                ..Capabilities::default()
+            }
+        }
+        fn poll_mute_change(&mut self) -> Option<bool> {
+            self.mute.take()
+        }
+        fn finished(&self) -> bool {
+            self.mute.is_none()
+        }
+    }
+
+    #[test]
+    fn req_dev_002_a_device_declares_its_capabilities_and_reports_a_local_mute() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+            let mut dec = Decoder::new(Limits::default());
+            let mut closed = false;
+            let hello = loop {
+                if let Some(m) = poll(&mut s, &mut dec, &mut closed).unwrap() {
+                    break m;
+                }
+            };
+            let Message::Hello(hello) = hello else {
+                panic!("not a hello")
+            };
+            assert!(hello.capabilities.leds && hello.capabilities.buttons);
+            assert!(
+                hello.capabilities.wake_word,
+                "wake_on_connect is added to the device's own set"
+            );
+            assert!(!hello.capabilities.hardware_mute);
+            send(&mut s, &welcome()).unwrap();
+            loop {
+                if let Message::MuteChanged { muted } = next(&mut s, &mut dec, &mut closed) {
+                    assert!(muted);
+                    return;
+                }
+            }
+        });
+        let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut dev = Pressing { mute: Some(true) };
+        // `finished` turns true once the press was taken, which happens on the first pass after the handshake.
+        run(sock, &mut dev, &cfg()).unwrap();
         h.join().unwrap();
     }
 

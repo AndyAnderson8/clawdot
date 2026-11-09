@@ -207,6 +207,11 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> AudioDevice<I, O, T> {
         &self.output
     }
 
+    /// The audio output, to play a local sound (a tone) between replies.
+    pub fn output_mut(&mut self) -> &mut O {
+        &mut self.output
+    }
+
     /// Replies received so far.
     #[must_use]
     pub fn turns(&self) -> usize {
