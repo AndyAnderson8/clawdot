@@ -30,7 +30,7 @@ The satellite only moves samples. The programs it starts are `ffmpeg` (capture) 
 The core's speech client calls the OpenAI-compatible endpoints `POST {url}/audio/transcriptions` and `POST {url}/audio/speech` ([voice-pipeline.md](../architecture/voice-pipeline.md)). **An OpenRouter key does not by itself provide these**, and ClawDot does not send it to the speech provider. Pick one:
 
 1. **OpenAI**: `url` `https://api.openai.com/v1`, models `whisper-1` and `tts-1`, key in a second environment variable (for example `OPENAI_API_KEY`). This costs money; the daily spend cap below applies to the language model only, so keep the session short.
-2. **A local server on this PC** that speaks the same two endpoints (a Whisper server and a Piper or Kokoro wrapper, for example). Use `http://localhost:PORT/v1`; plain `http` is accepted for localhost only. No key and no cost. The model and voice names are whatever that server expects.
+2. **A local server on this PC** that speaks the same two endpoints. [local-speech.md](local-speech.md) sets one up for free (whisper.cpp and Piper, with scripts and a sample configuration). Use `http://localhost:PORT/v1`; plain `http` is accepted for localhost only. No key and no cost. The model and voice names are whatever that server expects.
 
 If you have neither, you can still exercise the text and file paths (next to last section).
 

@@ -36,6 +36,7 @@
 | Design | [design/portal.md](design/portal.md) | The tabbed web portal: palette, type, layout, tab names, principles |
 | Design | [design/ui-stack.md](design/ui-stack.md) | Proposed: raw JS, esbuild TypeScript, or Preact for the web UI |
 | Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
+| Guides | [guides/local-speech.md](guides/local-speech.md) | Free local speech to text (whisper.cpp) and text to speech (Piper) with an OpenAI-compatible URL, for the PC voice loop |
 | Guides | [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | B0 trial of the TECHO5 Dot base image on the maintainer's unit: backups, install, measurements, rollback, go/no-go |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
 | Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |

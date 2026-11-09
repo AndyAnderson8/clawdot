@@ -1,0 +1,18 @@
+{
+  "data_dir": "./clawdot-data",
+  "llm": {
+    "url": "https://openrouter.ai/api/v1",
+    "model": "openai/gpt-4o-mini",
+    "key_env": "OPENROUTER_API_KEY"
+  },
+  "limits": { "max_requests_per_day": 50, "daily_spend_usd": 1 },
+  "speech": {
+    "url": "http://127.0.0.1:8082/v1",
+    "stt_model": "whisper-1",
+    "tts_model": "piper",
+    "voice": "en_US-joe-medium",
+    "language": "en",
+    "tts_sample_rate": 22050
+  },
+  "satellite": { "listen": "127.0.0.1:10400", "follow_up_secs": 0 }
+}
