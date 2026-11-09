@@ -95,6 +95,13 @@ impl HttpBackend {
     /// A bad URL, or `https://` without the `tls` feature.
     pub fn new(base_url: &str, api_key: &str, deadline: Duration) -> Result<Self, String> {
         let endpoint = Endpoint::parse(base_url)?;
+        // The key, the conversation and agent summaries travel here: same rule as the speech clients
+        // (REQ-SEC-001), plain http only for this machine and the home network.
+        if !endpoint.tls && !crate::speech::is_private_host(&endpoint.host) {
+            return Err(format!(
+                "{base_url}: the language model API key and conversation must not cross the internet unencrypted; use https:// (plain http:// is for localhost and the home network)"
+            ));
+        }
         #[cfg(not(feature = "tls"))]
         if endpoint.tls {
             return Err("this build has no TLS support (feature `tls`); use an http:// URL".into());
@@ -396,6 +403,27 @@ mod tests {
         assert_eq!(Endpoint::parse("http://h").unwrap().base, "");
         for bad in ["ftp://h", "h", "http://", "http://h:x", "http://a b"] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn plain_http_to_the_language_model_is_only_for_this_machine_and_the_home_network() {
+        let d = Duration::from_secs(1);
+        for ok in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://192.168.1.20:11434/v1",
+            "http://ollama.local/v1",
+        ] {
+            assert!(HttpBackend::new(ok, "", d).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://api.example.com/v1",
+            "http://8.8.8.8/v1",
+            "http://openrouter.ai/api/v1",
+        ] {
+            let e = HttpBackend::new(bad, "sk-secret", d).unwrap_err();
+            assert!(e.contains("https://") && !e.contains("sk-secret"), "{e}");
         }
     }
 

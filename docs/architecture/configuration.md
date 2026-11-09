@@ -30,7 +30,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `zone` | IANA time zone | UTC |
 | `persona_file` | Replaces the default system prompt | built-in persona |
 | `endpoints` | Inbox endpoints to create at startup (`NAME` or `NAME:ADAPTER`) | none |
-| `llm.url`, `llm.model` | Language model; set together or not at all | none (fast path only) |
+| `llm.url`, `llm.model` | Language model; set together or not at all. `https://` is required unless the host is localhost, `.local` or a private-network address (REQ-SEC-001) | none (fast path only) |
 | `llm.fallback_model`, `llm.summary_model` | Optional; need `llm.url` and `llm.model` | none |
 | `llm.key_env` | Name of the environment variable holding the key | `OPENROUTER_API_KEY` |
 | `limits.max_requests_per_day` | Model requests per local day, at least 1 | 500 |
