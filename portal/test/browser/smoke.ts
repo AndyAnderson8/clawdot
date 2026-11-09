@@ -385,10 +385,28 @@ await step("Tools: turn off, add a web tool, delete", async () => {
   await open("open", "#/tools");
   await b.until(`T.all('h3').some((h) => h.textContent === 'Web tools (1)')`, "web tools heading");
   await shot("tools");
+  await eq(`T.q('#tier-set_light').value`, "costly", "a web tool starts at the careful level");
+  await eq(
+    `[...T.q('#tier-set_light').options].map((o) => o.value)`,
+    ["read_only", "reversible", "costly", "destructive"],
+    "choices",
+  );
+  await eq(`T.q('#tier-set_light option[value="destructive"]').disabled`, true, "destructive is never offered");
+  await b.ev(`window.confirm = () => false`);
+  await T(`set('#tier-set_light', 'read_only')`);
+  assert.ok(!mock.log.some((l) => l.path === "/api/tools/set_light/tier"), "declining the warning sends nothing");
+  await b.ev(`window.confirm = () => true`);
+  await T(`set('#tier-set_light', 'reversible')`);
+  await b.until(`T.q('#tier-set_light').value === 'reversible' && T.rows()[0].includes('Can be undone')`, "lowered");
+  assert.deepEqual(mock.log.find((l) => l.path === "/api/tools/set_light/tier")!.body, { tier: "reversible" });
+  await eq(`T.rows()[0].includes('The usual level is “Asks you first”')`, true, "says it was changed");
+  await T(`set('#tier-set_light', '')`);
+  await b.until(`T.q('#tier-set_light').value === 'costly'`, "back to the usual level");
+  assert.deepEqual(mock.log.filter((l) => l.path === "/api/tools/set_light/tier").pop()!.body, { tier: null });
   await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Turn off')`);
   await b.until(`T.all('.badge.bad').some((x) => x.textContent === 'Off')`, "Off badge");
   assert.deepEqual(mock.log.find((l) => l.path === "/api/tools/set_light/enabled")!.body, { enabled: false });
-  await T(`click('#panel details summary')`);
+  await T(`click('#builtin-tools summary')`);
   await eq(`T.q('#builtin-tools').open`, true, "built-in tools open");
   await T(`set('#tool-name', 'lamp')`);
   await T(`set('#tool-desc', 'Lamp')`);

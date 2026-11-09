@@ -10,6 +10,7 @@
 //! * `POST /api/admin/password`                `{"password":..}`; sets a new password
 //! * `GET  /api/overview`                      endpoints and recent agent events
 //! * `GET  /api/schedule`, `POST /api/schedule`, `PUT|DELETE /api/schedule/{id}`   timers, alarms, reminders
+//! * `POST /api/tools/{name}/tier`            body `{"tier":..|null}`; the administrator's risk tier for a tool (REQ-SEC-030)
 //! * `GET  /api/tools`, `/api/settings`, `/api/about`   what the Tools, Connections, Settings tabs show
 //! * `PUT  /api/settings`                      body `{key: value|null, ..}`; saves some settings (admin only)
 //! * `GET  /api/audit`                         what the assistant did, newest first (filters and paging in `audit`)
@@ -285,6 +286,7 @@ pub async fn handle(
             | ["tools"]
             | ["tools", _]
             | ["tools", _, "enabled"]
+            | ["tools", _, "tier"]
             | ["connections"]
             | ["connections", _]
             | ["connections", _, "enabled"]
@@ -330,6 +332,10 @@ pub async fn handle(
         }
         (&Method::POST, ["tools", name, "enabled"]) => match enabled_flag(body).await {
             Ok(on) => ext(core, ExtOp::ToolEnable((*name).to_owned(), on)).await,
+            Err((s, m)) => error(s, m),
+        },
+        (&Method::POST, ["tools", name, "tier"]) => match tier_choice(body).await {
+            Ok(t) => ext(core, ExtOp::ToolTier((*name).to_owned(), t)).await,
             Err((s, m)) => error(s, m),
         },
         (&Method::POST, ["connections", "test"]) => match read_json::<Value>(body).await {
@@ -591,6 +597,23 @@ async fn enabled_flag(body: Incoming) -> Result<bool, (StatusCode, &'static str)
             "expected {\"enabled\": true or false}",
         )),
         Err(e) => Err(e),
+    }
+}
+
+/// `{"tier": "read_only"|"reversible"|"costly"|null}` (REQ-SEC-030).
+async fn tier_choice(
+    body: Incoming,
+) -> Result<Option<crate::session::Tier>, (StatusCode, &'static str)> {
+    let v = read_json::<Value>(body).await?;
+    match v.get("tier") {
+        Some(Value::Null) => Ok(None),
+        Some(t) => serde_json::from_value(t.clone()).map(Some).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "tier must be read_only, reversible, costly, or null",
+            )
+        }),
+        None => Err((StatusCode::BAD_REQUEST, "expected {\"tier\": ..}")),
     }
 }
 

@@ -17,7 +17,7 @@ Every tool call has a tier, declared by whoever wrote or configured the tool and
 
 Built-in tools declare theirs in `assistant/tools.rs`. A tool with no declaration is `costly`. HTTP tools take `tier` (or the older `confirm`) and MCP servers take `tiers` per tool, `confirm` and `no_confirm`; the default for both is `costly`. A tier set by the administrator is a `Risk` with the tier in force and a `baseline` (the conservative tier before the override); the baseline is what the untrusted-text rule falls back to. Hints that come from a server, such as an MCP `readOnlyHint` annotation, are ignored: only configuration and the portal can lower a tier.
 
-The portal listing includes each HTTP and MCP tool's `tier`; a tier selector is a follow-up.
+The portal lists each tool's tier and lets the administrator choose it (REQ-SEC-030, `POST /api/tools/<name>/tier`): an HTTP or MCP tool can be set to read-only, reversible or costly (or back to its declared tier), and a built-in tool can only be raised. `destructive` is not offered. The choice is stored in `tools.json`, applies to the next call, and is applied in `WithPolicy::risk` on top of the declared tier with the baseline unchanged, so untrusted text in a turn still holds a lowered tool.
 
 ## Host-held confirmation (REQ-SEC-011)
 
@@ -86,4 +86,4 @@ What is kept is bounded and cleaned before it is written. Argument keys that sou
 
 ## Not built here (follow-ups)
 
-The second factor for destructive tools (a repeated target name, a button or portal tap, agentic-scope P2-6), fencing of every tool result, a repeat-within-10-seconds limit, per-tool caps and dry-run, and the portal tier selector are separate work in the P0 and P1 list of agentic-scope.md.
+The second factor for destructive tools (a repeated target name, a button or portal tap, agentic-scope P2-6), fencing of every tool result, a repeat-within-10-seconds limit, per-tool caps and dry-run are separate work in the P0 and P1 list of agentic-scope.md.

@@ -12,7 +12,7 @@ use crate::session::{Risk, Tier, ToolHost};
 use crate::store::JsonStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Schema version of the three files.
@@ -56,6 +56,9 @@ struct ToolsFile {
     tools: Vec<ToolDef>,
     #[serde(default)]
     disabled: BTreeSet<String>,
+    /// Risk tiers the administrator set in the portal, by tool name (REQ-SEC-030).
+    #[serde(default)]
+    tiers: BTreeMap<String, Tier>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -83,6 +86,8 @@ pub enum ExtOp {
     ToolDelete(String),
     /// Turn a tool (any kind) on or off.
     ToolEnable(String, bool),
+    /// Set a tool's risk tier, or `None` to go back to the tier it was declared with (REQ-SEC-030).
+    ToolTier(String, Option<Tier>),
     /// Add and connect an MCP server.
     McpAdd(Value),
     /// Remove an MCP server added in the portal.
@@ -278,6 +283,17 @@ impl Extensions {
                 .is_some_and(|(server, _)| self.conns.disabled_servers.contains(server))
     }
 
+    /// The tier the administrator set for a tool in the portal, if any (REQ-SEC-030).
+    #[must_use]
+    pub fn tier_override(&self, name: &str) -> Option<Tier> {
+        self.tools.tiers.get(name).copied()
+    }
+
+    /// Whether a name is an HTTP tool (from the configuration file or added in the portal).
+    fn is_http(&self, name: &str) -> bool {
+        self.config_tools.contains(name) || self.tools.tools.iter().any(|t| t.name == name)
+    }
+
     /// The tools a turn is limited to because of the skills the user named in `user_text`, or `None` when no
     /// named skill lists any tools (REQ-SEC-013, REQ-CFG-036). A skill is active in a turn when it is enabled
     /// and the user's own words contain its name as whole words. The result is the union of the active
@@ -383,10 +399,14 @@ impl Extensions {
                 };
                 let old = self.tools.tools.remove(pos);
                 let was_off = self.tools.disabled.remove(&name);
+                let old_tier = self.tools.tiers.remove(&name);
                 if let Err(e) = self.save_tools() {
                     self.tools.tools.insert(pos, old);
                     if was_off {
-                        self.tools.disabled.insert(name);
+                        self.tools.disabled.insert(name.clone());
+                    }
+                    if let Some(t) = old_tier {
+                        self.tools.tiers.insert(name, t);
                     }
                     return Err(e);
                 }
@@ -414,6 +434,23 @@ impl Extensions {
                     self.save_tools()
                 }
             }
+            ExtOp::ToolTier(name, tier) => {
+                let known = builtin.contains(&name) || http.owns(&name) || mcp.owns(&name);
+                if !known {
+                    return Err(Fail::NotFound("There is no such tool.".into()));
+                }
+                if tier == Some(Tier::Destructive) {
+                    return Err(invalid(
+                        "Destructive cannot be chosen here. A destructive tool stays out of reach unless the configuration allows it.",
+                    ));
+                }
+                let before = self.tools.tiers.clone();
+                match tier {
+                    Some(t) => self.tools.tiers.insert(name, t),
+                    None => self.tools.tiers.remove(&name),
+                };
+                self.save_tools().inspect_err(|_| self.tools.tiers = before)
+            }
             ExtOp::McpAdd(v) => self.mcp_add(&v, http, mcp, builtin, env).await,
             ExtOp::McpDelete(name) => {
                 if self.config_servers.contains(&name) {
@@ -431,10 +468,15 @@ impl Extensions {
                     .collect();
                 self.conns.servers.remove(pos);
                 self.conns.disabled_servers.remove(&name);
+                let had_tiers = tool_names.iter().any(|t| self.tools.tiers.contains_key(t));
                 for t in &tool_names {
                     self.conns.disabled_tools.remove(t);
+                    self.tools.tiers.remove(t);
                 }
                 mcp.remove_server(&name);
+                if had_tiers {
+                    self.save_tools()?;
+                }
                 self.save_conns()
             }
             ExtOp::McpEnable(name, on) => {
@@ -597,24 +639,69 @@ impl Extensions {
     /// shown as text only. Radio and music tools are left out of the portal (REQ-CFG-026).
     #[must_use]
     pub fn listing(&self, builtin: &[ToolSpec], http: &HttpTools, mcp: &McpClient) -> Value {
+        self.listing_with(builtin, &BTreeMap::new(), http, mcp)
+    }
+
+    /// The tier fields of one tool: the tier in force, the one it was declared with, whether the portal changed
+    /// it, and the tiers the portal may offer (REQ-SEC-030). A tool whose declared tier is not known gets none.
+    fn tier_fields(&self, name: &str, declared: Option<Tier>, free: bool) -> Value {
+        let set = self.tier_override(name);
+        let Some(declared) = declared else {
+            return json!({});
+        };
+        let effective = match set {
+            Some(t) if free => t,
+            Some(t) => t.max(declared),
+            None => declared,
+        };
+        let options: Vec<Tier> = [Tier::ReadOnly, Tier::Reversible, Tier::Costly]
+            .into_iter()
+            .filter(|t| free || *t >= declared)
+            .collect();
+        json!({
+            "confirm": effective >= Tier::Costly, "tier": effective, "tier_default": declared,
+            "tier_set": set.is_some(), "tier_options": options,
+        })
+    }
+
+    /// [`Extensions::listing`] with the declared tiers of the built-in tools, which only the assistant knows.
+    #[must_use]
+    pub fn listing_with(
+        &self,
+        builtin: &[ToolSpec],
+        builtin_tiers: &BTreeMap<String, Tier>,
+        http: &HttpTools,
+        mcp: &McpClient,
+    ) -> Value {
+        let merge = |mut base: Value, extra: Value| {
+            if let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) {
+                b.extend(e.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            base
+        };
         let mut tools = Vec::new();
         for t in builtin {
             if matches!(t.name.as_str(), "play_music" | "music_control") {
                 continue;
             }
-            tools.push(json!({
-                "name": t.name, "description": t.description, "source": "builtin", "confirm": false,
-                "enabled": !self.tools.disabled.contains(&t.name), "deletable": false,
-            }));
+            tools.push(merge(
+                json!({
+                    "name": t.name, "description": t.description, "source": "builtin", "confirm": false,
+                    "enabled": !self.tools.disabled.contains(&t.name), "deletable": false,
+                }),
+                self.tier_fields(&t.name, builtin_tiers.get(&t.name).copied(), false),
+            ));
         }
         for t in http.specs() {
             let config = self.config_tools.contains(&t.name);
-            tools.push(json!({
-                "name": t.name, "description": t.description, "source": "http",
-                "confirm": http.risk(&t.name).tier >= Tier::Costly, "tier": http.risk(&t.name).tier,
-                "enabled": !self.tools.disabled.contains(&t.name), "deletable": !config,
-                "origin": if config { "config" } else { "portal" },
-            }));
+            tools.push(merge(
+                json!({
+                    "name": t.name, "description": t.description, "source": "http",
+                    "enabled": !self.tools.disabled.contains(&t.name), "deletable": !config,
+                    "origin": if config { "config" } else { "portal" },
+                }),
+                self.tier_fields(&t.name, Some(http.risk(&t.name).tier), true),
+            ));
         }
         let mut servers = Vec::new();
         for s in mcp.report().as_array().cloned().unwrap_or_default() {
@@ -625,10 +712,15 @@ impl Extensions {
             for t in s["tools"].as_array().cloned().unwrap_or_default() {
                 let tn = t["name"].as_str().unwrap_or("").to_owned();
                 let on = !self.conns.disabled_tools.contains(&tn);
-                tools.push(json!({
-                    "name": tn, "description": t["description"], "source": "mcp", "confirm": t["confirm"],
-                    "enabled": on && server_on, "deletable": false, "server": name,
-                }));
+                let declared =
+                    serde_json::from_value::<Tier>(t["tier"].clone()).unwrap_or(Tier::Costly);
+                tools.push(merge(
+                    json!({
+                        "name": tn, "description": t["description"], "source": "mcp", "confirm": t["confirm"],
+                        "enabled": on && server_on, "deletable": false, "server": name,
+                    }),
+                    self.tier_fields(&tn, Some(declared), true),
+                ));
                 listed.push(json!({ "name": tn, "description": t["description"], "confirm": t["confirm"], "enabled": on }));
             }
             servers.push(json!({
@@ -723,8 +815,21 @@ impl<H: ToolHost> ToolHost for WithPolicy<'_, H> {
         v
     }
 
+    /// The tier the administrator chose in the portal replaces the declared one for HTTP and MCP tools; for a
+    /// built-in tool it can only raise it. The baseline never drops, so untrusted text still holds the call
+    /// (REQ-SEC-012, REQ-SEC-030).
     fn risk(&self, name: &str, args: &Value) -> Risk {
-        self.inner.risk(name, args)
+        let declared = self.inner.risk(name, args);
+        let Some(chosen) = self.ext.tier_override(name) else {
+            return declared;
+        };
+        let free = self.mcp.owns(name) || self.ext.is_http(name);
+        let tier = if free {
+            chosen
+        } else {
+            chosen.max(declared.tier)
+        };
+        Risk::set(tier, declared.baseline)
     }
 
     fn returns_untrusted_text(&self, name: &str) -> bool {
@@ -1215,5 +1320,205 @@ mod tests {
         };
         host.begin_turn("use tea");
         assert!(names(&host).is_empty());
+    }
+
+    // REQ-SEC-030, REQ-SEC-012
+    #[tokio::test]
+    async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_in_one() {
+        let (mut ext, mut http, mut mcp, builtin) = ready().await;
+        ext.apply(ExtOp::ToolAdd(light()), &mut http, &mut mcp, &builtin, env)
+            .await
+            .unwrap();
+        let mut base = Fixed(vec![ToolSpec {
+            name: "set_timer".into(),
+            description: "d".into(),
+            parameters: json!({"type":"object"}),
+        }]);
+        let tools = |ext: &Extensions, http: &HttpTools, mcp: &McpClient| {
+            let specs = [ToolSpec {
+                name: "set_timer".into(),
+                description: "d".into(),
+                parameters: json!({"type":"object"}),
+            }];
+            let declared = BTreeMap::from([("set_timer".to_owned(), Tier::Reversible)]);
+            ext.listing_with(&specs, &declared, http, mcp)["tools"].clone()
+        };
+        let by = |l: &Value, n: &str| {
+            l.as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == n)
+                .unwrap()
+                .clone()
+        };
+
+        // A web tool starts at the conservative tier and offers all three; a built-in one offers only higher.
+        let l = tools(&ext, &http, &mcp);
+        let (web, own) = (by(&l, "set_light"), by(&l, "set_timer"));
+        assert_eq!(
+            (web["tier"].clone(), web["tier_set"].clone()),
+            (json!("costly"), json!(false))
+        );
+        assert_eq!(
+            web["tier_options"],
+            json!(["read_only", "reversible", "costly"])
+        );
+        assert_eq!(own["tier_options"], json!(["reversible", "costly"]));
+
+        // Lowering a web tool applies at once and is listed.
+        ext.apply(
+            ExtOp::ToolTier("set_light".into(), Some(Tier::Reversible)),
+            &mut http,
+            &mut mcp,
+            &builtin,
+            env,
+        )
+        .await
+        .unwrap();
+        let l = tools(&ext, &http, &mcp);
+        let web = by(&l, "set_light");
+        assert_eq!(
+            (
+                web["tier"].clone(),
+                web["tier_default"].clone(),
+                web["tier_set"].clone()
+            ),
+            (json!("reversible"), json!("costly"), json!(true))
+        );
+        assert_eq!(web["confirm"], false);
+        let host = WithPolicy {
+            inner: &mut base,
+            ext: &ext,
+            mcp: &mcp,
+            scope: None,
+        };
+        let risk = host.risk("set_light", &json!({}));
+        assert_eq!(risk.tier, Tier::Reversible);
+        // A built-in tool is raised, never lowered, and its baseline rises with it.
+        ext.apply(
+            ExtOp::ToolTier("set_timer".into(), Some(Tier::ReadOnly)),
+            &mut http,
+            &mut mcp,
+            &builtin,
+            env,
+        )
+        .await
+        .unwrap();
+        let host = WithPolicy {
+            inner: &mut base,
+            ext: &ext,
+            mcp: &mcp,
+            scope: None,
+        };
+        assert_eq!(
+            host.risk("set_timer", &json!({})).tier,
+            Tier::Reversible,
+            "not lowered"
+        );
+        ext.apply(
+            ExtOp::ToolTier("set_timer".into(), Some(Tier::Costly)),
+            &mut http,
+            &mut mcp,
+            &builtin,
+            env,
+        )
+        .await
+        .unwrap();
+        let host = WithPolicy {
+            inner: &mut base,
+            ext: &ext,
+            mcp: &mcp,
+            scope: None,
+        };
+        let r = host.risk("set_timer", &json!({}));
+        assert_eq!(
+            (r.tier, r.baseline),
+            (Tier::Costly, Tier::Costly),
+            "raised for good, even with untrusted text"
+        );
+
+        // Destructive cannot be chosen, an unknown tool is refused, and clearing goes back to the declared tier.
+        let e = ext
+            .apply(
+                ExtOp::ToolTier("set_light".into(), Some(Tier::Destructive)),
+                &mut http,
+                &mut mcp,
+                &builtin,
+                env,
+            )
+            .await;
+        assert!(matches!(e, Err(Fail::Invalid(m)) if m.contains("Destructive")));
+        let e = ext
+            .apply(
+                ExtOp::ToolTier("nope".into(), Some(Tier::Costly)),
+                &mut http,
+                &mut mcp,
+                &builtin,
+                env,
+            )
+            .await;
+        assert!(matches!(e, Err(Fail::NotFound(_))));
+        ext.apply(
+            ExtOp::ToolTier("set_light".into(), None),
+            &mut http,
+            &mut mcp,
+            &builtin,
+            env,
+        )
+        .await
+        .unwrap();
+        let host = WithPolicy {
+            inner: &mut base,
+            ext: &ext,
+            mcp: &mcp,
+            scope: None,
+        };
+        assert_eq!(
+            host.risk("set_light", &json!({})).tier,
+            Tier::Reversible,
+            "the inner host's own answer"
+        );
+        assert_eq!(ext.tier_override("set_light"), None);
+        // Deleting the tool forgets its tier.
+        ext.apply(
+            ExtOp::ToolTier("set_light".into(), Some(Tier::ReadOnly)),
+            &mut http,
+            &mut mcp,
+            &builtin,
+            env,
+        )
+        .await
+        .unwrap();
+        ext.apply(
+            ExtOp::ToolDelete("set_light".into()),
+            &mut http,
+            &mut mcp,
+            &builtin,
+            env,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ext.tier_override("set_light"), None);
+    }
+
+    // REQ-SEC-030
+    #[tokio::test]
+    async fn a_chosen_tier_survives_a_restart() {
+        let dir = crate::store::testutil::TempDir::new("tiers");
+        let builtin = vec!["set_timer".to_owned()];
+        let mut http = HttpTools::new(Vec::new(), &builtin, env).unwrap();
+        let (mut mcp, _) = McpClient::connect(Vec::new(), &builtin, env).await.unwrap();
+        let mut ext = Extensions::open(&dir.0).unwrap();
+        ext.apply(
+            ExtOp::ToolTier("set_timer".into(), Some(Tier::Costly)),
+            &mut http,
+            &mut mcp,
+            &builtin,
+            env,
+        )
+        .await
+        .unwrap();
+        let again = Extensions::open(&dir.0).unwrap();
+        assert_eq!(again.tier_override("set_timer"), Some(Tier::Costly));
     }
 }
