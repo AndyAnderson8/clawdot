@@ -43,10 +43,11 @@ mod tests;
 
 type Resp = Response<BoxBody<Bytes, Infallible>>;
 
-const PAGE: &str = include_str!("ui.html");
-/// The theme (colour, type, spacing tokens) lives in its own plain CSS file so a later toolchain can reuse it;
-/// it is spliced into the page at the `/*@theme*/` marker.
-const THEME: &str = include_str!("ui-theme.css");
+/// The page with the theme (`ui-theme.css`, kept as its own file so a later toolchain can reuse it) spliced
+/// in at the `/*@theme*/` marker, and a gzip copy of it. Both are made by `build.rs`, so the program carries no
+/// compression code (REQ-CFG-043).
+const PAGE: &str = include_str!(concat!(env!("OUT_DIR"), "/ui-page.html"));
+const PAGE_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui-page.html.gz"));
 /// The release notes, shown on the About card (REQ-CFG-013, 025).
 const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 /// Only the page's own inline script and style, and only calls back to this origin.
@@ -86,12 +87,27 @@ fn error(status: StatusCode, msg: &str) -> Resp {
 
 /// The static page.
 #[must_use]
-pub fn page() -> Resp {
-    let mut r = reply(
-        StatusCode::OK,
-        "text/html; charset=utf-8",
-        PAGE.replacen("/*@theme*/", THEME, 1),
-    );
+pub fn page(accept_encoding: Option<&str>) -> Resp {
+    let mut r = if accepts_gzip(accept_encoding) {
+        let mut r = Response::new(Full::new(Bytes::from_static(PAGE_GZ)).boxed());
+        r.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        r.headers_mut()
+            .insert("cache-control", HeaderValue::from_static("no-store"));
+        r.headers_mut().insert(
+            "x-content-type-options",
+            HeaderValue::from_static("nosniff"),
+        );
+        r.headers_mut()
+            .insert("content-encoding", HeaderValue::from_static("gzip"));
+        r
+    } else {
+        reply(StatusCode::OK, "text/html; charset=utf-8", PAGE.to_owned())
+    };
+    r.headers_mut()
+        .insert("vary", HeaderValue::from_static("Accept-Encoding"));
     r.headers_mut()
         .insert("content-security-policy", HeaderValue::from_static(CSP));
     r.headers_mut()
@@ -99,6 +115,22 @@ pub fn page() -> Resp {
     r.headers_mut()
         .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     r
+}
+
+/// True when an `Accept-Encoding` header lists gzip (or `*`) with a quality above zero.
+fn accepts_gzip(header: Option<&str>) -> bool {
+    header.is_some_and(|h| {
+        h.split(',').any(|item| {
+            let mut parts = item.split(';');
+            let name = parts.next().unwrap_or("").trim();
+            let refused = parts.any(|p| {
+                p.trim()
+                    .strip_prefix("q=")
+                    .is_some_and(|q| q.trim().parse::<f32>().is_ok_and(|q| q <= 0.0))
+            });
+            (name.eq_ignore_ascii_case("gzip") || name == "*") && !refused
+        })
+    })
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -206,7 +238,11 @@ pub async fn handle(
     let is_page = matches!(segs, [""] | ["ui"]);
     if is_page {
         return Some(match *method {
-            Method::GET | Method::HEAD => page(),
+            Method::GET | Method::HEAD => page(
+                headers
+                    .get(hyper::header::ACCEPT_ENCODING)
+                    .and_then(|v| v.to_str().ok()),
+            ),
             _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
         });
     }

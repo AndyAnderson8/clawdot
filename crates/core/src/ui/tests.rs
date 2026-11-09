@@ -396,3 +396,57 @@ async fn settings_are_saved_validated_and_need_the_administrator() {
     .await;
     assert_eq!((s, v["llm"]["key_present"].as_bool()), (200, Some(true)));
 }
+
+// REQ-CFG-043
+#[test]
+fn the_page_is_compressed_only_for_browsers_that_accept_it() {
+    for (h, gz) in [
+        (None, false),
+        (Some("identity"), false),
+        (Some("br, deflate"), false),
+        (Some("gzip;q=0"), false),
+        (Some("gzip"), true),
+        (Some("deflate, GZIP;q=0.5"), true),
+        (Some("*"), true),
+    ] {
+        assert_eq!(accepts_gzip(h), gz, "{h:?}");
+    }
+    let plain = page(None);
+    assert!(plain.headers().get("content-encoding").is_none());
+    assert_eq!(plain.headers()["vary"], "Accept-Encoding");
+    let zipped = page(Some("gzip"));
+    assert_eq!(zipped.headers()["content-encoding"], "gzip");
+    assert_eq!(zipped.headers()["vary"], "Accept-Encoding");
+    // Both carry the security headers, and the gzip copy is a real gzip stream much smaller than the page.
+    for r in [&plain, &zipped] {
+        assert!(r.headers().contains_key("content-security-policy"));
+    }
+    assert_eq!(&PAGE_GZ[..2], &[0x1f, 0x8b]);
+    assert!(
+        PAGE_GZ.len() * 3 < PAGE.len(),
+        "{} vs {}",
+        PAGE_GZ.len(),
+        PAGE.len()
+    );
+}
+
+// REQ-CFG-043
+#[tokio::test]
+async fn the_served_page_negotiates_the_encoding() {
+    let p = start(false).await;
+    for (accept, encoded) in [("", false), ("Accept-Encoding: gzip\r\n", true)] {
+        let mut s = TcpStream::connect(p.addr).await.unwrap();
+        let req = format!("GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{accept}\r\n");
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).await.unwrap();
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&raw[..split]).to_lowercase();
+        assert_eq!(head.contains("content-encoding: gzip"), encoded, "{head}");
+        let body = &raw[split + 4..];
+        assert_eq!(body.starts_with(&[0x1f, 0x8b]), encoded);
+        if !encoded {
+            assert!(String::from_utf8_lossy(body).contains("<!doctype html>"));
+        }
+    }
+}
