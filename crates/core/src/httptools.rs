@@ -460,6 +460,10 @@ impl<H: crate::session::ToolHost> crate::session::ToolHost for WithHttp<'_, H> {
         }
     }
 
+    fn begin_turn(&mut self, user_text: &str) {
+        self.inner.begin_turn(user_text);
+    }
+
     async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         if self.http.owns(name) {
             self.http.call(name, args).await

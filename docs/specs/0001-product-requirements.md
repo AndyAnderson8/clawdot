@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.13 |
+| **Version** | 0.17 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -81,6 +81,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-AST-012 | The project SHOULD maintain a tested-models list and a tool-calling evaluation set so that recommended models are verified to call the built-in tools reliably. | Should | M3 | T |
 | REQ-AST-013 | The assistant's persona, system prompt, and TTS voice MUST be configurable (with safe defaults), and the configured prompt MUST NOT be able to disable the confirm policy or the untrusted-text handling required elsewhere in this spec. | Must | M3 | T |
 | REQ-AST-014 | The system MUST support **declarative HTTP tools**: an admin-configured URL, method, auth, and parameter schema, exposed to the LLM as a tool. The LLM supplies only schema-validated parameters and MUST NOT choose URLs or headers. The confirm policy and usage limits apply. | Must | M5 | T |
+| REQ-AST-015 | A tool that forwards text to an external agent (the `instruct` reply) MUST NOT send it until the user has confirmed the exact text out loud in a later turn than the one that proposed it; the model cannot supply that confirmation. Untrusted text returned by any tool (for example agent event details) MUST be fenced and labelled as untrusted data. | Must | M2 | T |
 
 ### 4.3 Agent inbox (`INB`)
 
@@ -95,7 +96,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-INB-007 | The user MUST be able to: hear the summary, ask for details, dismiss, snooze, and reply to continue the agent's work. | Must | M2 | D |
 | REQ-INB-008 | Replies and acknowledgements MUST be delivered to agents through an authenticated, per-endpoint **reply stream** (SSE) that the agent bridge opens to the device. The device MUST NOT initiate connections to agent hosts. Each reply carries an id, the event's `session_ref`, a reply type, and text; delivery is at-least-once with bridge acknowledgement, a bounded queue, and expiry. | Must | M2 | T |
 | REQ-INB-009 | The system MUST also support device-initiated sources (outbound subscribe via SSE, or periodic poll with a configurable interval), for agents unreachable from the device. | Should | M2 | T |
-| REQ-INB-010 | Inbox event text MUST be treated as untrusted data: it MUST NOT directly trigger tool execution without a user turn (see threat model). | Must | M2 | T |
+| REQ-INB-010 | Inbox event text MUST be treated as untrusted data: it MUST NOT directly trigger tool execution without a user turn (see threat model). This covers every event field (source, title, status and text), not only the text: each is sanitised before it reaches a prompt or is spoken, and none can close the prompt fence. | Must | M2 | T |
 | REQ-INB-011 | Notification latency from event receipt to tone SHOULD be ≤ 3 s (push) when idle. | Should | M2 | T |
 | REQ-INB-012 | The system SHOULD support quiet hours and per-endpoint priority/mute settings. | Should | M2 | T |
 | REQ-INB-013 | The project SHOULD provide copy-paste integration snippets (Claude Code native `http` hooks, Home Assistant, Hermes, shell, GitHub Actions). Shipped hook snippets MUST run asynchronously so a slow or offline speaker can never stall an agent. | Should | M2 | I |
@@ -103,7 +104,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-INB-015 | The project MUST provide a reference **agent bridge** (starting with Claude Code, using headless resume) that receives replies and resumes the agent session on the developer machine. | Must | M2 | T/D |
 | REQ-INB-016 | The user MUST be able to ask by voice what their agents are doing or have finished (e.g. "what are my agents up to?"), answered from recent inbox events grouped by source, without replaying every announcement. | Should | M2 | T/D |
 | REQ-INB-017 | Replies MUST have a type: `ack` (user will handle it), `instruct` (free-text instruction), `snooze`, `dismiss`, and `details` (answered locally from the stored event without contacting the agent). The assistant classifies the user's utterance into a type via a tool call; `ack` and `instruct` are delivered over the reply stream (INB-008). | Must | M2 | T/D |
-| REQ-INB-018 | Announcements MUST be spoken as **bounded summaries**: a default cap of about two sentences (≈ 15 s of speech), progressive disclosure (tone, then headline, then "want details?"), source-aware phrasing (for coding agents: what was done, what is left, anything needing attention, without file paths), and a configurable verbosity. Summaries use a separately configurable, cheaper `summary_model`. If the LLM is unreachable, the system MUST speak only the event's title and status and MUST NOT read long raw text aloud. The summariser MUST treat event text as data and MUST NOT be able to call tools. | Must | M2 | T/D |
+| REQ-INB-018 | Announcements MUST always name the source first ("From Claude Code: ..."), and the title and status MUST be sanitised and bounded like the summary. Announcements MUST be spoken as **bounded summaries**: a default cap of about two sentences (≈ 15 s of speech), progressive disclosure (tone, then headline, then "want details?"), source-aware phrasing (for coding agents: what was done, what is left, anything needing attention, without file paths), and a configurable verbosity. Summaries use a separately configurable, cheaper `summary_model`. If the LLM is unreachable, the system MUST speak only the event's title and status and MUST NOT read long raw text aloud. The summariser MUST treat event text as data and MUST NOT be able to call tools. | Must | M2 | T/D |
 | REQ-INB-019 | The UI SHOULD include a **Connect an agent** flow that creates an endpoint and generates ready-to-paste setup snippets for supported harnesses (Claude Code first; Codex, Gemini CLI, opencode, and others as each adapter is verified), including endpoint URL, token, and the bridge command. | Should | M4 | D |
 | REQ-INB-020 | The reference agent bridge MUST be structured with pluggable per-harness adapters (how to resume or message a session). Only the Claude Code adapter is a v1.0 deliverable; other harnesses are added as their hook and resume mechanisms are verified. Webhook/SSE transport is harness-agnostic. | Must | M2 | I |
 
@@ -187,13 +188,14 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 
 | ID | Requirement | Pri | Ms | Ver |
 |---|---|---|---|---|
-| REQ-SEC-001 | All outbound provider traffic MUST use TLS with certificate validation. | Must | M1 | T |
+| REQ-SEC-001 | All outbound provider traffic (language model, speech-to-text, text-to-speech) MUST use TLS with certificate validation. Plain `http://` is accepted only for loopback and private-network hosts (localhost, `.local`, RFC 1918, link-local, unique-local), and any other host is refused at start-up. | Must | M1 | T |
 | REQ-SEC-002 | Raw audio MUST NOT be persisted by default, and MUST NOT be logged. | Must | M1 | I/T |
 | REQ-SEC-003 | The microphone state (muted / listening / streaming) MUST be unambiguous to the user. | Must | M1 | D |
 | REQ-SEC-004 | Inbound HTTP MUST be rate-limited and size-limited, and parsers MUST NOT panic on malformed input (fuzzed). | Must | M2 | T |
 | REQ-SEC-005 | Dependencies MUST be audited in CI (`cargo-deny`, `cargo-audit`); an SBOM MUST be published per release. | Must | M0 | I |
 | REQ-SEC-006 | Satellite connections MUST be authenticated when not in-process. | Must | M1 | T |
 | REQ-SEC-007 | The system MUST NOT send telemetry, analytics, or crash reports to any party. Network traffic is limited to user-configured providers, bridges, and sources. This is documented in [PRIVACY.md](../../PRIVACY.md). | Must | M1 | I/T |
+| REQ-SEC-008 | Resources held before authentication MUST be bounded: the HTTP and satellite listeners MUST apply short header and hello timeouts, a read timeout on request bodies, and a cap on connections per source address in addition to the global cap, so idle sockets cannot starve either listener. | Must | M2 | T |
 
 ### 4.9 Extensibility (`EXT`)
 
@@ -279,4 +281,8 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.10 | 2026-11-08 | The console-printed setup code is removed because the device has no visible console; CFG-021 now accepts first-visitor setup from private addresses as a documented residual risk (T15); CFG-015 amended |
 | 0.11 | 2026-11-08 | Default listen port changed from 8765 to 3335 at the maintainer's request (CFG-014 amended) |
 | 0.12 | 2026-11-08 | Board support layer (section 4.10, BRD-001..016, ADR-0012): one `Board` interface for buttons, LED ring, mute, Wi-Fi, clock trust and audio devices; null, desktop and Echo Dot Gen 2 boards chosen by Cargo feature and the `board` setting; per-device JSON; honest mute and clock reporting; AC-13. Evidence in R-07 |
-| 0.13 | 2026-11-09 | Tabbed web portal with plain names (CFG-025..031): header and version footer, Reminders management, Webhooks snippets, read-only Tools and Connections, Settings overview, honest coming-soon states |
+| 0.13 | 2026-11-09 | Security review F1: spoken confirmation of the exact text before an `instruct` reply is forwarded, and fencing of untrusted tool-result text (AST-015) |
+| 0.14 | 2026-11-09 | Security review F3: every event field is untrusted (INB-010), and announcements always name the source and sanitise title and status (INB-018) |
+| 0.15 | 2026-11-09 | Security review F4: the plain-http exception in SEC-001 is stated once for the language model as well as the speech clients |
+| 0.16 | 2026-11-09 | Security review F2 and F9: pre-authentication resources are bounded per source address with header, hello and body timeouts (SEC-008) |
+| 0.17 | 2026-11-09 | Tabbed web portal with plain names (CFG-025..031): header and version footer, Reminders management, Webhooks snippets, read-only Tools and Connections, Settings overview, honest coming-soon states |
