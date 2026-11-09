@@ -66,11 +66,11 @@ phone. It shows endpoints and the recent inbox, and creates, rotates, and delete
   `listen` is a specific public address. Every view shows a red "Unprotected" banner. Webhook, bridge, and
   satellite tokens are separate and **stay required** in both modes. Do not put open mode behind a reverse proxy
   or port forward: the proxy's address looks private to ClawDot. You can set a password later from the same page.
-- **Before setup is done** (REQ-CFG-021). The setup page is reachable by whoever gets there first, which on a shared
-  network is a risk, so: the default `listen` is loopback only; setup is accepted only from private addresses;
-  and when `listen` is anything other than loopback, the console prints a one-time **setup code** that the setup
-  page asks for (kept in memory, new at every start). Finish setup right after the first start, and start the
-  first time somewhere you can see the console.
+- **Before setup is done** (REQ-CFG-021). There is no setup code, because an Echo Dot has no visible console. The
+  setup page is reachable by whoever gets there first, so until you finish it, anyone on a private network who
+  opens the page can set the password or choose open mode. Mitigations: the default `listen` is loopback only;
+  setup is accepted only from private addresses; the console prints the URL and a warning. Finish setup right after
+  the first start, on a network you trust (threat T15, ADR-0013 amendment).
 - **Recovery** (REQ-CFG-022). Forgot the password, or want to start over? On the device, stop the server and run
   `clawdot --reset-admin` (with the same `--data-dir`). It clears only the administrator setting; endpoints and
   the rest of your state stay. The next start shows setup again.
@@ -79,7 +79,7 @@ phone. It shows endpoints and the recent inbox, and creates, rotates, and delete
   password (which retires the token). `--rotate-admin-token` is gone; use `--reset-admin`.
 - **Binding.** The default listen address is `127.0.0.1:8765` (not 8080, which Amazon's `oobed` service holds on an Echo Dot; REQ-CFG-014). Change `listen` to the LAN address deliberately;
   there is no TLS, so use a trusted network or a VPN (REQ-CFG-005).
-- **Start-up order.** The listening address is bound first; only then is a setup code printed or the administrator
+- **Start-up order.** The listening address is bound first; only then is the administrator
   setting written (REQ-CFG-015). `--create-endpoint` and `--rotate-endpoint` print their token and exit without starting
   the server; run them with the server stopped, then start it. Snippets use `--public-url`, or a URL derived from
   `listen` (REQ-CFG-016).
