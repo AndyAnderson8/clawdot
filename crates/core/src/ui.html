@@ -6,25 +6,77 @@
 <title>ClawDot</title>
 <style>
 /*@theme*/
-  main { max-width: 42rem; margin: 0 auto; padding: var(--s4) var(--s4) var(--s6); }
-  header { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) 0 var(--s4); }
-  .logo { width: 3.25rem; height: 3.25rem; flex: none; }
+  main { max-width: 44rem; margin: 0 auto; padding: var(--s4) var(--s4) var(--s5); }
   h1 { font-size: var(--t-xl); line-height: 1.1; margin: 0; letter-spacing: -.01em; }
   h1 span { color: var(--acc); }
-  h2 { font-size: var(--t-l); line-height: 1.2; margin: 0 0 var(--s2); }
-  h3 { font-size: var(--t-m); margin: 0 0 var(--s2); }
+  h2 { font-size: var(--t-xl); line-height: 1.15; margin: var(--s3) 0 var(--s2); letter-spacing: -.01em; }
+  h3 { font-size: var(--t-m); margin: var(--s5) 0 var(--s2); }
   p { margin: 0 0 var(--s3); max-width: 60ch; }
   p.sub, .mut { color: var(--mut); font-size: var(--t-s); }
-  header p.sub { margin: var(--s1) 0 0; }
-  body.setup header, body.login header { flex-direction: column; text-align: center; padding: var(--s5) 0 var(--s4); animation: arrive .7s ease-out both; }
-  body.setup .logo, body.login .logo { width: 7rem; height: 7rem; }
-  body.setup h1, body.login h1 { font-size: var(--t-xxl); }
+  .lead { font-size: var(--t-l); line-height: 1.35; margin: 0 0 var(--s4); }
+  .hidden { display: none !important; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  /* Sign-in and setup keep the big centred mark */
+  #hero { display: flex; flex-direction: column; align-items: center; text-align: center; gap: var(--s3); padding: var(--s5) 0 var(--s4); animation: arrive .7s ease-out both; }
+  #hero .logo { width: 7rem; height: 7rem; }
+  #hero h1 { font-size: var(--t-xxl); }
+  #hero p { margin: var(--s1) auto 0; }
   @keyframes arrive { from { opacity: 0; } }
-  section { padding: var(--s4) 0; border-top: 1px solid var(--line); }
-  #setup, #login { border-top: 0; max-width: 28rem; margin: 0 auto; }
-  form.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m); padding: var(--s4); margin: 0 0 var(--s4); }
+  #setup, #login { max-width: 28rem; margin: 0 auto; }
+
+  /* The puck: header and tabs share one dark band, and the ring marks where you are */
+  #top { position: sticky; top: 0; z-index: 10; }
+  #banner { background: var(--bad-bg); color: var(--on-bad); padding: var(--s2) var(--s4); text-align: center; font-weight: 600; border-bottom: 3px solid var(--shell); }
+  #banner a { color: inherit; text-underline-offset: 3px; }
+  #banner a:focus-visible { outline-color: var(--on-bad); }
+  .band { background: var(--band); color: var(--on-band); border-bottom: 1px solid var(--band-line); }
+  .band :focus-visible { outline-color: var(--ring); }
+  .who { display: flex; align-items: center; gap: var(--s3); max-width: 44rem; margin: 0 auto; padding: var(--s2) var(--s4) 0; }
+  .who .logo { width: 2.5rem; height: 2.5rem; flex: none; }
+  .who h1 { font-size: var(--t-l); line-height: 1.1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+  .state { display: flex; align-items: center; gap: var(--s1); font-size: var(--t-s); color: var(--band-mut); white-space: nowrap; }
+  .state svg { width: 1.6rem; height: .9rem; flex: none; }
+  .state.ok svg { color: var(--ring); }
+  .state.warn svg { color: var(--shell); }
+  .state.wait svg { color: var(--band-mut); }
+  .tabs { display: flex; max-width: 44rem; margin: 0 auto; padding: 0 var(--s2); overflow-x: auto; scrollbar-width: none; scroll-snap-type: x proximity; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs a { position: relative; flex: none; scroll-snap-align: start; display: flex; align-items: center; min-height: 2.75rem; padding: var(--s2) var(--s3); color: var(--band-mut); text-decoration: none; font-weight: 600; }
+  .tabs a:hover { color: var(--on-band); }
+  .tabs a[aria-selected="true"] { color: #fff; }
+  .tabs a[aria-selected="true"]::after { content: ""; position: absolute; left: 22%; right: 22%; bottom: 3px; height: 8px; border-bottom: 3px solid var(--ring); border-radius: 50%; }
+  #panel { padding: var(--s3) 0 var(--s5); outline: 0; min-height: 50vh; }
+  footer { border-top: 1px solid var(--line); padding: var(--s4) 0 0; display: flex; gap: var(--s4); flex-wrap: wrap; align-items: center; font-size: var(--t-s); color: var(--mut); }
+  footer a { color: var(--acc); }
+
+  /* Lists with row actions; surfaces only for forms and secrets */
+  ul.rows { list-style: none; padding: 0; margin: var(--s2) 0 var(--s4); border-top: 1px solid var(--line); }
+  ul.rows > li { padding: var(--s3) 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  .rowhead { display: flex; gap: var(--s3); align-items: baseline; justify-content: space-between; flex-wrap: wrap; }
+  .rowhead strong { font-size: var(--t-m); }
+  .when { font-variant-numeric: tabular-nums; }
+  .acts { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s2); }
+  .acts button { min-height: 2.5rem; padding: var(--s1) var(--s3); }
+  ul.check { list-style: none; padding: 0; margin: 0 0 var(--s4); }
+  ul.check li { display: flex; gap: var(--s3); padding: var(--s3) 0; border-bottom: 1px solid var(--line); }
+  ul.check li::before { content: ""; flex: none; width: 1.5rem; height: .9rem; margin-top: .4rem; border: 2.5px solid var(--edge); border-radius: 50%; }
+  ul.check li.done::before { border-color: var(--acc); background: var(--acc); }
+  ul.check li.todo::before { border-color: var(--shell); }
+  ul.check .why { color: var(--mut); font-size: var(--t-s); }
+  .badge { display: inline-block; font-size: var(--t-s); padding: 0 var(--s2); border: 1px solid var(--edge); border-radius: var(--r-pill); color: var(--mut); white-space: nowrap; }
+  .badge.good { border-color: var(--acc); color: var(--acc); }
+  .badge.bad { border-color: var(--bad); color: var(--bad); }
+  .soon { border: 1px dashed var(--edge); border-radius: var(--r-m); padding: var(--s4); margin: var(--s4) 0; }
+  .soon h3 { margin-top: 0; }
+  .soon p:last-child { margin-bottom: 0; }
+
+  form.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m); padding: var(--s4); margin: var(--s3) 0 var(--s4); }
+  form.panel h3 { margin-top: 0; }
   form.panel.quiet { background: transparent; border-style: dashed; }
-  input, select, button { font: inherit; min-height: 2.75rem; padding: var(--s2) var(--s3); border: 1px solid var(--edge); border-radius: var(--r-s); background: var(--surface); color: inherit; }
+  label { display: block; font-weight: 600; font-size: var(--t-s); margin: var(--s3) 0 var(--s1); }
+  input, select, button, textarea { font: inherit; min-height: 2.75rem; padding: var(--s2) var(--s3); border: 1px solid var(--edge); border-radius: var(--r-s); background: var(--surface); color: inherit; }
+  input[type="text"], input[type="number"], input[type="date"], input[type="time"], input[type="password"], select { width: 100%; max-width: 24rem; }
   input::placeholder { color: var(--mut); opacity: 1; }
   button { cursor: pointer; background: var(--acc); color: var(--on-acc); border-color: transparent; border-radius: var(--r-pill); padding: var(--s2) var(--s4); font-weight: 600; transition: filter .15s; }
   button:hover { filter: brightness(1.08); }
@@ -34,18 +86,24 @@
   button.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
   .row { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; margin: var(--s2) 0; }
   .row > input { flex: 1 1 10rem; min-width: 0; }
-  #setup .row > input, #login .row > input { flex: 1 1 100%; }
+  #setup .row > input, #login .row > input { flex: 1 1 100%; max-width: none; }
   #setup .row > button { width: 100%; }
-  ul { list-style: none; padding: 0; margin: 0; }
-  li { padding: var(--s3) 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
-  code, .token { font-family: var(--mono); font-size: .92em; word-break: break-all; }
-  .token { display: block; padding: var(--s3); border: 1px dashed var(--acc); border-radius: var(--r-s); margin: var(--s2) 0; background: var(--surface); }
-  #msg { min-height: 1.5rem; color: var(--bad); font-weight: 600; }
-  .warn { color: var(--bad); font-weight: 600; font-size: var(--t-s); }
-  #banner { position: sticky; top: 0; z-index: 10; background: var(--bad-bg); color: var(--on-bad); padding: var(--s2) var(--s4); text-align: center; font-weight: 600; border-bottom: 3px solid var(--shell); }
-  #banner a { color: inherit; text-underline-offset: 3px; }
-  #banner a:focus-visible { outline-color: var(--on-bad); }
-  .hidden { display: none; }
+  .days { display: flex; gap: var(--s1); flex-wrap: wrap; border: 0; padding: 0; margin: 0; }
+  .days label { display: flex; align-items: center; justify-content: center; min-width: 3rem; min-height: 2.75rem; margin: 0; border: 1px solid var(--edge); border-radius: var(--r-pill); cursor: pointer; font-weight: 600; }
+  .days input { position: absolute; opacity: 0; width: 1px; min-height: 0; }
+  .days label:has(input:checked) { background: var(--acc); color: var(--on-acc); border-color: transparent; }
+  .days label:has(input:focus-visible) { outline: 3px solid var(--focus); outline-offset: 2px; }
+  code, .token, pre { font-family: var(--mono); font-size: .875rem; }
+  .token { display: block; padding: var(--s3); border: 1px dashed var(--acc); border-radius: var(--r-s); margin: var(--s2) 0; background: var(--surface); word-break: break-all; }
+  pre { margin: var(--s2) 0; padding: var(--s3); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-s); overflow-x: auto; white-space: pre; max-height: 20rem; }
+  details { margin: var(--s2) 0; }
+  summary { cursor: pointer; font-weight: 600; min-height: 2.75rem; display: flex; align-items: center; color: var(--acc); }
+  dl { margin: 0 0 var(--s4); display: grid; grid-template-columns: 9rem 1fr; gap: var(--s2) var(--s4); }
+  dt { color: var(--mut); font-size: var(--t-s); padding-top: .1rem; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .toast { position: fixed; left: var(--s4); right: var(--s4); bottom: var(--s4); max-width: 40rem; margin: 0 auto; padding: var(--s3) var(--s4); border-radius: var(--r-m); background: var(--band); color: var(--on-band); border: 1px solid var(--ring); font-weight: 600; z-index: 20; }
+  .toast.err { border-color: var(--shell); }
+  .toast:empty { display: none; }
 </style>
 </head>
 <body>
@@ -60,16 +118,25 @@
 <circle cx="57" cy="51" r="4" fill="#fff" stroke="#0e2a33" stroke-width="1.200"/><circle cx="71" cy="51" r="4" fill="#fff" stroke="#0e2a33" stroke-width="1.200"/>
 <circle cx="57.600" cy="51.400" r="1.800" fill="#0e2a33"/><circle cx="70.400" cy="51.400" r="1.800" fill="#0e2a33"/>
 </symbol></svg>
-<div id="banner" class="hidden" role="alert">Unprotected (open mode): anyone on this network can use this page. <a href="#pwsec">Set a password</a></div>
+<div id="top">
+  <div id="banner" class="hidden" role="alert">Unprotected (open mode): anyone on this network can use this page. <a href="#/settings" id="setpw">Set a password</a></div>
+  <div class="band hidden" id="band">
+    <div class="who">
+      <svg class="logo" aria-hidden="true"><use href="#mk"/></svg>
+      <h1 id="devname">ClawDot</h1>
+      <span class="state wait" id="state"><svg viewBox="0 0 28 16" aria-hidden="true"><ellipse cx="14" cy="8" rx="11.500" ry="5" fill="none" stroke="currentColor" stroke-width="2.800"/></svg><span id="statetext">Starting</span></span>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Sections"></nav>
+  </div>
+</div>
 <main>
-  <header>
+  <div id="hero" class="hidden">
     <svg class="logo" aria-hidden="true"><use href="#mk"/></svg>
     <div>
       <h1>Claw<span>Dot</span></h1>
-      <p class="sub">Your speaker's agent inbox. Nothing on this page leaves your network.</p>
+      <p class="sub">A voice assistant that runs on your own speaker.</p>
     </div>
-  </header>
-  <div id="msg" role="status"></div>
+  </div>
 
   <section id="setup" class="hidden">
     <h2>Set up ClawDot</h2>
@@ -82,7 +149,7 @@
     </form>
     <form id="openform" class="panel quiet">
       <h3>Or leave it open on this network</h3>
-      <p class="warn">Anyone on this network can use this page and read your inbox.</p>
+      <p class="warn">Anyone on this network can use this page and see what your agents send.</p>
       <div class="row"><button class="danger" id="openbtn">Leave open</button></div>
     </form>
   </section>
@@ -92,55 +159,15 @@
     <form class="panel" id="loginform">
       <div class="row"><input id="pw" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password"><button>Sign in</button></div>
     </form>
-    <p class="mut" id="legacynote">Forgot it? On the device, run <code>clawdot --reset-admin</code> and open this page again.</p>
+    <p class="mut">Forgot it? On the device, run <code>clawdot --reset-admin</code> and open this page again.</p>
   </section>
 
   <div id="app" class="hidden">
-    <div class="row"><span class="mut" id="who"></span><button class="plain" id="out">Sign out</button></div>
-
-    <section>
-      <h2>Status</h2>
-      <ul id="status"><li class="mut">Loading...</li></ul>
-      <form class="row" id="speakform">
-        <input id="speaktext" placeholder="Make the speaker say something" aria-label="Test speak" maxlength="200">
-        <button>Test speak</button>
-      </form>
-    </section>
-
-    <section>
-      <h2>Scheduled</h2>
-      <ul id="scheduled"></ul>
-    </section>
-
-    <section>
-      <h2>Endpoints</h2>
-      <ul id="endpoints"></ul>
-      <form class="row" id="newform">
-        <input id="newname" placeholder="name (a-z, 0-9, - _)" aria-label="New endpoint name" maxlength="32">
-        <select id="newadapter" aria-label="Adapter"><option>claude-code</option><option>generic</option></select>
-        <button>Create</button>
-      </form>
-      <div id="secret" class="hidden">
-        <p>Copy this token now. It is shown only once.</p>
-        <code class="token" id="secrettext"></code>
-      </div>
-    </section>
-
-    <section>
-      <h2>Inbox</h2>
-      <ul id="events"></ul>
-    </section>
-
-    <section id="pwsec">
-      <h2 id="pwtitle">Admin password</h2>
-      <p class="mut hidden" id="legacywarn">You are signed in with the old administrator token. Set a password to replace it.</p>
-      <form class="row" id="newpwform">
-        <input id="newpw" type="password" autocomplete="new-password" placeholder="New password (8 or more characters)" aria-label="New password" maxlength="128">
-        <button>Save password</button>
-      </form>
-    </section>
+    <div id="panel" role="tabpanel" tabindex="-1"></div>
   </div>
+  <footer id="foot"><span id="ver">ClawDot</span><a href="#/settings" id="newlink" class="hidden">What is new in this version</a></footer>
 </main>
+<div id="msg" class="toast" role="status"></div>
 <script>
 (function () {
   "use strict";
@@ -149,8 +176,42 @@
   try { token = sessionStorage.getItem("clawdot-session") || ""; } catch (e) { token = ""; }
   function keep(t) { token = t || ""; try { if (token) sessionStorage.setItem("clawdot-session", token); else sessionStorage.removeItem("clawdot-session"); } catch (e) {} }
 
-  function say(m) { $("msg").textContent = m || ""; }
-  function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+  // S: what the page knows. fresh: tokens shown once, kept only in memory until the page closes.
+  var S = { mode: "", version: "", settings: null, status: null, overview: null, fresh: {}, spoke: false, cur: null };
+  var DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  var toastTimer = 0;
+
+  // Build elements; text is always set as text, never as markup.
+  function h(tag, a) {
+    var e = document.createElement(tag);
+    a = a || {};
+    Object.keys(a).forEach(function (k) {
+      var v = a[k];
+      if (k === "class") e.className = v;
+      else if (k === "text") e.textContent = v;
+      else if (k.slice(0, 2) === "on") e[k] = v;
+      else if (v === true) e.setAttribute(k, "");
+      else if (v !== false && v != null) e.setAttribute(k, v);
+    });
+    for (var i = 2; i < arguments.length; i++) {
+      var c = arguments[i];
+      if (c == null || c === false) continue;
+      e.append(c.nodeType ? c : document.createTextNode(String(c)));
+    }
+    return e;
+  }
+  function say(m, bad) {
+    var t = $("msg");
+    t.textContent = m || "";
+    t.className = "toast" + (bad ? " err" : "");
+    clearTimeout(toastTimer);
+    if (m && !bad) toastTimer = setTimeout(function () { t.textContent = ""; }, 5000);
+  }
+  function fail(x) {
+    if (x.status === 401) { keep(""); start(); say("Please sign in again.", true); }
+    else if (x.status === 429) say("Too many attempts. Wait a few seconds and try again.", true);
+    else say(x.message || "Something went wrong. Try again.", true);
+  }
 
   async function api(method, path, body) {
     var r = await fetch(path, {
@@ -160,159 +221,496 @@
     });
     var data = {};
     try { data = await r.json(); } catch (e) { data = {}; }
-    if (!r.ok) { var err = new Error(data.error || ("HTTP " + r.status)); err.status = r.status; throw err; }
+    if (!r.ok) { var err = new Error(data.error || ("The device answered with error " + r.status + ".")); err.status = r.status; throw err; }
     return data;
   }
 
-  function show(view) {
-    ["setup", "login", "app"].forEach(function (v) { $(v).classList.toggle("hidden", v !== view); });
-    document.body.className = view;
+  function copy(text, btn) {
+    var done = function () { var o = btn.textContent; btn.textContent = "Copied"; setTimeout(function () { btn.textContent = o; }, 1500); };
+    if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).then(done, function () { say("Copy failed. Select the text and copy it by hand.", true); }); return; }
+    var ta = h("textarea", { "aria-hidden": "true" }); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.append(ta); ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) { say("Copy failed. Select the text and copy it by hand.", true); }
+    ta.remove();
   }
+  function copyBtn(text, label) { var b = h("button", { class: "plain", type: "button", text: label || "Copy" }); b.onclick = function () { copy(text, b); }; return b; }
 
-  function ago(ts, now) {
-    var s = Math.max(0, now - ts);
-    if (s < 90) return s + " s ago";
-    if (s < 5400) return Math.round(s / 60) + " min ago";
-    if (s < 129600) return Math.round(s / 3600) + " h ago";
-    return Math.round(s / 86400) + " d ago";
+  // ----- time, always in the device's zone -----
+  function zone() { return (S.settings && S.settings.zone) || "UTC"; }
+  function fmt(ts, o) {
+    var d = new Date(ts * 1000);
+    try { return new Intl.DateTimeFormat(undefined, Object.assign({ timeZone: zone() }, o)).format(d); }
+    catch (e) { return new Intl.DateTimeFormat(undefined, o).format(d); }
   }
-
-  function render(o) {
-    $("who").textContent = o.endpoints.length + " endpoint(s), " + o.events.length + " event(s)";
-    var ul = $("endpoints"); ul.replaceChildren();
-    o.endpoints.forEach(function (e) {
-      var li = el("li");
-      li.append(el("strong", e.name), el("span", "  " + e.adapter + (e.enabled ? "" : "  (disabled)"), "mut"));
-      var hook = el("div", location.origin + "/hook/" + e.name, "mut"); hook.style.wordBreak = "break-all";
-      var row = el("div", undefined, "row");
-      var rot = el("button", "Rotate token", "plain");
-      rot.onclick = async function () {
-        try { var r = await api("POST", "/api/endpoints/" + e.name + "/rotate"); secret(r.token); } catch (x) { say(x.message); }
-      };
-      var del = el("button", "Delete", "danger");
-      del.onclick = async function () {
-        if (!confirm("Delete endpoint " + e.name + "?")) return;
-        try { await api("DELETE", "/api/endpoints/" + e.name); await load(); } catch (x) { say(x.message); }
-      };
-      row.append(rot, del);
-      li.append(hook, row);
-      ul.append(li);
-    });
-    var ev = $("events"); ev.replaceChildren();
-    if (!o.events.length) ev.append(el("li", "Nothing in the inbox.", "mut"));
-    o.events.forEach(function (e) {
-      var li = el("li");
-      li.append(el("strong", e.title));
-      li.append(el("div", e.source + " via " + e.endpoint + " - " + e.state + " - " + ago(e.received_at, o.now), "mut"));
-      if (e.text) li.append(el("div", e.text));
-      ev.append(li);
-    });
+  function parts(ts) {
+    var d = new Date(ts * 1000), o = { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }, m = {};
+    var f; try { f = new Intl.DateTimeFormat("en-CA", Object.assign({ timeZone: zone() }, o)); } catch (e) { f = new Intl.DateTimeFormat("en-CA", o); }
+    f.formatToParts(d).forEach(function (p) { m[p.type] = p.value; });
+    return { date: m.year + "-" + m.month + "-" + m.day, time: m.hour + ":" + m.minute };
   }
-
-  function fmt(secs) {
+  function span(secs) {
     if (secs < 90) return secs + " s";
     if (secs < 5400) return Math.round(secs / 60) + " min";
-    return (secs / 3600).toFixed(1) + " h";
+    if (secs < 129600) { var hh = Math.floor(secs / 3600), mm = Math.round((secs % 3600) / 60); return hh + " h" + (mm ? " " + mm + " min" : ""); }
+    return Math.round(secs / 86400) + " days";
+  }
+  function ago(ts, now) {
+    var s = Math.max(0, now - ts);
+    return (s < 60 ? "just now" : span(s) + " ago");
+  }
+  function whenText(ts, now) {
+    var a = parts(ts), b = parts(now), tom = parts(now + 86400);
+    var day = a.date === b.date ? "Today" : a.date === tom.date ? "Tomorrow" : fmt(ts, { weekday: "short", month: "short", day: "numeric" });
+    return day + " at " + fmt(ts, { hour: "numeric", minute: "2-digit" });
+  }
+  function repeatText(r) {
+    if (!r) return "";
+    var d = r.days.join(",");
+    var who = r.every_day ? "Every day" : d === "0,1,2,3,4" ? "Weekdays" : d === "5,6" ? "Weekends" : r.days.map(function (i) { return DAYS[i]; }).join(", ");
+    return who;
   }
 
-  function renderStatus(r) {
-    var s = r.status || {};
-    var ul = $("status"); ul.replaceChildren();
-    if (!s.llm) { ul.append(el("li", "Starting up...", "mut")); return; }
-    var rows = [
-      ["Language model", s.llm.configured ? s.llm.model : "not configured (local commands only)"],
-      ["Requests today", s.usage.requests_today + " of " + s.usage.max_requests_per_day + (s.usage.spend_today > 0 ? ", $" + s.usage.spend_today.toFixed(3) : "")],
-      ["Satellites connected", String(s.satellites)],
-      ["Tools", s.tools.builtin + " built in, " + s.tools.http + " HTTP, " + s.tools.mcp + " MCP"],
-      ["Radio stations", s.stations.length ? s.stations.join(", ") : "none"],
-      ["Version", s.version]
-    ];
-    rows.forEach(function (p) {
-      var li = el("li"); li.append(el("strong", p[0] + ": "), el("span", p[1])); ul.append(li);
-    });
-    var sc = $("scheduled"); sc.replaceChildren();
-    if (!s.scheduled.length) sc.append(el("li", "Nothing scheduled.", "mut"));
-    s.scheduled.forEach(function (i) {
-      var li = el("li"); li.append(el("strong", i.kind + (i.label ? ": " + i.label : "")), el("span", "  in " + fmt(i.seconds_left), "mut")); sc.append(li);
-    });
+  // ----- header, footer, tabs -----
+  var TABS = [
+    ["home", "Home", home], ["reminders", "Reminders", reminders], ["agents", "Agents", agents], ["tools", "Tools", tools],
+    ["connections", "Connections", connections], ["skills", "Skills", skills], ["webhooks", "Webhooks", webhooks], ["settings", "Settings", settings]
+  ];
+  function buildTabs() {
+    var nav = $("tabs"); nav.replaceChildren();
+    TABS.forEach(function (t) { nav.append(h("a", { href: "#/" + t[0], role: "tab", id: "tab-" + t[0], "aria-controls": "panel", text: t[1] })); });
+  }
+  $("tabs").onkeydown = function (ev) {
+    var i = TABS.findIndex(function (t) { return t[0] === S.tab; });
+    var n = ev.key === "ArrowRight" ? i + 1 : ev.key === "ArrowLeft" ? i - 1 : ev.key === "Home" ? 0 : ev.key === "End" ? TABS.length - 1 : -1;
+    if (n < 0) return;
+    ev.preventDefault();
+    n = (n + TABS.length) % TABS.length;
+    location.hash = "#/" + TABS[n][0];
+    $("tab-" + TABS[n][0]).focus();
+  };
+  function paintHeader() {
+    var st = S.status || {}, ok = st.llm && st.clock_valid && st.llm.configured;
+    var cls = !st.llm ? "wait" : ok ? "ok" : "warn";
+    $("state").className = "state " + cls;
+    $("statetext").textContent = !st.llm ? "Starting" : ok ? "Ready" : !st.clock_valid ? "Clock not set" : "Needs setup";
+    if (S.settings && S.settings.device_name) $("devname").textContent = S.settings.device_name;
+  }
+  function paintFooter() {
+    $("ver").textContent = "ClawDot " + (S.version || "");
+    $("newlink").classList.remove("hidden");
   }
 
-  function secret(t) { $("secrettext").textContent = t; $("secret").classList.remove("hidden"); }
+  function setView(v) {
+    ["setup", "login", "app"].forEach(function (x) { $(x).classList.toggle("hidden", x !== v); });
+    $("hero").classList.toggle("hidden", v === "app");
+    $("band").classList.toggle("hidden", v !== "app");
+    document.body.className = v;
+  }
+
+  // ----- Home -----
+  function home(p) {
+    var lead = h("p", { class: "lead", text: "Checking..." });
+    var list = h("ul", { class: "check" });
+    var usage = h("p", { class: "mut" });
+    var inp = h("input", { id: "speaktext", type: "text", placeholder: "For example: Hello from the kitchen", "aria-label": "What the speaker should say", maxlength: "200" });
+    var form = h("form", { class: "panel" }, h("h3", { text: "Test the speaker" }), h("p", { class: "mut", text: "Type a sentence and the speaker will say it out loud." }), h("div", { class: "row" }, inp, h("button", { text: "Say it" })));
+    form.onsubmit = async function (ev) {
+      ev.preventDefault();
+      try { await api("POST", "/api/speak", { text: inp.value }); inp.value = ""; S.spoke = true; say("Sent. Listen for the speaker."); paint(); }
+      catch (x) { fail(x); }
+    };
+    p.append(h("h2", { text: "Home" }), lead, list, usage, form);
+    function go(tab) { location.hash = "#/" + tab; }
+    function paint() {
+      var st = S.status || {}, ov = S.overview || { endpoints: [], events: [] };
+      if (!st.llm) return;
+      var items = [
+        ["The clock is set", st.clock_valid, "Reminders and alarms wait until the device gets the time from the network.", null],
+        ["Admin password", S.mode === "password", "Anyone on your network can use this page.", ["settings", "Set a password"]],
+        ["Language model", st.llm.configured, "Without one the speaker only understands simple commands like timers.", ["settings", "See how"]],
+        ["A speaker is connected", st.satellites > 0, "Start a speaker program on the device or a computer so it can listen.", null],
+        ["An agent is connected", ov.endpoints.length > 0, "Create a webhook so Claude Code or another agent can talk to the speaker.", ["webhooks", "Connect an agent"]],
+        ["Speaker test", S.spoke, "Use the box below and listen for it.", null]
+      ];
+      var todo = items.filter(function (i) { return !i[1]; }).length;
+      lead.textContent = todo === 0 ? "Everything is set up and running." : todo === 1 ? "One thing left to set up." : todo + " things left to set up.";
+      list.replaceChildren();
+      items.forEach(function (i) {
+        var body = h("div", {}, h("div", {}, h("span", { class: "sr", text: i[1] ? "Done: " : "To do: " }), i[0]));
+        if (!i[1]) {
+          body.append(h("div", { class: "why", text: i[2] }));
+          if (i[3]) { var b = h("button", { class: "plain", type: "button", text: i[3][1] }); b.onclick = function () { go(i[3][0]); }; body.append(h("div", { class: "acts" }, b)); }
+        }
+        list.append(h("li", { class: i[1] ? "done" : "todo" }, body));
+      });
+      var u = st.usage || {};
+      usage.textContent = "Today: " + u.requests_today + " of " + u.max_requests_per_day + " language model requests" + (u.spend_today > 0 ? ", $" + u.spend_today.toFixed(3) + " spent" : "") + ".";
+    }
+    return async function () { paint(); };
+  }
+
+  // ----- Reminders -----
+  function reminders(p) {
+    var list = h("ul", { class: "rows" });
+    var note = h("p", { class: "mut" });
+    var editing = 0;
+    var kind = h("select", { id: "rkind", "aria-label": "What to add" },
+      h("option", { value: "timer", text: "Timer (counts down)" }), h("option", { value: "alarm", text: "Alarm (a time of day)" }), h("option", { value: "reminder", text: "Reminder (a date and a message)" }));
+    var label = h("input", { id: "rlabel", type: "text", maxlength: "100" });
+    var labelL = h("label", { for: "rlabel", text: "Name" });
+    var amount = h("input", { id: "ramount", type: "number", min: "1", max: "10080", value: "10" });
+    var unit = h("select", { id: "runit", "aria-label": "Unit" }, h("option", { value: "60", text: "minutes" }), h("option", { value: "3600", text: "hours" }));
+    var tf = h("div", { id: "rtimer" }, h("label", { for: "ramount", text: "Length" }), h("div", { class: "row" }, amount, unit));
+    var time = h("input", { id: "rtime", type: "time", value: "07:00" });
+    var date = h("input", { id: "rdate", type: "date" });
+    var dayset = h("fieldset", { class: "days" }, h("legend", { class: "sr", text: "Repeat on" }));
+    DAYS.forEach(function (d, i) { dayset.append(h("label", {}, h("input", { type: "checkbox", value: String(i) }), d)); });
+    var af = h("div", { id: "ralarm" }, h("label", { for: "rtime", text: "Time" }), time, h("label", { text: "Repeat on" }), dayset, h("p", { class: "mut", text: "Leave every day off to ring once, at the next time it comes round." }));
+    var rf = h("div", { id: "rrem" }, h("label", { for: "rdate", text: "Date" }), date, h("label", { for: "rtime2", text: "Time" }), h("input", { id: "rtime2", type: "time", value: "09:00" }));
+    var save = h("button", { text: "Add" });
+    var cancel = h("button", { class: "plain hidden", type: "button", text: "Stop editing" });
+    var title = h("h3", { text: "Add a timer, alarm, or reminder" });
+    var form = h("form", { class: "panel" }, title, h("label", { for: "rkind", text: "Type" }), kind, tf, af, rf, labelL, label, h("div", { class: "row" }, save, cancel));
+    function layout() {
+      var k = kind.value;
+      tf.classList.toggle("hidden", k !== "timer"); af.classList.toggle("hidden", k !== "alarm"); rf.classList.toggle("hidden", k !== "reminder");
+      labelL.textContent = k === "reminder" ? "What should it say?" : "Name (optional)";
+      label.placeholder = k === "timer" ? "For example: pasta" : k === "alarm" ? "For example: wake up" : "For example: call Mum";
+    }
+    kind.onchange = layout;
+    function reset() {
+      editing = 0; form.reset(); date.value = parts(Math.floor(Date.now() / 1000)).date; layout(); save.textContent = "Add"; title.textContent = "Add a timer, alarm, or reminder";
+      cancel.classList.add("hidden"); kind.disabled = false;
+    }
+    cancel.onclick = reset;
+    form.onsubmit = async function (ev) {
+      ev.preventDefault();
+      var k = kind.value, body = { kind: k, label: label.value.trim() };
+      if (k === "timer") body.seconds = Math.round(Number(amount.value) * Number(unit.value));
+      else if (k === "alarm") {
+        var hm = time.value.split(":"); body.hour = Number(hm[0]); body.minute = Number(hm[1]);
+        body.days = Array.prototype.filter.call(dayset.querySelectorAll("input"), function (c) { return c.checked; }).map(function (c) { return Number(c.value); });
+        if (!time.value) { say("Pick a time for the alarm.", true); return; }
+      } else {
+        body.date = date.value; body.time = $("rtime2").value;
+        if (!date.value || !body.time) { say("Pick a date and a time for the reminder.", true); return; }
+      }
+      try {
+        var r = editing ? await api("PUT", "/api/schedule/" + editing, body) : await api("POST", "/api/schedule", body);
+        say(editing ? "Saved." : "Added."); reset(); draw(r);
+      } catch (x) { fail(x); }
+    };
+    function startEdit(i) {
+      editing = i.id; kind.value = i.kind; layout(); kind.disabled = false;
+      label.value = i.label; save.textContent = "Save changes"; title.textContent = "Change this " + i.kind;
+      cancel.classList.remove("hidden");
+      if (i.kind === "timer") { amount.value = String(Math.max(1, Math.ceil(i.seconds_left / 60))); unit.value = "60"; }
+      else if (i.kind === "alarm") {
+        var pr = parts(i.fire_at); time.value = i.repeat ? ("0" + i.repeat.hour).slice(-2) + ":" + ("0" + i.repeat.minute).slice(-2) : pr.time;
+        Array.prototype.forEach.call(dayset.querySelectorAll("input"), function (c) { c.checked = !!i.repeat && i.repeat.days.indexOf(Number(c.value)) >= 0; });
+      } else { var q = parts(i.fire_at); date.value = q.date; $("rtime2").value = q.time; }
+      form.scrollIntoView({ block: "center" }); label.focus();
+    }
+    var data = null;
+    function draw(r) {
+      data = r || data; if (!data) return;
+      list.replaceChildren();
+      if (!data.items.length) list.append(h("li", { class: "mut", text: "Nothing set. Add a timer, alarm, or reminder below, or just ask the speaker." }));
+      data.items.forEach(function (i) {
+        var kindName = i.kind === "timer" ? "Timer" : i.kind === "alarm" ? "Alarm" : "Reminder";
+        var when = i.kind === "timer" ? "Rings in " + span(i.seconds_left) + " (" + whenText(i.fire_at, data.now) + ")"
+          : i.repeat ? repeatText(i.repeat) + " at " + fmt(i.fire_at, { hour: "numeric", minute: "2-digit" }) + ". Next: " + whenText(i.fire_at, data.now)
+          : whenText(i.fire_at, data.now);
+        var edit = h("button", { class: "plain", type: "button", text: "Edit" }); edit.onclick = function () { startEdit(i); };
+        var del = h("button", { class: "danger", type: "button", text: "Cancel" });
+        del.onclick = async function () {
+          if (!confirm("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?")) return;
+          try { draw(await api("DELETE", "/api/schedule/" + i.id)); say("Cancelled."); } catch (x) { fail(x); }
+        };
+        list.append(h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: (i.label || kindName) }), h("span", { class: "badge", text: kindName })), h("div", { class: "when", text: when }), h("div", { class: "acts" }, edit, del)));
+      });
+      note.textContent = (data.clock_valid ? "" : "The device clock is not set yet, so nothing will ring until it is. ") + "Times are in " + zone().replace(/_/g, " ") + ", the device's time zone.";
+    }
+    p.append(h("h2", { text: "Reminders" }), h("p", { text: "Timers, alarms, and reminders you set here or by voice. They ring on the speaker even when the internet is down." }), list, note, form);
+    layout();
+    date.value = parts(Math.floor(Date.now() / 1000)).date;
+    return async function () {
+      try { draw(await api("GET", "/api/schedule")); } catch (x) { if (x.status === 503) note.textContent = x.message; else fail(x); }
+    };
+  }
+
+  // ----- Agents -----
+  function agents(p) {
+    var list = h("ul", { class: "rows" });
+    p.append(h("h2", { text: "Agents" }), h("p", { text: "News from your coding agents, like Claude Code, such as “the build finished” or “I need your answer”. The speaker reads it out when it is idle." }), list);
+    var STATE = { "new": "Waiting to be read out", announced: "Read out", acknowledged: "You handled it", dismissed: "Dismissed", snoozed: "Snoozed" };
+    return async function () {
+      var ov = S.overview; if (!ov) return;
+      list.replaceChildren();
+      if (!ov.events.length) {
+        var go = h("button", { type: "button", text: "Connect an agent" }); go.onclick = function () { location.hash = "#/webhooks"; };
+        list.append(h("li", {}, h("p", { text: "Nothing from your agents yet." }), go));
+      }
+      ov.events.forEach(function (e) {
+        list.append(h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: e.title }), h("span", { class: "badge", text: STATE[e.state] || e.state })),
+          h("div", { class: "mut", text: e.source + " through the “" + e.endpoint + "” webhook, " + ago(e.received_at, ov.now) }), e.text ? h("div", { text: e.text }) : null));
+      });
+    };
+  }
+
+  // ----- Tools -----
+  var SOURCE = { builtin: "Built in", http: "Web tool", mcp: "From a connection" };
+  function tools(p) {
+    var box = h("div");
+    p.append(h("h2", { text: "Tools" }), h("p", { text: "Everything the assistant can do besides talk. Tools that change things in the outside world ask you out loud first." }), box);
+    return async function () {
+      var d; try { d = await api("GET", "/api/tools"); } catch (x) { fail(x); return; }
+      var old = $("builtin-tools"), wasOpen = old && old.open;
+      box.replaceChildren();
+      ["http", "mcp", "builtin"].forEach(function (src) {
+        var mine = (d.tools || []).filter(function (t) { return t.source === src; });
+        var heading = SOURCE[src] + " (" + mine.length + ")";
+        if (src !== "builtin") box.append(h("h3", { text: heading }));
+        if (!mine.length) {
+          box.append(src === "http" ? h("p", { class: "mut", text: "No web tools yet. A web tool lets the assistant call a web address, for example to switch on a light." }) : src === "mcp" ? h("p", { class: "mut", text: "None yet. Tools from outside servers appear here once you add a connection." }) : null);
+          return;
+        }
+        var ul = h("ul", { class: "rows" });
+        mine.forEach(function (t) {
+          ul.append(h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: t.name }), h("span", { class: "badge" + (t.confirm ? " good" : ""), text: t.confirm ? "Asks you first" : "Runs right away" })), h("div", { class: "mut", text: t.description })));
+        });
+        if (src === "builtin") box.append(h("details", { id: "builtin-tools", open: !!wasOpen }, h("summary", { text: heading + ": what the assistant can already do" }), ul));
+        else box.append(ul);
+      });
+      box.append(h("div", { class: "soon" }, h("h3", { text: "Add, turn off, or remove tools: coming soon" }),
+        h("p", { text: "You will be able to paste a web address, say what it does, and have the assistant use it, and turn any tool off or delete it, right here." }),
+        h("p", { class: "mut", text: "Until then, web tools are added in the configuration file (the “tools” list) and apply after a restart." })));
+    };
+  }
+
+  // ----- Connections -----
+  function connections(p) {
+    var box = h("div");
+    p.append(h("h2", { text: "Connections" }), h("p", { text: "A connection links ClawDot to an outside tool server using MCP (the Model Context Protocol), such as Home Assistant or a calendar. Its tools then show up under Tools." }), box);
+    return async function () {
+      var d; try { d = await api("GET", "/api/tools"); } catch (x) { fail(x); return; }
+      box.replaceChildren();
+      var servers = d.mcp || [];
+      if (!servers.length) box.append(h("p", { text: "No connections yet." }));
+      else {
+        var ul = h("ul", { class: "rows" });
+        servers.forEach(function (s) {
+          var li = h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: s.name }), h("span", { class: "badge " + (s.connected ? "good" : "bad"), text: s.connected ? "Connected" : "Cannot connect" })), h("div", { class: "mut", text: s.url }));
+          if (!s.connected) li.append(h("p", { text: "It did not answer: " + (s.error || "unknown reason") + ". Check the address, that the server is running, and that the token variable is set, then restart ClawDot." }));
+          if (s.token_env) li.append(h("div", { class: "mut", text: "Token comes from the environment variable " + s.token_env + "." }));
+          if (s.tools.length) {
+            var inner = h("ul", { class: "rows" });
+            s.tools.forEach(function (t) { inner.append(h("li", {}, h("strong", { text: t.name }), " ", h("span", { class: "badge", text: t.confirm ? "Asks you first" : "Runs right away" }), h("div", { class: "mut", text: t.description }))); });
+            li.append(h("details", {}, h("summary", { text: s.tools.length + (s.tools.length === 1 ? " tool" : " tools") }), inner));
+          } else if (s.connected) li.append(h("p", { class: "mut", text: "Connected, but it offers no tools." }));
+          ul.append(li);
+        });
+        box.append(ul);
+      }
+      box.append(h("div", { class: "soon" }, h("h3", { text: "Add a connection: coming soon" }),
+        h("p", { text: "You will be able to enter a server address, name the environment variable that holds its token, test the connection, and choose which of its tools are on." }),
+        h("p", { class: "mut", text: "Until then, connections are added in the configuration file (the “mcp” list) and apply after a restart." })));
+    };
+  }
+
+  // ----- Skills -----
+  function skills(p) {
+    p.append(h("h2", { text: "Skills" }),
+      h("div", { class: "soon" }, h("h3", { text: "Coming soon" }),
+        h("p", { text: "A skill is a named set of instructions for the assistant, for example “When I say good night, turn off the lights and set the alarm”. You will write one, choose which tools it may use, and switch it on or off." }),
+        h("p", { class: "mut", text: "Nothing to manage yet." })));
+    return async function () {};
+  }
+
+  // ----- Webhooks -----
+  function snippets(base, name, adapter, tok) {
+    var url = base + "/hook/" + name, t = tok || "YOUR_TOKEN";
+    var out = [["Try it from a terminal", "curl -X POST " + url + " \\\n  -H 'Authorization: Bearer " + t + "' \\\n  -d '{\"title\":\"Backup finished\",\"summary\":\"12 GB copied\"}'"]];
+    if (adapter === "claude-code") {
+      var hook = function (ev) { return '    "' + ev + '": [{ "hooks": [{ "type": "http", "url": "' + url + '", "headers": { "Authorization": "Bearer ' + t + '" }, "timeout": 5 }] }]'; };
+      out.unshift(["Claude Code: add to ~/.claude/settings.json", '{\n  "hooks": {\n' + hook("Stop") + ",\n" + hook("Notification") + "\n  }\n}"]);
+      out.push(["Let your voice replies reach Claude Code (run on the computer where it works)", "CLAWDOT_TOKEN=" + t + " clawdot-bridge --url " + base + " --endpoint " + name]);
+    }
+    out.push(["GitHub Actions: add as the last step of a job", "- name: Tell ClawDot\n  if: always()\n  run: |\n    curl -fsS -X POST " + url + " \\\n      -H \"Authorization: Bearer ${{ secrets.CLAWDOT_TOKEN }}\" \\\n      -d '{\"title\":\"Build ${{ job.status }}\",\"summary\":\"${{ github.repository }}\"}'"]);
+    return out;
+  }
+  function webhooks(p) {
+    var list = h("ul", { class: "rows" });
+    var base = function () { return (S.settings && S.settings.public_url) || location.origin; };
+    var name = h("input", { id: "wname", type: "text", maxlength: "32", placeholder: "For example: claude-code", autocomplete: "off", autocapitalize: "none" });
+    var adapter = h("select", { id: "wadapter" }, h("option", { value: "claude-code", text: "Claude Code" }), h("option", { value: "generic", text: "Anything else (plain JSON)" }));
+    var form = h("form", { class: "panel" }, h("h3", { text: "Create a webhook" }),
+      h("p", { class: "mut", text: "Give each agent or service its own webhook so you can cut one off without touching the rest. Use letters, numbers, - and _." }),
+      h("label", { for: "wname", text: "Name" }), name, h("label", { for: "wadapter", text: "What is sending?" }), adapter, h("div", { class: "row" }, h("button", { text: "Create webhook" })));
+    form.onsubmit = async function (ev) {
+      ev.preventDefault();
+      try {
+        var r = await api("POST", "/api/endpoints", { name: name.value.trim(), adapter: adapter.value });
+        S.fresh[r.name] = r.token; name.value = ""; say("Created. Copy the token now; it is shown once."); await load();
+        var d = document.getElementById("snip-" + r.name); if (d) { d.open = true; d.scrollIntoView({ block: "center" }); }
+      } catch (x) { fail(x); }
+    };
+    p.append(h("h2", { text: "Webhooks" }), h("p", { text: "A webhook is a web address that an agent or service posts to when something happens. Each has its own token, which works like a password for that address." }), list, form);
+    return async function () {
+      var ov = S.overview; if (!ov) return;
+      var open = {}; Array.prototype.forEach.call(list.querySelectorAll("details"), function (d) { open[d.id] = d.open; });
+      list.replaceChildren();
+      if (!ov.endpoints.length) list.append(h("li", { class: "mut", text: "No webhooks yet. Create one below to connect your first agent." }));
+      ov.endpoints.forEach(function (e) {
+        var url = base() + "/hook/" + e.name, tok = S.fresh[e.name];
+        var rot = h("button", { class: "plain", type: "button", text: "New token" });
+        rot.onclick = async function () {
+          if (!confirm("Make a new token for " + e.name + "? The old one stops working, so update whatever uses it.")) return;
+          try { var r = await api("POST", "/api/endpoints/" + e.name + "/rotate"); S.fresh[e.name] = r.token; say("New token made. Copy it now; it is shown once."); await load(); var d = $("snip-" + e.name); if (d) d.open = true; } catch (x) { fail(x); }
+        };
+        var del = h("button", { class: "danger", type: "button", text: "Delete" });
+        del.onclick = async function () {
+          if (!confirm("Delete the webhook " + e.name + "? Anything posting to it will be turned away.")) return;
+          try { await api("DELETE", "/api/endpoints/" + e.name); delete S.fresh[e.name]; say("Deleted."); await load(); } catch (x) { fail(x); }
+        };
+        var det = h("details", { id: "snip-" + e.name }, h("summary", { text: "Setup and snippets" }));
+        det.open = !!open["snip-" + e.name] || !!tok;
+        if (tok) det.append(h("p", {}, "Your token (shown once, copy it now):"), h("code", { class: "token", text: tok }), copyBtn(tok, "Copy token"));
+        else det.append(h("p", { class: "mut", text: "The token is not shown again. The snippets below use YOUR_TOKEN; replace it with the token you saved, or make a new token." }));
+        snippets(base(), e.name, e.adapter, tok).forEach(function (s) {
+          det.append(h("h3", { text: s[0] }), h("pre", { text: s[1] }), copyBtn(s[1]));
+        });
+        list.append(h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: e.name }), h("span", { class: "badge", text: e.adapter === "claude-code" ? "Claude Code" : "Plain JSON" })),
+          h("code", { text: url }), h("div", { class: "acts" }, copyBtn(url, "Copy address"), rot, del), det));
+      });
+    };
+  }
+
+  // ----- Settings -----
+  function settings(p) {
+    var box = h("div");
+    var pwtitle = h("h3", { text: "Admin password" });
+    var np = h("input", { id: "newpw", type: "password", autocomplete: "new-password", placeholder: "New password (8 or more characters)", "aria-label": "New password", maxlength: "128" });
+    var pwform = h("form", { class: "panel", id: "pwsec" }, pwtitle, h("p", { class: "mut hidden", id: "legacywarn", text: "You are signed in with the old administrator token. Set a password to replace it." }), h("div", { class: "row" }, np, h("button", { text: "Save password" })));
+    pwform.onsubmit = async function (ev) {
+      ev.preventDefault(); var v = np.value; np.value = "";
+      try { var r = await api("POST", "/api/admin/password", { password: v }); keep(r.token); say("Password saved."); await load(); } catch (x) { fail(x); }
+    };
+    var out = h("button", { class: "plain", type: "button", text: "Sign out" });
+    out.onclick = async function () { try { await api("POST", "/api/logout"); } catch (x) {} keep(""); S.fresh = {}; await start(); };
+    var notes = h("pre", { class: "hidden", id: "notes" });
+    var about = h("details", { id: "about" }, h("summary", { text: "Release notes" }), notes);
+    about.ontoggle = async function () {
+      if (!about.open || notes.textContent) return;
+      try { var a = await api("GET", "/api/about"); notes.textContent = a.changelog; notes.classList.remove("hidden"); } catch (x) { fail(x); }
+    };
+    p.append(h("h2", { text: "Settings" }), box, pwform, h("h3", { text: "About" }), h("p", { id: "aboutver" }), about, h("div", { class: "row" }, out));
+    function dl(rows) {
+      var d = h("dl");
+      rows.forEach(function (r) { d.append(h("dt", { text: r[0] }), h("dd", { text: r[1] })); });
+      return d;
+    }
+    return async function () {
+      var s = S.settings; if (!s) return;
+      pwtitle.textContent = S.mode === "open" ? "Set an admin password" : "Change admin password";
+      $("legacywarn").classList.toggle("hidden", !S.legacy);
+      $("aboutver").textContent = "ClawDot " + S.version + ". It runs entirely on your own device; this page never contacts anything outside your network.";
+      if (box.dataset.done) return;
+      box.dataset.done = "1";
+      var llm = s.llm || {}, v = s.voice || {}, lim = s.limits || {};
+      var browser = ""; try { browser = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { browser = ""; }
+      box.append(h("p", { text: "This is what the device is running with. To change a value, edit the configuration file and restart ClawDot. Changing them from this page is coming soon." }));
+      box.append(h("h3", { text: "Device" }), dl([["Name", s.device_name], ["Time zone", s.zone]]));
+      if (browser && browser !== s.zone) {
+        var line = '"zone": "' + browser + '"';
+        box.append(h("p", {}, "Your browser is in " + browser + ", but the device uses " + s.zone + ", so reminders ring on " + s.zone + " time. To use yours, add this to the configuration file: ", h("code", { text: line }), " "), copyBtn(line, "Copy the line"));
+      }
+      box.append(h("h3", { text: "Language model" }), dl([
+        ["Status", llm.configured ? "Set up" : "Not set up. The speaker understands only simple commands."],
+        ["Address", llm.url || "None"], ["Model", llm.model || "None"], ["Backup model", llm.fallback_model || "None"],
+        ["Key", llm.key_env ? (llm.key_present ? "Found in " + llm.key_env : "Missing: set the environment variable " + llm.key_env) : "None"]]));
+      box.append(h("h3", { text: "Voice and personality" }), dl([
+        ["Personality", s.persona && s.persona.custom ? "Your own text file" : "The built-in one"],
+        ["Voice", v.configured ? (v.voice || "Set up") : "Not set up (speech needs a provider in the configuration file)"], ["Language", v.language || "Automatic"]]));
+      box.append(h("h3", { text: "Addresses" }), dl([
+        ["This page", s.listen], ["Address agents use", s.public_url], ["Speakers connect on", s.speakers_listen || "Not listening"]]));
+      box.append(h("h3", { text: "Usage limits" }), dl([
+        ["Requests per day", String(lim.max_requests_per_day)], ["Daily spend limit", lim.daily_spend_usd ? "$" + lim.daily_spend_usd : "None"]]));
+    };
+  }
+
+  // ----- routing and loading -----
+  async function loadCore() {
+    S.status = (await api("GET", "/api/status")).status;
+    S.overview = await api("GET", "/api/overview");
+    paintHeader();
+  }
+  function route() {
+    var name = location.hash.replace(/^#\/?/, "").split("/")[0];
+    var t = TABS.filter(function (x) { return x[0] === name; })[0] || TABS[0];
+    S.tab = t[0];
+    Array.prototype.forEach.call($("tabs").children, function (a) {
+      var on = a.id === "tab-" + t[0];
+      a.setAttribute("aria-selected", on ? "true" : "false"); a.tabIndex = on ? 0 : -1;
+      if (on) { a.scrollIntoView({ block: "nearest", inline: "nearest" }); }
+    });
+    $("panel").setAttribute("aria-labelledby", "tab-" + t[0]);
+    document.title = t[1] + " - ClawDot";
+    var panel = $("panel"); panel.replaceChildren();
+    S.cur = { refresh: t[2](panel) };
+    S.cur.refresh();
+  }
+  window.addEventListener("hashchange", function () { if (!$("app").classList.contains("hidden")) route(); });
+  $("newlink").onclick = function () { setTimeout(function () { var d = $("about"); if (d) { d.open = true; d.scrollIntoView(); } }, 50); };
+  $("setpw").onclick = function () { setTimeout(function () { var i = $("newpw"); if (i) i.focus(); }, 50); };
 
   async function load() {
+    try { await loadCore(); if (S.cur) await S.cur.refresh(); } catch (x) { fail(x); }
+  }
+
+  async function start() {
     var st;
-    try { st = await api("GET", "/api/auth"); } catch (x) { say(x.message); return; }
+    try { st = await api("GET", "/api/auth"); } catch (x) { say(x.message, true); return; }
+    S.mode = st.mode; S.version = st.version; S.legacy = st.legacy;
     var open = st.mode === "open";
     $("banner").classList.toggle("hidden", !open);
     $("openbtn").disabled = !st.open_allowed || !st.peer_private;
-    $("out").classList.toggle("hidden", open);
-    $("pwtitle").textContent = open ? "Set an admin password" : "Change admin password";
-    $("legacywarn").classList.toggle("hidden", !st.legacy);
-    if (st.mode === "setup") { show("setup"); if (!st.peer_private) say("Setup can only be finished from a device on your own network."); return; }
-    if (st.mode === "password" && !token) { show("login"); return; }
+    paintFooter();
+    if (st.mode === "setup") { setView("setup"); if (!st.peer_private) say("Setup can only be finished from a device on your own network.", true); return; }
+    if (st.mode === "password" && !token) { setView("login"); return; }
     try {
-      render(await api("GET", "/api/overview")); show("app"); say("");
-      renderStatus(await api("GET", "/api/status"));
+      S.settings = await api("GET", "/api/settings");
+      await loadCore();
+      setView("app");
+      if (!$("tabs").children.length) buildTabs();
+      route();
     } catch (x) {
-      if (x.status === 401) { keep(""); show("login"); say("Please sign in."); }
-      else if (x.status === 429) say("Too many attempts. Wait a few seconds.");
-      else say(x.message);
+      if (x.status === 401) { keep(""); setView("login"); say("Please sign in.", true); }
+      else fail(x);
     }
   }
 
   async function finishSetup(body) {
-    try {
-      var r = await api("POST", "/api/setup", body);
-      keep(r.token || ""); say(""); await load();
-    } catch (x) { say(x.message); }
+    try { var r = await api("POST", "/api/setup", body); keep(r.token || ""); say(""); await start(); } catch (x) { fail(x); }
   }
-
   $("pwform").onsubmit = function (ev) {
     ev.preventDefault();
     var p = $("pw1").value;
-    if (p !== $("pw2").value) { say("The two passwords differ."); return; }
-    if (p.length < 8) { say("Use at least 8 characters."); return; }
+    if (p !== $("pw2").value) { say("The two passwords differ. Type the same one twice.", true); return; }
+    if (p.length < 8) { say("Use at least 8 characters.", true); return; }
     $("pw1").value = ""; $("pw2").value = "";
     finishSetup({ mode: "password", password: p });
   };
-  $("openform").onsubmit = function (ev) {
-    ev.preventDefault();
-    finishSetup({ mode: "open" });
-  };
+  $("openform").onsubmit = function (ev) { ev.preventDefault(); finishSetup({ mode: "open" }); };
   $("loginform").onsubmit = async function (ev) {
     ev.preventDefault();
     var p = $("pw").value; $("pw").value = "";
-    try { var r = await api("POST", "/api/login", { password: p }); keep(r.token); say(""); await load(); }
-    catch (x) { say(x.status === 401 ? "That password was not accepted." : x.status === 429 ? "Too many attempts. Wait a few seconds." : x.message); }
-  };
-  $("out").onclick = async function () {
-    try { await api("POST", "/api/logout"); } catch (x) {}
-    keep(""); $("secret").classList.add("hidden"); await load();
-  };
-  $("newpwform").onsubmit = async function (ev) {
-    ev.preventDefault();
-    var p = $("newpw").value; $("newpw").value = "";
-    try { var r = await api("POST", "/api/admin/password", { password: p }); keep(r.token); await load(); say("Password saved."); }
-    catch (x) { say(x.message); }
-  };
-  $("newform").onsubmit = async function (ev) {
-    ev.preventDefault();
-    try {
-      var r = await api("POST", "/api/endpoints", { name: $("newname").value.trim(), adapter: $("newadapter").value });
-      $("newname").value = ""; secret(r.token); await load();
-    } catch (x) { say(x.message); }
+    try { var r = await api("POST", "/api/login", { password: p }); keep(r.token); say(""); await start(); }
+    catch (x) { say(x.status === 401 ? "That password was not accepted. Check it and try again." : x.status === 429 ? "Too many attempts. Wait a few seconds and try again." : x.message, true); }
   };
 
-  $("speakform").onsubmit = async function (ev) {
-    ev.preventDefault();
-    try {
-      await api("POST", "/api/speak", { text: $("speaktext").value });
-      $("speaktext").value = ""; say("");
-    } catch (x) { say(x.message); }
-  };
-
-  load();
-  setInterval(function () { if (!$("app").classList.contains("hidden")) load(); }, 10000);
+  start();
+  setInterval(function () { if (!$("app").classList.contains("hidden") && !document.hidden) load(); }, 10000);
 })();
 </script>
 </body>

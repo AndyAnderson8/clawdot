@@ -4,7 +4,7 @@ Status: **Proposed** (not decided; no tooling has been added). A later ADR (sugg
 
 ## Context
 
-The embedded UI is one hand-written file, `crates/core/src/ui.html`, plus the theme `crates/core/src/ui-theme.css`, both pulled into the binary with `include_str!` (about 18 KB together, uncompressed). It has no dependencies, makes no external requests, and runs under a strict Content-Security-Policy (inline script and style only, `connect-src 'self'`). The device is a 48 MB-budget Echo Dot Gen 2 class machine (REQ-NFR-101..103, binary at most 8 MB), and the repository builds with Rust only. The UI will grow (history, voice and persona settings, connect-an-agent flow, `/display`), and the maintainer prefers TypeScript. This note compares three ways forward.
+The embedded UI is one hand-written file, `crates/core/src/ui.html`, plus the theme `crates/core/src/ui-theme.css`, both pulled into the binary with `include_str!` (about 50 KB together after the tabbed portal, uncompressed; it was 18 KB). It has no dependencies, makes no external requests, and runs under a strict Content-Security-Policy (inline script and style only, `connect-src 'self'`). The device is a 48 MB-budget Echo Dot Gen 2 class machine (REQ-NFR-101..103, binary at most 8 MB), and the repository builds with Rust only. The UI will grow (history, voice and persona settings, connect-an-agent flow, `/display`), and the maintainer prefers TypeScript. This note compares three ways forward.
 
 ## Options
 

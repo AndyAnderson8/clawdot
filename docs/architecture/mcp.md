@@ -54,5 +54,5 @@ control, and a compromised server could try to steer the model. So:
 - Resources, prompts, sampling, and server-initiated requests or notifications (only tools are used).
 - Re-listing tools while running: the list is read once at startup, so restart after changing a server.
 - OAuth. Use a static bearer token from the environment, or a small proxy that adds one.
-- Showing and editing MCP servers in the web UI (REQ-CFG-010).
+- Adding and editing MCP servers in the web UI (REQ-CFG-010). The Connections tab lists them read-only (REQ-CFG-029).
 - Tested only against a fake server in this repository; no real MCP server has been tried.

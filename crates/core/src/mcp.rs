@@ -134,6 +134,26 @@ pub struct McpClient {
     servers: Vec<Server>,
     tools: Vec<McpTool>,
     connector: Connector,
+    /// Why each server could not be used, parallel to `servers` (`None` = connected).
+    errors: Vec<Option<String>>,
+}
+
+/// A server's address without credentials, query, or fragment, safe to show.
+#[must_use]
+pub fn display_url(url: &str) -> String {
+    let base = url.split(['?', '#']).next().unwrap_or("");
+    match base.split_once("://") {
+        Some((scheme, rest)) => {
+            let (auth, path) = rest.split_once('/').map_or((rest, ""), |(a, p)| (a, p));
+            let host = auth.rsplit('@').next().unwrap_or(auth);
+            if path.is_empty() {
+                format!("{scheme}://{host}")
+            } else {
+                format!("{scheme}://{host}/{path}")
+            }
+        }
+        None => String::new(),
+    }
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -240,10 +260,15 @@ impl McpClient {
             servers,
             tools: Vec::new(),
             connector: Connector::new()?,
+            errors: Vec::new(),
         };
         let mut warnings = Vec::new();
         for i in 0..client.servers.len() {
-            match client.load(i).await {
+            let loaded = client.load(i).await;
+            client
+                .errors
+                .push(loaded.as_ref().err().map(|e| clip(e, 200)));
+            match loaded {
                 Ok(mut tools) => {
                     tools.retain(|t| {
                         let clash = reserved.contains(&t.exposed);
@@ -420,6 +445,31 @@ impl McpClient {
             });
         }
         Ok(out)
+    }
+
+    /// Each configured server with its connection status and the tools it offers, for the portal. Holds no
+    /// secrets. Everything a server says (names, descriptions) is untrusted text and is shown as text only.
+    #[must_use]
+    pub fn report(&self) -> Value {
+        let list: Vec<Value> = self
+            .servers
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let tools: Vec<Value> = self
+                    .tools
+                    .iter()
+                    .filter(|t| t.server == i)
+                    .map(|t| json!({ "name": t.exposed, "description": t.description, "confirm": t.confirm }))
+                    .collect();
+                let error = self.errors.get(i).cloned().flatten();
+                json!({
+                    "name": s.def.name, "url": display_url(&s.def.url), "connected": error.is_none(),
+                    "error": error, "confirm": s.def.confirm, "token_env": s.def.auth_env, "tools": tools,
+                })
+            })
+            .collect();
+        Value::Array(list)
     }
 
     /// The tools on offer.
@@ -990,5 +1040,15 @@ mod tests {
                 .unwrap_err()
                 .contains("not JSON")
         );
+    }
+
+    #[test]
+    fn shown_addresses_carry_no_credentials_or_query() {
+        assert_eq!(
+            display_url("https://user:pw@host.example:8123/mcp?key=secret#x"),
+            "https://host.example:8123/mcp"
+        );
+        assert_eq!(display_url("http://ha.local"), "http://ha.local");
+        assert_eq!(display_url("nonsense"), "");
     }
 }

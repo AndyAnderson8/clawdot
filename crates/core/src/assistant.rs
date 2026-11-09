@@ -13,6 +13,7 @@ use crate::sched::{
 use crate::store::JsonStore;
 use std::sync::Arc;
 
+mod schedule_api;
 mod tools;
 
 /// Playback controls.
