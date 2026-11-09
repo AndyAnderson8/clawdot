@@ -7,10 +7,9 @@ import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
-const portal = fileURLToPath(new URL("..", import.meta.url));
+import { safetyRules } from "./safety.mjs";
 
-// The portal renders agent and tool text, so these ways of turning text into HTML or code are banned outright.
-const htmlSinks = ["innerHTML", "outerHTML", "insertAdjacentHTML", "createContextualFragment"];
+const portal = fileURLToPath(new URL("..", import.meta.url));
 
 export default tseslint.config(
   { ignores: ["node_modules/**", "lint/node_modules/**", "**/*.d.ts"] },
@@ -54,33 +53,8 @@ export default tseslint.config(
       "no-unused-private-class-members": "error",
       "no-unreachable-loop": "error",
       "no-useless-return": "error",
-      // Safety: no HTML injection, no dynamic code
-      "no-eval": "error",
-      "no-implied-eval": "error",
-      "no-new-func": "error",
-      "no-script-url": "error",
-      "no-restricted-properties": [
-        "error",
-        ...htmlSinks.map((property) => ({
-          property,
-          message: `${property} turns text into HTML; build elements or use JSX text instead.`,
-        })),
-        { object: "document", property: "write", message: "document.write injects HTML." },
-        { object: "document", property: "writeln", message: "document.writeln injects HTML." },
-      ],
-      "no-restricted-globals": ["error", { name: "DOMParser", message: "DOMParser parses untrusted text as HTML." }],
-      "no-restricted-syntax": [
-        "error",
-        {
-          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
-          message: "dangerouslySetInnerHTML injects HTML; render text through JSX instead.",
-        },
-        {
-          selector: "Property[key.name='dangerouslySetInnerHTML'], Property[key.value='dangerouslySetInnerHTML']",
-          message: "dangerouslySetInnerHTML injects HTML; render text through JSX instead.",
-        },
-        { selector: "ImportExpression", message: "No dynamic import; the page is one bundle." },
-      ],
+      // Safety: no HTML injection, no dynamic code (lint/safety.mjs, also exercised by test/unit/rules.test.ts)
+      ...safetyRules,
       // Plain readable code
       eqeqeq: ["error", "always"],
       "prefer-const": "error",
@@ -124,6 +98,24 @@ export default tseslint.config(
       "@typescript-eslint/no-non-null-assertion": "off",
       "@typescript-eslint/no-unnecessary-condition": "off",
       "@typescript-eslint/explicit-module-boundary-types": "off",
+    },
+  },
+
+  // The safety test loads ESLint dynamically and holds the bad snippets as strings.
+  {
+    files: ["test/unit/rules.test.ts"],
+    rules: { "no-restricted-syntax": "off", "no-script-url": "off" },
+  },
+
+  // The fake device answers with whatever JSON the page sent; typing every body would just restate the Rust API.
+  {
+    files: ["test/browser/mock-api.ts"],
+    rules: {
+      "@typescript-eslint/no-unsafe-assignment": "off",
+      "@typescript-eslint/no-unsafe-member-access": "off",
+      "@typescript-eslint/no-unsafe-argument": "off",
+      "@typescript-eslint/no-unsafe-return": "off",
+      "@typescript-eslint/no-unsafe-call": "off",
     },
   },
 

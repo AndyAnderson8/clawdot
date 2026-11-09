@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 function files(dir: string): string[] {
@@ -22,10 +22,63 @@ function none(re: RegExp, why: string, allow: string[] = []) {
 
 test("there is source to check", () => assert.ok(sources.length >= 15));
 
-test("untrusted text is never injected as HTML", () => {
-  none(
-    /dangerouslySetInnerHTML|innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser/,
-    "no HTML injection APIs",
+// The HTML-injection ban is an ESLint rule set (lint/safety.mjs), enforced on the real sources by `npm run lint`.
+// This test keeps that safety net honest: it lints known-bad snippets with the same rules and expects every one to be
+// reported, and a clean snippet to pass. A rule that stops matching fails here instead of silently allowing a hole.
+interface LintResult {
+  messages: { ruleId: string | null }[];
+}
+interface EslintApi {
+  ESLint: new (options: object) => { lintText(code: string, options: { filePath: string }): Promise<LintResult[]> };
+}
+async function lintSnippet(code: string): Promise<(string | null)[]> {
+  const load = async (path: string): Promise<unknown> => import(pathToFileURL(join(root, path)).href);
+  const eslint = (await load("lint/node_modules/eslint/lib/api.js")) as EslintApi & { default?: EslintApi };
+  const { safetyRules } = (await load("lint/safety.mjs")) as { safetyRules: object };
+  const { ESLint } = eslint.default ?? eslint;
+  const linter = new ESLint({
+    cwd: root,
+    overrideConfigFile: true,
+    overrideConfig: [
+      {
+        files: ["**/*.jsx"],
+        languageOptions: {
+          globals: { setTimeout: "readonly", document: "readonly" },
+          ecmaVersion: "latest",
+          sourceType: "module",
+          parserOptions: { ecmaFeatures: { jsx: true } },
+        },
+        rules: safetyRules,
+      },
+    ],
+  });
+  const [result] = await linter.lintText(code, { filePath: join(root, "probe.jsx") });
+  return (result?.messages ?? []).map((m) => m.ruleId);
+}
+
+test("untrusted text is never injected as HTML or run as code (lint rules catch each way in)", async () => {
+  const bad: Record<string, string> = {
+    "dangerouslySetInnerHTML prop": `const a = <div dangerouslySetInnerHTML={{ __html: t }} />;`,
+    "dangerouslySetInnerHTML in props object": `h("div", { dangerouslySetInnerHTML: { __html: t } });`,
+    "innerHTML assignment": `el.innerHTML = t;`,
+    "outerHTML assignment": `el.outerHTML = t;`,
+    insertAdjacentHTML: `el.insertAdjacentHTML("beforeend", t);`,
+    "document.write": `document.write(t);`,
+    DOMParser: `new DOMParser().parseFromString(t, "text/html");`,
+    createContextualFragment: `range.createContextualFragment(t);`,
+    eval: `eval(t);`,
+    "new Function": `new Function(t);`,
+    "string timer": `setTimeout("go()", 10);`,
+    "javascript: URL": `const u = "javascript:alert(1)";`,
+    "dynamic import": `import(t);`,
+  };
+  for (const [what, code] of Object.entries(bad)) {
+    assert.notDeepEqual(await lintSnippet(code), [], `${what} must be reported`);
+  }
+  assert.deepEqual(
+    await lintSnippet(`const a = <p>{t}</p>; el.textContent = t;`),
+    [],
+    "plain text rendering is allowed",
   );
 });
 
