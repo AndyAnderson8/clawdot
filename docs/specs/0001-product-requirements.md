@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.27 |
+| **Version** | 0.28 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -148,6 +148,11 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-TMR-007 | Alarms MUST sound without depending on any remote provider (local tone). | Must | M3 | T |
 | REQ-TMR-008 | The user SHOULD be able to list, edit, and cancel items by voice and via the web UI. | Should | M3 | T |
 | REQ-TMR-009 | The clock counts as unsynchronised (REQ-TMR-006) when the system time is earlier than a fixed known-good floor (14 November 2023, compiled in). While it is, the core MUST log a warning at startup and show `clock_valid: false` in the UI status; and the fast path and the built-in tools MUST NOT answer time or date questions, set timers, alarms, or reminders, or report time left, and MUST instead say that the clock is not set. Cancelling items and every command that does not depend on the time keep working. | Must | M3 | T |
+| REQ-TMR-010 | The system MUST provide one stopwatch that counts up: **start**, **lap**, **stop**, **read** (the time so far, or the final time once stopped) and **reset**, by voice on the fast path (no model call) and as the built-in `stopwatch` tool (`action`: `start`, `lap`, `stop`, `read`, `reset`; `read` is read-only, the rest reversible). Starting while it is running MUST NOT restart it: it says the time so far and that it is running. Starting after a stop discards the stopped result. | Must | A7 | T |
+| REQ-TMR-011 | The stopwatch MUST survive a restart (it is part of the scheduler's saved state) and its reading is the wall-clock time since the start, so time while the speaker was off counts, as it does on a real stopwatch left running. The state is bounded: at most 50 laps are kept, and a lap beyond that is refused with a spoken reason. | Must | A7 | T |
+| REQ-TMR-012 | The stopwatch MUST follow the clock rules of REQ-TMR-009: while the clock is not set it MUST NOT start, lap, stop or read, and says so; reset still works. It MUST also refuse to invent a time when the clock has gone backwards since the last thing it recorded (the start, a lap or the stop): it says it cannot trust the reading and gives the last one it can vouch for. A clock that steps forward cannot be detected; this limit is documented, not hidden. Readings are whole seconds. | Must | A7 | T |
+| REQ-TMR-013 | Each lap MUST be spoken as its number, its own time and the total ("Lap 2, 1 minute 5 seconds. Total 3 minutes 10 seconds."); stopping speaks the total and the number of laps; reading a stopped stopwatch says it is stopped. | Must | A7 | T |
+| REQ-TMR-014 | The fast path MUST recognise the usual phrasings, including "start the stopwatch", "start timing", "lap", "mark a lap", "stop the stopwatch", "stop timing", "how long on the stopwatch", "what's the stopwatch at" and "reset the stopwatch", without confusing them with timers ("stop the timer" and "cancel timers" keep their meaning) or with the bare "stop" that silences playback. | Must | A7 | T |
 
 ### 4.5 Music (`MUS`)
 
@@ -353,3 +358,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.25 | 2026-11-09 | The spoken read-back of a held action hides secret-looking values and shortens long ones, using the audit log redaction (SEC-011) |
 | 0.26 | 2026-11-09 | Agent loop (agentic-scope A5b): turn limits and their spoken explanation, plan and progress speech, clarifying questions, cancel, stop while working, recent actions and opt-in notes, summaries of long results, error recovery (AST-019..025, VOI-020, CFG-044, SEC-017; AST-006 amended) |
 | 0.27 | 2026-11-09 | One-way announce API and `clawdot say` (INB-021..027): speak a message through the inbox so quiet hours, priority, source naming, untrusted-text fencing and the audit log all apply |
+| 0.28 | 2026-11-09 | Stopwatch (TMR-010..014): start, lap, stop, read and reset by voice and tool, saved across restarts, with the clock rules stated honestly |

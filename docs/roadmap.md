@@ -97,7 +97,7 @@ Status: none of these is demonstrated yet. Item 4 has a fix in flight; item 5 ha
 
 The default toolset is a set of **recipes** (configuration that the portal can add, with the config shown), not hard-coded behaviour. Each is optional and the core runs with none of them (REQ-AGT-008 as proposed).
 
-- **Timers, alarms, reminders and a stopwatch:** built in (scheduler exists; stopwatch is new).
+- **Timers, alarms, reminders and a stopwatch:** built in. *Built*: the scheduler, and the stopwatch (`feature/stopwatch-and-timers-polish`, REQ-TMR-010..014).
 - **Web search:** through a declarative HTTP tool or an MCP server, chosen by the user.
 - **Spotify control** through the Spotify Web API (HTTP tool or MCP), with receiver options: a Spotify Connect device elsewhere, or the opt-in Connect receiver on the device (B6). Audio does not play on ClawDot's speaker unless a receiver runs there.
 - **Home Assistant tools:** optional, via its API or MCP server; never required.

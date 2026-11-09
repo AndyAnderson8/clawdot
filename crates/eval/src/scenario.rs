@@ -15,8 +15,9 @@ pub const VERSION: u32 = 1;
 pub const DEFAULT_NOW: i64 = 1_794_225_600;
 
 /// The tools that run for real, through the product's own `Assistant`, against a fixed clock.
-pub const BUILTIN_TOOLS: [&str; 8] = [
+pub const BUILTIN_TOOLS: [&str; 9] = [
     "set_timer",
+    "stopwatch",
     "list_timers",
     "cancel_timers",
     "set_alarm",

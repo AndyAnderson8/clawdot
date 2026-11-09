@@ -37,6 +37,7 @@ pub mod sched;
 pub mod session;
 pub mod settings;
 pub mod speech;
+pub mod stopwatch;
 pub mod store;
 pub mod transport;
 pub mod ui;

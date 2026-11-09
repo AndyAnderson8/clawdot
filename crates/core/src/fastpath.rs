@@ -912,6 +912,51 @@ pub const BUILTIN: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "stopwatch.start",
+        &[
+            "(start|begin|run|use) [a|the|my] [new] (stopwatch|stop watch)",
+            "(set up|set) [a|the|my] [new] (stopwatch|stop watch)",
+            "(stopwatch|stop watch) start",
+            "(start|begin) timing [me|it|this]",
+            "time (me|this|it)",
+        ],
+    ),
+    (
+        "stopwatch.lap",
+        &[
+            "lap",
+            "split",
+            "lap time",
+            "(next|new|another) (lap|split)",
+            "(mark|record|take|log|do|add|start) [a|an|another|the|next|new] (lap|split)",
+            "(lap|split) [the|my] (stopwatch|stop watch)",
+            "(stopwatch|stop watch) (lap|split)",
+        ],
+    ),
+    (
+        "stopwatch.stop",
+        &[
+            "(stop|end|finish) [the|my] (stopwatch|stop watch)",
+            "(stopwatch|stop watch) stop",
+            "stop timing [me|it|this]",
+        ],
+    ),
+    (
+        "stopwatch.read",
+        &[
+            "how long (has|is) [the|my] (stopwatch|stop watch) (been running|running|at|on)",
+            "how long (on|is on) [the|my] (stopwatch|stop watch)",
+            "how much time (is on|has passed on|has elapsed on) [the|my] (stopwatch|stop watch)",
+            "(what's|what is) [on|at] [the|my] (stopwatch|stop watch) [at|reading|time|say|says|show|shows]",
+            "(check|read|show|tell me|give me) [me] [the|my] (stopwatch|stop watch) [time|reading]",
+            "(stopwatch|stop watch) (time|reading|check)",
+        ],
+    ),
+    (
+        "stopwatch.reset",
+        &["(reset|clear|cancel|delete|remove|zero) [the|my] (stopwatch|stop watch)"],
+    ),
+    (
         "alarm.cancel",
         &["(cancel|stop|delete|clear|remove|turn off) [the|my|all] [of] [my] alarm[s]"],
     ),
@@ -1103,6 +1148,115 @@ mod tests {
             m("show the pasta timer").unwrap().text("label"),
             Some("pasta")
         );
+    }
+
+    // REQ-TMR-014
+    #[test]
+    fn stopwatch_phrasings_are_recognised() {
+        for (intent_name, phrases) in [
+            (
+                "stopwatch.start",
+                &[
+                    "start the stopwatch",
+                    "start a stopwatch",
+                    "Start stopwatch.",
+                    "start the stop watch",
+                    "start the stop-watch",
+                    "begin the stopwatch",
+                    "set up a stopwatch",
+                    "start timing",
+                    "start timing me",
+                    "time me",
+                    "stopwatch start",
+                    "please start the stopwatch",
+                ][..],
+            ),
+            (
+                "stopwatch.lap",
+                &[
+                    "lap",
+                    "mark a lap",
+                    "take a lap",
+                    "record a lap",
+                    "next lap",
+                    "new lap",
+                    "split",
+                    "lap time",
+                    "lap the stopwatch",
+                ][..],
+            ),
+            (
+                "stopwatch.stop",
+                &[
+                    "stop the stopwatch",
+                    "stop stopwatch",
+                    "end the stopwatch",
+                    "stop the stop watch",
+                    "stop timing",
+                    "stop timing me",
+                    "stopwatch stop",
+                ][..],
+            ),
+            (
+                "stopwatch.read",
+                &[
+                    "how long on the stopwatch",
+                    "how long has the stopwatch been running",
+                    "what's the stopwatch at",
+                    "what is the stopwatch reading",
+                    "check the stopwatch",
+                    "read the stopwatch",
+                    "how much time is on the stopwatch",
+                    "how much time has passed on the stopwatch",
+                    "stopwatch time",
+                ][..],
+            ),
+            (
+                "stopwatch.reset",
+                &[
+                    "reset the stopwatch",
+                    "clear the stopwatch",
+                    "cancel the stopwatch",
+                    "reset stopwatch",
+                ][..],
+            ),
+        ] {
+            for u in phrases {
+                assert_eq!(intent(u).as_deref(), Some(intent_name), "{u}");
+            }
+        }
+    }
+
+    // REQ-TMR-014: the stopwatch phrases must not take over timers, the bare stop, or ordinary requests.
+    #[test]
+    fn stopwatch_phrasings_do_not_steal_timers_or_stop() {
+        for (u, want) in [
+            ("stop", Some("stop")),
+            ("stop the timer", Some("timer.cancel")),
+            ("cancel all timers", Some("timer.cancel")),
+            ("set a timer for ten minutes", Some("timer.set")),
+            ("time me for ten minutes", Some("timer.set")),
+            ("start a timer for 5 minutes", Some("timer.set")),
+            ("how much time is left on the timer", Some("timer.query")),
+            ("what time is it", Some("time.query")),
+            ("cancel the alarm", Some("alarm.cancel")),
+        ] {
+            assert_eq!(intent(u).as_deref(), want, "{u}");
+        }
+        for u in [
+            "stop watching television",
+            "start the dishwasher",
+            "what's a stopwatch",
+            "lap swimming is good exercise",
+            "how long is the lap of a marathon",
+            "pause the stopwatch",
+        ] {
+            let got = intent(u);
+            assert!(
+                got.as_deref().is_none_or(|i| !i.starts_with("stopwatch.")),
+                "{u} -> {got:?}"
+            );
+        }
     }
 
     #[test]
