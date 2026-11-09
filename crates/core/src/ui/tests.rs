@@ -202,6 +202,7 @@ async fn every_portal_listing_needs_a_sign_in() {
         ("POST", "/api/tools"),
         ("DELETE", "/api/tools/x"),
         ("POST", "/api/tools/x/enabled"),
+        ("POST", "/api/tools/x/tier"),
         ("POST", "/api/connections"),
         ("POST", "/api/connections/test"),
         ("DELETE", "/api/connections/x"),
@@ -274,6 +275,35 @@ async fn the_portal_manages_tools_connections_and_skills() {
             .0,
         400
     );
+    // The administrator picks a tier (REQ-SEC-030): lowering, going back, and the refusals.
+    let tier = |t: &str| format!(r#"{{"tier":{t}}}"#);
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/tools/set_light/tier",
+        "",
+        &tier("\"reversible\""),
+    )
+    .await;
+    assert_eq!(
+        (s, &v["tools"][0]["tier"], &v["tools"][0]["tier_set"]),
+        (200, &json!("reversible"), &json!(true)),
+        "{v}"
+    );
+    let (s, v) = call(&p, "POST", "/api/tools/set_light/tier", "", &tier("null")).await;
+    assert_eq!((s, &v["tools"][0]["tier"]), (200, &json!("costly")));
+    for (path, body, want) in [
+        ("/api/tools/set_light/tier", tier("\"destructive\""), 400),
+        ("/api/tools/set_light/tier", tier("\"harmless\""), 400),
+        ("/api/tools/set_light/tier", "{}".to_owned(), 400),
+        ("/api/tools/nope/tier", tier("\"costly\""), 404),
+    ] {
+        assert_eq!(
+            call(&p, "POST", path, "", &body).await.0,
+            want,
+            "{path} {body}"
+        );
+    }
     let (s, v) = call(&p, "DELETE", "/api/tools/set_light", "", "").await;
     assert_eq!((s, v["tools"].as_array().unwrap().len()), (200, 0));
 

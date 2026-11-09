@@ -158,6 +158,10 @@ function seed(mode: string): Json {
         confirm: false,
         source: "builtin",
         deletable: false,
+        tier: "reversible",
+        tier_default: "reversible",
+        tier_set: false,
+        tier_options: ["reversible", "costly"],
       },
       {
         name: "set_light",
@@ -167,6 +171,10 @@ function seed(mode: string): Json {
         source: "http",
         origin: "portal",
         deletable: true,
+        tier: "costly",
+        tier_default: "costly",
+        tier_set: false,
+        tier_options: ["read_only", "reversible", "costly"],
       },
       {
         name: "home_toggle",
@@ -471,6 +479,15 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           }
           if (seg[2] === "enabled") {
             for (const t of tools) if (t["name"] === seg[1]) t["enabled"] = body.enabled;
+            return send(200, ext());
+          }
+          if (seg[2] === "tier") {
+            const t = tools.find((x) => x["name"] === seg[1]);
+            if (!t) return err(404, "There is no such tool.");
+            if (body.tier === "destructive") return err(400, "Destructive cannot be chosen here.");
+            t["tier_set"] = body.tier !== null;
+            t["tier"] = body.tier ?? t["tier_default"];
+            t["confirm"] = t["tier"] === "costly";
             return send(200, ext());
           }
         }
