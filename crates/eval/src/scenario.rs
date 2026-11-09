@@ -93,9 +93,30 @@ pub struct Setup {
     /// Offer destructive tools (off as shipped).
     #[serde(default)]
     pub allow_destructive: bool,
-    /// Tool rounds per turn; default as shipped.
+    /// Model rounds per turn; default as shipped (REQ-AST-019).
     #[serde(default)]
     pub max_tool_loops: Option<usize>,
+    /// Tool calls per turn; default as shipped.
+    #[serde(default)]
+    pub max_tool_calls: Option<usize>,
+    /// Seconds a turn may take; default as shipped.
+    #[serde(default)]
+    pub deadline_secs: Option<u64>,
+    /// Milliseconds one tool call may take before it counts as failed; default as shipped.
+    #[serde(default)]
+    pub tool_timeout_ms: Option<u64>,
+    /// Say the plan first (default on).
+    #[serde(default)]
+    pub plan_speech: Option<bool>,
+    /// Say progress phrases (default on).
+    #[serde(default)]
+    pub progress_speech: Option<bool>,
+    /// Summarise results longer than this many characters; 0 is off; default as shipped (REQ-AST-024).
+    #[serde(default)]
+    pub summarize_over: Option<usize>,
+    /// Keep notes the user asks for (REQ-AST-023); off unless set.
+    #[serde(default)]
+    pub notes: bool,
     /// Replace the system prompt (default: the product's).
     #[serde(default)]
     pub system: Option<String>,
@@ -122,6 +143,13 @@ impl Default for Setup {
             max_costly_per_day: None,
             allow_destructive: false,
             max_tool_loops: None,
+            max_tool_calls: None,
+            deadline_secs: None,
+            tool_timeout_ms: None,
+            plan_speech: None,
+            progress_speech: None,
+            summarize_over: None,
+            notes: false,
             system: None,
         }
     }
@@ -160,6 +188,18 @@ pub struct ToolFixture {
     /// Fail every call with this message.
     #[serde(default)]
     pub error: Option<String>,
+    /// The host expects a call to take a while, so it says a progress phrase first (REQ-AST-020).
+    #[serde(default)]
+    pub slow: bool,
+    /// Never answer: the turn's tool timeout ends the call (REQ-AST-019).
+    #[serde(default)]
+    pub hang: bool,
+    /// Seconds a call takes on the scenario clock (the deadline counts them).
+    #[serde(default)]
+    pub duration_secs: i64,
+    /// The user says stop while this tool runs: the turn's cancel token is set when it is called (REQ-AST-022).
+    #[serde(default)]
+    pub cancels_turn: bool,
 }
 
 fn empty_schema() -> Value {
@@ -226,6 +266,9 @@ pub struct Turn {
     /// Seconds since the previous turn.
     #[serde(default)]
     pub after_secs: Option<i64>,
+    /// The user says stop as the turn starts (REQ-AST-022).
+    #[serde(default)]
+    pub cancel: bool,
     /// The scripted model replies for this turn, in order (replay mode).
     #[serde(default)]
     pub model: Option<Vec<Reply>>,
@@ -277,8 +320,18 @@ pub enum Ends {
     Answered,
     /// The host asked the user to confirm an action.
     Held,
-    /// The tool loop hit its bound.
+    /// The round limit ended it.
     ToolLoopLimit,
+    /// The tool-call limit ended it.
+    CallsLimit,
+    /// The deadline ended it.
+    Deadline,
+    /// The user cancelled it.
+    Cancelled,
+    /// Calls kept failing.
+    ToolFailures,
+    /// The assistant asked a clarifying question.
+    Asked,
     /// A usage limit stopped it.
     Limit,
     /// The model could not be reached.
@@ -331,6 +384,24 @@ pub struct Expect {
     /// The audit log, as a whole, must not contain these (for secrets).
     #[serde(default)]
     pub audit_text_not_contains: Vec<String>,
+    /// Each of these must be in some phrase spoken while the turn ran (plan, progress; REQ-AST-020).
+    #[serde(default)]
+    pub early_contains: Vec<String>,
+    /// None of the phrases spoken while the turn ran may contain these.
+    #[serde(default)]
+    pub early_not_contains: Vec<String>,
+    /// At most this many phrases were spoken while the turn ran.
+    #[serde(default)]
+    pub early_max: Option<usize>,
+    /// The notes saved after this turn, exactly (REQ-AST-023).
+    #[serde(default)]
+    pub notes: Option<Vec<String>>,
+    /// Some audit record of this turn has full result text containing each of these (REQ-AST-024).
+    #[serde(default)]
+    pub audit_detail_contains: Vec<String>,
+    /// Whether the turn ends with a question that wants a longer follow-up window.
+    #[serde(default)]
+    pub expects_reply: Option<bool>,
 }
 
 /// A call that must have run.
@@ -528,6 +599,12 @@ fn validate(s: &Scenario) -> Result<(), String> {
         {
             return Err(format!(
                 "tool `{}`: give only one of result, results, error",
+                t.name
+            ));
+        }
+        if t.hang && s.setup.tool_timeout_ms.is_none() {
+            return Err(format!(
+                "tool `{}` hangs: set `setup.tool_timeout_ms` so the run does not wait",
                 t.name
             ));
         }

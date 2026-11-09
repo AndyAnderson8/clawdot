@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "agt-a-costly-failure-says-it-may-have-gone-through",
+  "use_case": "AGT",
+  "description": "An approved restart times out: the host cannot know whether it happened and says so instead of claiming success or failure (REQ-AST-025).",
+  "tags": ["recovery", "timeout", "docker", "t2"],
+  "tool_sets": ["docker"],
+  "tools": [
+    {"name": "docker__restart", "tier": "costly", "hang": true,
+     "parameters": {"type": "object", "properties": {"container": {"type": "string"}}, "required": ["container"]}}
+  ],
+  "setup": {"tool_timeout_ms": 40},
+  "turns": [
+    {
+      "say": "restart sonarr",
+      "model": [{"calls": [{"name": "docker__restart", "args": {"container": "sonarr"}}]}],
+      "expect": {"ends": "held", "calls": [], "held": {"tool": "docker__restart", "args": {"container": "sonarr"}}}
+    },
+    {
+      "say": "yes",
+      "model": [{"text": ""}],
+      "expect": {
+        "ends": "tool_failures",
+        "calls": [{"tool": "docker__restart"}],
+        "speech_contains": ["did not answer in time", "can't tell whether it went through", "try again"],
+        "audit": [{"tool": "docker__restart", "decision": "approved"}]
+      }
+    }
+  ],
+  "forbidden": {"speech_contains": ["Done.", "restarted sonarr"]},
+  "limits": {"max_model_requests": 2, "max_tool_calls": 1}
+}

@@ -61,7 +61,16 @@ pub mod decision {
     pub const INVALID: &str = "blocked:invalid";
     /// An earlier call in the same round was held, so this one was not looked at.
     pub const SKIPPED: &str = "blocked:pending";
+    /// The user cancelled the turn: the call was dropped, or a held call was discarded (REQ-AST-022).
+    pub const CANCELLED: &str = "cancelled";
+    /// A turn limit, the deadline or a failure streak stopped the turn before this call (REQ-AST-019).
+    pub const STOPPED: &str = "blocked:limit";
 }
+
+/// A result longer than this many characters also keeps its text in the record's `detail` (REQ-AST-024).
+pub const LONG_RESULT_CHARS: usize = 400;
+/// The most characters of a long result kept in `detail`.
+pub const DETAIL_CHARS: usize = 2_000;
 
 /// Limits and switches that act on calls (REQ-SEC-015, REQ-SEC-016).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +146,10 @@ pub struct Record {
     /// The first part of the result, redacted. Text from outside: show it as data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    /// For a result over [`LONG_RESULT_CHARS`]: more of its text, redacted and cut at [`DETAIL_CHARS`], for
+    /// the portal (REQ-AST-024). Text from outside: show it as data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// What the language model cost so far in this turn, in US dollars, when the provider reported it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_cost_usd: Option<f64>,
@@ -421,7 +434,11 @@ impl AuditLog {
             Some(Ok(text)) => (Some("ok"), Some(excerpt(text))),
             Some(Err(text)) => (Some("error"), Some(excerpt(text))),
         };
-        let rec = Record {
+        let detail = match a.outcome {
+            Some(Ok(text)) if text.chars().count() > LONG_RESULT_CHARS => Some(redact_detail(text)),
+            _ => None,
+        };
+        let mut rec = Record {
             v: FORMAT,
             id,
             ts,
@@ -436,10 +453,20 @@ impl AuditLog {
             dry_run: a.decision == decision::DRY_RUN,
             status: status.map(str::to_owned),
             result,
+            detail,
             turn_cost_usd: cost.filter(|c| c.is_finite() && *c > 0.0),
             note: a.note.map(|n| clip(n, MAX_VALUE_CHARS)),
         };
         let mut line = serde_json::to_string(&rec).ok()?;
+        if line.len() > MAX_LINE_BYTES && rec.detail.is_some() {
+            // Multi-byte text can make a long detail too big for one line: keep less rather than lose the record.
+            rec.detail = rec.detail.take().map(|d| clip(&d, 500));
+            line = serde_json::to_string(&rec).ok()?;
+            if line.len() > MAX_LINE_BYTES {
+                rec.detail = None;
+                line = serde_json::to_string(&rec).ok()?;
+            }
+        }
         if line.len() > MAX_LINE_BYTES {
             // Cannot happen with the clips above; refuse rather than write something unbounded.
             return None;
@@ -680,6 +707,17 @@ fn clip(s: &str, max: usize) -> String {
     }
     let cut: String = s.chars().take(max).collect();
     format!("{cut}...")
+}
+
+/// A long result for the portal: cut at [`DETAIL_CHARS`], secrets removed line by line, line breaks kept so it
+/// stays readable.
+fn redact_detail(text: &str) -> String {
+    let cut: String = text.chars().take(DETAIL_CHARS + 1).collect();
+    let lines: Vec<String> = cut
+        .split('\n')
+        .map(|l| redact_words(&printable(l)))
+        .collect();
+    clip(&lines.join("\n"), DETAIL_CHARS)
 }
 
 fn printable(s: &str) -> String {

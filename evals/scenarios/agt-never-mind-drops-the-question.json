@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "agt-never-mind-drops-the-question",
+  "use_case": "AGT",
+  "description": "After a question, 'never mind' drops it without a model call, and a later bare yes releases nothing (REQ-AST-021).",
+  "tags": ["clarify", "media"],
+  "tool_sets": ["media"],
+  "turns": [
+    {
+      "say": "play some jazz",
+      "model": [
+        {"calls": [{"name": "ask_user", "args": {"question": "Which device?"}}]}
+      ],
+      "expect": {"ends": "asked", "speech_is_question": true}
+    },
+    {
+      "say": "never mind",
+      "expect": {"ends": "answered", "speech_contains": ["never mind"], "calls": [], "no_held": true}
+    }
+  ],
+  "limits": {"max_model_requests": 1, "max_tool_calls": 0}
+}

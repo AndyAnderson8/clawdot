@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "agt-undo-that-resolves-from-recent-actions",
+  "use_case": "AGT",
+  "description": "'Undo that' has no target in the words. The model sees the host's recent-actions list, finds the timer it just set and cancels timers (REQ-AST-023).",
+  "tags": ["memory", "recent-actions", "timers", "builtin"],
+  "builtin_tools": ["set_timer", "cancel_timers"],
+  "turns": [
+    {
+      "say": "set a ten minute timer for the pasta",
+      "model": [
+        {"calls": [{"name": "set_timer", "args": {"seconds": 600, "label": "pasta"}}]},
+        {"text": "Your pasta timer is set for ten minutes."}
+      ],
+      "expect": {"calls": [{"tool": "set_timer", "args": {"seconds": 600}}]}
+    },
+    {
+      "say": "undo that",
+      "model": [
+        {"calls": [{"name": "cancel_timers"}]},
+        {"text": "I cancelled the pasta timer."}
+      ],
+      "expect": {
+        "calls": [{"tool": "cancel_timers"}],
+        "model_saw": ["Recent actions in this conversation", "#1 set_timer", "-> ran", "#2 cancel_timers"]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 4}
+}
