@@ -115,6 +115,42 @@ export interface Settings {
   note?: string;
 }
 
+/** One line of the audit log. Argument and result text can come from outside: show it as text only. */
+export interface AuditRecord {
+  id: number;
+  ts: number;
+  turn: number;
+  trigger: string;
+  tool: string;
+  tier: string;
+  args: unknown;
+  decision: string;
+  held_id?: number;
+  dry_run?: boolean;
+  status?: string;
+  result?: string;
+  detail?: string;
+  turn_cost_usd?: number;
+  note?: string;
+}
+export interface AuditPage {
+  records: AuditRecord[];
+  next_before: number | null;
+  log: { bytes: number; max_file_bytes: number; corrupt_lines: number; write_errors: number };
+  policy: { dry_run: boolean; max_actions_per_day: number; max_costly_per_day: number };
+}
+
+export interface Note {
+  id: number;
+  text: string;
+  ts: number;
+}
+export interface NotesList {
+  enabled: boolean;
+  notes: Note[];
+  limits: { max_notes: number; max_note_chars: number; max_total_bytes: number };
+}
+
 export interface WebhookToken {
   name: string;
   token: string;

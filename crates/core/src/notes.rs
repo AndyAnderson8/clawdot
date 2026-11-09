@@ -9,6 +9,7 @@ use crate::sched::Ts;
 use crate::store::JsonStore;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Most notes kept.
@@ -63,11 +64,27 @@ pub enum NoteError {
 }
 
 impl NoteError {
+    /// The same reasons as plain text for the portal, which is not a voice (REQ-CFG-061).
+    #[must_use]
+    pub fn plain(&self) -> String {
+        match self {
+            Self::Off => "Notes are turned off. Turn them on in Settings, under Agent settings.".into(),
+            Self::Empty => "Write what to remember.".into(),
+            Self::TooLong => format!("That is too long to keep. Notes are at most {MAX_NOTE_CHARS} characters."),
+            Self::Full => "The notes are full. Forget one first.".into(),
+            Self::Secret => "That looks like a password or a key, so it is not saved. Notes are shown to the assistant and are not a safe place for secrets.".into(),
+            Self::Duplicate => "That note is already saved.".into(),
+            Self::Missing => "There is no such note.".into(),
+            Self::Ambiguous(n) => format!("{n} notes match that."),
+            Self::Storage => "The notes could not be saved. Check that the data directory can be written.".into(),
+        }
+    }
+
     /// What to say to the user.
     #[must_use]
     pub fn spoken(&self) -> String {
         match self {
-            Self::Off => "Notes are turned off, so I can't keep that. An administrator can turn them on in the configuration.".into(),
+            Self::Off => "Notes are turned off, so I can't keep that. An administrator can turn them on in the portal under Settings, or in the configuration.".into(),
             Self::Empty => "I didn't catch what to remember.".into(),
             Self::TooLong => format!("That is too long to keep. Notes are at most {MAX_NOTE_CHARS} characters."),
             Self::Full => "My notes are full. Ask me to forget one first.".into(),
@@ -83,7 +100,7 @@ impl NoteError {
 /// The notes, in memory and (when a directory is given) in `memory.json`, which only the service user can read.
 #[derive(Debug)]
 pub struct NoteStore {
-    enabled: bool,
+    enabled: AtomicBool,
     doc: Mutex<Doc>,
     file: Option<JsonStore>,
 }
@@ -97,7 +114,7 @@ impl NoteStore {
     #[must_use]
     pub fn in_memory(enabled: bool) -> Self {
         Self {
-            enabled,
+            enabled: AtomicBool::new(enabled),
             doc: Mutex::new(Doc::default()),
             file: None,
         }
@@ -116,7 +133,7 @@ impl NoteStore {
             n.text = n.text.chars().take(MAX_NOTE_CHARS).collect();
         }
         Ok(Self {
-            enabled,
+            enabled: AtomicBool::new(enabled),
             doc: Mutex::new(doc),
             file: Some(file),
         })
@@ -125,7 +142,12 @@ impl NoteStore {
     /// Whether the user has turned notes on.
     #[must_use]
     pub fn enabled(&self) -> bool {
-        self.enabled
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Turn notes on or off while running (the portal setting, REQ-CFG-062). Existing notes are kept.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
     }
 
     /// All notes, oldest first.
@@ -149,7 +171,7 @@ impl NoteStore {
     /// # Errors
     /// See [`NoteError`].
     pub fn add(&self, text: &str, now: Ts) -> Result<Note, NoteError> {
-        if !self.enabled {
+        if !self.enabled() {
             return Err(NoteError::Off);
         }
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -265,7 +287,7 @@ impl NoteStore {
     /// The labelled block added to the system prompt, or `None` when notes are off or empty.
     #[must_use]
     pub fn prompt_block(&self) -> Option<String> {
-        if !self.enabled {
+        if !self.enabled() {
             return None;
         }
         let doc = lock(&self.doc);

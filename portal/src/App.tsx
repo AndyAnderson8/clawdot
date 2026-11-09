@@ -1,9 +1,11 @@
 import type { ComponentType, JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { api, keep } from "./api.ts";
+import { Activity } from "./tabs/Activity.tsx";
 import { Agents } from "./tabs/Agents.tsx";
 import { Connections } from "./tabs/Connections.tsx";
 import { Home } from "./tabs/Home.tsx";
+import { Notes } from "./tabs/Notes.tsx";
 import { Reminders } from "./tabs/Reminders.tsx";
 import { Settings } from "./tabs/Settings.tsx";
 import { Skills } from "./tabs/Skills.tsx";
@@ -19,7 +21,9 @@ interface Tab {
 export const TABS: [Tab, ...Tab[]] = [
   { id: "home", label: "Home", view: Home },
   { id: "reminders", label: "Reminders", view: Reminders },
+  { id: "notes", label: "Notes", view: Notes },
   { id: "agents", label: "Agents", view: Agents },
+  { id: "activity", label: "Activity", view: Activity },
   { id: "tools", label: "Tools", view: Tools },
   { id: "connections", label: "Connections", view: Connections },
   { id: "skills", label: "Skills", view: Skills },

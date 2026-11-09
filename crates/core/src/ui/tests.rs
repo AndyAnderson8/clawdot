@@ -561,12 +561,69 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     let (s, v) = call(&p, "DELETE", "/api/notes", &session, "").await;
     assert_eq!((s, v["forgotten"].as_u64()), (200, Some(1)));
     assert!(store.list().is_empty());
-    // notes cannot be written through the API: only the user's voice writes them
-    for m in ["POST", "PUT"] {
-        assert_eq!(
-            call(&p, m, "/api/notes", &session, "{}").await.0,
-            405,
-            "{m}"
-        );
+    // only the signed-in administrator writes through the page; other methods are refused
+    assert_eq!(call(&p, "PUT", "/api/notes", &session, "{}").await.0, 405);
+}
+
+// REQ-CFG-061, REQ-SEC-017
+#[tokio::test]
+async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one() {
+    use crate::notes::NoteStore;
+    let p = start(false).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    let add = |text: &str| format!(r#"{{"text":{}}}"#, json!(text));
+    // never without a sign-in, and before notes exist
+    let s = call(&p, "POST", "/api/notes", "", &add("x")).await.0;
+    assert!(s == 401 || s == 429, "{s}");
+    assert_eq!(
+        call(&p, "POST", "/api/notes", &session, &add("x")).await.0,
+        503
+    );
+    // off: refused with the reason, nothing written
+    let store = Arc::new(NoteStore::in_memory(false));
+    p.core.set_notes(Arc::clone(&store));
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/notes",
+        &session,
+        &add("my NAS is Andy-NAS"),
+    )
+    .await;
+    assert_eq!(s, 409);
+    assert!(v["error"].as_str().unwrap().contains("turned off"), "{v}");
+    assert!(store.list().is_empty());
+    // on: saved, and the answer is the new list
+    store.set_enabled(true);
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/notes",
+        &session,
+        &add("  my NAS is   Andy-NAS "),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["notes"][0]["text"], "my NAS is Andy-NAS");
+    assert_eq!(v["notes"][0]["ts"], 1_794_225_600);
+    // the same refusals as the spoken path, each with a plain reason and no write
+    for (body, status, needle) in [
+        (add("my NAS is andy-nas"), 409, "already saved"),
+        (add("   "), 400, "Write what"),
+        (add(&"a".repeat(201)), 400, "too long"),
+        (
+            add("the key is sk-abcdefghijklmnopqrstuvwxyz123456"),
+            400,
+            "password or a key",
+        ),
+        (r#"{"text":5}"#.to_owned(), 400, "expected"),
+        (r#"{"text":"a","extra":1}"#.to_owned(), 400, "expected"),
+    ] {
+        let (s, v) = call(&p, "POST", "/api/notes", &session, &body).await;
+        assert_eq!(s, status, "{body}");
+        assert!(v["error"].as_str().unwrap().contains(needle), "{body}: {v}");
     }
+    assert_eq!(store.list().len(), 1);
 }
