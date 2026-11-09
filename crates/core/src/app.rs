@@ -206,7 +206,7 @@ pub struct Core {
     status: Mutex<serde_json::Value>,
     speech: Mutex<std::collections::VecDeque<String>>,
     tools: Mutex<serde_json::Value>,
-    settings: Mutex<serde_json::Value>,
+    settings: Mutex<Option<crate::settings::SettingsState>>,
     jobs: Mutex<Option<tokio::sync::mpsc::Sender<portal::Job>>>,
 }
 
@@ -298,7 +298,7 @@ impl Core {
             status: Mutex::new(serde_json::Value::Null),
             speech: Mutex::new(std::collections::VecDeque::new()),
             tools: Mutex::new(serde_json::Value::Null),
-            settings: Mutex::new(serde_json::Value::Null),
+            settings: Mutex::new(None),
             jobs: Mutex::new(None),
         }
     }
