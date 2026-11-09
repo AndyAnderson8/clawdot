@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.28 |
+| **Version** | 0.29 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -271,6 +271,10 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | REQ-EXT-004 | Inbox adapters (including `claude-code`) MUST be implemented as declarative mappings interpreted by an adapter engine, so new agents and event sources are added as data. | Must | M2 | T |
 | REQ-EXT-005 | The core API surface for sidecars (inbox ingress, reply stream, status) MUST be documented and versioned. | Must | M5 | I |
 | REQ-EXT-006 | A ClawDot MCP server (agents calling `announce`/`ask_user`) is **not** part of v1.0. The inbox event model (`kind`, reply types) MUST NOT preclude it. | Must | M2 | I |
+| REQ-EXT-007 | The default toolset (web search, music control, Home Assistant, GitHub, a read-only calendar, and the Claude Code hook) MUST be shipped as **recipes**: documents in `docs/recipes/` with example configuration under `examples/`, built only from declarative HTTP tools, MCP connections and inbox endpoints. No recipe may need a change to the core, and the core MUST run with none of them. | Must | A5b | I |
+| REQ-EXT-008 | Every recipe MUST state the risk tier it sets for each tool (read-only tools are `read_only`; anything that changes a remote system, costs money or quota, or is visible to others is held for confirmation), the exact configuration, a verification step that works with fakes or `--dry-run` and needs no live account, and its failure modes. Credentials MUST appear only as environment variable names; a recipe that needs a token refresh MUST say where the refresh happens (outside the core). | Must | A5b | I |
+| REQ-EXT-009 | Each recipe's tool shape MUST be exercised in the replay evals with fake servers or fixtures, and a shipped example file MUST pass the core's own validation (`ToolDef` and MCP definitions) in a test, so a recipe cannot rot unnoticed. | Must | A5b | T |
+| REQ-EXT-010 | A recipe that depends on a third party's terms MUST cite the clause and its date, state what could not be verified, and MUST NOT present a use the cited terms forbid as supported. | Must | A5b | I |
 
 ### 4.10 Board support (`BRD`)
 
@@ -359,3 +363,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.26 | 2026-11-09 | Agent loop (agentic-scope A5b): turn limits and their spoken explanation, plan and progress speech, clarifying questions, cancel, stop while working, recent actions and opt-in notes, summaries of long results, error recovery (AST-019..025, VOI-020, CFG-044, SEC-017; AST-006 amended) |
 | 0.27 | 2026-11-09 | One-way announce API and `clawdot say` (INB-021..027): speak a message through the inbox so quiet hours, priority, source naming, untrusted-text fencing and the audit log all apply |
 | 0.28 | 2026-11-09 | Stopwatch (TMR-010..014): start, lap, stop, read and reset by voice and tool, saved across restarts, with the clock rules stated honestly |
+| 0.29 | 2026-11-09 | Recipes for the default toolset (EXT-007..010): declarative, tiered, testable against fakes, credentials by environment variable name, third-party terms cited and dated |
