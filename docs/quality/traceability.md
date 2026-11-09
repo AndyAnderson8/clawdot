@@ -82,6 +82,34 @@ Audio interface (added 2026-11-09). Tested with scripted child processes and rec
 | VOI-018 pings during playback, honest `playback-done` | Done | `Device::playback_idle` in `run` | `req_voi_018_*` |
 | VOI-019 optional lights, buttons, output capabilities | Done (traits and null versions; no board file yet) | `satellite::hw` | `req_voi_019_*` |
 
+## Device layer (DEV)
+
+Spec [0006](../specs/0006-device-layer-contract.md); the daemon is `crates/device` (see [device-daemon](../architecture/device-daemon.md)). The daemon is a skeleton: command audio, console LEDs and terminal-key buttons only. Nothing here has run on a device. The conformance suite is slice 3 and adds its own column when it lands.
+
+| ID | Status | Where | Verified by |
+|---|---|---|---|
+| DEV-001 one daemon, no per-device code | Done | `board::ConfiguredBoard` over `BoardFile` | `board` tests |
+| DEV-002 native protocol, declare capabilities | Done | `caps::Declared`, `Device::capabilities` | `daemon` tests |
+| DEV-003 audio in and out | Partial | command and default backends from `clawdot-satellite`; no `alsa` backend | `board` tests |
+| DEV-004 LED state set | Done (console driver only) | `led` | `led` tests |
+| DEV-005 stop without the wake word, local first | Done (the core is not told yet) | `daemon::DaemonDevice` | `daemon` tests |
+| DEV-006 quiet hours local | Done (set by flag; no wire message yet) | `quiet`, `daemon` | `quiet` and `daemon` tests |
+| DEV-007 signed updates | Not started | image recipe (B5) | |
+| DEV-008 board file validation | Done | `board_file`, `schemas/board/board-1.schema.json` | `board_file` tests |
+| DEV-009, 010, 018 follow-up, Wi-Fi, clock trust | Not started (09 is core-driven) | | |
+| DEV-011 conformance suite | Not started | | |
+| DEV-012 unsupported boards | Done | `hardware` checks in `board_file` | `board_file` tests |
+| DEV-013 equivalents | Done | `caps::Capability::equivalent` | `caps` tests |
+| DEV-014 local tones | Done | `tone`, `daemon` | `tone` and `daemon` tests |
+| DEV-015 honest mute | Done | `daemon`, `caps` | `daemon` and `caps` tests |
+| DEV-016 ducking | Partial: software, the daemon's own audio only | `daemon::GainOut` | `daemon` tests |
+| DEV-017 push-to-talk and wake seam | Done (no engine) | `wake`, `button` | `wake` tests |
+| DEV-019 forbidden paths | Done | `BoardFile::path_allowed` | `board_file` tests |
+| DEV-020 bounded queues, local functions offline | Done | `button::KeyButtons`, `daemon::run_forever` | `button` and `daemon` tests |
+| DEV-021 no C in the default build | Done | manifest | inspection |
+| DEV-022 resource profile | Binary size measured (649 KiB armv7); RSS and CPU not measured | | |
+| DEV-023, 024 Bluetooth, Spotify Connect | Not started (optional) | | |
+
 ## Security and non-functional
 
 | ID | Status | Notes |
