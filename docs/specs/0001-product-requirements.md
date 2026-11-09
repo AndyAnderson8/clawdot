@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.14 |
+| **Version** | 0.15 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -181,7 +181,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 
 | ID | Requirement | Pri | Ms | Ver |
 |---|---|---|---|---|
-| REQ-SEC-001 | All outbound provider traffic MUST use TLS with certificate validation. | Must | M1 | T |
+| REQ-SEC-001 | All outbound provider traffic (language model, speech-to-text, text-to-speech) MUST use TLS with certificate validation. Plain `http://` is accepted only for loopback and private-network hosts (localhost, `.local`, RFC 1918, link-local, unique-local), and any other host is refused at start-up. | Must | M1 | T |
 | REQ-SEC-002 | Raw audio MUST NOT be persisted by default, and MUST NOT be logged. | Must | M1 | I/T |
 | REQ-SEC-003 | The microphone state (muted / listening / streaming) MUST be unambiguous to the user. | Must | M1 | D |
 | REQ-SEC-004 | Inbound HTTP MUST be rate-limited and size-limited, and parsers MUST NOT panic on malformed input (fuzzed). | Must | M2 | T |
@@ -275,3 +275,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.12 | 2026-11-08 | Board support layer (section 4.10, BRD-001..016, ADR-0012): one `Board` interface for buttons, LED ring, mute, Wi-Fi, clock trust and audio devices; null, desktop and Echo Dot Gen 2 boards chosen by Cargo feature and the `board` setting; per-device JSON; honest mute and clock reporting; AC-13. Evidence in R-07 |
 | 0.13 | 2026-11-09 | Security review F1: spoken confirmation of the exact text before an `instruct` reply is forwarded, and fencing of untrusted tool-result text (AST-015) |
 | 0.14 | 2026-11-09 | Security review F3: every event field is untrusted (INB-010), and announcements always name the source and sanitise title and status (INB-018) |
+| 0.15 | 2026-11-09 | Security review F4: the plain-http exception in SEC-001 is stated once for the language model as well as the speech clients |
