@@ -1,4 +1,4 @@
-# ADR-0012: First-run administrator setup instead of a printed token
+# ADR-0013: First-run administrator setup instead of a printed token
 
 - **Status:** Proposed
 - **Date:** 2026-11-08
@@ -11,7 +11,7 @@ The first web UI printed an administrator token once on the console and asked fo
 ## Decision
 
 1. **One administrator, one password. No accounts.** Multi-user admin stays parked in [future-scope](../future-scope.md).
-2. **First-run setup screen** (REQ-CFG-018) offers a password (recommended) or open mode. The choice is stored in `admin.json` (schema-versioned, written atomically, mode 0600 on Unix).
+2. **First-run setup screen** (REQ-CFG-018) offers a password (recommended) or open mode. The choice is stored in `admin.json` (schema-versioned, written atomically, like the other state files).
 3. **Hashing: PBKDF2-HMAC-SHA256 built on `sha2`, which is already in the tree** (REQ-CFG-019). Cost: about 60 lines, no new dependency, no binary growth beyond that code, constant memory (two SHA-256 states). The iteration count (100,000) and salt are stored with the hash so the cost can be raised later without a migration. Alternatives rejected: argon2 or scrypt crates add code and, by design, tens of MiB of working memory, which the budget forbids; a bare SHA-256 of a password (what endpoint tokens use) is fine for 256-bit random tokens but not for human passwords. The trade-off accepted: PBKDF2 is less resistant to GPU cracking than a memory-hard function, so the hash file is protected by file mode, the minimum length is 8, and the attack needs access to the device's disk.
 4. **Sessions, not password-per-request.** Verifying costs real CPU on a small core, so sign-in returns a random 256-bit session token kept in memory (hashed, at most 8, 12-hour lifetime). Restarting the core signs everyone out.
 5. **Open mode is private-network only** (REQ-CFG-020): it can be chosen, and used, only from loopback, private, link-local, or 100.64.0.0/10 addresses (the last because Tailscale and carrier-grade NAT use it), and never with a specific public listen address. A persistent banner shows in every view. Webhook, bridge, and satellite tokens are separate credentials and remain required.

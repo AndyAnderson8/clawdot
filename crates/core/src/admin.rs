@@ -1,5 +1,5 @@
 //! The web UI administrator: one password or deliberate open mode, never accounts
-//! (REQ-CFG-018..024, ADR-0012).
+//! (REQ-CFG-018..024, ADR-0013).
 //!
 //! * [`hash_password`] / [`verify_password`]: PBKDF2-HMAC-SHA256 on the `sha2` crate that is already in the
 //!   build. Constant memory, no new dependency. The iteration count and salt travel with the hash.

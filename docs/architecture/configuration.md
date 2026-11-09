@@ -53,17 +53,38 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 The core serves a small page at `/` and `/ui` (REQ-CFG-001, 008): no external assets, no frameworks, usable on a
 phone. It shows endpoints and the recent inbox, and creates, rotates, and deletes endpoints (REQ-CFG-003, 004).
 
-- **Sign-in** uses an administrator token printed once on first start (`--rotate-admin-token` issues a new one).
-  Only its hash is stored, in `admin-token.hash` in the data directory (REQ-CFG-006). The token lives in the
-  browser tab's session storage only.
+- **First run** (REQ-CFG-018). Start `clawdot`, then open the address it prints. While nothing is configured the
+  page shows one setup screen with two choices: **protect with an admin password** (recommended), or **leave the
+  page open** on this network. There is one administrator and no user accounts.
+- **Password mode** (REQ-CFG-019). Only a salted PBKDF2-HMAC-SHA256 hash (100,000 iterations) is stored, in
+  `admin.json` in the data directory (REQ-CFG-006); [ADR-0013](../adr/0013-first-run-admin-setup.md) explains the
+  choice. Signing in returns a random session token that lives in the browser tab's session storage for up to 12
+  hours (at most 8 sessions; a restart signs everyone out). The password is 8 to 128 characters and can be changed
+  from the page at any time (REQ-CFG-024).
+- **Open mode** (REQ-CFG-020). Anyone on your network can use the page and read your inbox. It can be chosen,
+  and is served, only to loopback, private, link-local, and `100.64.0.0/10` (Tailscale) addresses, and never when
+  `listen` is a specific public address. Every view shows a red "Unprotected" banner. Webhook, bridge, and
+  satellite tokens are separate and **stay required** in both modes. Do not put open mode behind a reverse proxy
+  or port forward: the proxy's address looks private to ClawDot. You can set a password later from the same page.
+- **Before setup is done** (REQ-CFG-021). The setup page is reachable by whoever gets there first, which on a shared
+  network is a risk, so: the default `listen` is loopback only; setup is accepted only from private addresses;
+  and when `listen` is anything other than loopback, the console prints a one-time **setup code** that the setup
+  page asks for (kept in memory, new at every start). Finish setup right after the first start, and start the
+  first time somewhere you can see the console.
+- **Recovery** (REQ-CFG-022). Forgot the password, or want to start over? On the device, stop the server and run
+  `clawdot --reset-admin` (with the same `--data-dir`). It clears only the administrator setting; endpoints and
+  the rest of your state stay. The next start shows setup again.
+- **Upgrading** (REQ-CFG-023). If `admin-token.hash` exists from an earlier version, it is converted on the first
+  start: the old token keeps working, typed into the password field, and the page invites you to set a real
+  password (which retires the token). `--rotate-admin-token` is gone; use `--reset-admin`.
 - **Binding.** The default listen address is `127.0.0.1:8765` (not 8080, which Amazon's `oobed` service holds on an Echo Dot; REQ-CFG-014). Change `listen` to the LAN address deliberately;
   there is no TLS, so use a trusted network or a VPN (REQ-CFG-005).
-- **Start-up order.** The listening address is bound first; only then is the administrator token created and
-  printed (REQ-CFG-015). `--create-endpoint` and `--rotate-endpoint` print their token and exit without starting
+- **Start-up order.** The listening address is bound first; only then is a setup code printed or the administrator
+  setting written (REQ-CFG-015). `--create-endpoint` and `--rotate-endpoint` print their token and exit without starting
   the server; run them with the server stopped, then start it. Snippets use `--public-url`, or a URL derived from
   `listen` (REQ-CFG-016).
 - **Console.** Type `quit` or `exit`, or press Ctrl-D, to stop (REQ-CFG-017).
-- **Throttling.** Wrong administrator tokens share the authentication rate limit.
+- **Throttling.** Wrong sessions, sign-in attempts, and setup tries share the authentication rate limit.
 - **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
 - **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), radio stations, and the schedule. It contains no secrets and no agent text.
 - **Test speak** makes the speaker say a short phrase (up to 200 characters, a few at a time) on the console and on any free satellite, a quick way to check the speaker end to end.
