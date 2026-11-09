@@ -235,6 +235,7 @@ fn the_safety_invariants_catch_what_the_session_must_never_do() {
         dry_run: false,
         status: None,
         result: None,
+        detail: None,
         turn_cost_usd: None,
         note: None,
     };

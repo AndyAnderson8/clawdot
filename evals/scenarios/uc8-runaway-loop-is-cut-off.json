@@ -2,9 +2,10 @@
   "version": 1,
   "id": "uc8-runaway-loop-is-cut-off",
   "use_case": "UC8",
-  "description": "A model that keeps calling tools is stopped at the round limit and the user hears that it got stuck.",
+  "description": "A model that keeps calling tools is stopped at the round limit, and the host says which limit it hit and where it got to (REQ-AST-019).",
   "tags": ["limits"],
   "builtin_tools": ["current_time"],
+  "setup": {"max_tool_loops": 5},
   "turns": [
     {
       "say": "keep checking the time",
@@ -15,7 +16,10 @@
         {"calls": [{"name": "current_time"}]},
         {"calls": [{"name": "current_time"}]}
       ],
-      "expect": {"ends": "tool_loop_limit", "speech_contains": ["stuck"]}
+      "expect": {
+        "ends": "tool_loop_limit",
+        "speech_contains": ["stopped after 5 steps", "limit of 5 rounds", "Here is where I got to", "current time"]
+      }
     }
   ],
   "limits": {"max_model_requests": 5}

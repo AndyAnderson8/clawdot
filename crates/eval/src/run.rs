@@ -9,11 +9,15 @@ use crate::model::Model;
 use crate::scenario::{Ends, Expect, Scenario, Trigger, Turn};
 use clawdot_core::assistant::DEFAULT_PERSONA;
 use clawdot_core::audit::{ActionPolicy, AuditConfig, AuditLog, Query, Record};
+use clawdot_core::cancel::CancelToken;
+use clawdot_core::notes::NoteStore;
 use clawdot_core::session::{
-    Conversation, Tier, TurnConfig, TurnEnd, TurnResult, run_event_turn_for, run_turn,
+    Conversation, Stop, Tier, TurnConfig, TurnCtl, TurnEnd, TurnResult, run_event_turn_ctl,
+    run_turn_ctl,
 };
 use clawdot_core::usage::{LimitReached, UsageTracker};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The outcome of one check.
 #[derive(Debug, Clone)]
@@ -134,7 +138,12 @@ fn request_text(m: &dyn Fn() -> Option<clawdot_core::llm::ChatRequest>) -> Strin
 fn end_name(e: &TurnEnd) -> Ends {
     match e {
         TurnEnd::Answered => Ends::Answered,
-        TurnEnd::ToolLoopLimit => Ends::ToolLoopLimit,
+        TurnEnd::Asked => Ends::Asked,
+        TurnEnd::Stopped(Stop::Rounds) => Ends::ToolLoopLimit,
+        TurnEnd::Stopped(Stop::Calls) => Ends::CallsLimit,
+        TurnEnd::Stopped(Stop::Deadline) => Ends::Deadline,
+        TurnEnd::Stopped(Stop::Cancelled) => Ends::Cancelled,
+        TurnEnd::Stopped(Stop::Failures) => Ends::ToolFailures,
         TurnEnd::Limit(_) => Ends::Limit,
         TurnEnd::Failed(_) => Ends::Failed,
     }
@@ -175,14 +184,26 @@ pub async fn run_scenario<M: Model>(
         600,
     );
     conv.set_audit(Arc::clone(&log));
+    let notes = Arc::new(NoteStore::in_memory(s.setup.notes));
+    if s.setup.notes {
+        conv.set_notes(Arc::clone(&notes));
+    }
+    let d = TurnConfig::default();
     let cfg = TurnConfig {
         model: "eval-model".into(),
+        summary_model: Some("eval-summary-model".into()),
         allow_destructive: s.setup.allow_destructive,
-        max_tool_loops: s
+        max_tool_loops: s.setup.max_tool_loops.unwrap_or(d.max_tool_loops),
+        max_tool_calls: s.setup.max_tool_calls.unwrap_or(d.max_tool_calls),
+        deadline_secs: s.setup.deadline_secs.unwrap_or(d.deadline_secs),
+        tool_timeout: s
             .setup
-            .max_tool_loops
-            .unwrap_or(TurnConfig::default().max_tool_loops),
-        ..TurnConfig::default()
+            .tool_timeout_ms
+            .map_or(d.tool_timeout, Duration::from_millis),
+        plan_speech: s.setup.plan_speech.unwrap_or(d.plan_speech),
+        progress_speech: s.setup.progress_speech.unwrap_or(d.progress_speech),
+        summarize_over: s.setup.summarize_over.unwrap_or(d.summarize_over),
+        ..d
     };
 
     let mut now = s.setup.now;
@@ -195,23 +216,56 @@ pub async fn run_scenario<M: Model>(
         now += turn.after_secs.unwrap_or(s.setup.turn_gap_secs);
         clock.set(now);
         model.start_turn(i, turn);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctl = TurnCtl {
+            cancel: CancelToken::new(),
+            speak: Some(tx),
+            clock: Some(Arc::clone(&clock) as Arc<dyn clawdot_core::sched::Clock + Send + Sync>),
+        };
+        host.set_cancel(ctl.cancel.clone());
         let result = match turn.trigger {
             Trigger::User => {
-                run_turn(
-                    model, &mut host, &mut conv, &cfg, usage, day, now, &turn.say,
+                run_turn_ctl(
+                    &ctl, model, &mut host, &mut conv, &cfg, usage, day, now, &turn.say,
                 )
                 .await
             }
             Trigger::Event => {
                 let source = turn.source.as_deref().unwrap_or("event");
-                run_event_turn_for(
-                    source, model, &mut host, &mut conv, &cfg, usage, day, now, &turn.say,
+                run_event_turn_ctl(
+                    &ctl, source, model, &mut host, &mut conv, &cfg, usage, day, now, &turn.say,
                 )
                 .await
             }
         };
+        drop(ctl);
+        let mut streamed = Vec::new();
+        while let Ok(p) = rx.try_recv() {
+            streamed.push(p);
+        }
         report.model_requests += result.model_requests;
-        report.speech.push(result.speech.clone());
+        report.speech.push(
+            result
+                .early
+                .iter()
+                .map(String::as_str)
+                .chain([result.speech.as_str()])
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        report.push(
+            Some(n),
+            "speech sink matches what the turn says it spoke early",
+            false,
+            if streamed == result.early {
+                Ok(())
+            } else {
+                Err(format!(
+                    "sink got {streamed:?}, the turn reports {:?}",
+                    result.early
+                ))
+            },
+        );
         let ran: Vec<crate::host::Executed> = host.executed[seen_executed..].to_vec();
         seen_executed = host.executed.len();
         let records = new_records(&log, &mut seen_records);
@@ -224,6 +278,7 @@ pub async fn run_scenario<M: Model>(
             &records,
             &conv,
             &log,
+            &notes,
             &|| model.last_request(),
         );
         check_invariants(&mut report, n, turn, &records);
@@ -287,6 +342,7 @@ fn check_turn(
     records: &[Record],
     conv: &Conversation,
     log: &AuditLog,
+    notes: &NoteStore,
     last_request: &dyn Fn() -> Option<clawdot_core::llm::ChatRequest>,
 ) {
     let e: &Expect = &turn.expect;
@@ -490,6 +546,75 @@ fn check_turn(
             "audit_text_not_contains",
             true,
             contains_none(&text, &e.audit_text_not_contains),
+        );
+    }
+    let early = result.early.join(" ");
+    if !e.early_contains.is_empty() {
+        r.push(
+            Some(n),
+            "early_contains",
+            false,
+            contains_all(&early, &e.early_contains),
+        );
+    }
+    r.push(
+        Some(n),
+        "early_not_contains",
+        false,
+        contains_none(&early, &e.early_not_contains),
+    );
+    if let Some(max) = e.early_max {
+        let got = result.early.len();
+        r.push(
+            Some(n),
+            "early_max",
+            false,
+            if got <= max {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{got} phrases spoken while working, at most {max}: {early}"
+                ))
+            },
+        );
+    }
+    if let Some(want) = &e.notes {
+        let got: Vec<String> = notes.list().into_iter().map(|x| x.text).collect();
+        r.push(
+            Some(n),
+            "notes",
+            // A note written by anything but the user's own words breaks REQ-SEC-017.
+            true,
+            if &got == want {
+                Ok(())
+            } else {
+                Err(format!("notes are {got:?}, expected {want:?}"))
+            },
+        );
+    }
+    if !e.audit_detail_contains.is_empty() {
+        let details: String = records
+            .iter()
+            .filter_map(|x| x.detail.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        r.push(
+            Some(n),
+            "audit_detail_contains",
+            false,
+            contains_all(&details, &e.audit_detail_contains),
+        );
+    }
+    if let Some(want) = e.expects_reply {
+        r.push(
+            Some(n),
+            "expects_reply",
+            false,
+            if result.expects_reply == want {
+                Ok(())
+            } else {
+                Err(format!("expects_reply is {}", result.expects_reply))
+            },
         );
     }
 }

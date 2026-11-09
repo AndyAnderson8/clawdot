@@ -735,6 +735,10 @@ impl<H: ToolHost> ToolHost for WithPolicy<'_, H> {
         self.inner.describe_action(name, args)
     }
 
+    fn expected_slow(&self, name: &str) -> bool {
+        self.inner.expected_slow(name)
+    }
+
     fn begin_turn(&mut self, user_text: &str) {
         self.scope = self.ext.active_scope(user_text);
         self.inner.begin_turn(user_text);

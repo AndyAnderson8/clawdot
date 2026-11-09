@@ -11,6 +11,7 @@
 //! silent peer is dropped after the keepalive timeout, and frames are size-limited by the protocol decoder.
 
 use crate::assistant::{Effect, MediaCmd};
+use crate::cancel::CancelToken;
 use crate::inbox::endpoint::verify_token;
 use crate::speech::decode_pcm16;
 use crate::voice::{
@@ -37,6 +38,10 @@ pub struct Ask {
     pub text: String,
     /// Where the answer goes.
     pub reply: oneshot::Sender<Answer>,
+    /// Where plan and progress phrases go while the turn runs (REQ-AST-020).
+    pub progress: Option<mpsc::UnboundedSender<String>>,
+    /// Set to stop the turn (REQ-AST-022).
+    pub cancel: CancelToken,
 }
 
 /// The assistant's answer.
@@ -46,6 +51,8 @@ pub struct Answer {
     pub say: String,
     /// Side effects for the satellite.
     pub effects: Vec<Effect>,
+    /// The answer ends with a question, so listen longer for the reply (REQ-AST-021).
+    pub expects_reply: bool,
 }
 
 /// Server settings.
@@ -481,7 +488,16 @@ where
                         let sink = Arc::clone(&effects);
                         let outcome = voice_turn(&*stt, &*tts, &pcm, move |text| async move {
                             let (tx, rx) = oneshot::channel();
-                            if asks.send(Ask { text, reply: tx }).await.is_err() {
+                            if asks
+                                .send(Ask {
+                                    text,
+                                    reply: tx,
+                                    progress: None,
+                                    cancel: CancelToken::new(),
+                                })
+                                .await
+                                .is_err()
+                            {
                                 return "Sorry, I can't answer right now.".to_owned();
                             }
                             match rx.await {
@@ -733,6 +749,7 @@ mod tests {
                 let _ = ask.reply.send(Answer {
                     say: format!("{answer} ({})", ask.text),
                     effects: vec![Effect::VolumeSet(30)],
+                    ..Answer::default()
                 });
             }
         });
@@ -1304,6 +1321,7 @@ mod tests {
                 url: "http://r.example/jazz".into(),
                 title: "jazz".into(),
             }],
+            ..Answer::default()
         }
     }
 
@@ -1315,6 +1333,7 @@ mod tests {
             Answer {
                 say: "Fine.".into(),
                 effects: vec![],
+                ..Answer::default()
             }
         }
     }
@@ -1405,6 +1424,7 @@ mod tests {
             Answer {
                 say: String::new(),
                 effects: vec![Effect::Media(MediaCmd::Pause)],
+                ..Answer::default()
             }
         }
         let mut p = start_music(true, "pause", pause_only).await;

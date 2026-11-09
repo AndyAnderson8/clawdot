@@ -9,7 +9,7 @@ use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, Effect, describe_fired};
 use clawdot_core::audit::{ActionPolicy, AuditConfig, AuditLog};
-use clawdot_core::config::{Config, SatelliteConfig, SpeechConfig};
+use clawdot_core::config::{AgentConfig, Config, SatelliteConfig, SpeechConfig};
 #[cfg(feature = "esphome-satellite")]
 use clawdot_core::esphome_cfg::EsphomeConfig;
 use clawdot_core::extensions::{ExtOp, Extensions, WithPolicy};
@@ -22,9 +22,12 @@ use clawdot_core::inbox::summary::{
 use clawdot_core::llm::{ChatRequest, Message};
 use clawdot_core::mcp::{McpClient, ServerDef, WithMcp};
 use clawdot_core::media::Station;
+use clawdot_core::notes::NoteStore;
 use clawdot_core::satellite::{self, Answer, Ask};
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
-use clawdot_core::session::{ChatBackend, Conversation, ToolHost, TurnConfig, TurnEnd, run_turn};
+use clawdot_core::session::{
+    ChatBackend, Conversation, ToolHost, TurnConfig, TurnCtl, TurnEnd, run_turn_ctl,
+};
 use clawdot_core::settings::{self, Layer, SettingsState, public_url_from_listen};
 use clawdot_core::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
 use clawdot_core::store::JsonStore;
@@ -118,6 +121,8 @@ struct Args {
     daily_spend: Option<f64>,
     /// Daily action caps and the dry-run switch (REQ-SEC-015, REQ-SEC-016); from the file and flags only.
     actions: ActionPolicy,
+    /// Turn limits, speech while working and notes (REQ-AST-019..025); from the file only.
+    agent: AgentConfig,
 }
 
 fn parse() -> Result<Args, String> {
@@ -156,6 +161,7 @@ fn parse() -> Result<Args, String> {
         max_requests: UsageLimits::default().max_requests_per_day,
         daily_spend: None,
         actions: ActionPolicy::default(),
+        agent: AgentConfig::default(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if let Some(i) = argv.iter().position(|x| x == "--config") {
@@ -293,6 +299,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     );
     put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
     put("voice", c.speech.voice.clone().map(Into::into));
+    a.agent = c.agent.clone();
     let d = ActionPolicy::default();
     a.actions = ActionPolicy {
         dry_run: c.limits.dry_run.unwrap_or(d.dry_run),
@@ -504,7 +511,33 @@ fn settings_extra(args: &Args) -> serde_json::Value {
 struct Llm {
     backend: HttpBackend,
     cfg: TurnConfig,
-    summary_model: String,
+}
+
+/// The turn settings: the defaults of REQ-AST-019 lowered or switched by the `agent` section.
+fn agent_turn_config(
+    model: &str,
+    fallback: Option<&str>,
+    summary: Option<&str>,
+    max_tokens: u32,
+    agent: &AgentConfig,
+) -> TurnConfig {
+    let d = TurnConfig::default();
+    TurnConfig {
+        model: model.to_owned(),
+        fallback_model: fallback.map(str::to_owned),
+        max_tokens,
+        max_tool_loops: agent.max_rounds.unwrap_or(d.max_tool_loops),
+        max_tool_calls: agent.max_tool_calls.unwrap_or(d.max_tool_calls),
+        deadline_secs: agent.deadline_secs.unwrap_or(d.deadline_secs),
+        tool_timeout: agent
+            .tool_timeout_secs
+            .map_or(d.tool_timeout, Duration::from_secs),
+        plan_speech: agent.plan_speech.unwrap_or(d.plan_speech),
+        progress_speech: agent.progress_speech.unwrap_or(d.progress_speech),
+        summarize_over: agent.summarize_over_chars.unwrap_or(d.summarize_over),
+        summary_model: Some(summary.unwrap_or(model).to_owned()),
+        allow_destructive: false,
+    }
 }
 
 /// Build the language model client from the effective settings, or `None` when none is set.
@@ -515,6 +548,7 @@ fn build_llm(
     summary: Option<&str>,
     key_env: &str,
     max_tokens: u32,
+    agent: &AgentConfig,
 ) -> Result<Option<Llm>, String> {
     let (Some(url), Some(model)) = (url, model) else {
         return Ok(None);
@@ -523,14 +557,7 @@ fn build_llm(
     let backend = HttpBackend::new(url, &key, Duration::from_secs(30))?;
     Ok(Some(Llm {
         backend,
-        cfg: TurnConfig {
-            model: model.to_owned(),
-            fallback_model: fallback.map(str::to_owned),
-            max_tokens,
-            max_tool_loops: 5,
-            allow_destructive: false,
-        },
-        summary_model: summary.unwrap_or(model).to_owned(),
+        cfg: agent_turn_config(model, fallback, summary, max_tokens, agent),
     }))
 }
 
@@ -587,6 +614,7 @@ fn apply_live(
             text("summary_model"),
             text("llm_key_env").unwrap_or("OPENROUTER_API_KEY"),
             max_tokens,
+            &brain.agent,
         ) {
             Ok(l) => brain.llm = l,
             Err(e) => eprintln!("clawdot: cannot switch language model: {e}"),
@@ -601,7 +629,11 @@ async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Event)
     if usage.check(day).is_ok() {
         let (system, user) = summary_prompt(event, &cfg);
         let req = ChatRequest {
-            model: llm.summary_model.clone(),
+            model: llm
+                .cfg
+                .summary_model
+                .clone()
+                .unwrap_or_else(|| llm.cfg.model.clone()),
             messages: vec![Message::system(system), Message::user(user)],
             tools: Vec::new(),
             max_tokens: 120,
@@ -634,12 +666,16 @@ struct Brain {
     builtin: Vec<String>,
     /// The system prompt without skills.
     persona: String,
+    /// Turn limits, speech while working and notes.
+    agent: AgentConfig,
 }
 
 /// What to say and which effects the satellite should carry out.
 struct Reply {
     say: String,
     effects: Vec<Effect>,
+    /// The reply ends with a question, so the follow-up window should be longer (REQ-AST-021).
+    expects_reply: bool,
 }
 
 impl Brain {
@@ -699,17 +735,19 @@ impl Brain {
     }
 
     /// Answer locally if the fast path can, otherwise ask the language model.
-    async fn respond(&mut self, line: &str) -> Reply {
+    async fn respond(&mut self, line: &str, ctl: &TurnCtl) -> Reply {
         if let Some(out) = self.assistant.handle(line) {
             return Reply {
                 say: out.say,
                 effects: out.effects,
+                expects_reply: false,
             };
         }
         let Some(l) = &self.llm else {
             return Reply {
                 say: "(that needs a language model; start with --llm-url and --llm-model)".into(),
                 effects: Vec::new(),
+                expects_reply: false,
             };
         };
         let (day, now) = (self.assistant.local_day(), self.clock.now());
@@ -732,7 +770,8 @@ impl Brain {
             self.persona,
             self.ext.skills_prompt(&available)
         ));
-        let r = run_turn(
+        let r = run_turn_ctl(
+            ctl,
             &l.backend,
             &mut host,
             &mut self.conversation,
@@ -749,9 +788,16 @@ impl Brain {
         if let TurnEnd::Failed(e) = &r.end {
             eprintln!("clawdot: language model error: {e}");
         }
+        // Without a speech sink (the console, a recorded utterance) plan and progress phrases come first.
+        let say = if ctl.speak.is_some() || r.early.is_empty() {
+            r.speech
+        } else {
+            format!("{} {}", r.early.join(" "), r.speech)
+        };
         Reply {
-            say: r.speech,
+            say,
             effects: self.assistant.take_effects(),
+            expects_reply: r.expects_reply,
         }
     }
 }
@@ -837,7 +883,7 @@ async fn voice_once(
         let brain = &mut *brain;
         let effects = &effects;
         async move {
-            let r = brain.respond(&text).await;
+            let r = brain.respond(&text, &TurnCtl::default()).await;
             effects.borrow_mut().extend(r.effects);
             r.say
         }
@@ -994,6 +1040,7 @@ async fn main() -> ExitCode {
         args.summary_model.as_deref(),
         &args.key_env,
         limits.max_output_tokens_per_turn,
+        &args.agent,
     ) {
         Ok(l) => l,
         Err(e) => {
@@ -1022,6 +1069,19 @@ async fn main() -> ExitCode {
     };
     conversation.set_audit(Arc::clone(&audit));
     core.set_audit(audit);
+    // Notes the user asks for (REQ-AST-023); off unless the `agent` section turns them on.
+    let notes = match NoteStore::open(&args.data_dir, args.agent.notes.unwrap_or(false)) {
+        Ok(n) => Arc::new(n),
+        Err(e) => {
+            eprintln!(
+                "clawdot: cannot open the notes in {}: {e}",
+                args.data_dir.display()
+            );
+            return ExitCode::from(1);
+        }
+    };
+    conversation.set_notes(Arc::clone(&notes));
+    core.set_notes(notes);
     if args.actions.dry_run {
         eprintln!("clawdot: dry-run mode: actions are described and recorded, not run");
     }
@@ -1104,6 +1164,7 @@ async fn main() -> ExitCode {
         ext,
         builtin: builtin.clone(),
         persona,
+        agent: args.agent.clone(),
     };
 
     core.set_ui_tools(brain.listing());
@@ -1274,7 +1335,7 @@ async fn main() -> ExitCode {
                 let Some(line) = line else { return ExitCode::SUCCESS };
                 if line.is_empty() { continue; }
                 if is_quit(&line) { return ExitCode::SUCCESS; }
-                let reply = brain.respond(&line).await;
+                let reply = brain.respond(&line, &TurnCtl::default()).await;
                 if reply.say.is_empty() {
                     println!("speaker> (done)");
                 } else {
@@ -1285,8 +1346,13 @@ async fn main() -> ExitCode {
                 }
             }
             Some(ask) = ask_rx.recv() => {
-                let r = brain.respond(&ask.text).await;
-                let _ = ask.reply.send(Answer { say: r.say, effects: r.effects });
+                let ctl = TurnCtl {
+                    cancel: ask.cancel.clone(),
+                    speak: ask.progress.clone(),
+                    clock: Some(clock.clone()),
+                };
+                let r = brain.respond(&ask.text, &ctl).await;
+                let _ = ask.reply.send(Answer { say: r.say, effects: r.effects, expects_reply: r.expects_reply });
             }
             _ = tick.tick() => {
                 let tool_counts = serde_json::json!({ "builtin": builtin.len(), "http": brain.http_tools.specs().len(), "mcp": brain.mcp.tools().len() });

@@ -683,6 +683,10 @@ impl<H: ToolHost> ToolHost for WithMcp<'_, H> {
         }
     }
 
+    fn expected_slow(&self, name: &str) -> bool {
+        self.mcp.owns(name) || self.inner.expected_slow(name)
+    }
+
     fn begin_turn(&mut self, user_text: &str) {
         self.inner.begin_turn(user_text);
     }
