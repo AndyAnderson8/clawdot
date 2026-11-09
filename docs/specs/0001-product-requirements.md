@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.20 |
+| **Version** | 0.21 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -62,6 +62,12 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-VOI-010 | The system SHOULD play a short "thinking" earcon if a response has not begun within a configurable delay (default 1.0 s), and MUST stop it when audio output begins. | Should | M1 | D |
 | REQ-VOI-011 | The system SHOULD adapt end-of-utterance silence thresholds (e.g. longer after trailing filler words or incomplete clauses) to reduce clipped speech. | Should | M6 | T |
 | REQ-VOI-012 | By default the system MUST operate **half-duplex**: microphone input is not processed for speech while the system is playing assistant speech, tones, or music, except wake-word handling where the satellite declares echo cancellation. A "stop" command is available via the physical button where present. | Must | M1 | T |
+| REQ-VOI-013 | A satellite front end MUST reach audio hardware only through two small interfaces. `AudioIn` yields 20 ms frames (320 samples) of 16 kHz mono signed 16-bit PCM and can be started and stopped (stopping releases the device). `AudioOut` plays 16 kHz mono PCM that arrives in pieces and offers `finish` (let queued audio play out), `stop` (silence now, discarding what is queued), and a `duck` hook (reduce the output level; a backend that cannot MUST accept the call and do nothing). Device loss, a missing tool, end of input and a stalled device are reported as distinct errors, never as silence. The core and the dialog state machine MUST NOT depend on how a backend reaches the hardware. | Must | A2 | T |
+| REQ-VOI-014 | The reference hardware backend MUST spawn an external command given as an argument vector (program and arguments, no shell). Audio MUST pass only through the child's standard input and output, and no text from the network, the assistant or a user MAY be placed into an argument, so there is nothing to inject. The backend MUST bound its buffers, MUST kill and reap the child on stop and on drop, MUST treat a child that produces no audio (capture) or accepts none (playback) for a configurable time as stalled, and MUST report a child that exits early as end of input. The code MUST NOT use `unsafe` and MUST NOT add an audio crate without a recorded size and licence justification. | Must | A2 | T |
+| REQ-VOI-015 | Default commands MUST be found by looking for known programs on `PATH`, in a documented order per operating system (`ffmpeg`, `sox`, then `arecord` and `aplay` on Linux; `ffmpeg` then `sox` on Windows and macOS), and the user MUST be able to override both commands completely. Discovery MUST NOT run a program to probe it. When nothing is found, the error MUST name the programs that were looked for. | Must | A2 | T |
+| REQ-VOI-016 | A WAV-file backend (mono 16-bit PCM at 16 kHz in; the same format out) MUST exist for tests and headless use, so that a full turn can run with no audio device and no spawned program. | Must | A2 | T |
+| REQ-VOI-017 | Push-to-talk MUST be available as a turn trigger without a wake word: a key press (the `--ptt` option of the reference satellite reads a line from the terminal) sends the same `wake` event a wake word would, and capture starts at the press so speech right after it is not lost. A press is ignored while the assistant is speaking (REQ-VOI-012); the core ignores it while thinking or muted. Turn triggers MUST be a separate small interface so a wake-word detector (REQ-VOI-001) can replace the key without changing the satellite loop. | Must | A3 | T |
+| REQ-VOI-018 | The satellite loop MUST keep answering the core's pings and stop requests while a reply is playing, and MUST send `playback-done` only after the audio has actually finished playing (or was stopped), so the follow-up window (REQ-VOI-007) opens at the right moment even for a reply longer than the dead-peer timeout (REQ-SAT-008). | Must | A2 | T |
 
 ### 4.2 Assistant (`AST`)
 
@@ -302,3 +308,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.18 | 2026-11-09 | Security review F6 and F7: private state files (SEC-009) and no agent text on stdout in server mode unless `--echo-speech` is given |
 | 0.19 | 2026-11-09 | Portal management of tools, MCP connections, and skills (CFG-032..036): add, turn on and off, delete, test; secrets only as environment variable names; skills defined as named instruction bundles with import and export |
 | 0.20 | 2026-11-09 | Editable settings in the portal (CFG-037..042): layered `settings.json` over the configuration file under flags, live versus restart, whole-change validation, environment-variable names for keys; compressed page (CFG-043); CFG-030 amended |
+| 0.21 | 2026-11-09 | Audio input/output interface, command-backed and WAV backends, push-to-talk, and non-blocking playback in the satellite loop (VOI-013..018) |
