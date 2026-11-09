@@ -32,6 +32,16 @@ What cannot release an action: a `confirmed` argument (it is not offered in any 
 
 Who said yes is unknown: ClawDot does not identify speakers, so a guest or a television could answer. The 120-second window, the read-back and the half-duplex microphone limit that; this is recorded in the [threat model](../security/threat-model.md).
 
+## Turns the user did not start (REQ-SEC-012, REQ-INB-010)
+
+`run_turn` is for the user's voice. A turn started by anything else (an inbox event, a schedule, a rule) must use `run_event_turn`, which sets `Trigger::Event`:
+
+- The trigger's text is shown to the model fenced in `<event_text>` and labelled untrusted, with angle brackets removed so it cannot close the fence. It is never read as an answer: an event cannot release a held action, however it is worded.
+- Only `read_only` tools run. A call to anything else is not run and is not refused outright: it is saved as a proposal (the same pending action as above) and the host speaks it as "Suggested action: ... Say yes if you want that, or no to drop it." The user's own later turn decides, within 120 seconds, exactly as for a normal held action.
+- The turn counts as holding untrusted text (see below).
+
+Nothing in the product starts an LLM turn from an event yet (announcements are spoken without the model); this is the gate that any such feature, and the rules of agentic-scope UC9, must go through.
+
 ## Not built here (follow-ups)
 
 The audit log of every call and decision (REQ-SEC-014), the evaluation harness (REQ-AST-012), per-day caps and dry-run (REQ-SEC-015, REQ-SEC-016) are separate branches in the P0 and P1 list of agentic-scope.md. Until the audit log exists, the console is the only record of a held action.
