@@ -42,7 +42,7 @@ git commit -m "feat(sched): add persistent timer store" -m "Why this change is n
 - Format: `type(scope): summary`, imperative, at most 72 characters, no trailing period. Types: `feat fix docs spec refactor perf test build ci chore revert`.
 - One logical change per commit, with its tests and docs. Reference requirement IDs in the body.
 - Do not add `Co-Authored-By`, "Generated with ...", or any AI attribution. Hooks and CI reject it.
-- Hooks run on each commit (fast checks). If one fails, fix the cause and commit again; never use `--no-verify`.
+- Hooks run on each commit and check only fast things: branch name, commit message, and `scripts/check.sh --fast` (changed shell files, docs if Markdown changed, `cargo fmt` and scoped `clippy` if Rust changed; docs-only commits skip Rust). Tests and `cargo-deny` run at `scripts/land.sh` and in CI. If a hook fails, fix the cause and commit again; never use `--no-verify`.
 
 ## 4. Keep your branch current
 
@@ -55,7 +55,8 @@ A branch can only be landed if it contains the latest `dev`.
 ## 5. Land into `dev`
 
 ```
-scripts/check.sh                  # optional preview: every gate (format, lint, types, tests, docs, commits)
+scripts/check.sh                  # optional preview: the FULL gate that land.sh and CI run (format, lint, types, tests, deny, docs, commits)
+scripts/check.sh --fast           # the quicker subset that the commit hook runs on staged files
 scripts/land.sh feature/timer-tool
 ```
 

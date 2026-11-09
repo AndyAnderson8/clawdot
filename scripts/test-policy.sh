@@ -180,5 +180,75 @@ rc=$?
 if [ "$rc" -eq 0 ]; then ok; else fail "landing/release flow test failed at step code $rc (output: $(tail -3 "$out" | tr '\n' ' '))"; fi
 rm -rf "$L" "$out"
 
+# --- commit-time checks are fast; the full gate is not (scratch repository with a recording cargo stub) ----
+F=$(mktemp -d)
+calls="$F/cargo-calls.log"
+fout=$(mktemp)
+(
+  cd "$F" || exit 1
+  git init -q -b main
+  git config user.name T
+  git config user.email t@example.com
+  git config core.autocrlf false
+  mkdir -p scripts .githooks crates/a/src
+  for f in check.sh check-docs.sh check-commit-msg.sh lib-git.sh; do cp "$root/scripts/$f" scripts/; done
+  cp "$root/.githooks/pre-commit" "$root/.githooks/commit-msg" .githooks/
+  cp "$root/.shellcheckrc" .shellcheckrc
+  # The stub records its arguments instead of building anything.
+  cat >scripts/cargo.sh <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >>"${CARGO_CALLS:?}"
+exit 0
+STUB
+  chmod +x scripts/*.sh .githooks/*
+  printf '[workspace]\nmembers = ["crates/*"]\n' >Cargo.toml
+  printf '[package]\nname = "pkg-a"\nversion = "0.0.0"\n' >crates/a/Cargo.toml
+  : >deny.toml
+  echo "// a" >crates/a/src/lib.rs
+  git add -A
+  git commit -q -m "chore: initialize repository"
+  git branch dev
+  git switch -q -c chore/x
+  git config core.hooksPath .githooks
+  export CARGO_CALLS="$calls"
+
+  # 1. a docs-only commit runs no Rust step and says what was skipped
+  : >"$calls"
+  mkdir -p docs && echo "# d" >docs/d.md && git add docs/d.md
+  git commit -m "docs: add d" >"$fout" 2>&1 || exit 31
+  [ ! -s "$calls" ] || exit 32
+  grep -q "scripts/land.sh and in CI" "$fout" || exit 33
+
+  # 2. a Rust commit runs fmt and clippy scoped to the affected package, but not tests or deny
+  : >"$calls"
+  echo "// b" >>crates/a/src/lib.rs && git add -A
+  git commit -m "feat(a): change a" >"$fout" 2>&1 || exit 34
+  grep -q "^fmt " "$calls" || exit 35
+  grep -q "^clippy -p pkg-a " "$calls" || exit 36
+  ! grep -qE "^(test|deny) " "$calls" || exit 37
+
+  # 3. a root manifest change lints the whole workspace
+  : >"$calls"
+  echo "# c" >>Cargo.toml && git add -A
+  git commit -m "build: touch manifest" >"$fout" 2>&1 || exit 38
+  grep -q "^clippy --workspace " "$calls" || exit 39
+
+  # 4. a bad commit message still blocks, whatever the files
+  : >"$calls"
+  echo "# e" >docs/e.md && git add docs/e.md
+  if git commit -m "Added e." >"$fout" 2>&1; then exit 40; fi
+  git reset -q
+
+  # 5. the full gate still runs tests and cargo-deny
+  : >"$calls"
+  scripts/check.sh >"$fout" 2>&1 || exit 41
+  grep -q "^test " "$calls" || exit 42
+  grep -q "^deny check" "$calls" || exit 43
+  exit 0
+)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else fail "commit-time check test failed at step code $rc (output: $(tail -3 "$fout" | tr '\n' ' '))"; fi
+rm -rf "$F" "$fout"
+
 echo "policy tests: $pass passed, $failn failed"
 [ "$failn" -eq 0 ]
