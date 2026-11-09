@@ -50,6 +50,8 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `tools` | Declarative HTTP tools the model may call; see [http-tools.md](http-tools.md) | none |
 | `mcp` | MCP servers whose tools the model may call; see [mcp.md](mcp.md) | none |
 | `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |
+
+Every `limits.*` and `agent.*` row above except `agent.summarize_over_chars` is also a portal setting (Settings, "Agent settings", REQ-CFG-062): `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`, `plan_speech`, `progress_speech`, `notes`, `max_actions_per_day`, `max_costly_per_day` and `dry_run`. They follow the usual layers (default, this file, saved in the portal, flag such as `--dry-run`), apply without a restart, and the page shows the value in force and where it came from. The same group holds the device-wide quiet hours (`quiet_start`, `quiet_end`, local `HH:MM`, both or neither; REQ-INB-040), which exist only as a setting: while the window lasts, only urgent agent events are announced.
 | `speech` | Speech-to-text and text-to-speech provider (`url`, `key_env`, `stt_model`, `tts_model`, `voice`, `language`, `tts_sample_rate`); see [voice-pipeline.md](voice-pipeline.md) | none |
 | `satellite` | Where speakers connect (`listen`, `token_env`, `follow_up_secs`); see [satellite-server.md](satellite-server.md) | off |
 | `esphome` | ESPHome voice satellites to dial (`devices`, `media_listen`, `media_url`); needs a build with the `esphome-satellite` feature; see [esphome-satellite.md](esphome-satellite.md) | off |

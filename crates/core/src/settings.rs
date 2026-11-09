@@ -60,7 +60,7 @@ pub struct Field {
 }
 
 /// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039).
-pub const FIELDS: [Field; 14] = [
+pub const FIELDS: [Field; 26] = [
     Field {
         key: "device_name",
         live: true,
@@ -117,6 +117,54 @@ pub const FIELDS: [Field; 14] = [
         key: "board",
         live: false,
     },
+    Field {
+        key: "agent_max_rounds",
+        live: true,
+    },
+    Field {
+        key: "agent_max_tool_calls",
+        live: true,
+    },
+    Field {
+        key: "agent_deadline_secs",
+        live: true,
+    },
+    Field {
+        key: "agent_tool_timeout_secs",
+        live: true,
+    },
+    Field {
+        key: "plan_speech",
+        live: true,
+    },
+    Field {
+        key: "progress_speech",
+        live: true,
+    },
+    Field {
+        key: "notes",
+        live: true,
+    },
+    Field {
+        key: "max_actions_per_day",
+        live: true,
+    },
+    Field {
+        key: "max_costly_per_day",
+        live: true,
+    },
+    Field {
+        key: "dry_run",
+        live: true,
+    },
+    Field {
+        key: "quiet_start",
+        live: true,
+    },
+    Field {
+        key: "quiet_end",
+        live: true,
+    },
 ];
 
 /// The default listen address (REQ-CFG-014).
@@ -171,6 +219,26 @@ fn check_zone(name: &str) -> Result<(), String> {
             Err("This build has no time zone database, so only UTC can be used.".to_owned())
         }
     }
+}
+
+/// A whole number from `lo` to `hi`.
+fn whole(v: &Value, what: &str, lo: u64, hi: u64) -> Result<Value, String> {
+    v.as_u64()
+        .filter(|n| (lo..=hi).contains(n))
+        .map(|n| json!(n))
+        .ok_or_else(|| format!("{what} must be a whole number from {lo} to {hi}."))
+}
+
+/// Minutes after local midnight for `HH:MM` (24-hour, two digits each), or `None`.
+#[must_use]
+pub fn minute_of_day(hhmm: &str) -> Option<u16> {
+    let (h, m) = hhmm.split_once(':')?;
+    let ok = |s: &str| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit());
+    if !ok(h) || !ok(m) {
+        return None;
+    }
+    let (h, m): (u16, u16) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
 }
 
 /// Check one value and return it in the form that is stored. Empty text counts as "clear" and is
@@ -274,6 +342,24 @@ fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Resu
             )?;
             json!(n)
         }
+        "agent_max_rounds" => whole(v, "Rounds per request", 1, 20)?,
+        "agent_max_tool_calls" => whole(v, "Tool calls per request", 1, 20)?,
+        "agent_deadline_secs" => whole(v, "Seconds per request", 5, 300)?,
+        "agent_tool_timeout_secs" => whole(v, "Seconds per tool call", 1, 120)?,
+        "max_actions_per_day" => whole(v, "Actions per day", 0, 100_000)?,
+        "max_costly_per_day" => whole(v, "Actions that ask first, per day", 0, 100_000)?,
+        "plan_speech" | "progress_speech" | "notes" | "dry_run" => {
+            json!(
+                v.as_bool()
+                    .ok_or_else(|| format!("`{key}` must be on or off (true or false)."))?
+            )
+        }
+        "quiet_start" | "quiet_end" => {
+            let t = string("The quiet hours time", 5)?;
+            minute_of_day(&t)
+                .ok_or("Quiet hours times look like 22:00 or 07:30 (24-hour, local time).")?;
+            json!(t)
+        }
         "board" => match text(v, "The board")?.as_str() {
             b @ ("auto" | "none") => json!(b),
             _ => return Err("The board setting must be `auto` or `none`.".into()),
@@ -297,6 +383,14 @@ fn check(
         return Err(
             "The backup and summary models need a language model address and model name. Set those first, or clear these.".into(),
         );
+    }
+    if has("quiet_start") != has("quiet_end") {
+        return Err("Set both the quiet hours start and end, or clear both.".into());
+    }
+    if has("quiet_start")
+        && eff.get("quiet_start").map(|(v, _)| v) == eff.get("quiet_end").map(|(v, _)| v)
+    {
+        return Err("Quiet hours cannot start and end at the same time. Use different times, or clear both.".into());
     }
     if has("voice") && !speech_configured {
         return Err(
@@ -825,5 +919,83 @@ mod tests {
         for k in ["llm_key", "api_key", "key"] {
             assert!(st.change(&json!({ (k): "sk-1234" })).is_err());
         }
+    }
+
+    // REQ-CFG-062, REQ-CFG-038
+    #[test]
+    fn agent_settings_are_layered_validated_and_live() {
+        let dir = TempDir::new("agent");
+        let file = layer(&[("agent_max_rounds", json!(6)), ("notes", json!(true))]);
+        let flags = layer(&[("dry_run", json!(true))]);
+        let mut st = open_in(&dir.0, file, flags);
+        assert_eq!(source(&st, "agent_max_rounds"), "file");
+        st.change(&json!({
+            "agent_max_rounds": 10, "agent_max_tool_calls": 3, "agent_deadline_secs": 30,
+            "agent_tool_timeout_secs": 20, "plan_speech": false, "progress_speech": false,
+            "max_actions_per_day": 0, "max_costly_per_day": 5, "quiet_start": "22:00", "quiet_end": "07:30",
+        }))
+        .unwrap();
+        let live = st.live_values();
+        for (k, v) in [
+            ("agent_max_rounds", json!(10)),
+            ("plan_speech", json!(false)),
+            ("max_actions_per_day", json!(0)),
+            ("quiet_start", json!("22:00")),
+            ("notes", json!(true)),
+            ("dry_run", json!(true)),
+        ] {
+            assert_eq!(live[k], v, "{k}");
+        }
+        assert_eq!(source(&st, "agent_max_rounds"), "saved");
+        // a flag beats a saved value, and the page is told
+        st.change(&json!({"dry_run": false})).unwrap();
+        assert_eq!(st.json()["fields"]["dry_run"]["ignored"], true);
+        assert_eq!(st.get("dry_run"), true);
+        // clearing falls back to the file, then the default
+        st.change(&json!({"agent_max_rounds": null, "quiet_start": null, "quiet_end": ""}))
+            .unwrap();
+        assert_eq!(st.get("agent_max_rounds"), 6);
+        assert!(st.get("quiet_start").is_null());
+    }
+
+    // REQ-CFG-062, REQ-CFG-040
+    #[test]
+    fn bad_agent_values_are_refused_and_change_nothing() {
+        let mut st = SettingsState::in_memory(defaults(), false, env_with(&[]));
+        for (patch, needle) in [
+            (json!({"agent_max_rounds": 0}), "1 to 20"),
+            (json!({"agent_max_rounds": 21}), "1 to 20"),
+            (json!({"agent_max_tool_calls": "many"}), "1 to 20"),
+            (json!({"agent_deadline_secs": 4}), "5 to 300"),
+            (json!({"agent_tool_timeout_secs": 121}), "1 to 120"),
+            (json!({"max_actions_per_day": -1}), "0 to 100000"),
+            (json!({"max_costly_per_day": 1.5}), "0 to 100000"),
+            (json!({"plan_speech": "yes"}), "on or off"),
+            (json!({"dry_run": 1}), "on or off"),
+            (
+                json!({"quiet_start": "10pm", "quiet_end": "07:00"}),
+                "22:00",
+            ),
+            (
+                json!({"quiet_start": "24:00", "quiet_end": "07:00"}),
+                "22:00",
+            ),
+            (
+                json!({"quiet_start": "7:00", "quiet_end": "08:00"}),
+                "22:00",
+            ),
+            (json!({"quiet_start": "22:00"}), "both"),
+            (
+                json!({"quiet_start": "22:00", "quiet_end": "22:00"}),
+                "same time",
+            ),
+        ] {
+            let e = st.change(&patch).unwrap_err();
+            assert!(e.contains(needle), "{patch}: {e}");
+        }
+        assert!(st.get("quiet_start").is_null() && st.get("agent_max_rounds").is_null());
+        assert_eq!(minute_of_day("07:30"), Some(450));
+        assert_eq!(minute_of_day("23:59"), Some(1439));
+        assert_eq!(minute_of_day("7:30"), None);
     }
 }
