@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.8 |
+| **Version** | 0.9 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006 |
 
@@ -139,7 +139,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-002 | The UI MUST allow configuring providers (keys, models, endpoints), wake word, voice, volume, time zone, and tool policies. | Must | M4 | D |
 | REQ-CFG-003 | The UI MUST allow creating, viewing, rotating, and revoking inbox endpoints and show integration snippets. | Must | M4 | D |
 | REQ-CFG-004 | The UI MUST show inbox history, scheduled items, and recent logs, and offer a "test speak" action. | Should | M4 | D |
-| REQ-CFG-005 | The UI and API MUST require authentication and bind to the LAN only by default. | Must | M4 | T |
+| REQ-CFG-005 | The UI and API MUST require authentication, unless the administrator deliberately chose open mode on a private network (REQ-CFG-020), and MUST bind to loopback only by default (REQ-CFG-014). | Must | M4 | T |
 | REQ-CFG-006 | Secrets MUST be write-only in the UI (never displayed back in full). | Must | M4 | T |
 | REQ-CFG-007 | Configuration MUST be a single human-editable file, validated at startup with clear errors. Hot-reload SHOULD apply where safe. | Must | M1 | T |
 | REQ-CFG-008 | The UI SHOULD work on a phone-sized screen and without JavaScript frameworks. | Should | M4 | I |
@@ -149,9 +149,16 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-012 | Documentation MUST cover headless network setup for the supported Raspberry Pi path (pre-seeded Wi-Fi). An on-device provisioning portal is post-1.0. | Must | M4 | I |
 | REQ-CFG-013 | The build MUST include the project changelog; the UI "About" page SHOULD show the running version, build information, and the release notes for that version. | Should | M4 | T |
 | REQ-CFG-014 | The default listen address MUST be `127.0.0.1:8765`: loopback only (REQ-CFG-005) and a port that does not collide with services on the reference device (Amazon's `oobed` holds 8080 on an Echo Dot). If the address cannot be bound, the error MUST name the address and tell the user to choose another with `--listen` or the `listen` setting. | Must | M4 | T |
-| REQ-CFG-015 | The core MUST bind its listening address before it creates or prints an administrator token, so a server that never started never reveals a token. `--create-endpoint` and `--rotate-endpoint` are management commands: they print the token once and exit without starting the server (endpoints listed in the configuration file are still created at every start). | Must | M4 | T |
+| REQ-CFG-015 | The core MUST bind its listening address before it writes any administrator setting or prints a setup code (REQ-CFG-021), so a server that never started never reveals a secret. `--create-endpoint` and `--rotate-endpoint` are management commands: they print the token once and exit without starting the server (endpoints listed in the configuration file are still created at every start). | Must | M4 | T |
 | REQ-CFG-016 | Printed integration snippets MUST use `--public-url` when given, otherwise a URL derived from the listen address. An unspecified listen host (`0.0.0.0`, `[::]`) is not reachable as written, so the default name `clawdot.local` (REQ-CFG-009) is used with the listen port, and the core says the address was assumed. | Must | M4 | T |
 | REQ-CFG-017 | The text console (the stand-in for a satellite until audio ships) MUST end the program on `quit` or `exit` as well as on end of input. | Should | M1 | T |
+| REQ-CFG-018 | While no administrator setting exists, the UI MUST show one first-run setup screen with two choices: protect the UI with a single administrator password (recommended), or leave it open (unprotected) on this network, with a one-line warning. Until setup completes, the administrator API MUST refuse everything except reading the setup state and completing setup. There is exactly one administrator password; multi-user accounts are out of scope. No administrator token exists and none is printed. | Must | M4 | T |
+| REQ-CFG-019 | The administrator password MUST be stored only as a salted, iterated hash (PBKDF2-HMAC-SHA256, at least 100,000 iterations, 16-byte random salt, parameters stored with the hash) built on the dependencies already in the build, and MUST NOT be logged. Passwords MUST be 8 to 128 characters. A correct password yields a random, expiring, in-memory session token (at most 8 live sessions); API calls carry the session token, never the password. Sign-in attempts MUST share the authentication rate limit. | Must | M4 | T |
+| REQ-CFG-020 | Open mode MUST be refused unless the request that chooses it comes from a loopback, private, link-local, or shared (100.64.0.0/10) address and the listen address is not a specific public address. While open mode is active, any UI request from another address MUST be refused, and every UI view MUST show a persistent "unprotected" banner. Webhook, bridge, and satellite credentials are unaffected: endpoint tokens stay required in every UI mode (REQ-INB-002, REQ-SEC-006). | Must | M4 | T |
+| REQ-CFG-021 | Setup MUST complete only from a loopback, private, link-local, or shared address. When the listen address is not loopback, the core MUST print a one-time setup code (8 digits, held in memory only, new at every start) on the console at start-up, and setup MUST present it; wrong codes share the authentication rate limit. | Must | M4 | T |
+| REQ-CFG-022 | `clawdot --reset-admin` MUST remove the administrator setting (and any legacy `admin-token.hash`) from the data directory and exit, leaving endpoints, inbox, and other state untouched, so that setup shows again at the next start. It is run on the device with the server stopped. `--rotate-admin-token` no longer exists. | Must | M4 | T |
+| REQ-CFG-023 | An installation that has an `admin-token.hash` from an earlier version MUST keep working: on the first start the old token becomes the password-mode credential (entered in the password field), and the core converts the file without printing anything. The UI MUST let the signed-in administrator replace it with a real password (REQ-CFG-024). | Must | M4 | T |
+| REQ-CFG-024 | A signed-in administrator (or any private-address user in open mode) MUST be able to set a new administrator password in the UI; this moves an open installation to password mode and ends every other session. | Must | M4 | T |
 
 ### 4.7 Non-functional (`NFR`)
 
@@ -236,3 +243,4 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | 0.6 | 2026-11-07 | Changelog shipped in the build and shown on the About page (CFG-013), following the git-flow release process (ADR-0011) |
 | 0.7 | 2026-11-08 | Hardware test on an Echo Dot with no network time: unsynchronised-clock behaviour defined (TMR-009) |
 | 0.8 | 2026-11-08 | Hardware test findings: default listen port, bind-before-token ordering, endpoint management commands exit, snippet URLs derived from the listen address, console `quit` (CFG-014..017) |
+| 0.9 | 2026-11-08 | First-run admin setup replaces the printed administrator token: one password or deliberate open mode on a private network, session sign-in, setup code, `--reset-admin`, legacy token migration (CFG-018..024; CFG-005 and CFG-015 amended) |

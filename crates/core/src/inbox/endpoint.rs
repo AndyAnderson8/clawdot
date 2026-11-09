@@ -161,7 +161,7 @@ pub fn hash_token(token: &str) -> String {
 }
 
 /// Compare two equal-length strings without an early exit on the first difference.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
