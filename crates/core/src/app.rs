@@ -341,13 +341,13 @@ impl Core {
         let Some(s) = &self.stores else { return };
         // A failed write must not lose the in-memory event, but it must not be silent either.
         if let Err(e) = s.endpoints.save(&inner.endpoints) {
-            eprintln!("clawdot: could not save endpoints: {e}");
+            crate::diag::error(&format!("could not save endpoints: {e}"));
         }
         if let Err(e) = inner.inbox.save(&s.inbox) {
-            eprintln!("clawdot: could not save inbox: {e}");
+            crate::diag::error(&format!("could not save inbox: {e}"));
         }
         if let Err(e) = inner.replies.save(&s.replies) {
-            eprintln!("clawdot: could not save replies: {e}");
+            crate::diag::error(&format!("could not save replies: {e}"));
         }
     }
 

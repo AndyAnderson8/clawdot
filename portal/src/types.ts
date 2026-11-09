@@ -164,3 +164,25 @@ export interface WebhookToken {
 export interface ConnectionTest {
   tools: { name: string }[];
 }
+
+export interface BuildInfo {
+  version: string;
+  profile: string;
+  os: string;
+  arch: string;
+  features: string[];
+}
+export interface About {
+  version: string;
+  build?: BuildInfo;
+  changelog: string;
+}
+export interface LogLine {
+  ts: number;
+  level: string;
+  text: string;
+}
+export interface LogList {
+  lines: LogLine[];
+  max_lines: number;
+}

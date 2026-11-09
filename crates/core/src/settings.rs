@@ -18,6 +18,9 @@ use std::path::Path;
 /// Schema version of `settings.json`.
 pub const SCHEMA: u32 = 1;
 
+/// The name of the export file format (REQ-CFG-065).
+pub const EXPORT_FORMAT: &str = "clawdot-settings";
+
 /// Settings by key. A missing key means "not set at this layer".
 pub type Layer = BTreeMap<String, Value>;
 
@@ -597,6 +600,13 @@ impl SettingsState {
         Ok(())
     }
 
+    /// The settings saved on this device as a portable file (REQ-CFG-065). Only values saved in the portal are
+    /// in it, and none is a secret: a key is only ever the name of an environment variable (REQ-CFG-042).
+    #[must_use]
+    pub fn export(&self) -> Value {
+        json!({ "format": EXPORT_FORMAT, "version": 1, "settings": self.saved })
+    }
+
     /// Everything the Settings tab shows. Holds no secret: a key is only ever a variable name and whether
     /// that variable is set.
     #[must_use]
@@ -997,5 +1007,42 @@ mod tests {
         assert_eq!(minute_of_day("07:30"), Some(450));
         assert_eq!(minute_of_day("23:59"), Some(1439));
         assert_eq!(minute_of_day("7:30"), None);
+    }
+
+    // REQ-CFG-065
+    #[test]
+    fn the_export_holds_only_saved_values_and_loads_back_through_the_same_checks() {
+        let dir = TempDir::new("export");
+        let mut st = open_in(
+            &dir.0,
+            layer(&[("zone", json!("America/Chicago"))]),
+            Layer::new(),
+        );
+        assert_eq!(st.export()["settings"], json!({}), "nothing saved yet");
+        st.change(&json!({"device_name": "Den", "llm_key_env": "MY_KEY", "plan_speech": false}))
+            .unwrap();
+        let x = st.export();
+        assert_eq!(
+            (x["format"].clone(), x["version"].clone()),
+            (json!("clawdot-settings"), json!(1))
+        );
+        assert_eq!(
+            x["settings"],
+            json!({"device_name": "Den", "llm_key_env": "MY_KEY", "plan_speech": false})
+        );
+        assert!(
+            !x.to_string().contains("secret-value"),
+            "a key is only a variable name"
+        );
+        // A fresh device accepts it, and a file with a bad value is refused whole.
+        let other = TempDir::new("export2");
+        let mut st2 = open_in(&other.0, Layer::new(), Layer::new());
+        st2.change(&x["settings"]).unwrap();
+        assert_eq!(st2.get("device_name"), "Den");
+        let e = st2
+            .change(&json!({"device_name": "Ok", "agent_max_rounds": 99}))
+            .unwrap_err();
+        assert!(e.contains("1 to 20"));
+        assert_eq!(st2.get("device_name"), "Den", "nothing applied");
     }
 }

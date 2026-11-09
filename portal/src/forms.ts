@@ -232,3 +232,55 @@ export function settingsPatch(
 export function restartText(keys: string[]): string {
   return keys.map((k) => labelOf(k).toLowerCase()).join(", ");
 }
+
+/** A setting as a person reads it: on or off, "not set", or the text. */
+export function shownValue(v: unknown): string {
+  if (v === null || v === undefined || v === "") return "not set";
+  if (typeof v === "boolean") return v ? "on" : "off";
+  return typeof v === "string" || typeof v === "number" ? String(v) : JSON.stringify(v);
+}
+
+/** The settings in a file saved by "Save my settings", or the plain reason it cannot be one. */
+export function parseSettingsFile(
+  text: string,
+): { settings: Record<string, string | number | boolean | null> } | string {
+  const notOurs = "That is not a ClawDot settings file. Use a file made by “Save my settings”.";
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return notOurs;
+  }
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return notOurs;
+  const d = doc as Record<string, unknown>;
+  if (d["format"] !== "clawdot-settings") return notOurs;
+  if (d["version"] !== 1) return "This file comes from a different version of ClawDot and cannot be loaded here.";
+  const raw = d["settings"];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return notOurs;
+  const out: Record<string, string | number | boolean | null> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean"))
+      return "The value of “" + k + "” in the file is not something a setting can hold.";
+    out[k] = v;
+  }
+  if (Object.keys(out).length > 64) return "That file has too many settings to be a ClawDot settings file.";
+  return { settings: out };
+}
+
+export interface SettingChange {
+  key: string;
+  label: string;
+  from: string;
+  to: string;
+}
+
+/** What loading `incoming` would change, compared with the values in force now. */
+export function settingsChanges(s: Settings, incoming: Record<string, unknown>): SettingChange[] {
+  const out: SettingChange[] = [];
+  for (const [key, to] of Object.entries(incoming)) {
+    const now = s.fields[key]?.value ?? null;
+    if (JSON.stringify(now) === JSON.stringify(to)) continue;
+    out.push({ key, label: labelOf(key), from: shownValue(now), to: shownValue(to) });
+  }
+  return out;
+}

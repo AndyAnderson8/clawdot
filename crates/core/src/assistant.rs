@@ -306,7 +306,7 @@ impl Assistant {
     fn save(&self) {
         if let Some(store) = &self.sched_store {
             if let Err(e) = self.sched.save(store) {
-                eprintln!("clawdot: could not save timers and alarms: {e}");
+                crate::diag::error(&format!("could not save timers and alarms: {e}"));
             }
         }
     }
