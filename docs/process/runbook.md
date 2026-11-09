@@ -62,7 +62,7 @@ scripts/land.sh feature/timer-tool
 
 What it does: runs all gates on your branch, creates a **merge commit** on `dev`, and (once a remote exists) pushes that exact commit to a CI candidate branch, waits for CI to pass, then publishes it. After the push, it fetches and checks that `origin/dev` contains the merge commit; only then does it print `done` and delete your branch.
 
-Exit codes: `0` landed and verified, `1` other error, `3` `dev` held by another worktree, `4` merge exists only in local `dev`, `5` CI or publishing failed. `--wait SECONDS` (default 0) retries while another worktree holds `dev`.
+Exit codes: `0` landed and verified, `1` other error, `3` `dev` held by another worktree, `4` merge exists only in local `dev`, `5` CI or publishing failed, `6` (batching only, section 5a) integration branch moved underneath. `--wait SECONDS` (default 0) retries while another worktree holds `dev`.
 
 If it fails:
 
@@ -75,6 +75,33 @@ If it fails:
 | `NOT LANDED ... exists only in your LOCAL dev` (exit 4) | the push to `origin/dev` was rejected or not confirmed. Your branch and the CI candidate ref are kept. Read the server message, restore local `dev` with the `git switch dev && git reset --hard <sha>` it prints, then land again. |
 | `dev is checked out in another worktree` (exit 3) | only one worktree can hold `dev`. Ask the holder to release it (`git -C <path> switch --detach`), or run `scripts/land.sh <branch> --wait 300` to retry for up to 300 seconds. |
 | `gh CLI is required` | install and sign in to GitHub's CLI (`gh auth login`) |
+
+## 5a. Batch several branches, land once (integration branches)
+
+Use this for a milestone or parallel agent work you want to test and publish together. For a single branch use section 5. Policy: [git-workflow.md section 5a](git-workflow.md#5a-batching-a-milestone-integration-branches).
+
+```
+scripts/new-integration.sh my-milestone                     # or: scripts/land.sh --new-integration my-milestone
+# on each working branch, once it is ready:
+git merge integration/my-milestone                          # the branch must contain the batch so far
+scripts/land.sh feature/x --into integration/my-milestone  # fast check, LOCAL merge commit, branch deleted. No push, no CI.
+# when dev has moved on (or land says "does not contain dev"):
+scripts/land.sh --update integration/my-milestone           # merges dev into the batch, locally
+# when the milestone is done:
+scripts/land.sh integration/my-milestone --wait 900         # full gate, CI on the exact merge, push dev, verify
+```
+
+Extra exit code for `--into` and `--update`: `6` the integration branch moved while the merge was being made (nothing changed). Exit `3` means a worktree has the integration branch checked out (or, when landing, `dev`).
+
+| Message | Fix |
+|---|---|
+| `<branch> does not contain integration/<name>` | `git switch <branch> && git merge integration/<name>`, then land again |
+| `integration/<name> moved underneath this landing` (exit 6) | someone else batched first: `git merge integration/<name>` on your branch, land again |
+| `'integration/<name>' is checked out in a worktree` (exit 3) | `git -C <path> switch --detach` there, or add `--wait SECONDS`. Integration branches never need a checkout. |
+| `does not contain dev` when landing the batch | `scripts/land.sh --update integration/<name>`; on conflicts follow the branch recipe it prints |
+| `commits are never made by hand on an integration branch` | switch away (`git switch --detach`); put the change on a `feature/` or `chore/` branch and land it `--into` the batch |
+| the fast check fails | fix it on the source branch; the integration branch is untouched |
+| landing the batch fails (exit 4 or 5) | exactly as in section 5; the integration branch and its candidate ref are kept |
 
 ## 6. The tiny-change exception
 
@@ -144,6 +171,7 @@ Contributors open PRs against `dev` from forks. In the GitHub UI check that `gat
 - Create tags by hand, or run `release.sh publish`/`tag` as an agent.
 - Add AI attribution to commits, PRs, or docs.
 - Merge or push to `dev`/`main` by any route other than `scripts/land.sh` and `scripts/release.sh`.
+- Commit, merge, rebase or move refs on an `integration/` branch by hand (use `scripts/land.sh --into` and `--update`).
 
 ## 11. Changing the web portal
 

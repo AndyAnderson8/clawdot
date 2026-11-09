@@ -5,17 +5,21 @@
 #                                    lint of changed shell files, docs checks when docs changed, fmt and clippy
 #                                    (affected packages only) when Rust changed. No tests, cargo-deny, policy tests
 #                                    or history scan; scripts/land.sh and CI always run the full gate.
+#   scripts/check.sh --fast --tests  the fast subset plus `cargo test` for the affected packages (used when batching into an
+#                                    integration branch; CHECK_BASE=<rev> sets what "changed" is measured against, default dev)
 #   scripts/check.sh --release X.Y.Z additionally verify release readiness
 set -u -o pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
 fast=0
+tests=0
 release=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --fast) fast=1 ;;
+    --tests) tests=1 ;;
     --release) release="${2:-}"; shift ;;
-    *) echo "usage: $0 [--fast] [--release X.Y.Z]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--fast [--tests]] [--release X.Y.Z]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -29,7 +33,7 @@ run() { "$@" || { echo "FAILED: $*" >&2; fail=1; }; }
 changed=""
 if [ "$fast" -eq 1 ]; then
   changed=$(git diff --cached --name-only --diff-filter=ACMR)
-  [ -n "$changed" ] || changed=$({ git diff --name-only dev...HEAD; git diff --name-only; } 2>/dev/null | sort -u)
+  [ -n "$changed" ] || changed=$({ git diff --name-only "${CHECK_BASE:-dev}"...HEAD; git diff --name-only; } 2>/dev/null | sort -u)
 fi
 changed_matches() { printf '%s\n' "$changed" | grep -qE "$1"; }
 shell_re='^(scripts/[^/]+\.sh|\.githooks/[^/]+|\.claude/hooks/[^/]+\.sh)$'
@@ -171,6 +175,14 @@ if [ -f Cargo.toml ]; then
     run scripts/cargo.sh fmt --all --check
     step "rust: lint and type-check (clippy, warnings are errors) [${pkg_args[*]}]"
     run scripts/cargo.sh clippy "${pkg_args[@]}" --all-targets --locked -- -D warnings
+    if [ "$fast" -eq 1 ] && [ "$tests" -eq 1 ]; then
+      if [ "${#pkg_args[@]}" -gt 0 ] && [ "${pkg_args[0]}" = "-p" ]; then
+        step "rust: tests of the touched packages [${pkg_args[*]}]"
+        run scripts/cargo.sh test "${pkg_args[@]}" --locked
+      else
+        echo "note: a workspace-wide Rust change; the full test run is deferred to the landing into dev"
+      fi
+    fi
     if [ "$fast" -eq 0 ]; then
       step "rust: unit and integration tests"
       run scripts/cargo.sh test --workspace --locked
@@ -206,7 +218,8 @@ fi
 
 echo
 if [ "$fast" -eq 1 ]; then
-  skipped+=("tests" "cargo-deny" "policy tests" "history scan")
+  [ "$tests" -eq 1 ] || skipped+=("tests")
+  skipped+=("cargo-deny" "policy tests" "history scan")
   echo "check --fast: skipped (nothing relevant changed, or deferred): ${skipped[*]}. The full gate runs at scripts/land.sh and in CI."
 fi
 if [ "$fail" -eq 0 ]; then

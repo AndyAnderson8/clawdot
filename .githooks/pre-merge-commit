@@ -5,7 +5,7 @@ root=$(git rev-parse --show-toplevel)
 . "$root/scripts/lib-git.sh"
 
 branch=$(current_branch)
-if is_protected "$branch" && [ "${CLAWDOT_LANDING:-}" != "1" ]; then
-  die "merging into $branch must go through scripts/land.sh (it runs every gate first)."
+if { is_protected "$branch" || is_integration "$branch"; } && [ "${CLAWDOT_LANDING:-}" != "1" ]; then
+  die "merging into $branch must go through scripts/land.sh (it runs the gates first)."
 fi
 exit 0

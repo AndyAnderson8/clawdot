@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Regression tests for the git-flow policy tooling: commit-message rules and the agent guard.
 # Runs in a scratch repository; touches nothing in the working tree. Part of scripts/check.sh.
+# Each scratch-repo block runs in its own subshell on purpose, so its PATH and variables stay local.
+# shellcheck disable=SC2030,SC2031
 set -u
 # When run from a git hook, git exports variables that would point scratch-repo commands at the real repository.
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
@@ -92,6 +94,19 @@ g feature/x 2 "git branch -D dev"
 g feature/x 2 "gh pr merge 3"
 g feature/x 2 "git commit -m x -m Co-Authored-By: $ai <a@b.c>"
 g wip 2 "git commit -m x"
+# integration branches: valid for scripts, but changed only by scripts/land.sh (no manual commits, merges, or ref moves)
+g integration/x 2 "git commit -m x"
+g integration/x 2 "git merge feature/x"
+g integration/x 2 "git rebase dev"
+g integration/x 0 "git switch --detach integration/x"
+g integration/x 0 "git log --oneline integration/x"
+g feature/x 2 "git update-ref refs/heads/integration/x HEAD"
+g feature/x 2 "git update-ref refs/heads/dev HEAD"
+g feature/x 2 "git branch -f integration/x HEAD"
+g feature/x 0 "git branch -f feature/devops HEAD"
+g feature/x 2 "git push --force origin integration/x"
+g feature/x 2 "git push origin HEAD:dev"
+g feature/x 0 "scripts/land.sh feature/x --into integration/x"
 rm -rf "$S"
 
 # --- hook stubs fail closed on main when the versioned hooks are absent ---------------------------
@@ -368,6 +383,189 @@ STUB
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else fail "land.sh remote test failed at step code $rc (output: $(tail -4 "$rout" | tr '\n' ' '))"; fi
 rm -rf "$R" "$rout"
+
+# --- integration branches: batch locally (no push, no CI), then land the batch (scratch repos, gh stub) ----------
+I=$(mktemp -d)
+iout=$(mktemp)
+(
+  cd "$I" || exit 1
+  git init -q --bare origin.git
+  cat >origin.git/hooks/pre-receive <<'HOOK'
+#!/bin/sh
+while read -r old new ref; do
+  if [ "$ref" = refs/heads/dev ] && [ -f "$GIT_DIR/reject" ]; then echo "push declined due to repository rule violations" >&2; exit 1; fi
+done
+HOOK
+  chmod +x origin.git/hooks/pre-receive
+  mkdir -p bin
+  # The gh stub logs every call, so "no CI call" can be asserted.
+  cat >bin/gh <<'STUB'
+#!/bin/sh
+echo "$*" >>"$I_GH_LOG"
+case "$1 $2" in
+  "run list") echo 1 ;;
+  "run watch") exit 0 ;;
+esac
+STUB
+  chmod +x bin/gh
+  export I_GH_LOG="$I/gh.log" PATH="$I/bin:$PATH" LAND_CI_POLL=0 LAND_WAIT_INTERVAL=1 I_MOVE="$I/move"
+  : >"$I_GH_LOG"
+
+  git init -q -b main work
+  cd work || exit 1
+  git config user.name T
+  git config user.email t@example.com
+  git config core.autocrlf false
+  git remote add origin "$I/origin.git"
+  git commit -q --allow-empty -m "chore: initialize repository"
+  git branch dev
+  git switch -q dev
+  mkdir -p scripts .githooks
+  for f in "$root"/scripts/*.sh; do [ "$(basename "$f")" = test-policy.sh ] || cp "$f" scripts/; done
+  cp "$root"/.githooks/* .githooks/
+  cp "$root/.shellcheckrc" .shellcheckrc
+  # Test seam: a pre-merge-commit hook that moves the integration branch once, as a racing agent would.
+  # shellcheck disable=SC2016
+  sed -i 's|^exit 0$|if [ -n "${I_MOVE:-}" ] \&\& [ -f "$I_MOVE" ]; then rm "$I_MOVE"; git update-ref refs/heads/integration/batch "$(git commit-tree -p refs/heads/integration/batch -m "chore: racer" "refs/heads/integration/batch^{tree}")"; fi\nexit 0|' .githooks/pre-merge-commit
+  git add scripts .githooks .shellcheckrc
+  git commit -q -m "build: add scripts"
+  git push -q origin main dev 2>/dev/null
+  git config core.hooksPath .githooks
+  snap() { git ls-remote origin | sort; }
+  mkbranch() { # mkbranch <name> <file>: a branch from the given base (default dev) with one commit
+    git switch -q -c "$1" "${3:-dev}" && echo "$1" >"$2" && git add "$2" && git commit -q -m "feat: add $2"
+  }
+
+  # 1. create the integration branch from up-to-date dev; nothing holds it
+  scripts/new-integration.sh batch >"$iout" 2>&1 || exit 80
+  [ "$(git rev-parse integration/batch)" = "$(git rev-parse origin/dev)" ] || exit 81
+  ! git worktree list --porcelain | grep -q 'branch refs/heads/integration' || exit 82
+  if scripts/new-integration.sh batch >"$iout" 2>&1; then exit 83; fi
+  if scripts/new-integration.sh "Bad Name" >"$iout" 2>&1; then exit 84; fi
+
+  # 2. batch two branches: local merge commits only, no push, no CI call, sources deleted after the merge
+  before=$(snap)
+  mkbranch feature/a a.txt || exit 85
+  scripts/land.sh feature/a --into integration/batch >"$iout" 2>&1 || exit 86
+  grep -q "local only; no push, no CI" "$iout" || exit 87
+  [ "$(git log -1 --format=%s integration/batch)" = "Merge feature/a into integration/batch" ] || exit 88
+  [ "$(git rev-list --parents -n1 integration/batch | wc -w)" -eq 3 ] || exit 89
+  ! git rev-parse -q --verify feature/a >/dev/null || exit 90
+  [ -z "$(git symbolic-ref -q --short HEAD)" ] || exit 91
+  mkbranch feature/b b.txt || exit 92
+  # a branch that lacks the integration tip is refused, and kept
+  if scripts/land.sh feature/b --into integration/batch >"$iout" 2>&1; then exit 93; fi
+  grep -q "does not contain integration/batch" "$iout" || exit 94
+  git rev-parse -q --verify feature/b >/dev/null || exit 95
+  git merge -q -m "Merge integration/batch into feature/b" integration/batch || exit 96
+  scripts/land.sh feature/b --into integration/batch >"$iout" 2>&1 || exit 97
+  [ "$(git rev-list --count --merges dev..integration/batch)" -ge 2 ] || exit 98
+  [ "$(snap)" = "$before" ] || exit 99
+  [ ! -s "$I_GH_LOG" ] || exit 100
+  [ -z "$(git ls-remote origin 'refs/heads/ci/*')" ] || exit 101
+  [ "$(git rev-parse dev)" = "$(git rev-parse origin/dev)" ] || exit 102
+  # only feature/chore/bugfix/docs/spike branches are batched; dev and main cannot be targets this way
+  git switch -q -c release/9.9.9 dev
+  if scripts/land.sh release/9.9.9 --into integration/batch >"$iout" 2>&1; then exit 103; fi
+  grep -q "cannot be batched" "$iout" || exit 104
+  git switch -q --detach && git branch -q -D release/9.9.9
+
+  # 3. the integration branch moves while a merge is in flight: exit 6, nothing changed, no leftovers
+  mkbranch feature/c c.txt integration/batch || exit 105
+  : >"$I_MOVE"
+  tipc=$(git rev-parse feature/c)
+  rc=0; scripts/land.sh feature/c --into integration/batch >"$iout" 2>&1 || rc=$?
+  [ "$rc" -eq 6 ] || exit 106
+  grep -q "moved underneath" "$iout" || exit 107
+  git rev-parse -q --verify feature/c >/dev/null || exit 108
+  [ "$(git log -1 --format=%s integration/batch)" = "chore: racer" ] || exit 109
+  [ "$(git worktree list | wc -l)" -eq 1 ] || exit 110
+  git merge -q -m "Merge integration/batch into feature/c" integration/batch || exit 111
+  scripts/land.sh feature/c --into integration/batch >"$iout" 2>&1 || exit 112
+  git merge-base --is-ancestor "$tipc" integration/batch || exit 113
+
+  # 4. a worktree holding the integration branch: exit 3 naming it; --wait succeeds once it lets go
+  git worktree add -q "$I/holder" integration/batch
+  mkbranch feature/d d.txt integration/batch || exit 114
+  rc=0; scripts/land.sh feature/d --into integration/batch >"$iout" 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || exit 115
+  grep -q "holder" "$iout" || exit 116
+  git rev-parse -q --verify feature/d >/dev/null || exit 117
+  (sleep 2; git worktree remove --force "$I/holder") &
+  rc=0; scripts/land.sh feature/d --into integration/batch --wait 30 >"$iout" 2>&1 || rc=$?
+  wait
+  [ "$rc" -eq 0 ] || exit 118
+  [ "$(snap)" = "$before" ] || exit 119
+  [ ! -s "$I_GH_LOG" ] || exit 120
+
+  # 5. dev moves on (a normal landing, with CI); the stale integration branch is refused until updated
+  git switch -q dev
+  mkbranch feature/e e.txt || exit 121
+  scripts/land.sh feature/e >"$iout" 2>&1 || exit 122
+  [ -s "$I_GH_LOG" ] || exit 123
+  : >"$I_GH_LOG"
+  git switch -q --detach
+  rc=0; scripts/land.sh integration/batch >"$iout" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || exit 124
+  grep -q "does not contain dev" "$iout" || exit 125
+  grep -q -- "--update integration/batch" "$iout" || exit 126
+  git rev-parse -q --verify integration/batch >/dev/null || exit 127
+  [ ! -s "$I_GH_LOG" ] || exit 128
+  scripts/land.sh --update integration/batch >"$iout" 2>&1 || exit 129
+  git merge-base --is-ancestor origin/dev integration/batch || exit 130
+  [ "$(git log -1 --format=%s integration/batch)" = "Merge dev into integration/batch" ] || exit 131
+  [ ! -s "$I_GH_LOG" ] || exit 132
+
+  # 6. landing the batch: contains dev, FULL check, CI on the exact merge, push, verify, clean up
+  tipb=$(git rev-parse integration/batch)
+  scripts/land.sh integration/batch >"$iout" 2>&1 || exit 133
+  grep -q "check: all gates passed" "$iout" || exit 134
+  grep -q "run watch" "$I_GH_LOG" || exit 135
+  git fetch -q origin
+  [ "$(git rev-parse dev)" = "$(git rev-parse origin/dev)" ] || exit 136
+  [ "$(git log -1 --format=%s origin/dev)" = "Merge integration/batch into dev" ] || exit 137
+  git merge-base --is-ancestor "$tipb" origin/dev || exit 138
+  ! git rev-parse -q --verify integration/batch >/dev/null || exit 139
+  grep -q "verified: origin/dev" "$iout" || exit 140
+  [ -z "$(git ls-remote origin 'refs/heads/ci/*')" ] || exit 141
+  [ "$(git rev-list --count --merges origin/dev)" -ge 5 ] || exit 142
+
+  # 7. a rejected push keeps everything and exits non-zero
+  prev=$(git rev-parse origin/dev)
+  scripts/new-integration.sh rej >"$iout" 2>&1 || exit 143
+  mkbranch feature/f f.txt integration/rej || exit 144
+  scripts/land.sh feature/f --into integration/rej >"$iout" 2>&1 || exit 145
+  git switch -q dev
+  : >"$I/origin.git/reject"
+  rc=0; scripts/land.sh integration/rej >"$iout" 2>&1 || rc=$?
+  [ "$rc" -eq 4 ] || exit 146
+  grep -q "LOCAL dev" "$iout" || exit 147
+  ! grep -q " done" "$iout" || exit 148
+  git rev-parse -q --verify integration/rej >/dev/null || exit 149
+  [ "$(git rev-parse origin/dev)" = "$prev" ] || exit 150
+  [ -n "$(git ls-remote origin 'refs/heads/ci/*')" ] || exit 151
+  git reset -q --hard "$prev"
+  rm "$I/origin.git/reject"
+
+  # 8. direct commits stay blocked: dev (beyond the tiny change) and any integration branch
+  git switch -q dev
+  echo 1 >x1.txt && echo 2 >x2.txt && echo 3 >x3.txt && git add x1.txt x2.txt x3.txt
+  if git commit -q -m "feat: too big for dev" >"$iout" 2>&1; then exit 152; fi
+  git reset -q && rm -f x1.txt x2.txt x3.txt
+  git switch -q -c chore/z dev && echo z >z.txt && git add z.txt && git commit -q -m "chore: add z" || exit 156
+  git switch -q integration/rej
+  echo 1 >y.txt && git add y.txt
+  if git commit -q -m "feat: by hand" >"$iout" 2>&1; then exit 153; fi
+  grep -q "never made by hand" "$iout" || exit 154
+  git reset -q && rm -f y.txt
+  if git merge --no-ff -q chore/z >"$iout" 2>&1; then exit 155; fi
+  git merge --abort 2>/dev/null || true
+  git switch -q --detach
+  exit 0
+)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else fail "integration branch test failed at step code $rc (output: $(tail -4 "$iout" | tr '\n' ' '))"; fi
+rm -rf "$I" "$iout"
 
 # --- scripts/cargo.sh must not build into the repository (stray '-agent-<id>' directories) -------------
 if grep -qE '\$\{?CARGO_TARGET_DIR' "$root/scripts/cargo.sh"; then

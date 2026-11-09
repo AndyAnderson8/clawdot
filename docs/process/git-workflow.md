@@ -11,6 +11,7 @@ This is the binding policy for how code moves from an idea to a release. It appl
 | `feature/<name>` | New functionality | Author | Branch from `dev`, land into `dev` |
 | `bugfix/<name>` | Fix for a defect found on `dev` | Author | Branch from `dev`, land into `dev` |
 | `docs/<name>`, `chore/<name>`, `spike/<name>` | Docs, maintenance, time-boxed investigations | Author | Branch from `dev`, land into `dev` |
+| `integration/<name>` | Optional batch of several working branches, landed into `dev` once ([section 5a](#5a-batching-a-milestone-integration-branches)) | Nobody by hand | `scripts/new-integration.sh`; branches go in with `scripts/land.sh <branch> --into integration/<name>`; the batch lands with `scripts/land.sh integration/<name>` |
 | `release/<X.Y.Z>` | Prepares a release (version and changelog commit) | Anyone | `scripts/release.sh prepare` branches from `dev`; land it into `dev`; the human then publishes `dev` to `main` |
 | `hotfix/<name>` | Urgent fix for a released version | Author | Branch from `main`; `scripts/land.sh hotfix/<name> --into main`; the human tags it; back-merge `main` into `dev` |
 
@@ -76,6 +77,26 @@ scripts/land.sh feature/timer-tool
 5. Fetches and verifies that `origin/dev` contains the merge commit; only then does it delete the merged branch and the candidate ref and report success. If the final push is rejected or unverified it exits `4`, keeps the branch and candidate ref, leaves local `dev` as it is and prints the recovery command. If another worktree holds `dev` it exits `3` naming that worktree (`--wait SECONDS` retries for a bounded time). A CI failure exits `5`.
 
 The tiny-commit exception: make the single commit on `dev` (the `pre-commit` hook verifies the size), then run `scripts/land.sh --tiny`.
+
+## 5a. Batching a milestone (integration branches)
+
+The default stays one branch, one landing: `scripts/land.sh <branch>`. When several branches belong together (a milestone, or work by several agents), batching them avoids a full gate and a CI wait per branch: **do not push while building, add all the features, run the tests when ready to merge, then push.**
+
+```
+scripts/new-integration.sh device-layer           # integration/device-layer from up-to-date dev (no checkout)
+git merge integration/device-layer                # on each working branch, so it contains the batch so far
+scripts/land.sh feature/boards --into integration/device-layer     # FAST check, LOCAL merge commit, branch deleted
+scripts/land.sh feature/daemon --into integration/device-layer
+scripts/land.sh --update integration/device-layer # bring newer dev into the batch when dev has moved
+scripts/land.sh integration/device-layer          # the batch lands into dev: FULL gate, CI on the exact merge, push, verify
+```
+
+- **Into the batch (local only).** Only `feature/`, `bugfix/`, `docs/`, `chore/` and `spike/` branches can be batched, and each must contain the integration branch. `land.sh --into integration/<name>` runs `scripts/check.sh --fast --tests` on the merged tree (shell, docs, `fmt`, `clippy`, and `cargo test` for the touched packages; a workspace-wide change defers the tests to the landing) and the commit-message scan, then makes a merge commit and deletes the source branch. It never pushes and never runs CI, and it needs no network.
+- **Into `dev`.** `land.sh integration/<name>` is the normal landing: the branch must contain `dev` (otherwise run `--update`), the full gate runs on the exact tip, the merge commit goes to a candidate ref, CI must pass, then `dev` is pushed and verified on `origin`. Exit codes and `--wait` are as in section 5. Nothing reaches `dev` or `main` without the full gate and CI on the exact merge SHA.
+- **No checkout needed.** The local merge happens in a temporary detached worktree and the branch ref is moved by a compare-and-swap, so agents batching into the same branch do not hold it. If it moved underneath (exit 6), merge the new tip into your branch (`git merge integration/<name>`) and land again. If a worktree has it checked out (exit 3), run `git switch --detach` there, or use `--wait`. To inspect a batch, check it out detached.
+- **Script-owned.** Do not commit, merge, rebase or move refs on an integration branch by hand; hooks and the agent guard refuse it. A merge conflict while updating from `dev` is resolved on a `chore/update-<name>` branch made from the integration branch, which is then landed `--into` it.
+- **When to use it.** Batch a milestone, a handful of related branches, or parallel agent work that you want tested and published together. Do not use it for one branch, for urgent fixes, or for long-lived batches (the longer the batch lives, the harder a failure at landing is to place).
+- **History.** Merge commits keep each branch visible: `git log --first-parent dev` shows one entry per batch; inside it each branch is its own merge commit. `git bisect` works across the batch as on any history. To undo a whole batch after landing, `git revert -m 1 <batch merge>`; to undo one branch, `git revert -m 1 <that branch's merge in the batch>`.
 
 Required gates (all of them, with no exceptions):
 
@@ -168,4 +189,4 @@ Local hooks can be bypassed by someone determined; the server rules and CI canno
 - Do not commit build outputs, model blobs over 1 MB, or audio fixtures over 500 KB without discussion (Git LFS for approved large fixtures).
 - `Cargo.lock` is committed (this is an application).
 - Line endings are LF via `.gitattributes` and `.editorconfig`.
-- Delete merged branches (the landing script does).
+- Delete merged branches (the landing script does; remote copies of batched branches are left for a human).
