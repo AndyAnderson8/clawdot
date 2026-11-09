@@ -7,6 +7,7 @@
 
 use clawdot_core::esphome::frame::{Link, plain_frame};
 use clawdot_core::esphome::media::{MediaStore, serve as serve_media};
+use clawdot_core::esphome::noise;
 use clawdot_core::esphome::proto::{Msg, event, flags, media as player};
 use clawdot_core::esphome::{Device, Pipeline, Timing, run_device};
 use clawdot_core::satellite::{Announcer, Answer, Ask, Settings};
@@ -160,6 +161,7 @@ struct Rig {
     announcer: Announcer,
     asked: mpsc::UnboundedReceiver<String>,
     media_base: Option<String>,
+    device_key: Option<[u8; 32]>,
 }
 
 /// Start the client against a fake device. `media` also starts the file server.
@@ -169,6 +171,16 @@ async fn rig(media: bool) -> Rig {
 
 /// Like `rig`, with an assistant that takes `think_ms` to answer.
 async fn rig_slow(media: bool, think_ms: u64) -> Rig {
+    rig_keys(media, think_ms, None, None).await
+}
+
+/// Like `rig_slow`, with Noise keys: the one the client uses and the one the fake device expects.
+async fn rig_keys(
+    media: bool,
+    think_ms: u64,
+    client_key: Option<[u8; 32]>,
+    device_key: Option<[u8; 32]>,
+) -> Rig {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let announcer = Announcer::default();
@@ -206,7 +218,7 @@ async fn rig_slow(media: bool, think_ms: u64) -> Rig {
         Device {
             name: "kitchen".into(),
             addr: addr.to_string(),
-            psk: None,
+            psk: client_key,
         },
         store,
         Pipeline {
@@ -223,6 +235,7 @@ async fn rig_slow(media: bool, think_ms: u64) -> Rig {
         announcer,
         asked,
         media_base,
+        device_key,
     }
 }
 
@@ -233,9 +246,11 @@ impl Rig {
             .await
             .expect("the client dials the device")
             .unwrap();
-        let mut c = Conn {
-            link: Link::plain(s),
+        let link = match &self.device_key {
+            Some(key) => noise::accept(s, key, "fake-dot").await.unwrap(),
+            None => Link::plain(s),
         };
+        let mut c = Conn { link };
         let sub = c.setup(spec).await;
         (c, sub)
     }
@@ -702,6 +717,52 @@ async fn req_esp_003_malformed_frames_end_the_connection_and_it_is_redialled() {
     c.send(Msg::PingRequest).await;
     c.expect("a ping response", |m| *m == Msg::PingResponse)
         .await;
+}
+
+// REQ-ESP-014: the whole voice run works over the encrypted link.
+#[tokio::test]
+async fn req_esp_014_a_voice_run_works_over_noise() {
+    let mut rig = rig_keys(false, 0, Some([5; 32]), Some([5; 32])).await;
+    let mut c = rig.ready(Spec::full()).await;
+    c.send(start_run()).await;
+    speak(&mut c, 1200, false).await;
+    let (kinds, audio) = until_run_end(&mut c).await;
+    assert!(kinds.contains(&event::TTS_STREAM_END), "{kinds:?}");
+    assert_eq!(audio.len(), "You have nothing.".len() * 50 * 2);
+    assert_eq!(rig.asked.recv().await.unwrap(), "what is on my plate");
+}
+
+// REQ-ESP-014: a wrong key never gets as far as a voice session, and the client keeps trying.
+#[tokio::test]
+async fn req_esp_014_a_wrong_key_is_refused_and_retried() {
+    let rig = rig_keys(false, 0, Some([5; 32]), Some([6; 32])).await;
+    for _ in 0..2 {
+        let (s, _) = timeout(PATIENCE, rig.listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let e = noise::accept(s, &[6; 32], "fake-dot").await.unwrap_err();
+        assert!(e.contains("MAC"), "{e}");
+    }
+    assert_eq!(rig.announcer.connected(), 0);
+}
+
+// REQ-ESP-014, REQ-ESP-003: a device that is not encrypted, dialled with a key, is refused.
+#[tokio::test]
+async fn req_esp_014_a_plaintext_device_is_refused_when_a_key_is_set() {
+    let rig = rig_keys(false, 0, Some([5; 32]), None).await;
+    let (mut s, _) = timeout(PATIENCE, rig.listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    // The client's empty hello arrives; the device answers in plaintext.
+    let mut hello = [0u8; 3];
+    s.read_exact(&mut hello).await.unwrap();
+    assert_eq!(hello, [1, 0, 0]);
+    s.write_all(&plain_frame(2, &[])).await.unwrap();
+    // The client gives up and redials.
+    let again = timeout(PATIENCE, rig.listener.accept()).await;
+    assert!(again.is_ok(), "the client dials again");
 }
 
 // REQ-ESP-004: a message of a type the client does not use is ignored, not fatal.

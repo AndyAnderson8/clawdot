@@ -40,6 +40,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |
 | `speech` | Speech-to-text and text-to-speech provider (`url`, `key_env`, `stt_model`, `tts_model`, `voice`, `language`, `tts_sample_rate`); see [voice-pipeline.md](voice-pipeline.md) | none |
 | `satellite` | Where speakers connect (`listen`, `token_env`, `follow_up_secs`); see [satellite-server.md](satellite-server.md) | off |
+| `esphome` | ESPHome voice satellites to dial (`devices`, `media_listen`, `media_url`); needs a build with the `esphome-satellite` feature; see [esphome-satellite.md](esphome-satellite.md) | off |
 
 ## Rules
 

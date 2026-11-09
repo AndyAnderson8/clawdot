@@ -17,6 +17,7 @@
 | Architecture | [architecture/voice-pipeline.md](architecture/voice-pipeline.md) | Dialog state machine, endpointing, and the speech turn |
 | Architecture | [architecture/satellite-server.md](architecture/satellite-server.md) | How speakers connect: handshake, a spoken turn, mute, limits |
 | Architecture | [architecture/board-support.md](architecture/board-support.md) | Board layer: buttons, LED ring, mute, Wi-Fi, clock, audio names; the Echo Dot Gen 2 board file |
+| Architecture | [architecture/esphome-satellite.md](architecture/esphome-satellite.md) | Optional client for ESPHome voice satellites (a Dot base image, Voice PE): config, mapping, limits |
 | Architecture | [architecture/porting-a-satellite.md](architecture/porting-a-satellite.md) | Implementing a satellite on new hardware; the reference client |
 | Decisions | [adr/](adr/README.md) | Why we chose what we chose |
 | Quality | [quality/testing-strategy.md](quality/testing-strategy.md) | Test levels, CI gates, review checklist |

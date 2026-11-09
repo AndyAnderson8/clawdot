@@ -196,6 +196,7 @@ Goal: a Dot running a base image (or any ESPHome voice satellite, such as a Pi r
 - Estimate **about 1,100 to 1,300 lines**. Not in the default Dot budget unless chosen
 - **Optional Noise encryption on `ring`** (the `Noise_NNpsk0_25519_ChaChaPoly_SHA256` initiator, tested with published vectors), with no `snow` and no `prost` so the dependency budget is protected. Revisit with measured binary size once code exists
 - **Test against a fake ESPHome server on a PC first**, then against `aioesphomeapi` as the peer, before any real device is involved
+- **Status (2026-11-09):** the client is built behind the cargo features `esphome-satellite` and `esphome-noise` ([spec 0004](specs/0004-esphome-satellite-client.md), [architecture/esphome-satellite.md](architecture/esphome-satellite.md)) and tested against the fake device in `crates/e2e`. The Noise handshake was also checked once against an independent responder (`noiseprotocol`). Still to do: run against `aioesphomeapi`'s own voice client and then a real satellite (blocked on the B0 trial and the maintainer's go for any device)
 
 **Exit:** a desktop run in which a real ESPHome satellite wakes, a voice turn runs through ClawDot's pipeline, and an inbox announcement gets a spoken reply.
 

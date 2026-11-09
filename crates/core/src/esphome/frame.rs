@@ -170,12 +170,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Link<IO> {
             .await
             .map_err(|e| format!("write: {e}"))
     }
-
-    /// Give back the socket (used by the Noise handshake, which frames its own first messages).
-    #[cfg(feature = "esphome-noise")]
-    pub(super) fn into_parts(self) -> (IO, Vec<u8>) {
-        (self.io, self.rx)
-    }
 }
 
 #[cfg(test)]
