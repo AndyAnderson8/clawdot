@@ -1,6 +1,6 @@
 # Proposal: the web UI stack
 
-Status: **Proposed** (not decided; no tooling has been added). A later ADR (suggested: ADR-0014, "Web UI source language and build") records the decision once the maintainer chooses.
+Status: **Superseded in part (2026-11-09)** by [ADR-0016](../adr/0016-portal-typescript-stack.md), which measured five implementations of one tab (vanilla TypeScript, Preact, Lit, Svelte, Solid) and proposes TypeScript with Preact built by esbuild, output committed, no `build.rs` Node dependency. The build-pipeline reasoning below (committed output plus a CI rebuild check, no Node in `cargo build`) still holds; the recommendation of option B (no framework) was changed to option C because the portal reached eight tabs. This note is kept as the original comparison.
 
 ## Context
 

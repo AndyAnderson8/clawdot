@@ -2,6 +2,8 @@
 
 Status: Accepted (design guidance; requirements are REQ-CFG-025..031 in [spec 0001](../specs/0001-product-requirements.md)). Builds on [brand.md](brand.md) for colour tokens and the logo, and on [ui-stack.md](ui-stack.md) (plain HTML, CSS, and JavaScript for now).
 
+> 2026-11-09: the source language and framework are proposed in [ADR-0016](../adr/0016-portal-typescript-stack.md) (TypeScript, Preact, esbuild, committed output). The design below does not change.
+
 ## Who and what for
 
 One person on a phone, just after plugging in a small crab-themed speaker. The portal has to answer three questions fast: is it alive, what will it do for me, and how do I change that. The earlier single-page layout failed because it used internal words (inbox, scheduled, endpoints), hid tools and connections entirely, and showed radio stations nobody asked for.
