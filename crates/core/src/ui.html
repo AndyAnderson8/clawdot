@@ -603,7 +603,7 @@
       if (servers.length) box.append(ul);
     }
     var name = h("input", { type: "text", maxlength: "24", autocapitalize: "none", autocomplete: "off", placeholder: "home" });
-    var url = h("input", { type: "text", inputmode: "url", autocapitalize: "none", autocomplete: "off", placeholder: "http://homeassistant.local:8123/mcp" });
+    var url = h("input", { type: "text", inputmode: "url", autocapitalize: "none", autocomplete: "off", placeholder: "https://homeassistant.local:8123/mcp" });
     var tokenVar = h("input", { type: "text", maxlength: "64", autocapitalize: "none", autocomplete: "off", placeholder: "HA_TOKEN" });
     var asks = h("input", { type: "checkbox", id: "conn-asks" }); asks.checked = true;
     var result = h("p", { role: "status" });
