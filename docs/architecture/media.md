@@ -66,7 +66,7 @@ Assistant media player; **these recipes are untested**, so check each call again
 
 MPD and Music Assistant expose similar HTTP or JSON-RPC interfaces; Spotify's Web API needs OAuth tokens
 that expire, which a fixed bearer token from the environment does not handle, so use a small sidecar that
-refreshes the token and exposes a simple endpoint.
+refreshes the token and exposes a simple endpoint (see [the Spotify recipe](../recipes/spotify.md), which also explains why Spotify voice control is a policy problem).
 
 ## Not built yet
 
