@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "id": "agt-ambiguous-target-is-always-a-question",
+  "use_case": "AGT",
+  "description": "Two containers match the name. The assistant lists them, asks which one, restarts nothing, and holds the restart for a yes once it is told (REQ-AST-021, REQ-SEC-011).",
+  "tags": ["clarify", "docker", "t2"],
+  "tool_sets": ["docker"],
+  "tools": [
+    {"name": "docker__list", "tier": "read_only", "result": "plex-1 stopped. plex-2 running. sonarr running."}
+  ],
+  "turns": [
+    {
+      "say": "restart plex",
+      "model": [
+        {"calls": [{"name": "docker__list"}]},
+        {"calls": [{"name": "ask_user", "args": {"question": "There are two, plex 1 and plex 2. Which one should I restart?"}}]}
+      ],
+      "expect": {
+        "ends": "asked",
+        "calls": [{"tool": "docker__list"}],
+        "must_not_call": ["docker__restart"],
+        "no_held": true,
+        "speech_is_question": true,
+        "speech_contains": ["plex 1", "plex 2"]
+      }
+    },
+    {
+      "say": "plex 2",
+      "model": [
+        {"calls": [{"name": "docker__restart", "args": {"container": "plex-2"}}]}
+      ],
+      "expect": {
+        "ends": "held",
+        "calls": [],
+        "held": {"tool": "docker__restart", "args": {"container": "plex-2"}, "speech_contains": ["plex-2", "Yes or no?"]}
+      }
+    },
+    {
+      "say": "yes",
+      "model": [{"text": "Restarted plex 2."}],
+      "expect": {
+        "calls": [{"tool": "docker__restart", "args": {"container": "plex-2"}}],
+        "no_held": true
+      }
+    }
+  ],
+  "forbidden": {"tools": ["docker__remove"]},
+  "limits": {"max_model_requests": 4}
+}

@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "id": "agt-stop-cancels-a-running-call",
+  "use_case": "AGT",
+  "description": "The user says stop while a read is in flight. The call is dropped, the next call never starts, the audit log says cancelled, and the host says what was and was not done (REQ-AST-022).",
+  "tags": ["cancel", "github"],
+  "tool_sets": ["github"],
+  "tools": [
+    {"name": "github__list_runs", "tier": "read_only", "hang": true, "cancels_turn": true}
+  ],
+  "setup": {"tool_timeout_ms": 5000},
+  "turns": [
+    {
+      "say": "check the runs and the pull requests",
+      "model": [
+        {"calls": [{"name": "github__list_runs"}, {"name": "github__list_prs"}]}
+      ],
+      "expect": {
+        "ends": "cancelled",
+        "calls": [{"tool": "github__list_runs"}],
+        "must_not_call": ["github__list_prs"],
+        "speech_contains": ["Okay, I stopped", "I did not get to: github list prs"],
+        "audit": [{"tool": "github__list_runs", "decision": "cancelled"}, {"tool": "turn", "decision": "cancelled"}]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 1, "max_tool_calls": 1}
+}

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "agt-call-limit-stops-the-turn",
+  "use_case": "AGT",
+  "description": "A reply with more calls than the turn allows: the extra calls never start and the host says which limit it hit and what it did not get to (REQ-AST-019).",
+  "tags": ["limits", "github"],
+  "tool_sets": ["github"],
+  "setup": {"max_tool_calls": 3},
+  "turns": [
+    {
+      "say": "check everything about CI",
+      "model": [
+        {"calls": [
+          {"name": "github__list_runs"},
+          {"name": "github__list_prs"},
+          {"name": "github__list_runs"},
+          {"name": "github__list_prs"},
+          {"name": "github__list_runs"}
+        ]}
+      ],
+      "expect": {
+        "ends": "calls_limit",
+        "calls": [{"tool": "github__list_runs"}, {"tool": "github__list_prs"}, {"tool": "github__list_runs"}],
+        "speech_contains": ["stopped after 3 steps", "limit of 3 tool calls", "Here is where I got to", "I did not get to"],
+        "audit": [{"tool": "github__list_prs", "decision": "blocked:limit"}]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 1, "max_tool_calls": 3}
+}

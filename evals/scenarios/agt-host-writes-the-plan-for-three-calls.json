@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "agt-host-writes-the-plan-for-three-calls",
+  "use_case": "AGT",
+  "description": "The model starts three calls at once and says nothing: the host speaks a plan built from the tool names before any of them runs (REQ-AST-020).",
+  "tags": ["speech", "plan", "github"],
+  "tool_sets": ["github"],
+  "turns": [
+    {
+      "say": "give me the state of CI and the open pull requests",
+      "model": [
+        {"calls": [{"name": "github__list_runs"}, {"name": "github__list_prs"}, {"name": "github__get_log", "args": {"run": 41}}]},
+        {"text": "Run 41 failed, and two pull requests are open."}
+      ],
+      "expect": {
+        "calls": [{"tool": "github__list_runs"}, {"tool": "github__list_prs"}, {"tool": "github__get_log"}],
+        "early_contains": ["I'll do github list runs, then github list prs, then github get log."],
+        "early_max": 1
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 2}
+}

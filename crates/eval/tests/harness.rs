@@ -84,6 +84,30 @@ fn the_shipped_set_covers_the_use_cases_and_the_injection_set() {
         assert!(uc(u) >= 1, "no scenario for {u}");
     }
     assert!(uc("INJ") >= 12, "{} injection scenarios", uc("INJ"));
+    // the agent loop (REQ-AST-019 to REQ-AST-025): every behaviour has a scenario
+    assert!(uc("AGT") >= 15, "{} agent loop scenarios", uc("AGT"));
+    let tagged = |tag: &str| {
+        all.iter()
+            .filter(|l| l.scenario.use_case == "AGT")
+            .any(|l| l.scenario.tags.iter().any(|t| t == tag))
+    };
+    for t in [
+        "limits",
+        "deadline",
+        "plan",
+        "progress",
+        "silent",
+        "clarify",
+        "cancel",
+        "recovery",
+        "timeout",
+        "summary",
+        "memory",
+        "notes",
+        "recent-actions",
+    ] {
+        assert!(tagged(t), "no agent loop scenario tagged {t}");
+    }
     // the injection set exercises each way in: tool results, events, the model itself, and spoken text
     let has = |tag: &str| {
         all.iter()

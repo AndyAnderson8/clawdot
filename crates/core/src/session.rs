@@ -989,7 +989,7 @@ fn first_sentence(text: &str) -> String {
 /// A plan built from tool names, used when the model made several calls in its first round and said nothing.
 fn plan_from_calls(calls: &[ToolCall]) -> String {
     let names: Vec<String> = calls.iter().take(4).map(|c| spoken_name(&c.name)).collect();
-    format!("I'll {}.", names.join(", then "))
+    format!("I'll do {}.", names.join(", then "))
 }
 
 /// The steps already taken, in words ("set timer, github list runs (it failed)").
@@ -4102,7 +4102,7 @@ mod tests {
             .await
         };
         let r = go(cfg()).await;
-        assert_eq!(r.early, ["I'll look, then act, then report."]);
+        assert_eq!(r.early, ["I'll do look, then act, then report."]);
         let r = go(TurnConfig {
             plan_speech: false,
             ..cfg()

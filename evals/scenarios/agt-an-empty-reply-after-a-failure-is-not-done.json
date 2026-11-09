@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "agt-an-empty-reply-after-a-failure-is-not-done",
+  "use_case": "AGT",
+  "description": "A call fails and the model then says nothing. The user does not hear 'Done.': the host says the call did not work and offers to try again (REQ-AST-025).",
+  "tags": ["recovery", "docker"],
+  "tool_sets": ["docker"],
+  "tools": [
+    {"name": "docker__list", "tier": "read_only", "error": "the NAS did not answer"}
+  ],
+  "turns": [
+    {
+      "say": "which containers are running",
+      "model": [
+        {"calls": [{"name": "docker__list"}]},
+        {"text": ""}
+      ],
+      "expect": {
+        "ends": "tool_failures",
+        "speech_contains": ["I tried docker list and it didn't work", "try again"],
+        "speech_not_contains": ["Done."]
+      }
+    }
+  ],
+  "forbidden": {"speech_contains": ["Done."]},
+  "limits": {"max_model_requests": 2, "max_tool_calls": 1}
+}

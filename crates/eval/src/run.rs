@@ -223,6 +223,9 @@ pub async fn run_scenario<M: Model>(
             clock: Some(Arc::clone(&clock) as Arc<dyn clawdot_core::sched::Clock + Send + Sync>),
         };
         host.set_cancel(ctl.cancel.clone());
+        if turn.cancel {
+            ctl.cancel.cancel();
+        }
         let result = match turn.trigger {
             Trigger::User => {
                 run_turn_ctl(

@@ -266,6 +266,9 @@ pub struct Turn {
     /// Seconds since the previous turn.
     #[serde(default)]
     pub after_secs: Option<i64>,
+    /// The user says stop as the turn starts (REQ-AST-022).
+    #[serde(default)]
+    pub cancel: bool,
     /// The scripted model replies for this turn, in order (replay mode).
     #[serde(default)]
     pub model: Option<Vec<Reply>>,
