@@ -72,3 +72,7 @@ clawdot-device --board my-board.json --check              # a board file of your
 | `unsafe` | None (`unsafe_code = "forbid"` from the workspace) |
 
 Measured with the zig linker wrappers of `scripts/setup-wsl.sh`; RSS and CPU wait for the unit (B3).
+
+## PC voice loop
+
+With `--wake-model`, `--always-on`, `--mic-device` and `--speaker-device` the desktop board becomes a live voice loop on a PC: the microphone stays open between turns and a wake word starts a turn, with push-to-talk and the console keys unchanged. See [wake-word-runtime.md](wake-word-runtime.md) for the front end and [pc-voice-loop.md](../guides/pc-voice-loop.md) for the steps. `board::load_tuned` applies the command-line microphone and speaker names to the board file before it is used and declares the wake engine only when one was loaded.
