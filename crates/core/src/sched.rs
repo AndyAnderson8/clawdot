@@ -5,6 +5,7 @@
 //! (REQ-TMR-005). Nothing fires until the wall clock is trustworthy (REQ-TMR-006), and the whole state
 //! is a small serialisable value that survives restarts (REQ-TMR-003).
 
+use crate::stopwatch::{Lap, Reading, Refusal, Stopwatch};
 use crate::store::{JsonStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -252,6 +253,9 @@ impl std::error::Error for SchedError {}
 pub struct SchedState {
     next_id: u64,
     items: Vec<Item>,
+    /// The stopwatch, if there is one (REQ-TMR-011). Files from before it existed load without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stopwatch: Option<Stopwatch>,
 }
 
 /// Schema version of the persisted scheduler file.
@@ -391,6 +395,56 @@ impl Scheduler {
             repeat: None,
             created_at: now,
         })
+    }
+
+    /// Start the stopwatch at `now`. A stopped one is replaced; a running one is left alone.
+    ///
+    /// # Errors
+    /// [`Refusal::Running`] with its reading, or [`Refusal::ClockWentBack`] when it is running and
+    /// the clock is behind its last record.
+    pub fn stopwatch_start(&mut self, now: Ts) -> Result<(), Refusal> {
+        if let Some(sw) = &self.state.stopwatch {
+            let r = sw.read(now)?;
+            if r.running {
+                return Err(Refusal::Running(r));
+            }
+        }
+        self.state.stopwatch = Some(Stopwatch::start(now));
+        Ok(())
+    }
+
+    /// Record a lap.
+    ///
+    /// # Errors
+    /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
+    pub fn stopwatch_lap(&mut self, now: Ts) -> Result<Lap, Refusal> {
+        self.state.stopwatch.as_mut().ok_or(Refusal::None)?.lap(now)
+    }
+
+    /// Stop the stopwatch.
+    ///
+    /// # Errors
+    /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
+    pub fn stopwatch_stop(&mut self, now: Ts) -> Result<Reading, Refusal> {
+        self.state
+            .stopwatch
+            .as_mut()
+            .ok_or(Refusal::None)?
+            .stop(now)
+    }
+
+    /// What the stopwatch shows, with each lap's own time.
+    ///
+    /// # Errors
+    /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
+    pub fn stopwatch_read(&self, now: Ts) -> Result<(Reading, Vec<i64>), Refusal> {
+        let sw = self.state.stopwatch.as_ref().ok_or(Refusal::None)?;
+        Ok((sw.read(now)?, sw.splits()))
+    }
+
+    /// Throw the stopwatch away; false when there was none. Needs no clock.
+    pub fn stopwatch_reset(&mut self) -> bool {
+        self.state.stopwatch.take().is_some()
     }
 
     /// Remove an item.
@@ -764,5 +818,27 @@ mod tests {
         s2.set_alarm(at("2026-03-07T20:00:00-05:00"), &zone, 2, 30, None, "gap")
             .unwrap();
         assert_eq!(s2.list()[0].fire_at, at("2026-03-08T03:30:00-04:00"));
+    }
+
+    // REQ-TMR-011
+    #[test]
+    fn a_saved_scheduler_from_before_the_stopwatch_still_loads_and_the_stopwatch_is_saved() {
+        let old = r#"{"next_id":2,"items":[{"id":1,"kind":"timer","label":"","fire_at":5,"repeat":null,"created_at":1}]}"#;
+        let state: SchedState = serde_json::from_str(old).unwrap();
+        assert!(state.stopwatch.is_none() && state.items.len() == 1);
+        let mut s = Scheduler {
+            state,
+            max_items: 4,
+        };
+        assert!(!s.stopwatch_reset(), "nothing to reset");
+        s.stopwatch_start(1_800_000_000).unwrap();
+        let json = serde_json::to_string(&s.state).unwrap();
+        assert!(json.contains("stopwatch"));
+        let back: SchedState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s.state);
+        // A stopwatch needs no timer slot, and a full scheduler can still run one.
+        let mut full = Scheduler::new(1);
+        full.set_timer(1_800_000_000, 60, "").unwrap();
+        assert!(full.stopwatch_start(1_800_000_000).is_ok());
     }
 }
