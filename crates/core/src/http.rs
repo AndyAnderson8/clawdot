@@ -398,11 +398,23 @@ mod tests {
     }
 
     async fn start(limits: Limits, opts: ServeOptions) -> Harness {
-        let core = Arc::new(Core::in_memory(
-            Arc::new(SystemClock),
-            Adapters::builtin(),
-            limits,
-        ));
+        start_with_clock(Arc::new(SystemClock), limits, opts).await
+    }
+
+    /// A clock that never moves, so token-bucket refill cannot depend on how fast the machine is.
+    struct FrozenClock;
+    impl crate::sched::Clock for FrozenClock {
+        fn now(&self) -> crate::sched::Ts {
+            1_800_000_000
+        }
+    }
+
+    async fn start_with_clock(
+        clock: Arc<dyn crate::sched::Clock + Send + Sync>,
+        limits: Limits,
+        opts: ServeOptions,
+    ) -> Harness {
+        let core = Arc::new(Core::in_memory(clock, Adapters::builtin(), limits));
         let (_, token) = core.create_endpoint("claude-code", "claude-code").unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1325,20 +1337,18 @@ mod tests {
     // REQ-CFG-019
     #[tokio::test]
     async fn sign_in_attempts_are_rate_limited() {
-        let h = start(Limits::default(), ServeOptions::default()).await;
+        // A frozen clock: the bucket cannot refill however slow each (PBKDF2) attempt is, so the burst is
+        // spent after exactly `auth_fail_burst` attempts on any machine.
+        let limits = Limits::default();
+        let burst = limits.auth_fail_burst as usize;
+        let h = start_with_clock(Arc::new(FrozenClock), limits, ServeOptions::default()).await;
         admin(&h);
-        let mut limited = false;
-        for _ in 0..100 {
-            if post(&h, "/api/login", "", r#"{"password":"guess guess"}"#)
-                .await
-                .0
-                == 429
-            {
-                limited = true;
-                break;
-            }
+        for i in 0..burst {
+            let (status, ..) = post(&h, "/api/login", "", r#"{"password":"guess guess"}"#).await;
+            assert_eq!(status, 401, "attempt {i} is within the burst");
         }
-        assert!(limited, "password guessing must be throttled");
+        let (status, ..) = post(&h, "/api/login", "", r#"{"password":"guess guess"}"#).await;
+        assert_eq!(status, 429, "password guessing must be throttled");
     }
 
     // REQ-CFG-023
