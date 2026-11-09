@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.1 |
+| **Version** | 0.2 |
 | **Created** | 2026-11-09 |
 | **Related** | [0003](0003-satellite-protocol.md), [0002](0002-resource-budget.md), [R-08](../research/08-existing-echo-dot-projects.md) section 4.2, roadmap B2, [ADR-0014](../adr/0014-language-rust-core-polyglot-edges.md) |
 
@@ -105,7 +105,20 @@ Recorded in [open-questions.md](../open-questions.md): the end-of-playback signa
 
 ## 7. Size record (REQ-ESP-017)
 
-Filled in at the end of the work that implemented this spec; see the changelog.
+Release builds for `armv7-unknown-linux-musleabihf` (opt-level `z`, LTO, stripped), measured 2026-11-09 against `dev` at `ab05588`:
+
+| Build | Size (bytes) | Difference from `dev` |
+|---|---|---|
+| `dev` before this work | 2,513,840 | none |
+| Default features (this work merged) | 2,513,592 | -248 (none; link-order noise) |
+| `--features esphome-satellite` | 2,600,592 | +86,752 (+3.5 %) |
+| `--features esphome-noise` | 2,612,752 | +98,912 (+3.9 %); Noise itself is +12,160 |
+
+All are far inside the 8 MiB limit of spec 0002. Memory was not measured on a device: a connection holds one frame (at most 64 KiB), at most 4 MiB of reply audio while it is being played, and the pipeline session that a satellite connection already costs. The default build is unchanged because the `esphome` configuration section is kept as raw JSON there and refused unless empty (REQ-ESP-002).
+
+### Verification against independent code
+
+The Noise handshake and the first records were checked once, by hand, against the `noiseprotocol` Python package (the library `aioesphomeapi` uses) acting as the device: handshake, `PingRequest`/`PingResponse`, and `HelloRequest`/`HelloResponse` all interoperated (`crates/core/src/esphome/noise.rs`, `interop_with_an_independent_responder`, `#[ignore]`, with `CLAWDOT_NOISE_PEER` and `CLAWDOT_NOISE_PSK` set). The ChaCha20-Poly1305 transport is checked against RFC 8439 section 2.8.2. Everything else is tested against the fake device in `crates/e2e`; no real ESPHome device or `aioesphomeapi` voice client has been used yet.
 
 ## 8. Licensing of the protocol definition
 
@@ -116,3 +129,4 @@ Findings are in [NOTICE](../../NOTICE) and [open-questions.md](../open-questions
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-11-09 | First draft: REQ-ESP-001 to REQ-ESP-017 |
+| 0.2 | 2026-11-09 | Implemented behind `esphome-satellite` and `esphome-noise`; size record and verification notes (section 7); REQ-ESP-002 clarified: a default build keeps the section unparsed and refuses it unless empty |
