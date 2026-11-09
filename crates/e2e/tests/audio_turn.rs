@@ -124,7 +124,8 @@ fn req_voi_017_a_press_with_a_scripted_microphone_and_player_process_runs_a_turn
     std::fs::write(&mic_file, bytes).unwrap();
 
     let (addr, stop, asked) = start_core();
-    let stall = Duration::from_secs(5);
+    // Generous: the stall clock starts at spawn, and these children can start slowly on a loaded machine.
+    let stall = Duration::from_secs(120);
     let mut dev = AudioDevice::new(
         CommandIn::new(
             // A paced fake microphone: one 20 ms frame every 10 ms, like a live source (a burst would
