@@ -13,6 +13,9 @@ pub mod admin;
 pub mod app;
 pub mod assistant;
 pub mod config;
+#[cfg(feature = "esphome-satellite")]
+pub mod esphome;
+pub mod esphome_cfg;
 pub mod extensions;
 pub mod fastpath;
 pub mod http;

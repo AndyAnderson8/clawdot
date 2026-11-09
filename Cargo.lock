@@ -63,6 +63,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jiff",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

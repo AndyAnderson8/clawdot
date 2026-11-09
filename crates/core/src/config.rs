@@ -96,6 +96,9 @@ pub struct Config {
     /// Satellite server.
     #[serde(default)]
     pub satellite: SatelliteConfig,
+    /// ESPHome voice satellites to dial (optional feature `esphome-satellite`; see spec 0004).
+    #[serde(default)]
+    pub esphome: crate::esphome_cfg::EsphomeConfig,
     /// Radio stations for the music commands.
     #[serde(default)]
     pub stations: Vec<crate::media::Station>,
@@ -170,6 +173,10 @@ impl Config {
             return Err(
                 "config: `satellite.listen` is needed for the other `satellite` settings".into(),
             );
+        }
+        self.esphome.validate()?;
+        if !self.esphome.is_empty() && self.speech.url.is_none() {
+            return Err("config: `esphome` needs the `speech` section".into());
         }
         let sp = &self.speech;
         if sp.url.is_some() {
