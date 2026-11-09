@@ -28,6 +28,7 @@
 | Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
 | Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |
+| Planning | [open-questions.md](open-questions.md) | Questions for the maintainer, each with the default chosen meanwhile |
 | Planning | [roadmap.md](roadmap.md) | Milestones, feasibility gate, exit criteria, initial backlog |
 | Reports | [reports/2026-11-07-overnight-session.md](reports/2026-11-07-overnight-session.md) | Overnight session: what was built, measurements, decisions, open items |
 | Planning | [future-scope.md](future-scope.md) | Parked ideas with promotion conditions |
