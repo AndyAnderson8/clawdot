@@ -15,7 +15,7 @@ use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -32,7 +32,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 5;
 const MAX_TIMEOUT_SECS: u64 = 30;
 
 /// One declared parameter.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Param {
     /// `string`, `integer`, `number`, or `boolean`.
@@ -50,7 +50,7 @@ pub struct Param {
 }
 
 /// One tool as written in the configuration file.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ToolDef {
     /// Tool name the model sees: lowercase letters, digits, and underscores.
@@ -302,6 +302,45 @@ impl HttpTools {
             connector: Connector::new()?,
             secrets,
         })
+    }
+
+    /// Add one tool while running (the portal, REQ-CFG-032). Checks it like start-up does, and reads its
+    /// credential from the environment now.
+    ///
+    /// # Errors
+    /// An invalid definition, a taken name, or a credential variable that is not set.
+    pub fn add(
+        &mut self,
+        def: ToolDef,
+        reserved: &[String],
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
+        def.validate()?;
+        if reserved.contains(&def.name) || self.owns(&def.name) {
+            return Err(format!("tool `{}`: the name is already taken", def.name));
+        }
+        if let Some(var) = &def.auth_env {
+            let v = env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
+                format!("tool `{}`: environment variable {var} is not set", def.name)
+            })?;
+            self.secrets.insert(def.name.clone(), v);
+        }
+        self.defs.push(def);
+        Ok(())
+    }
+
+    /// Remove a tool by name; false if there is none.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let before = self.defs.len();
+        self.defs.retain(|d| d.name != name);
+        self.secrets.remove(name);
+        self.defs.len() != before
+    }
+
+    /// The definitions, as written (no credentials).
+    #[must_use]
+    pub fn defs(&self) -> &[ToolDef] {
+        &self.defs
     }
 
     /// Whether any tools are configured.

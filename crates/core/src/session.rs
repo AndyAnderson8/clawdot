@@ -73,6 +73,11 @@ impl Conversation {
         }
     }
 
+    /// Replace the system prompt (the persona plus the user's enabled skills, REQ-CFG-036).
+    pub fn set_system(&mut self, system: impl Into<String>) {
+        self.system = system.into();
+    }
+
     /// The messages after the system prompt.
     #[must_use]
     pub fn history(&self) -> &[Message] {
