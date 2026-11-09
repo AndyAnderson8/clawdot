@@ -309,7 +309,22 @@ fn zone_for(name: Option<&str>) -> Result<Box<dyn Zone + Send + Sync>, String> {
     }
 }
 
+/// One-time secrets go only to a person at a terminal. Under a service manager or in a container, stdout
+/// is kept by the journal or the container log with no size cap, so a token printed there would be
+/// stored indefinitely (REQ-SEC-009, threat T6).
+fn secrets_may_be_printed() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
 fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
+    if !secrets_may_be_printed() {
+        println!(
+            "Endpoint `{endpoint}` created (adapter: {adapter}). Its token is not printed because stdout is not a terminal; \
+             rotate it from the web UI, or run `clawdot --rotate {endpoint}` in a terminal."
+        );
+        return;
+    }
     println!(
         "\nEndpoint `{endpoint}` created (adapter: {adapter}). The token is shown only now:\n  {token}\n"
     );
@@ -660,6 +675,14 @@ async fn main() -> ExitCode {
         }
     }
     for name in &args.rotate {
+        if !secrets_may_be_printed() {
+            // Rotating would lose the new token, so refuse rather than print it into a log.
+            eprintln!(
+                "clawdot: --rotate {name}: the new token would be lost because stdout is not a terminal; run it in a terminal or rotate from the web UI"
+            );
+            failed = true;
+            continue;
+        }
         match core.rotate_endpoint(name) {
             Ok(token) => println!("New token for `{name}` (shown once): {token}"),
             Err(e) => {
@@ -929,15 +952,21 @@ async fn main() -> ExitCode {
             }
             _ = tick.tick() => {
                 core.set_ui_status(brain.status_json(announcer.connected(), &station_names, &tool_counts));
+                // Spoken text is echoed only to an interactive console: in server mode stdout goes to a
+                // journal or container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
                 while let Some(phrase) = core.take_speech() {
-                    println!("speaker> {phrase}");
+                    if args.console {
+                        println!("speaker> {phrase}");
+                    }
                     if announcer.connected() > 0 {
                         announcer.announce(&phrase).await;
                     }
                 }
                 for fired in brain.assistant.tick() {
                     let line = describe_fired(&fired);
-                    println!("speaker> {line}");
+                    if args.console {
+                        println!("speaker> {line}");
+                    }
                     if announcer.connected() > 0 {
                         // Best effort: a satellite that is busy or muted simply does not speak it.
                         announcer.announce(&line).await;
@@ -959,7 +988,9 @@ async fn main() -> ExitCode {
                         None => fallback_summary(&next.event),
                     };
                     let line = announcement(&next.event, &spoken, next.more_waiting);
-                    println!("speaker> {line}");
+                    if args.console {
+                        println!("speaker> {line}");
+                    }
                     let delivered = announcer.connected() == 0 || announcer.announce(&line).await;
                     if delivered {
                         core.mark_announced(&[next.event.id]);

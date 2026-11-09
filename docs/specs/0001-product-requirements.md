@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.16 |
+| **Version** | 0.17 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -189,6 +189,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-SEC-006 | Satellite connections MUST be authenticated when not in-process. | Must | M1 | T |
 | REQ-SEC-007 | The system MUST NOT send telemetry, analytics, or crash reports to any party. Network traffic is limited to user-configured providers, bridges, and sources. This is documented in [PRIVACY.md](../../PRIVACY.md). | Must | M1 | I/T |
 | REQ-SEC-008 | Resources held before authentication MUST be bounded: the HTTP and satellite listeners MUST apply short header and hello timeouts, a read timeout on request bodies, and a cap on connections per source address in addition to the global cap, so idle sockets cannot starve either listener. | Must | M2 | T |
+| REQ-SEC-009 | State files MUST be created readable only by the service user (mode 0600 in a 0700 directory on Unix, set at creation). Agent text and one-time secrets MUST NOT be written to stdout in server mode: spoken text is echoed only to an interactive `--console`, and endpoint tokens are printed only to a terminal. | Must | M2 | T |
 
 ### 4.9 Extensibility (`EXT`)
 
@@ -278,3 +279,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.14 | 2026-11-09 | Security review F3: every event field is untrusted (INB-010), and announcements always name the source and sanitise title and status (INB-018) |
 | 0.15 | 2026-11-09 | Security review F4: the plain-http exception in SEC-001 is stated once for the language model as well as the speech clients |
 | 0.16 | 2026-11-09 | Security review F2 and F9: pre-authentication resources are bounded per source address with header, hello and body timeouts (SEC-008) |
+| 0.17 | 2026-11-09 | Security review F6 and F7: private state files and no agent text or one-time secrets on stdout in server mode (SEC-009) |

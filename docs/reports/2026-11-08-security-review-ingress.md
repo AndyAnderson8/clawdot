@@ -137,3 +137,17 @@ Top three: F1 (injected agent text can drive an unconfirmed instruction back to 
 2. Add requirements for the gaps marked "new requirement needed": per-source pre-auth caps (F2), flash write bounds (F5), state file permissions (F6), untrusted-text labelling in tool results (F1).
 3. Add `docs/README.md` and threat-model review-log entries for this report (not done here because this task could not edit existing files).
 4. F3, F4, F7 are small, isolated fixes suited to one branch each.
+
+## Resolution
+
+Updated 2026-11-09. Each group was fixed on its own branch and landed into `dev` with `scripts/land.sh`.
+
+| Finding | Status | Fixed by |
+|---|---|---|
+| F1 (High) | Fixed. `instruct` replies are held until the user answers a plain yes in a later turn and the proposed text is what is sent; `inbox_details` is fenced and labelled as untrusted. Regression test with an injection attempt. New requirement REQ-AST-015. | `17d5777` (merge `7a0e449`, branch `bugfix/inbox-instruct-confirmation`) |
+| F3 (Medium) | Fixed. Source, title and status go inside the prompt fence with angle brackets neutralised; status must be a short slug; every announcement starts with the source. REQ-INB-010 and REQ-INB-018 amended. | `9dba2fd` (merge `80b9618`, branch `bugfix/spoken-event-fields`) |
+| F4 (Medium) | Fixed for the language model client: plain `http://` only for localhost, `.local` and private-network hosts, the same rule as the speech clients. REQ-SEC-001 amended. MCP and HTTP-tool URLs are not covered (see below). | `dc6dd7b` (merge `fb34aba`, branch `bugfix/llm-url-scheme`) |
+| F2 (Medium) and F9 (Low) | Fixed in part. Per-address connection caps on the HTTP listener (8) and the satellite listener (2), header timeout 3 s, hello timeout 5 s, body read timeout 5 s. New requirement REQ-SEC-008. Residual: many distinct source addresses can still fill the global caps, and the satellite slot is still counted before the token is verified. | `dbb6295` (merge `84641dd`, branch `bugfix/listener-timeouts`) |
+| F6 (Medium) and F7 (Medium) | Fixed on branch `bugfix/state-file-permissions` (see `git log` for the merge): state files are created 0600 and new data directories 0700 at creation; `speaker>` echoes need `--console`; endpoint tokens are printed only to a terminal and `--rotate` refuses without one. New requirement REQ-SEC-009. | `bugfix/state-file-permissions` |
+
+Not addressed: F5 (write bounds, needs design), F8, F10, F11, F12, F13, F14, F15 (low severity or informational), and F4 for MCP and HTTP-tool URLs.
