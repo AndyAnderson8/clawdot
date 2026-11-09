@@ -31,11 +31,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.d.outputs.rust }}
+      portal: ${{ steps.d.outputs.portal }}
     steps:
       - uses: actions/checkout@v4
       - id: d
         run: |
           if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -f portal/package.json ]; then echo "portal=true" >> "$GITHUB_OUTPUT"; else echo "portal=false" >> "$GITHUB_OUTPUT"; fi
 
   commits:
     name: commits (conventional, human-only)
@@ -95,7 +97,8 @@ jobs:
 
   portal:
     name: portal (npm ci, types, tests, built page is current, browser)
-    if: hashFiles('portal/package.json') != ''
+    needs: detect
+    if: needs.detect.outputs.portal == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
