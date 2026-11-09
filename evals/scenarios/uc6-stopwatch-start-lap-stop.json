@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "id": "uc6-stopwatch-start-lap-stop",
+  "use_case": "UC6",
+  "description": "A stopwatch started, lapped twice and stopped on the scenario clock. The tool reports exact times, reading is read-only, and starting a second one while it runs is refused.",
+  "tags": ["stopwatch", "builtin", "timers"],
+  "builtin_tools": ["stopwatch"],
+  "turns": [
+    {
+      "say": "start the stopwatch",
+      "model": [
+        {"calls": [{"name": "stopwatch", "args": {"action": "start"}}]},
+        {"text": "Stopwatch started."}
+      ],
+      "expect": {
+        "calls": [{"tool": "stopwatch", "args": {"action": "start"}}],
+        "audit": [{"tool": "stopwatch", "decision": "ran"}],
+        "model_saw": ["Stopwatch started."]
+      }
+    },
+    {
+      "say": "lap",
+      "after_secs": 60,
+      "model": [
+        {"calls": [{"name": "stopwatch", "args": {"action": "lap"}}]},
+        {"text": "Lap one, one minute."}
+      ],
+      "expect": {
+        "calls": [{"tool": "stopwatch", "args": {"action": "lap"}}],
+        "model_saw": ["Lap 1, 1 minute. Total 1 minute."]
+      }
+    },
+    {
+      "say": "how long has it been",
+      "after_secs": 65,
+      "model": [
+        {"calls": [{"name": "stopwatch", "args": {"action": "read"}}]},
+        {"text": "Two minutes and five seconds."}
+      ],
+      "expect": {
+        "calls": [{"tool": "stopwatch", "args": {"action": "read"}}],
+        "audit": [{"tool": "stopwatch", "decision": "ran"}],
+        "model_saw": ["2 minutes and 5 seconds so far"]
+      }
+    },
+    {
+      "say": "start another stopwatch",
+      "model": [
+        {"calls": [{"name": "stopwatch", "args": {"action": "start"}}]},
+        {"text": "It is already running at two minutes and five seconds."}
+      ],
+      "expect": {
+        "model_saw": ["already running"]
+      }
+    },
+    {
+      "say": "stop it",
+      "after_secs": 55,
+      "model": [
+        {"calls": [{"name": "stopwatch", "args": {"action": "stop"}}]},
+        {"text": "Three minutes, one lap."}
+      ],
+      "expect": {
+        "calls": [{"tool": "stopwatch", "args": {"action": "stop"}}],
+        "model_saw": ["Stopped at 3 minutes and", "1 lap."]
+      }
+    }
+  ],
+  "forbidden": {"tools": ["set_timer"]}
+}

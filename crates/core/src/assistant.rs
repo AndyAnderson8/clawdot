@@ -14,6 +14,7 @@ use crate::store::JsonStore;
 use std::sync::Arc;
 
 mod schedule_api;
+mod stopwatch;
 mod tools;
 
 /// The system prompt used when none is configured. The evaluation harness runs the same text, so a change
@@ -229,7 +230,14 @@ pub const CLOCK_UNSET: &str =
 fn needs_valid_clock(intent: &str) -> bool {
     matches!(
         intent,
-        "time.query" | "date.query" | "timer.set" | "timer.query"
+        "time.query"
+            | "date.query"
+            | "timer.set"
+            | "timer.query"
+            | "stopwatch.start"
+            | "stopwatch.lap"
+            | "stopwatch.stop"
+            | "stopwatch.read"
     ) || intent.starts_with("alarm.set")
         || intent.starts_with("reminder.set")
 }
@@ -409,6 +417,11 @@ impl Assistant {
                 let level = m.number("level").filter(|l| (0..=100).contains(l))?;
                 Outcome::effect("", Effect::VolumeSet(u8::try_from(level).ok()?))
             }
+            "stopwatch.start" => self.stopwatch_outcome(stopwatch::Action::Start),
+            "stopwatch.lap" => self.stopwatch_outcome(stopwatch::Action::Lap),
+            "stopwatch.stop" => self.stopwatch_outcome(stopwatch::Action::Stop),
+            "stopwatch.read" => self.stopwatch_outcome(stopwatch::Action::Read),
+            "stopwatch.reset" => self.stopwatch_outcome(stopwatch::Action::Reset),
             "timer.set" => self.timer_set(&m, now),
             "timer.cancel" => self.timer_cancel(&m),
             "timer.query" => self.timer_query(&m, now),
@@ -477,6 +490,11 @@ impl Assistant {
             other if other.starts_with("inbox.") => self.inbox(&m, now),
             _ => None,
         }
+    }
+
+    fn stopwatch_outcome(&mut self, action: stopwatch::Action) -> Option<Outcome> {
+        let said = self.stopwatch(action).unwrap_or_else(|e| e);
+        Outcome::say(said)
     }
 
     fn timer_set(&mut self, m: &Match, now: Ts) -> Option<Outcome> {
