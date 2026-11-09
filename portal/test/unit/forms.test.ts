@@ -175,3 +175,45 @@ test("labels", () => {
   assert.equal(labelOf("unknown_key"), "unknown_key");
   assert.equal(restartText(["listen", "public_url"]), "address this page uses, address agents use");
 });
+
+// REQ-CFG-062
+test("agent settings: toggles become real booleans, times stay text, and an emptied box goes back to the default", () => {
+  const agent: SettingSpec[] = [
+    { key: "plan_speech", kind: "bool" },
+    { key: "dry_run", kind: "bool" },
+    { key: "agent_max_rounds", kind: "number", min: 1, max: 20 },
+    { key: "quiet_start", kind: "time" },
+    { key: "quiet_end", kind: "time" },
+  ];
+  const s: Settings = {
+    fields: {
+      plan_speech: { value: true, source: "default" },
+      dry_run: { value: false, source: "default" },
+      agent_max_rounds: { value: 8, source: "default" },
+      quiet_start: { value: null, source: "default" },
+      quiet_end: { value: null, source: "default" },
+    },
+  };
+  const cur = Object.fromEntries(agent.map((a) => [a.key, currentText(s, a.key)]));
+  assert.deepEqual(cur, {
+    plan_speech: "true",
+    dry_run: "false",
+    agent_max_rounds: "8",
+    quiet_start: "",
+    quiet_end: "",
+  });
+  assert.deepEqual(settingsPatch(agent, cur, cur), {});
+  assert.deepEqual(
+    settingsPatch(agent, cur, {
+      ...cur,
+      plan_speech: "false",
+      dry_run: "true",
+      agent_max_rounds: "5",
+      quiet_start: "22:00",
+      quiet_end: "07:00",
+    }),
+    { plan_speech: false, dry_run: true, agent_max_rounds: 5, quiet_start: "22:00", quiet_end: "07:00" },
+  );
+  assert.deepEqual(settingsPatch(agent, cur, { ...cur, plan_speech: "" }), { plan_speech: null });
+  assert.equal(labelOf("quiet_start"), "Quiet from");
+});

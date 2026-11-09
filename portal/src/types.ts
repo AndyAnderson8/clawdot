@@ -100,9 +100,10 @@ export interface Extensions {
 }
 
 export interface SettingField {
-  value: string | number | null;
+  value: string | number | boolean | null;
   source: "default" | "file" | "saved" | "flag" | string;
   live?: boolean;
+  saved?: boolean;
   ignored?: boolean;
 }
 export interface Settings {
