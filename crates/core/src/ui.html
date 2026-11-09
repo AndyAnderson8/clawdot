@@ -109,6 +109,8 @@
   .toast { position: fixed; left: var(--s4); right: var(--s4); bottom: var(--s4); max-width: 40rem; margin: 0 auto; padding: var(--s3) var(--s4); border-radius: var(--r-m); background: var(--band); color: var(--on-band); border: 1px solid var(--ring); font-weight: 600; z-index: 20; }
   .toast.err { border-color: var(--shell); }
   .toast:empty { display: none; }
+  .errtext { color: var(--bad); font-weight: 600; margin: var(--s2) 0; }
+  .errtext:empty { display: none; }
 </style>
 </head>
 <body>
@@ -240,7 +242,7 @@
   function copyBtn(text, label) { var b = h("button", { class: "plain", type: "button", text: label || "Copy" }); b.onclick = function () { copy(text, b); }; return b; }
 
   // ----- time, always in the device's zone -----
-  function zone() { return (S.settings && S.settings.zone) || "UTC"; }
+  function zone() { return sv("zone") || "UTC"; }
   function fmt(ts, o) {
     var d = new Date(ts * 1000);
     try { return new Intl.DateTimeFormat(undefined, Object.assign({ timeZone: zone() }, o)).format(d); }
@@ -297,7 +299,7 @@
     var cls = !st.llm ? "wait" : ok ? "ok" : "warn";
     $("state").className = "state " + cls;
     $("statetext").textContent = !st.llm ? "Starting" : ok ? "Ready" : !st.clock_valid ? "Clock not set" : "Needs setup";
-    if (S.settings && S.settings.device_name) $("devname").textContent = S.settings.device_name;
+    if (sv("device_name")) $("devname").textContent = sv("device_name");
   }
   function paintFooter() {
     $("ver").textContent = "ClawDot " + (S.version || "");
@@ -724,7 +726,7 @@
   }
   function webhooks(p) {
     var list = h("ul", { class: "rows" });
-    var base = function () { return (S.settings && S.settings.public_url) || location.origin; };
+    var base = function () { return sv("public_url") || location.origin; };
     var name = h("input", { id: "wname", type: "text", maxlength: "32", placeholder: "For example: claude-code", autocomplete: "off", autocapitalize: "none" });
     var adapter = h("select", { id: "wadapter" }, h("option", { value: "claude-code", text: "Claude Code" }), h("option", { value: "generic", text: "Anything else (plain JSON)" }));
     var form = h("form", { class: "panel" }, h("h3", { text: "Create a webhook" }),
@@ -770,6 +772,11 @@
   }
 
   // ----- Settings -----
+  var LABEL = { device_name: "Device name", zone: "Time zone", persona: "Personality", llm_url: "Language model address", llm_model: "Model", llm_fallback_model: "Backup model", summary_model: "Summary model", llm_key_env: "Key variable", voice: "Voice", listen: "Address this page uses", public_url: "Address agents use", max_requests_per_day: "Requests per day", daily_spend_usd: "Daily spend limit", board: "Board" };
+  var FROM = { "default": "Default", file: "Configuration file", saved: "Saved here", flag: "Command-line flag" };
+  function sv(k) { var f = S.settings && S.settings.fields && S.settings.fields[k]; return f ? f.value : null; }
+  function browserZone() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; } }
+  function zoneList() { try { var l = Intl.supportedValuesOf("timeZone"); if (l && l.length) return ["UTC"].concat(l); } catch (e) {} return null; }
   function settings(p) {
     var box = h("div");
     var pwtitle = h("h3", { text: "Admin password" });
@@ -793,32 +800,75 @@
       rows.forEach(function (r) { d.append(h("dt", { text: r[0] }), h("dd", { text: r[1] })); });
       return d;
     }
+    // One group of settings with its own Save button. Only the values you changed are sent.
+    function group(title, intro, specs) {
+      var form = h("form", { class: "panel" }, h("h3", { text: title }));
+      if (intro) form.append(h("p", { class: "mut", text: intro }));
+      var gets = [], err = h("p", { class: "errtext", role: "alert" });
+      specs.forEach(function (sp) {
+        var k = sp[0], kind = sp[1], f = S.settings.fields[k], cur = f.value == null ? "" : String(f.value), id = "f-" + k, ctl, hint = sp[2], off = sp[3];
+        if (kind === "zone") {
+          var zs = zoneList(), bz = browserZone();
+          if (zs) {
+            ctl = h("select", { id: id });
+            if (zs.indexOf(cur) < 0) zs.unshift(cur);
+            zs.forEach(function (z) { ctl.append(h("option", { value: z, text: z.replace(/_/g, " ") })); });
+            ctl.value = cur;
+            if (f.source === "default" && bz && zs.indexOf(bz) >= 0) { ctl.value = bz; hint = "Your browser says " + bz.replace(/_/g, " ") + ", so that is pre-selected. Save to use it. (This comes from your browser, never from your internet address.)"; }
+          } else { ctl = h("input", { id: id, type: "text", value: cur, placeholder: bz || "America/Phoenix" }); }
+        } else if (kind === "area") { ctl = h("textarea", { id: id, rows: "7", maxlength: "4000" }); ctl.value = cur; }
+        else if (kind === "board") { ctl = h("select", { id: id }, h("option", { value: "none", text: "None" }), h("option", { value: "auto", text: "Detect automatically" })); ctl.value = cur; }
+        else { ctl = h("input", { id: id, type: kind === "number" ? "number" : "text", value: cur, autocomplete: "off", step: kind === "number" ? "any" : null, min: kind === "number" ? "0" : null }); }
+        if (off) { ctl.disabled = true; }
+        form.append(h("label", { for: id, text: LABEL[k] }), ctl);
+        var m = h("p", { class: "mut" }, FROM[f.source] + ". " + (f.live ? "Applies right away." : "Needs a restart to apply.") + (hint ? " " + hint : ""));
+        if (f.ignored) m.append(" A command-line flag is set, so a value saved here has no effect until the flag is removed.");
+        form.append(m);
+        gets.push(function (body) {
+          if (off) return;
+          var v = ctl.value.trim();
+          if (v === cur.trim()) return;
+          body[k] = v === "" ? null : kind === "number" ? Number(v) : v;
+        });
+      });
+      form.append(err, h("button", { text: "Save " + title.toLowerCase() }));
+      form.onsubmit = async function (ev) {
+        ev.preventDefault(); err.textContent = "";
+        var body = {}; gets.forEach(function (g) { g(body); });
+        if (!Object.keys(body).length) { say("Nothing to save: you have not changed anything here."); return; }
+        try {
+          S.settings = Object.assign(S.settings, await api("PUT", "/api/settings", body));
+          paintHeader(); render(); say(S.settings.note || "Saved.");
+        } catch (x) { if (x.status === 400) { err.textContent = x.message; err.scrollIntoView({ block: "nearest" }); } else fail(x); }
+      };
+      return form;
+    }
+    function render() {
+      var s = S.settings, need = s.restart_needed || [], key = s.llm || {}, vi = s.voice_info || {};
+      box.replaceChildren(h("p", { class: "mut", text: "Changes are saved on this device. Most apply right away; a few say they need a restart. A command-line flag always wins over a value saved here." }));
+      if (need.length) {
+        box.append(h("div", { class: "soon", role: "status" }, h("h3", { text: "Restart needed" }),
+          h("p", { text: "These saved values are not running yet: " + need.map(function (k) { return LABEL[k].toLowerCase(); }).join(", ") + "." }),
+          h("p", { text: "ClawDot cannot restart itself safely from this page. Restart it on the device: for example run sudo systemctl restart clawdot if it runs as a service, or stop the program and start it again." })));
+      }
+      box.append(
+        group("Device", "", [["device_name", "text", "Shown at the top of every page."], ["zone", "zone", "Reminders and alarms use this time."]]),
+        group("Language model", "Without one, the speaker understands only simple commands like timers. Leave a box empty to go back to the configuration file or the default.", [
+          ["llm_url", "text", "Starts with https://, for example https://openrouter.ai/api/v1."], ["llm_model", "text"], ["llm_fallback_model", "text", "Tried if the model fails."], ["summary_model", "text", "A cheaper model for spoken summaries."],
+          ["llm_key_env", "text", "Type the NAME of the environment variable that holds your key, not the key. " + (key.key_present ? "That variable is set." : "That variable is not set where ClawDot runs.")]]),
+        group("Personality and voice", "", [["persona", "area", "Instructions for how the assistant talks. Skills are added after this."], ["voice", "text", s.speech_configured ? "" : "Needs a speech provider in the configuration file.", !s.speech_configured]]),
+        group("Addresses", "Changing these needs a restart. Use an address on your own network; do not expose this page to the internet.", [["listen", "text", "For example 0.0.0.0:3335 to allow your whole network."], ["public_url", "text", "Used in the copy-and-paste setup for agents."]]),
+        group("Usage limits", "", [["max_requests_per_day", "number", "Language model requests per day."], ["daily_spend_usd", "number", "In US dollars. Empty for no limit."]]),
+        group("Board", "", [["board", "board", "Nothing uses this yet: the hardware layer is not built. The choice is saved for when it is."]]),
+        h("h3", { text: "From the configuration file" }), dl([["Speech language", vi.language || "Automatic"], ["Transcription model", vi.stt_model || "None"], ["Speech model", vi.tts_model || "None"], ["Speakers connect on", s.speakers_listen || "Not listening"]]),
+        h("p", { class: "mut", text: "These are set in the configuration file only." }));
+    }
     return async function () {
       var s = S.settings; if (!s) return;
       pwtitle.textContent = S.mode === "open" ? "Set an admin password" : "Change admin password";
       $("legacywarn").classList.toggle("hidden", !S.legacy);
       $("aboutver").textContent = "ClawDot " + S.version + ". It runs entirely on your own device; this page never contacts anything outside your network.";
-      if (box.dataset.done) return;
-      box.dataset.done = "1";
-      var llm = s.llm || {}, v = s.voice || {}, lim = s.limits || {};
-      var browser = ""; try { browser = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { browser = ""; }
-      box.append(h("p", { text: "This is what the device is running with. To change a value, edit the configuration file and restart ClawDot. Changing them from this page is coming soon." }));
-      box.append(h("h3", { text: "Device" }), dl([["Name", s.device_name], ["Time zone", s.zone]]));
-      if (browser && browser !== s.zone) {
-        var line = '"zone": "' + browser + '"';
-        box.append(h("p", {}, "Your browser is in " + browser + ", but the device uses " + s.zone + ", so reminders ring on " + s.zone + " time. To use yours, add this to the configuration file: ", h("code", { text: line }), " "), copyBtn(line, "Copy the line"));
-      }
-      box.append(h("h3", { text: "Language model" }), dl([
-        ["Status", llm.configured ? "Set up" : "Not set up. The speaker understands only simple commands."],
-        ["Address", llm.url || "None"], ["Model", llm.model || "None"], ["Backup model", llm.fallback_model || "None"],
-        ["Key", llm.key_env ? (llm.key_present ? "Found in " + llm.key_env : "Missing: set the environment variable " + llm.key_env) : "None"]]));
-      box.append(h("h3", { text: "Voice and personality" }), dl([
-        ["Personality", s.persona && s.persona.custom ? "Your own text file" : "The built-in one"],
-        ["Voice", v.configured ? (v.voice || "Set up") : "Not set up (speech needs a provider in the configuration file)"], ["Language", v.language || "Automatic"]]));
-      box.append(h("h3", { text: "Addresses" }), dl([
-        ["This page", s.listen], ["Address agents use", s.public_url], ["Speakers connect on", s.speakers_listen || "Not listening"]]));
-      box.append(h("h3", { text: "Usage limits" }), dl([
-        ["Requests per day", String(lim.max_requests_per_day)], ["Daily spend limit", lim.daily_spend_usd ? "$" + lim.daily_spend_usd : "None"]]));
+      if (!box.dataset.done) { box.dataset.done = "1"; render(); }
     };
   }
 

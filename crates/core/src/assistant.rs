@@ -253,6 +253,12 @@ impl Assistant {
         }
     }
 
+    /// Switch the time zone used for alarms, reminders, and the time (REQ-CFG-039). Items already set keep
+    /// their absolute time; recurring alarms follow the new local clock.
+    pub fn set_zone(&mut self, zone: Box<dyn Zone + Send + Sync>) {
+        self.zone = zone;
+    }
+
     /// Set up the radio stations the music commands use.
     #[must_use]
     pub fn with_stations(mut self, stations: Vec<Station>) -> Self {

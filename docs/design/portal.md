@@ -53,7 +53,7 @@ On a wide screen the same single column is kept (max 44 rem) so that nothing mov
 | Connections | n/a | Outside tool servers (MCP). The page explains MCP in a sentence the first time |
 | Skills | n/a | Named instructions you write for the assistant, each switchable, with export and import |
 | Webhooks | Endpoints | A webhook is the web address an agent posts to; this tab creates them and gives copy-paste setup |
-| Settings | Admin password | Time zone, language model, voice, addresses, limits, password, and About with the version |
+| Settings | Admin password | Device name, time zone, language model, personality, voice, addresses, limits, board, password, and About with the version. Grouped forms with one Save each; each field says where its value comes from and whether it needs a restart |
 
 ## Principles
 
@@ -63,6 +63,10 @@ On a wide screen the same single column is kept (max 44 rem) so that nothing mov
 4. Never show a dead control. If the backend does not exist, say what the feature will do and that it is coming (REQ-CFG-031).
 5. Destructive actions use an outlined button and a confirm step. Secrets are shown once, then never again.
 6. Quality floor: AA contrast, a visible 3 px focus ring, reduced motion respected, 44 px tap targets, keyboard-operable tabs.
+
+## Settings tab
+
+Each group is a ruled form with its own Save button. Under every field one plain line says where the value comes from (default, configuration file, saved here, command-line flag) and whether it applies right away or needs a restart. Saved values that are not yet running appear in a dashed "Restart needed" box with the instruction; there is no Restart button because the core cannot restart itself safely. Errors from the device are shown in red text inside the form they belong to. The time zone is a list prefilled from the browser's own time zone (never the internet address). Keys are entered as the name of an environment variable; the page never asks for, shows, or stores a secret.
 
 ## Changes made in review of the first plan
 

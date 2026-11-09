@@ -48,6 +48,8 @@ pub enum Op {
     Sched(SchedOp),
     /// Tools, connections, and skills.
     Ext(crate::extensions::ExtOp),
+    /// Apply the effective values of the settings that change without a restart (REQ-CFG-039).
+    Settings(serde_json::Map<String, Value>),
 }
 
 /// One request and where to send the answer.
@@ -74,18 +76,36 @@ impl Core {
             .clone()
     }
 
-    /// Publish the settings the device is running with. Never put a secret in it.
-    pub fn set_ui_settings(&self, settings: Value) {
-        *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = settings;
+    /// Hand over the settings state (all layers and the saved file). Nothing in it is a secret.
+    pub fn set_settings(&self, state: crate::settings::SettingsState) {
+        *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);
     }
 
-    /// The settings the device is running with (`null` before they are published).
+    /// What the Settings tab shows (`null` before the settings are handed over).
     #[must_use]
     pub fn ui_settings(&self) -> Value {
         self.settings
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .as_ref()
+            .map_or(Value::Null, crate::settings::SettingsState::json)
+    }
+
+    /// Validate and save a change to settings (REQ-CFG-040). Returns the new listing and the values the
+    /// main loop must apply now.
+    ///
+    /// # Errors
+    /// [`Fail::Invalid`] with a message that says what to fix; [`Fail::Unavailable`] before settings exist.
+    pub fn change_settings(
+        &self,
+        patch: &Value,
+    ) -> Result<(Value, serde_json::Map<String, Value>), Fail> {
+        let mut guard = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        let st = guard
+            .as_mut()
+            .ok_or_else(|| Fail::Unavailable("Settings are not available yet.".into()))?;
+        st.change(patch).map_err(Fail::Invalid)?;
+        Ok((st.json(), st.live_values()))
     }
 
     /// Open the request channel. The main loop owns the returned receiver and answers each [`Job`].
