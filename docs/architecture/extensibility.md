@@ -101,7 +101,7 @@ A skill is a named, switchable bundle of instructions for the assistant, stored 
 |---|---|
 | `name` | Up to 40 characters; unique. |
 | `instructions` | Up to 2000 characters of plain text, written by the administrator. |
-| `tools` | Optional. The tools the skill relies on. They are named in the prompt so the model knows what to reach for. It is not a permission: a tool that is off stays off, and the confirm policy always applies. |
+| `tools` | Optional. The tools the skill may use. They are named in the prompt so the model knows what to reach for, and they are an enforced allow-list (REQ-SEC-013): in a turn where the user names the skill (as whole words, any case), only these tools are offered and any other call is refused. An empty list means no limit. A skill can only narrow: a tool that is off stays off, and the confirmation rules always apply. See [action-safety.md](action-safety.md). |
 | `enabled` | Off skills are stored but not used. |
 
 How it works: every turn, the instructions of the enabled skills are added to the system prompt after the persona, under a heading that says they are the user's own standing instructions and cannot change the confirm policy or the rules about untrusted text. At most 16 skills; the added text is capped so one skill cannot crowd out the conversation. Export gives a JSON file `{"format":"clawdot-skills","version":1,"skills":[...]}`; import accepts the same and adds the skills **turned off**, because an imported skill is text from somewhere else and should be read before it is trusted.
@@ -112,7 +112,7 @@ This is the minimal useful definition; richer skills (triggers, parameters, bund
 
 1. Packs are data. No code executes on the device because of a pack.
 2. A pack declares the tools, endpoints, and policies it adds; the portal shows this before install and requires explicit approval.
-3. A pack cannot disable the `confirm` policy, the untrusted-text handling, or the usage limits.
+3. A pack cannot disable the confirmation policy, the untrusted-text handling, or the usage limits, and a skill's tool list can only narrow the tools available.
 4. HTTP tool URLs are admin-configured; the LLM supplies only schema-validated parameters.
 5. Packs are pinned by hash and version. Updates require re-approval if requested permissions grow.
 6. The core never fetches or runs anything from a pack at runtime beyond its declared data.

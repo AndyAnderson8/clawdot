@@ -8,7 +8,7 @@ use crate::app::Fail;
 use crate::httptools::{HttpTools, ToolDef};
 use crate::llm::ToolSpec;
 use crate::mcp::{McpClient, ServerDef};
-use crate::session::ToolHost;
+use crate::session::{Risk, Tier, ToolHost};
 use crate::store::JsonStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,7 +42,7 @@ pub struct Skill {
     pub name: String,
     /// What the assistant should do, in the user's words.
     pub instructions: String,
-    /// Tools the skill relies on (named in the prompt; not a permission).
+    /// Tools the skill relies on. In a turn where the user names the skill, only these tools can be used (REQ-SEC-013); an empty list means no limit.
     #[serde(default)]
     pub tools: Vec<String>,
     /// Whether the skill is in use.
@@ -278,6 +278,38 @@ impl Extensions {
                 .is_some_and(|(server, _)| self.conns.disabled_servers.contains(server))
     }
 
+    /// The tools a turn is limited to because of the skills the user named in `user_text`, or `None` when no
+    /// named skill lists any tools (REQ-SEC-013, REQ-CFG-036). A skill is active in a turn when it is enabled
+    /// and the user's own words contain its name as whole words. The result is the union of the active
+    /// skills' tool lists: it can only narrow what is available, never add a tool that is off or add one the
+    /// confirmation rules would hold. Tools it names that do not exist simply leave nothing to use.
+    #[must_use]
+    pub fn active_scope(&self, user_text: &str) -> Option<Vec<String>> {
+        let words = |s: &str| -> Vec<String> {
+            s.to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let said = words(user_text);
+        let mut scope: Option<Vec<String>> = None;
+        for s in self
+            .skills
+            .skills
+            .iter()
+            .filter(|s| s.enabled && !s.tools.is_empty())
+        {
+            let name = words(&s.name);
+            if !name.is_empty() && said.windows(name.len()).any(|w| w == name.as_slice()) {
+                scope
+                    .get_or_insert_with(Vec::new)
+                    .extend(s.tools.iter().cloned());
+            }
+        }
+        scope
+    }
+
     /// The text added to the system prompt for the enabled skills, or empty. `available` are the tools the
     /// assistant can use right now; a skill's own tool list is filtered to those.
     #[must_use]
@@ -292,7 +324,7 @@ impl Extensions {
                 .map(String::as_str)
                 .collect();
             if !usable.is_empty() {
-                block.push_str(&format!("\n(Tools for this skill: {}.)", usable.join(", ")));
+                block.push_str(&format!("\n(Tools for this skill: {}. When the user names this skill, only these tools can be used.)", usable.join(", ")));
             }
             if body.chars().count() + block.chars().count() > MAX_PROMPT_SKILLS {
                 break;
@@ -579,7 +611,7 @@ impl Extensions {
             let config = self.config_tools.contains(&t.name);
             tools.push(json!({
                 "name": t.name, "description": t.description, "source": "http",
-                "confirm": http.needs_confirmation(&t.name),
+                "confirm": http.risk(&t.name).tier >= Tier::Costly, "tier": http.risk(&t.name).tier,
                 "enabled": !self.tools.disabled.contains(&t.name), "deletable": !config,
                 "origin": if config { "config" } else { "portal" },
             }));
@@ -671,26 +703,49 @@ pub struct WithPolicy<'a, H> {
     pub ext: &'a Extensions,
     /// The MCP tools (to tell which server a name belongs to).
     pub mcp: &'a McpClient,
+    /// The allow-list of the skill the user named in this turn, if it has one (REQ-SEC-013). Set from the
+    /// user's words at the start of every turn; start it as `None`.
+    pub scope: Option<Vec<String>>,
+}
+
+impl<H: ToolHost> WithPolicy<'_, H> {
+    fn in_scope(&self, name: &str) -> bool {
+        self.scope
+            .as_ref()
+            .is_none_or(|s| s.iter().any(|n| n == name))
+    }
 }
 
 impl<H: ToolHost> ToolHost for WithPolicy<'_, H> {
     fn tool_specs(&self) -> Vec<ToolSpec> {
         let mut v = self.inner.tool_specs();
-        v.retain(|t| !self.ext.is_disabled(&t.name, self.mcp));
+        v.retain(|t| !self.ext.is_disabled(&t.name, self.mcp) && self.in_scope(&t.name));
         v
     }
 
-    fn needs_confirmation(&self, name: &str) -> bool {
-        self.inner.needs_confirmation(name)
+    fn risk(&self, name: &str, args: &Value) -> Risk {
+        self.inner.risk(name, args)
+    }
+
+    fn returns_untrusted_text(&self, name: &str) -> bool {
+        self.inner.returns_untrusted_text(name)
+    }
+
+    fn describe_action(&self, name: &str, args: &Value) -> String {
+        self.inner.describe_action(name, args)
     }
 
     fn begin_turn(&mut self, user_text: &str) {
+        self.scope = self.ext.active_scope(user_text);
         self.inner.begin_turn(user_text);
     }
 
     async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         if self.ext.is_disabled(name, self.mcp) {
             return Err("That tool is turned off.".into());
+        }
+        if !self.in_scope(name) {
+            return Err("That tool is not allowed by the skill being used.".into());
         }
         self.inner.call_tool(name, args).await
     }
@@ -1036,8 +1091,8 @@ mod tests {
         fn tool_specs(&self) -> Vec<ToolSpec> {
             self.0.clone()
         }
-        fn needs_confirmation(&self, _: &str) -> bool {
-            false
+        fn risk(&self, _: &str, _: &Value) -> Risk {
+            Risk::fixed(Tier::Reversible)
         }
         async fn call_tool(&mut self, name: &str, _: &Value) -> Result<String, String> {
             Ok(format!("ran {name}"))
@@ -1067,6 +1122,7 @@ mod tests {
             inner: &mut base,
             ext: &ext,
             mcp: &mcp,
+            scope: None,
         };
         let names: Vec<String> = host.tool_specs().into_iter().map(|t| t.name).collect();
         assert_eq!(names, vec!["current_time"]);
@@ -1078,5 +1134,82 @@ mod tests {
             host.call_tool("current_time", &json!({})).await,
             Ok("ran current_time".into())
         );
+    }
+
+    // REQ-SEC-013, REQ-CFG-036
+    #[tokio::test]
+    async fn the_skill_the_user_names_limits_the_tools_for_that_turn() {
+        let (mut ext, mut http, mut mcp, builtin) = ready().await;
+        for v in [
+            json!({"name":"Tea","instructions":"Remind me.","tools":["set_timer"],"enabled":true}),
+            json!({"name":"Planning","instructions":"Plan.","enabled":true}),
+            json!({"name":"Secret","instructions":"x","tools":["current_time"],"enabled":false}),
+        ] {
+            ext.apply(ExtOp::SkillAdd(v), &mut http, &mut mcp, &builtin, env)
+                .await
+                .unwrap();
+        }
+        let spec = |n: &str| ToolSpec {
+            name: n.into(),
+            description: "d".into(),
+            parameters: json!({"type":"object"}),
+        };
+        let mut base = Fixed(vec![spec("set_timer"), spec("current_time")]);
+        let mut host = WithPolicy {
+            inner: &mut base,
+            ext: &ext,
+            mcp: &mcp,
+            scope: None,
+        };
+        let names = |h: &WithPolicy<'_, Fixed>| -> Vec<String> {
+            h.tool_specs().into_iter().map(|t| t.name).collect()
+        };
+
+        // No skill named, or a skill with no tool list, or a skill that is off: everything is available.
+        for say in ["what time is it", "use planning", "use secret"] {
+            host.begin_turn(say);
+            assert_eq!(names(&host), ["set_timer", "current_time"], "{say}");
+        }
+        // The user names the skill (case does not matter, whole words only): only its tools are offered
+        // and any other call is refused, even by name.
+        host.begin_turn("Use the TEA skill please");
+        assert_eq!(names(&host), ["set_timer"]);
+        assert_eq!(
+            host.call_tool("current_time", &json!({})).await,
+            Err("That tool is not allowed by the skill being used.".into())
+        );
+        assert_eq!(
+            host.call_tool("set_timer", &json!({})).await,
+            Ok("ran set_timer".into())
+        );
+        host.begin_turn("make steamy tea");
+        assert_eq!(
+            names(&host),
+            ["set_timer"],
+            "the name appears as a whole word"
+        );
+        host.begin_turn("a plateau of teapots");
+        assert_eq!(names(&host).len(), 2, "part of a word is not a name");
+        // The scope ends with the turn.
+        host.begin_turn("what time is it");
+        assert_eq!(names(&host).len(), 2);
+        // A scope never turns a tool back on.
+        ext.apply(
+            ExtOp::ToolEnable("set_timer".into(), false),
+            &mut http,
+            &mut mcp,
+            &builtin,
+            env,
+        )
+        .await
+        .unwrap();
+        let mut host = WithPolicy {
+            inner: &mut base,
+            ext: &ext,
+            mcp: &mcp,
+            scope: None,
+        };
+        host.begin_turn("use tea");
+        assert!(names(&host).is_empty());
     }
 }
