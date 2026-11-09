@@ -21,6 +21,7 @@
 | Architecture | [architecture/board-support.md](architecture/board-support.md) | Board layer: buttons, LED ring, mute, Wi-Fi, clock, audio names; the Echo Dot Gen 2 board file |
 | Specs | [specs/0006-device-layer-contract.md](specs/0006-device-layer-contract.md) | Device layer contract: REQ-DEV, capability model, minimum hardware, conformance; board-file schema in [../schemas/board/](../schemas/board/README.md) |
 | Architecture | [architecture/device-daemon.md](architecture/device-daemon.md) | The portable device daemon: modules, what exists and what does not, running it, size |
+| Architecture | [architecture/device-conformance.md](architecture/device-conformance.md) | The device conformance suite: cases, running it, how a new board proves itself |
 | Architecture | [architecture/esphome-satellite.md](architecture/esphome-satellite.md) | Optional client for ESPHome voice satellites (a Dot base image, Voice PE): config, mapping, limits |
 | Architecture | [architecture/porting-a-satellite.md](architecture/porting-a-satellite.md) | Implementing a satellite on new hardware; the reference client |
 | Guides | [guides/pc-voice-loop.md](guides/pc-voice-loop.md) | Manual smoke test: a push-to-talk spoken turn on a PC (microphone in, speaker out) |

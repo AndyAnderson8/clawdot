@@ -46,6 +46,10 @@ flowchart LR
 | Local cancel reaches the core | Not on the wire yet; playback is silenced and capture closed locally |
 | Mixer routes (`audio.mixer_routes`) | Validated, not applied (needs the ALSA backend) |
 
+## Proving a board
+
+The [conformance suite](device-conformance.md) runs the contract against any board file with a scripted core; the desktop, Raspberry Pi and Echo Dot 2 files all pass with the same daemon.
+
 ## Running it
 
 ```

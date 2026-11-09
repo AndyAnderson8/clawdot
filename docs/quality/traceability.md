@@ -84,7 +84,7 @@ Audio interface (added 2026-11-09). Tested with scripted child processes and rec
 
 ## Device layer (DEV)
 
-Spec [0006](../specs/0006-device-layer-contract.md); the daemon is `crates/device` (see [device-daemon](../architecture/device-daemon.md)). The daemon is a skeleton: command audio, console LEDs and terminal-key buttons only. Nothing here has run on a device. The conformance suite is slice 3 and adds its own column when it lands.
+Spec [0006](../specs/0006-device-layer-contract.md); the daemon is `crates/device` (see [device-daemon](../architecture/device-daemon.md)). The daemon is a skeleton: command audio, console LEDs and terminal-key buttons only. Nothing here has run on a device. The "Verified by" column names unit tests; the conformance suite (`crates/device-conformance`) also runs a case per requirement against three board files.
 
 | ID | Status | Where | Verified by |
 |---|---|---|---|
@@ -97,7 +97,7 @@ Spec [0006](../specs/0006-device-layer-contract.md); the daemon is `crates/devic
 | DEV-007 signed updates | Not started | image recipe (B5) | |
 | DEV-008 board file validation | Done | `board_file`, `schemas/board/board-1.schema.json` | `board_file` tests |
 | DEV-009, 010, 018 follow-up, Wi-Fi, clock trust | Not started (09 is core-driven) | | |
-| DEV-011 conformance suite | Not started | | |
+| DEV-011 conformance suite | Done on the desktop, Raspberry Pi and Echo Dot 2 files (recordings, not hardware); not run on a unit | `crates/device-conformance`, [device-conformance](../architecture/device-conformance.md) | the suite, and `tests/catches.rs` (faulty boards must fail) |
 | DEV-012 unsupported boards | Done | `hardware` checks in `board_file` | `board_file` tests |
 | DEV-013 equivalents | Done | `caps::Capability::equivalent` | `caps` tests |
 | DEV-014 local tones | Done | `tone`, `daemon` | `tone` and `daemon` tests |
