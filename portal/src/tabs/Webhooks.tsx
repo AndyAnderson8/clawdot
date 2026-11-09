@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { snippets } from "../forms.ts";
@@ -79,7 +80,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
   );
 }
 
-export function Webhooks() {
+export function Webhooks(): JSX.Element {
   const s = useApp();
   const [name, setName] = useState("");
   const [adapter, setAdapter] = useState("claude-code");

@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { skillBody } from "../forms.ts";
 import { CopyButton, Field } from "../parts.tsx";
@@ -6,7 +7,7 @@ import type { Skill } from "../types.ts";
 
 const MAX_IMPORT_BYTES = 70000;
 
-export function Skills() {
+export function Skills(): JSX.Element {
   const ext = useApp().ext;
   usePolled(loadExt);
   const skills = ext?.skills ?? [];
@@ -70,7 +71,7 @@ export function Skills() {
       return;
     }
     const r = new FileReader();
-    r.onload = () => setImportText(String(r.result));
+    r.onload = () => setImportText(typeof r.result === "string" ? r.result : "");
     r.readAsText(f);
   };
 

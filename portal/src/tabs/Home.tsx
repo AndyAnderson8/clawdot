@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { go } from "../parts.tsx";
@@ -10,7 +11,7 @@ interface Item {
   action?: [tab: string, label: string];
 }
 
-export function Home() {
+export function Home(): JSX.Element {
   const s = useApp();
   const [text, setText] = useState("");
   const st = s.status;
@@ -88,7 +89,7 @@ export function Home() {
               {i.done ? null : <div class="why">{i.why}</div>}
               {!i.done && i.action ? (
                 <div class="acts">
-                  <button class="plain" type="button" onClick={() => go(i.action![0])}>
+                  <button class="plain" type="button" onClick={() => go(i.action?.[0] ?? "home")}>
                     {i.action[1]}
                   </button>
                 </div>

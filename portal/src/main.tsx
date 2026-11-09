@@ -2,7 +2,9 @@ import { render } from "preact";
 import { App } from "./App.tsx";
 import { get, load, start } from "./store.ts";
 
-render(<App />, document.getElementById("root")!);
+const root = document.getElementById("root");
+if (!root) throw new Error("index.html lost its #root element");
+render(<App />, root);
 void start();
 // Keep what is on screen fresh while the page is open and visible.
 setInterval(() => {

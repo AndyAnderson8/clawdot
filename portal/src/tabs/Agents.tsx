@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { go } from "../parts.tsx";
 import { useApp } from "../store.ts";
 import { ago } from "../time.ts";
@@ -10,7 +11,7 @@ const STATE: Record<string, string> = {
   snoozed: "Snoozed",
 };
 
-export function Agents() {
+export function Agents(): JSX.Element {
   const ov = useApp().overview;
   return (
     <>

@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { connectionDefinition } from "../forms.ts";
@@ -170,7 +171,7 @@ function AddConnection() {
   );
 }
 
-export function Connections() {
+export function Connections(): JSX.Element {
   const ext = useApp().ext;
   usePolled(loadExt);
   const servers = ext?.mcp ?? [];

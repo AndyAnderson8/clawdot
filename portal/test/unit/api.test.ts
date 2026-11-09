@@ -10,16 +10,13 @@ let calls: Call[] = [];
 const realFetch = globalThis.fetch;
 
 function reply(status: number, body: unknown) {
-  globalThis.fetch = (async (url: string, init: RequestInit) => {
+  globalThis.fetch = ((url: string, init: RequestInit) => {
     calls.push({ url, init });
-    return {
+    return Promise.resolve({
       ok: status >= 200 && status < 300,
       status,
-      json: async () => {
-        if (body === undefined) throw new Error("no body");
-        return body;
-      },
-    } as Response;
+      json: () => (body === undefined ? Promise.reject(new Error("no body")) : Promise.resolve(body)),
+    } as Response);
   }) as typeof fetch;
 }
 

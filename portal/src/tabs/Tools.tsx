@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { ConfirmBadge, Field, OffBadge } from "../parts.tsx";
 import { change, loadExt, say, useApp, usePolled } from "../store.ts";
@@ -5,7 +6,7 @@ import { toolDefinition, type ParamForm } from "../forms.ts";
 import type { Extensions, Tool } from "../types.ts";
 
 /** The "Saved, but not running" box for tools or connections that failed to load. */
-export function Problems(props: { ext: Extensions; kind: string }) {
+export function Problems(props: { ext: Extensions; kind: string }): JSX.Element | null {
   const list = (props.ext.problems ?? []).filter((x) => x.kind === props.kind);
   if (!list.length) return null;
   return (
@@ -20,7 +21,7 @@ export function Problems(props: { ext: Extensions; kind: string }) {
   );
 }
 
-export function OnOffButton(props: { path: string; on: boolean; what: string }) {
+export function OnOffButton(props: { path: string; on: boolean; what: string }): JSX.Element {
   return (
     <button
       class="plain"
@@ -240,7 +241,7 @@ function AddTool() {
   );
 }
 
-export function Tools() {
+export function Tools(): JSX.Element {
   const ext = useApp().ext;
   usePolled(loadExt);
   const by = (s: string) => (ext?.tools ?? []).filter((t) => t.source === s);

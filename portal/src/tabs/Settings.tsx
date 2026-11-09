@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { useRef, useState } from "preact/hooks";
 import { Fragment } from "preact";
 import { api, ApiError, keep } from "../api.ts";
@@ -253,7 +254,7 @@ function Details(props: { settings: SettingsData }) {
   );
 }
 
-export function Settings() {
+export function Settings(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
   const [notes, setNotes] = useState("");

@@ -1,4 +1,4 @@
-import type { ComponentType } from "preact";
+import type { ComponentType, JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { api, keep } from "./api.ts";
 import { Agents } from "./tabs/Agents.tsx";
@@ -16,7 +16,7 @@ interface Tab {
   label: string;
   view: ComponentType;
 }
-export const TABS: Tab[] = [
+export const TABS: [Tab, ...Tab[]] = [
   { id: "home", label: "Home", view: Home },
   { id: "reminders", label: "Reminders", view: Reminders },
   { id: "agents", label: "Agents", view: Agents },
@@ -30,7 +30,7 @@ export const TABS: Tab[] = [
 /** The tab named in the address fragment (`#/reminders`), or the first. */
 export function tabFromHash(hash: string): Tab {
   const name = hash.replace(/^#\/?/, "").split("/")[0];
-  return TABS.find((t) => t.id === name) ?? TABS[0]!;
+  return TABS.find((t) => t.id === name) ?? TABS[0];
 }
 
 const Logo = () => (
@@ -60,7 +60,7 @@ function Band(props: { tab: Tab }) {
               : null;
     if (n === null) return;
     ev.preventDefault();
-    const next = TABS[(n + TABS.length) % TABS.length]!;
+    const next = TABS[(n + TABS.length) % TABS.length] ?? TABS[0];
     location.hash = "#/" + next.id;
     document.getElementById("tab-" + next.id)?.focus();
   };
@@ -232,7 +232,7 @@ function Login() {
   );
 }
 
-export function App() {
+export function App(): JSX.Element {
   const s = useApp();
   const [hash, setHash] = useState(location.hash);
   useEffect(() => {
@@ -248,7 +248,7 @@ export function App() {
     if (!inApp) return;
     document.title = tab.label + " - ClawDot";
     document.getElementById("tab-" + tab.id)?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [inApp, tab.id]);
+  }, [inApp, tab.id, tab.label]);
 
   const Active = tab.view;
   return (

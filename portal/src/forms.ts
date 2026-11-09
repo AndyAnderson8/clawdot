@@ -106,7 +106,12 @@ export function connectionDefinition(f: ConnectionForm): ConnectionDefinition {
   return d;
 }
 
-export function skillBody(name: string, instructions: string, tools: string, enabled: boolean | undefined) {
+export function skillBody(
+  name: string,
+  instructions: string,
+  tools: string,
+  enabled: boolean | undefined,
+): { name: string; instructions: string; tools: string[]; enabled: boolean | undefined } {
   return { name: name.trim(), instructions, tools: tools.split(/[\s,]+/).filter(Boolean), enabled };
 }
 
@@ -189,7 +194,7 @@ export function labelOf(key: string): string {
 /** The current value of a setting as the text a form field starts with. */
 export function currentText(s: Settings, key: string): string {
   const v = s.fields[key]?.value;
-  return v == null ? "" : String(v);
+  return String(v ?? "");
 }
 
 /** Only the values that changed, ready for `PUT /api/settings`; an emptied box becomes null (back to the default). */

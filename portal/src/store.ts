@@ -77,6 +77,8 @@ export function usePolled(fn: () => void | Promise<void>): void {
   const tick = useApp().tick;
   useEffect(() => {
     void fn();
+    // `fn` is a new closure on every render; only a refresh (the tick) should run it again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick]);
 }
 

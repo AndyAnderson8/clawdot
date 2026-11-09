@@ -1,3 +1,4 @@
+import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { reminderBody } from "../forms.ts";
@@ -21,7 +22,7 @@ function whenLine(i: ScheduleItem, now: number): string {
   return whenText(i.fire_at, now, z);
 }
 
-export function Reminders() {
+export function Reminders(): JSX.Element {
   const [data, setData] = useState<ScheduleList | null>(null);
   const [unavailable, setUnavailable] = useState("");
   const [editing, setEditing] = useState(0);
