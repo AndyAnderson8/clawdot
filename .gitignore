@@ -8,6 +8,11 @@ config.toml
 .env
 .env.*
 secrets/
+# Bridge secrets and local settings (the examples in bridges/examples are committed)
+bridges/deploy/*.env
+bridges/deploy/*.toml
+__pycache__/
+*.pyc
 
 # Runtime data
 /data/
