@@ -25,22 +25,45 @@
   code, .token { font-family: ui-monospace, monospace; word-break: break-all; }
   .token { display: block; padding: .5rem; border: 1px dashed var(--acc); border-radius: 6px; margin: .4rem 0; }
   #msg { min-height: 1.4rem; color: var(--bad); }
+  h3 { font-size: .95rem; margin: 1rem 0 .4rem; }
+  .warn { color: var(--bad); font-weight: 600; margin: .3rem 0; }
+  #banner { position: sticky; top: 0; z-index: 10; background: var(--bad); color: #fff; padding: .5rem 1rem; text-align: center; font-weight: 600; }
+  #banner a { color: #fff; }
   .hidden { display: none; }
 </style>
 </head>
 <body>
+<div id="banner" class="hidden" role="alert">Unprotected: anyone on this network can use this page. <a href="#pwsec">Set a password</a></div>
 <main>
   <h1>ClawDot</h1>
   <p class="sub">Your speaker's agent inbox. Nothing on this page leaves your network.</p>
   <div id="msg" role="status"></div>
 
-  <section id="login">
+  <section id="setup" class="hidden">
+    <h2>Set up ClawDot</h2>
+    <p class="mut">Choose how to protect this page. Webhook tokens for agents are separate and always required.</p>
+    <form id="pwform">
+      <h3>Protect with an admin password <span class="mut">(recommended)</span></h3>
+      <div class="row"><input id="pw1" type="password" autocomplete="new-password" placeholder="Password (8 or more characters)" aria-label="New password" maxlength="128"></div>
+      <div class="row"><input id="pw2" type="password" autocomplete="new-password" placeholder="Repeat the password" aria-label="Repeat the password" maxlength="128"></div>
+      <div class="row codebox hidden"><input id="code1" inputmode="numeric" autocomplete="off" placeholder="Setup code from the console" aria-label="Setup code" maxlength="9"></div>
+      <div class="row"><button>Set password</button></div>
+    </form>
+    <form id="openform">
+      <h3>Leave open on this network</h3>
+      <p class="warn">Unprotected: anyone on this network can use this page and read your inbox.</p>
+      <div class="row codebox hidden"><input id="code2" inputmode="numeric" autocomplete="off" placeholder="Setup code from the console" aria-label="Setup code" maxlength="9"></div>
+      <div class="row"><button class="danger" id="openbtn">Leave unprotected</button></div>
+    </form>
+  </section>
+
+  <section id="login" class="hidden">
     <h2>Sign in</h2>
     <form class="row" id="loginform">
-      <input id="tok" type="password" autocomplete="current-password" placeholder="Administrator token" aria-label="Administrator token">
+      <input id="pw" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password">
       <button>Sign in</button>
     </form>
-    <p class="mut">The token was printed once when the device first started. It is kept only for this browser tab.</p>
+    <p class="mut" id="legacynote">Forgot it? On the device, run <code>clawdot --reset-admin</code> and open this page again.</p>
   </section>
 
   <div id="app" class="hidden">
@@ -78,6 +101,15 @@
       <h2>Inbox</h2>
       <ul id="events"></ul>
     </section>
+
+    <section id="pwsec">
+      <h2 id="pwtitle">Admin password</h2>
+      <p class="mut hidden" id="legacywarn">You are signed in with the old administrator token. Set a password to replace it.</p>
+      <form class="row" id="newpwform">
+        <input id="newpw" type="password" autocomplete="new-password" placeholder="New password (8 or more characters)" aria-label="New password" maxlength="128">
+        <button>Save password</button>
+      </form>
+    </section>
   </div>
 </main>
 <script>
@@ -85,7 +117,8 @@
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
   var token = "";
-  try { token = sessionStorage.getItem("clawdot-admin") || ""; } catch (e) { token = ""; }
+  try { token = sessionStorage.getItem("clawdot-session") || ""; } catch (e) { token = ""; }
+  function keep(t) { token = t || ""; try { if (token) sessionStorage.setItem("clawdot-session", token); else sessionStorage.removeItem("clawdot-session"); } catch (e) {} }
 
   function say(m) { $("msg").textContent = m || ""; }
   function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
@@ -93,7 +126,7 @@
   async function api(method, path, body) {
     var r = await fetch(path, {
       method: method,
-      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      headers: token ? { "Authorization": "Bearer " + token, "Content-Type": "application/json" } : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
     var data = {};
@@ -102,9 +135,8 @@
     return data;
   }
 
-  function show(signedIn) {
-    $("login").classList.toggle("hidden", signedIn);
-    $("app").classList.toggle("hidden", !signedIn);
+  function show(view) {
+    ["setup", "login", "app"].forEach(function (v) { $(v).classList.toggle("hidden", v !== view); });
   }
 
   function ago(ts, now) {
@@ -178,23 +210,63 @@
   function secret(t) { $("secrettext").textContent = t; $("secret").classList.remove("hidden"); }
 
   async function load() {
-    say("");
-    try { render(await api("GET", "/api/overview")); show(true); renderStatus(await api("GET", "/api/status")); }
-    catch (x) {
-      show(false);
-      if (x.status === 401) { token = ""; try { sessionStorage.removeItem("clawdot-admin"); } catch (e) {} say("That token was not accepted."); }
+    var st;
+    try { st = await api("GET", "/api/auth"); } catch (x) { say(x.message); return; }
+    var open = st.mode === "open";
+    $("banner").classList.toggle("hidden", !open);
+    Array.prototype.forEach.call(document.querySelectorAll(".codebox"), function (b) { b.classList.toggle("hidden", !st.code_needed); });
+    $("openbtn").disabled = !st.open_allowed || !st.peer_private;
+    $("out").classList.toggle("hidden", open);
+    $("pwtitle").textContent = open ? "Set an admin password" : "Change admin password";
+    $("legacywarn").classList.toggle("hidden", !st.legacy);
+    if (st.mode === "setup") { show("setup"); if (!st.peer_private) say("Setup can only be finished from a device on your own network."); return; }
+    if (st.mode === "password" && !token) { show("login"); return; }
+    try {
+      render(await api("GET", "/api/overview")); show("app"); say("");
+      renderStatus(await api("GET", "/api/status"));
+    } catch (x) {
+      if (x.status === 401) { keep(""); show("login"); say("Please sign in."); }
       else if (x.status === 429) say("Too many attempts. Wait a few seconds.");
       else say(x.message);
     }
   }
 
-  $("loginform").onsubmit = function (ev) {
+  async function finishSetup(body) {
+    try {
+      var r = await api("POST", "/api/setup", body);
+      keep(r.token || ""); say(""); await load();
+    } catch (x) { say(x.message); }
+  }
+  function code(id) { var v = $(id).value.trim(); return v ? v : undefined; }
+
+  $("pwform").onsubmit = function (ev) {
     ev.preventDefault();
-    token = $("tok").value.trim(); $("tok").value = "";
-    try { sessionStorage.setItem("clawdot-admin", token); } catch (e) {}
-    load();
+    var p = $("pw1").value;
+    if (p !== $("pw2").value) { say("The two passwords differ."); return; }
+    if (p.length < 8) { say("Use at least 8 characters."); return; }
+    $("pw1").value = ""; $("pw2").value = "";
+    finishSetup({ mode: "password", password: p, code: code("code1") });
   };
-  $("out").onclick = function () { token = ""; try { sessionStorage.removeItem("clawdot-admin"); } catch (e) {} $("secret").classList.add("hidden"); show(false); };
+  $("openform").onsubmit = function (ev) {
+    ev.preventDefault();
+    finishSetup({ mode: "open", code: code("code2") });
+  };
+  $("loginform").onsubmit = async function (ev) {
+    ev.preventDefault();
+    var p = $("pw").value; $("pw").value = "";
+    try { var r = await api("POST", "/api/login", { password: p }); keep(r.token); say(""); await load(); }
+    catch (x) { say(x.status === 401 ? "That password was not accepted." : x.status === 429 ? "Too many attempts. Wait a few seconds." : x.message); }
+  };
+  $("out").onclick = async function () {
+    try { await api("POST", "/api/logout"); } catch (x) {}
+    keep(""); $("secret").classList.add("hidden"); await load();
+  };
+  $("newpwform").onsubmit = async function (ev) {
+    ev.preventDefault();
+    var p = $("newpw").value; $("newpw").value = "";
+    try { var r = await api("POST", "/api/admin/password", { password: p }); keep(r.token); await load(); say("Password saved."); }
+    catch (x) { say(x.message); }
+  };
   $("newform").onsubmit = async function (ev) {
     ev.preventDefault();
     try {
@@ -211,8 +283,8 @@
     } catch (x) { say(x.message); }
   };
 
-  if (token) load();
-  setInterval(function () { if (token && !$("app").classList.contains("hidden")) load(); }, 10000);
+  load();
+  setInterval(function () { if (!$("app").classList.contains("hidden")) load(); }, 10000);
 })();
 </script>
 </body>

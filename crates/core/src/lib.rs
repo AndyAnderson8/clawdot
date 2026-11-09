@@ -1,6 +1,7 @@
 //! ClawDot core.
 //!
 //! * [`inbox`]: events from agents and services, announced and answered by voice.
+//! * [`admin`]: the web UI administrator (password or open mode), sessions, and recovery.
 //! * [`app`]: the shared state behind one lock, with every operation a front end needs.
 //! * [`http`]: webhook ingress and the SSE reply stream for agent bridges.
 //! * [`sched`]: timers, alarms, and reminders.
@@ -8,6 +9,7 @@
 //! * [`store`]: atomic, versioned JSON persistence.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod admin;
 pub mod app;
 pub mod assistant;
 pub mod config;
