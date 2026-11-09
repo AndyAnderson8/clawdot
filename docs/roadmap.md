@@ -212,6 +212,7 @@ Goal: a Dot running a base image (or any ESPHome voice satellite, such as a Pi r
 - LED states (`inbox`, `listening`, `error`) through ring entities if the base exposes them; mute state from the entity; volume; clock trust via an HTTPS `Date` check
 - **Wake word choice with licence-clean models.** **No pretrained openWakeWord models are bundled** (their licence is not clean); the guide says how to pick or train one, and the choice is recorded with licence provenance (EPIC-001)
 - Anything the base cannot do becomes a documented gap or an upstream request, not our code
+- **Bluetooth speaker mode** (a phone plays through the Dot as an A2DP sink, and the Dot can play to a Bluetooth speaker) is a supported capability of the base image and stays available beside ClawDot; how it shares the speaker with announcements is measured in B0 ([trial plan](guides/b0-techo5-trial-plan.md))
 
 **Exit:** the Dot shows the inbox, listening and error states; no ClawDot code opens ALSA.
 
