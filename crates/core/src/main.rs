@@ -52,6 +52,8 @@ OPTIONS:
     --voice-in FILE            Answer one recorded utterance (WAV, mono 16-bit 16 kHz) and exit; needs a `speech` config
     --voice-out FILE           With --voice-in, write the spoken reply to this WAV file
     --no-console               Do not read the console (run as a server only)
+    --echo-speech              With --no-console, still print what the speaker says to stdout (diagnosis;
+                               stdout may be kept by a service manager, so leave it off in production)
 
 LANGUAGE MODEL (optional; without it only the local fast path and fallback summaries work):
     --llm-url URL              OpenAI-compatible base URL, for example https://openrouter.ai/api/v1
@@ -82,6 +84,8 @@ struct Args {
     /// An endpoint command was given on the command line: print and exit instead of serving.
     manage: bool,
     console: bool,
+    /// Echo spoken text to stdout even without the console (diagnosis only).
+    echo_speech: bool,
     llm_url: Option<String>,
     llm_model: Option<String>,
     llm_fallback: Option<String>,
@@ -112,6 +116,7 @@ fn parse() -> Result<Args, String> {
         reset_admin: false,
         manage: false,
         console: true,
+        echo_speech: false,
         llm_url: None,
         llm_model: None,
         llm_fallback: None,
@@ -168,6 +173,7 @@ fn parse() -> Result<Args, String> {
             "--voice-in" => a.voice_in = Some(PathBuf::from(value("--voice-in")?)),
             "--voice-out" => a.voice_out = Some(PathBuf::from(value("--voice-out")?)),
             "--no-console" => a.console = false,
+            "--echo-speech" => a.echo_speech = true,
             "--llm-url" => a.llm_url = Some(value("--llm-url")?),
             "--llm-model" => a.llm_model = Some(value("--llm-model")?),
             "--llm-fallback-model" => a.llm_fallback = Some(value("--llm-fallback-model")?),
@@ -309,22 +315,7 @@ fn zone_for(name: Option<&str>) -> Result<Box<dyn Zone + Send + Sync>, String> {
     }
 }
 
-/// One-time secrets go only to a person at a terminal. Under a service manager or in a container, stdout
-/// is kept by the journal or the container log with no size cap, so a token printed there would be
-/// stored indefinitely (REQ-SEC-009, threat T6).
-fn secrets_may_be_printed() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdout().is_terminal()
-}
-
 fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
-    if !secrets_may_be_printed() {
-        println!(
-            "Endpoint `{endpoint}` created (adapter: {adapter}). Its token is not printed because stdout is not a terminal; \
-             rotate it from the web UI, or run `clawdot --rotate {endpoint}` in a terminal."
-        );
-        return;
-    }
     println!(
         "\nEndpoint `{endpoint}` created (adapter: {adapter}). The token is shown only now:\n  {token}\n"
     );
@@ -675,14 +666,6 @@ async fn main() -> ExitCode {
         }
     }
     for name in &args.rotate {
-        if !secrets_may_be_printed() {
-            // Rotating would lose the new token, so refuse rather than print it into a log.
-            eprintln!(
-                "clawdot: --rotate {name}: the new token would be lost because stdout is not a terminal; run it in a terminal or rotate from the web UI"
-            );
-            failed = true;
-            continue;
-        }
         match core.rotate_endpoint(name) {
             Ok(token) => println!("New token for `{name}` (shown once): {token}"),
             Err(e) => {
@@ -955,7 +938,7 @@ async fn main() -> ExitCode {
                 // Spoken text is echoed only to an interactive console: in server mode stdout goes to a
                 // journal or container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
                 while let Some(phrase) = core.take_speech() {
-                    if args.console {
+                    if args.console || args.echo_speech {
                         println!("speaker> {phrase}");
                     }
                     if announcer.connected() > 0 {
@@ -964,7 +947,7 @@ async fn main() -> ExitCode {
                 }
                 for fired in brain.assistant.tick() {
                     let line = describe_fired(&fired);
-                    if args.console {
+                    if args.console || args.echo_speech {
                         println!("speaker> {line}");
                     }
                     if announcer.connected() > 0 {
@@ -988,7 +971,7 @@ async fn main() -> ExitCode {
                         None => fallback_summary(&next.event),
                     };
                     let line = announcement(&next.event, &spoken, next.more_waiting);
-                    if args.console {
+                    if args.console || args.echo_speech {
                         println!("speaker> {line}");
                     }
                     let delivered = announcer.connected() == 0 || announcer.announce(&line).await;

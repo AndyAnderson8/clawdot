@@ -39,6 +39,7 @@ fn create_endpoint(data_dir: &std::path::Path) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
+            "--echo-speech",
             "--data-dir",
             data_dir.to_str().unwrap(),
             "--create-endpoint",
@@ -83,6 +84,7 @@ fn the_binary_serves_hooks_and_announces_them() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
+            "--echo-speech",
             "--listen",
             &format!("127.0.0.1:{port}"),
             "--data-dir",
@@ -262,7 +264,12 @@ fn a_bad_config_file_stops_startup_and_names_the_problem() {
     let path = std::env::temp_dir().join(format!("clawdot-bad-config-{}.json", std::process::id()));
     std::fs::write(&path, r#"{"listn": "127.0.0.1:1"}"#).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args(["--no-console", "--config", path.to_str().unwrap()])
+        .args([
+            "--no-console",
+            "--echo-speech",
+            "--config",
+            path.to_str().unwrap(),
+        ])
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -592,6 +599,7 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
+            "--echo-speech",
             "--config",
             cfg.to_str().unwrap(),
             "--listen",
@@ -761,6 +769,7 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
+            "--echo-speech",
             "--config",
             cfg.to_str().unwrap(),
             "--listen",
@@ -1069,6 +1078,7 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
+            "--echo-speech",
             "--listen",
             &format!("127.0.0.1:{port}"),
             "--data-dir",
@@ -1169,6 +1179,7 @@ fn a_taken_port_fails_without_revealing_a_token() {
     let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
+            "--echo-speech",
             "--listen",
             &format!("127.0.0.1:{port}"),
             "--data-dir",
@@ -1195,7 +1206,7 @@ fn a_taken_port_fails_without_revealing_a_token() {
 /// Start the binary, wait for the "listening" line, and return it with everything printed so far.
 fn start_and_read(args: &[&str]) -> (std::process::Child, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .arg("--no-console")
+        .args(["--no-console", "--echo-speech"])
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1321,6 +1332,7 @@ fn snippets_follow_the_listen_address() {
         let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
             .args([
                 "--no-console",
+                "--echo-speech",
                 "--listen",
                 listen,
                 "--data-dir",

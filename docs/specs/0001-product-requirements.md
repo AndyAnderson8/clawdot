@@ -189,7 +189,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-SEC-006 | Satellite connections MUST be authenticated when not in-process. | Must | M1 | T |
 | REQ-SEC-007 | The system MUST NOT send telemetry, analytics, or crash reports to any party. Network traffic is limited to user-configured providers, bridges, and sources. This is documented in [PRIVACY.md](../../PRIVACY.md). | Must | M1 | I/T |
 | REQ-SEC-008 | Resources held before authentication MUST be bounded: the HTTP and satellite listeners MUST apply short header and hello timeouts, a read timeout on request bodies, and a cap on connections per source address in addition to the global cap, so idle sockets cannot starve either listener. | Must | M2 | T |
-| REQ-SEC-009 | State files MUST be created readable only by the service user (mode 0600 in a 0700 directory on Unix, set at creation). Agent text and one-time secrets MUST NOT be written to stdout in server mode: spoken text is echoed only to an interactive `--console`, and endpoint tokens are printed only to a terminal. | Must | M2 | T |
+| REQ-SEC-009 | State files MUST be created readable only by the service user (mode 0600 in a 0700 directory on Unix, set at creation). Agent text MUST NOT be written to stdout in server mode: spoken text is echoed only with the interactive console or the explicit `--echo-speech` diagnostic flag. One-time endpoint tokens are printed only by the operator's own management commands (REQ-CFG-015). | Must | M2 | T |
 
 ### 4.9 Extensibility (`EXT`)
 

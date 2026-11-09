@@ -26,7 +26,7 @@ ClawDot is a device that listens for a wake word, so privacy is a design require
 
 ## What this means in practice
 - Whatever your STT, LLM, and TTS providers do with data is governed by **their** terms. Pick them with that in mind. Self-hosted providers keep everything on your network.
-- Agent output can be sensitive (code, paths, secrets in logs). State files are readable only by the service user, and in server mode agent text and one-time tokens are not written to stdout (so not to the journal or container log); the interactive console `--console` echoes spoken text to your own terminal. Because inbox text reaches your LLM provider for summarisation, use endpoint filters and avoid piping highly sensitive output to ClawDot.
+- Agent output can be sensitive (code, paths, secrets in logs). State files are readable only by the service user, and in server mode (`--no-console`) agent text is not written to stdout, so not to the journal or container log, unless you pass `--echo-speech` for diagnosis. Because inbox text reaches your LLM provider for summarisation, use endpoint filters and avoid piping highly sensitive output to ClawDot.
 - Physical mute is the strongest control. Satellites declare whether they have one.
 
 ## Not covered
