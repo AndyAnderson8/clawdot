@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.23 |
+| **Version** | 0.24 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -85,10 +85,13 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-AST-009 | The system SHOULD support a fallback model if the primary fails or times out. | Should | M1 | T |
 | REQ-AST-010 | The system MUST include a **local fast-path intent matcher** (template grammar with alternatives, optionals, and slots) that handles stop/cancel, volume, and timer/alarm/music-control commands without an LLM call, resolves or rejects within the time in spec 0002, and falls through to the LLM on no match. The matcher is authoritative for its own grammar. | Must | M3 | T |
 | REQ-AST-011 | The system MUST enforce configurable usage limits: per-turn output token cap, per-day request cap, and an optional daily spend cap derived from provider usage data. On limit, it MUST degrade gracefully and tell the user. | Must | M3 | T |
-| REQ-AST-012 | The project SHOULD maintain a tested-models list and a tool-calling evaluation set so that recommended models are verified to call the built-in tools reliably. | Should | M3 | T |
+| REQ-AST-012 | The project SHOULD maintain a tested-models list and a tool-calling evaluation set so that recommended models are verified to call the built-in tools reliably (see REQ-AST-016 to REQ-AST-018). | Should | M3 | T |
 | REQ-AST-013 | The assistant's persona, system prompt, and TTS voice MUST be configurable (with safe defaults), and the configured prompt MUST NOT be able to disable the confirm policy or the untrusted-text handling required elsewhere in this spec. | Must | M3 | T |
 | REQ-AST-014 | The system MUST support **declarative HTTP tools**: an admin-configured URL, method, auth, and parameter schema, exposed to the LLM as a tool. The LLM supplies only schema-validated parameters and MUST NOT choose URLs or headers. The confirm policy and usage limits apply. | Must | M5 | T |
 | REQ-AST-015 | A tool that forwards text to an external agent (the `instruct` reply) MUST NOT send it until the user has confirmed the exact text out loud in a later turn than the one that proposed it; the model cannot supply that confirmation (this is the general rule of REQ-SEC-011). Untrusted text returned by any tool (for example agent event details, web or MCP results) MUST be fenced and labelled as untrusted data. | Must | M2 | T |
+| REQ-AST-016 | The project MUST have a scenario-based evaluation harness. A scenario is a declarative JSON file: the user's utterances or triggering events, the tools on offer (real built-ins or fixtures), the model's replies (scripted, or a recorded transcript), and the expectations: tool calls in order with argument matchers, forbidden calls, confirmation behaviour, and constraints on the spoken output. **Replay mode** MUST drive the real session loop (`run_turn`, host-held confirmation, audit log, caps) with a scripted fake model, MUST be deterministic, MUST use no network, secrets or spend, and MUST pass in `scripts/check.sh` and CI before anything reaches `dev`. | Must | M5 | T |
+| REQ-AST-017 | **Live mode** (the same scenarios against a real model, tools still fixtures) MUST be off by default and run only when asked explicitly, with a spend cap that stops the run and reports partial results. It MUST run each scenario three times and report pass rates; a scenario passes when at least two of three runs pass its checks and no run breaks a safety rule. It MUST never run in CI. | Should | M5 | T |
+| REQ-AST-018 | The shipped scenario set MUST cover the agentic use cases that today's tools can express, and an adversarial injection set (instructions in events, tool results and other outside text; a model that forges confirmation, calls forbidden tools or answers its own question) that MUST pass 100 percent in replay mode. A defect found in the field adds a scenario in the branch that fixes it. | Must | M5 | T |
 
 ### 4.3 Agent inbox (`INB`)
 
@@ -319,3 +322,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.21 | 2026-11-09 | Audio input/output interface, command-backed and WAV backends, push-to-talk, and non-blocking playback in the satellite loop, optional hardware capabilities (VOI-013..019) |
 | 0.22 | 2026-11-09 | Host-held action safety (agentic-scope P0-1 to P0-5): risk tiers, host-enforced confirmation bound to the exact action, read-only-only turns that the user did not start, the taint rule, enforced skill allow-lists (SEC-010..013; AST-008, AST-015, INB-010, CFG-036 amended) |
 | 0.23 | 2026-11-09 | Audit log of every action, per-day action caps, and dry-run mode (agentic-scope P0-4, P1-4; SEC-014..016) |
+| 0.24 | 2026-11-09 | Evaluation harness (agentic-scope A1c): scenario format, deterministic replay gate, opt-in live mode with a spend cap, the initial scenario set (AST-016..018; AST-012 amended) |
