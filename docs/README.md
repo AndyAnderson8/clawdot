@@ -30,6 +30,7 @@
 | Planning | [roadmap.md](roadmap.md) | Milestones, feasibility gate, exit criteria, initial backlog |
 | Reports | [reports/2026-11-07-overnight-session.md](reports/2026-11-07-overnight-session.md) | Overnight session: what was built, measurements, decisions, open items |
 | Planning | [future-scope.md](future-scope.md) | Parked ideas with promotion conditions |
+| Planning | [open-questions.md](open-questions.md) | Decisions an agent assumed and the maintainer should confirm |
 
 ## Document precedence
 
