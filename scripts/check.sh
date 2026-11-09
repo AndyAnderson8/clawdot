@@ -141,6 +141,12 @@ if [ -f Cargo.toml ]; then
     if [ "$fast" -eq 0 ]; then
       step "rust: unit and integration tests"
       run scripts/cargo.sh test --workspace --locked
+      # The agent-loop scenarios (REQ-AST-016): scripted model, no network, no spend. `cargo test` above runs
+      # them too; this names the gate and prints which scenario broke. Live mode is never run here.
+      if [ -d evals/scenarios ]; then
+        step "agent-loop scenarios (replay mode; the injection set must pass 100%)"
+        run scripts/cargo.sh run -q --locked -p clawdot-eval -- replay
+      fi
       if [ -f deny.toml ] && scripts/cargo.sh deny --version >/dev/null 2>&1; then
         step "rust: dependency policy (cargo-deny)"
         run scripts/cargo.sh deny check
