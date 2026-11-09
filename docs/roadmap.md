@@ -125,6 +125,8 @@ Hardware notes: the Echo Dot Gen 2 **hardware baseline** is normative from M1 on
 - Docs: quick start, protocol guide for porters, agent integration guide, upgrade procedure, [PRIVACY.md](../PRIVACY.md)
 - Licence and governance files in place
 
+*Status:* none of these is fully met. Licence (`LICENSE`, `NOTICE`) and `PRIVACY.md` exist; the budget gate runs as a script, not yet as a required CI job, and the first real-hardware measurement is not yet recorded as a run; fuzzing, signed releases with SBOM, the Raspberry Pi satellite and the quick start are not done. `v0.1.0` is prepared (`CHANGELOG.md`) but no tag has been published.
+
 ## Initial backlog (to be created as issues)
 
 | Key | Type | Title |
@@ -155,3 +157,5 @@ Hardware notes: the Echo Dot Gen 2 **hardware baseline** is normative from M1 on
 | TASK-015 | task | "Connect an agent" flow and per-harness snippet generator |
 | SPIKE-007 | spike | Verify Codex / Gemini CLI / opencode hook and resume mechanisms from primary docs |
 | SPIKE-008 | spike | Verify Home Assistant conversation API / MCP server and Hermes gateway from primary docs |
+
+**Backlog status (as of 2026-11-08).** Built, with tests: TASK-008 (`crates/bridge`), TASK-010 (`fastpath.rs`), TASK-011 and TASK-012 (`inbox/adapter.rs`, `inbox/reply.rs`, `inbox/summary.rs`), TASK-013 (`media.rs`), FEAT-001 (in-process transport, `crates/satellite`), FEAT-002 (`llm.rs`). Partly built: TASK-001 (workspace exists; dev environment validation open), TASK-002 (CI `gate`, Rust and deny jobs run; cross-armv7 still a TODO in `ci.yml`), TASK-003 (`scripts/budget.sh` measures size and RSS; no qemu harness, not a CI gate), TASK-004 (spec 0003 is a skeleton; typed messages in `crates/protocol`), TASK-009 and TASK-015 (snippets are generated per endpoint; the full Connect-an-agent UI flow is not), TASK-014 (HTTP tools built; Home Assistant and Hermes recipes untested). Not found in the repo: SPIKE-002..008 findings, EPIC-001, TASK-005 (conformance harness), TASK-006 (traceability tool), TASK-007 (board and labels not verifiable). SPIKE-001 desk phase is done.
