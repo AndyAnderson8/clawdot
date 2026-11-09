@@ -186,14 +186,15 @@ Until they land, the daemon uses the messages that exist (stop, indicator, mute,
 
 ## 9. Conformance
 
-The procedure for running it and for adding a board is written when the suite exists (slice 3 of the daemon work); this section is the contract.
+The suite is `crates/device-conformance`; how to run it and how a new board proves itself are in [architecture/device-conformance.md](../architecture/device-conformance.md). This section is the contract.
 
 1. **Fake core.** The suite runs the daemon (or any board implementation) against a scripted core built on the protocol decoder, as [0003 section 9](0003-satellite-protocol.md) does for satellites.
 2. **Every Must is a test.** Test names start with the requirement, `req_dev_005_...`. A requirement that cannot be tested off hardware is marked in the report as "needs hardware" and is run on the unit.
 3. **Capability profiles.** The suite runs once for a full profile and again for a profile with no LEDs, no buttons and no hardware mute, and checks the equivalents of section 5.
-4. **CI.** The desktop board runs the whole suite in CI with command audio replaced by WAV files. A pull request that breaks a Must fails.
+4. **CI.** The desktop board file, and the Raspberry Pi and Echo Dot 2 files, run the whole suite in CI with the microphone, speaker, keys and LED output replaced by recordings and captures. A pull request that breaks a Must fails.
 5. **A new board proves itself** by supplying its board file, running the suite on the unit with the same daemon binary built for its architecture, and recording the result (date, daemon version, board file hash, tests passed and skipped with reason). It needs no daemon change; if it does, the contract is wrong and this spec is amended first.
 6. **Schema.** The board-file schema and the loader are kept in step by a test that validates the shipped examples and a set of malformed files (section 10).
+7. **The suite is tested.** Boards that break a requirement on purpose (a false hardware-mute claim, a speaker that ignores stop, a board file with a stray key) MUST fail the matching cases.
 
 ## 10. Board file
 
