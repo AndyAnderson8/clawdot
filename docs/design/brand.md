@@ -69,3 +69,7 @@ All pairs meet WCAG AA. Re-run the check whenever a token changes.
 ## Why it avoids third-party marks
 
 The mark is a crab on a generic round puck with a ring of light. It does not use Amazon, Alexa or Echo marks, wordmarks, or the characteristic Echo light-bar styling (a segmented blue ring with a directional highlight), and the product name never uses "Echo" or "Alexa" as a brand element. The crab idea is a general mascot theme; this drawing was made for ClawDot and is not traced from, or modelled on, any other project's artwork. The reference device is mentioned in documentation only as hardware (nominative use). Keep it that way: do not add vendor marks, and review any new brand asset against this list.
+
+## Screenshots
+
+The web UI on a phone-width window (headless Chrome against the real binary): [setup, dark](screenshots/ui-setup-dark.png), [setup, light](screenshots/ui-setup-light.png), [sign-in, dark](screenshots/ui-login-dark.png), [open-mode banner, light](screenshots/ui-open-banner-light.png).
