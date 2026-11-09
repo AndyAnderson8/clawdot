@@ -21,6 +21,8 @@
 | Quality | [quality/testing-strategy.md](quality/testing-strategy.md) | Test levels, CI gates, review checklist |
 | Quality | [quality/traceability.md](quality/traceability.md) | Requirement-to-test map and measured results |
 | Security | [security/threat-model.md](security/threat-model.md) | Assets, threats, mitigations |
+| Design | [design/brand.md](design/brand.md) | Logo, colour tokens, contrast, usage rules, trademark stance |
+| Design | [design/ui-stack.md](design/ui-stack.md) | Proposed: raw JS, esbuild TypeScript, or Preact for the web UI |
 | Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
 | Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |
