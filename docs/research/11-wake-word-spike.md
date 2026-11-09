@@ -167,7 +167,7 @@ The probe (tract-onnx plus `hound`, `panic = "abort"`, LTO, stripped) cross-buil
 |---|---|
 | `opt-level = 3` | **13.0 MB** (13,046,628 bytes) |
 | `opt-level = "s"` | **8.6 MB** (8,641,652 bytes) |
-| x86_64 glibc, `opt-level = 3`, with the unused `tract-tflite` linked in | 21.4 MB (earlier build, before the TFLite loader was made optional) |
+| x86_64 glibc, `opt-level = 3` | 20.4 MB (20,366,832 bytes); 21.4 MB (21,350,400) in the earlier build that also linked `tract-tflite` |
 
 This one pipeline alone is **larger than the whole 8 MB release-binary budget (REQ-NFR-103) even at `opt-level = "s"`**, before any ClawDot code. The size is tract's generic graph optimiser and operator set, so it will not shrink much by choosing different models. A custom runtime estimated at 60-100 KB (section 3.2) is two orders of magnitude smaller. This is the main reason tract is an opt-in sidecar or feature at best.
 
