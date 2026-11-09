@@ -200,6 +200,7 @@ Goal: a Dot running a base image (or any ESPHome voice satellite, such as a Pi r
 - Estimate **about 1,100 to 1,300 lines**. Not in the default Dot budget unless chosen
 - **Optional Noise encryption on `ring`** (the `Noise_NNpsk0_25519_ChaChaPoly_SHA256` initiator, tested with published vectors), with no `snow` and no `prost` so the dependency budget is protected. Revisit with measured binary size once code exists
 - **Test against a fake ESPHome server on a PC first**, then against `aioesphomeapi` as the peer, before any real device is involved
+- **Status (2026-11-09):** the client is built behind the cargo features `esphome-satellite` and `esphome-noise` ([spec 0004](specs/0004-esphome-satellite-client.md), [architecture/esphome-satellite.md](architecture/esphome-satellite.md)) and tested against the fake device in `crates/e2e`. The Noise handshake was also checked once against an independent responder (`noiseprotocol`). Still to do: run against `aioesphomeapi`'s own voice client and then a real satellite (blocked on the B0 trial and the maintainer's go for any device)
 
 **Exit:** a desktop run in which a real ESPHome satellite wakes, a voice turn runs through ClawDot's pipeline, and an inbox announcement gets a spoken reply.
 
@@ -216,6 +217,7 @@ Goal: a Dot running a base image (or any ESPHome voice satellite, such as a Pi r
 - LED states (`inbox`, `listening`, `error`) through ring entities if the base exposes them; mute state from the entity; volume; clock trust via an HTTPS `Date` check
 - **Wake word choice with licence-clean models.** **No pretrained openWakeWord models are bundled** (their licence is not clean); the guide says how to pick or train one, and the choice is recorded with licence provenance (EPIC-001)
 - Anything the base cannot do becomes a documented gap or an upstream request, not our code
+- **Bluetooth speaker mode** (a phone plays through the Dot as an A2DP sink, and the Dot can play to a Bluetooth speaker) is a supported capability of the base image and stays available beside ClawDot; how it shares the speaker with announcements is measured in B0 ([trial plan](guides/b0-techo5-trial-plan.md))
 
 **Exit:** the Dot shows the inbox, listening and error states; no ClawDot code opens ALSA.
 

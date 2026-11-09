@@ -17,6 +17,7 @@
 | Architecture | [architecture/voice-pipeline.md](architecture/voice-pipeline.md) | Dialog state machine, endpointing, and the speech turn |
 | Architecture | [architecture/satellite-server.md](architecture/satellite-server.md) | How speakers connect: handshake, a spoken turn, mute, limits |
 | Architecture | [architecture/board-support.md](architecture/board-support.md) | Board layer: buttons, LED ring, mute, Wi-Fi, clock, audio names; the Echo Dot Gen 2 board file |
+| Architecture | [architecture/esphome-satellite.md](architecture/esphome-satellite.md) | Optional client for ESPHome voice satellites (a Dot base image, Voice PE): config, mapping, limits |
 | Architecture | [architecture/porting-a-satellite.md](architecture/porting-a-satellite.md) | Implementing a satellite on new hardware; the reference client |
 | Guides | [guides/pc-voice-loop.md](guides/pc-voice-loop.md) | Manual smoke test: a push-to-talk spoken turn on a PC (microphone in, speaker out) |
 | Decisions | [adr/](adr/README.md) | Why we chose what we chose |
@@ -27,6 +28,7 @@
 | Design | [design/portal.md](design/portal.md) | The tabbed web portal: palette, type, layout, tab names, principles |
 | Design | [design/ui-stack.md](design/ui-stack.md) | Proposed: raw JS, esbuild TypeScript, or Preact for the web UI |
 | Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
+| Guides | [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | B0 trial of the TECHO5 Dot base image on the maintainer's unit: backups, install, measurements, rollback, go/no-go |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
 | Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |
 | Planning | [open-questions.md](open-questions.md) | Questions for the maintainer, each with the default chosen meanwhile |
