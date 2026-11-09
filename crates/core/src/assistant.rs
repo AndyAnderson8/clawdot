@@ -723,6 +723,18 @@ mod tests {
     }
 
     #[test]
+    fn listing_timers_is_answered_locally() {
+        let (mut a, _, _) = setup(false);
+        assert_eq!(say(&mut a, "list timers"), "There are no timers running.");
+        say(&mut a, "set a pasta timer for 10 minutes");
+        say(&mut a, "set a timer for 5 minutes");
+        assert_eq!(
+            say(&mut a, "what timers do I have"),
+            "5 minutes left on your timer, 10 minutes left on the pasta timer."
+        );
+    }
+
+    #[test]
     fn an_unset_clock_is_admitted_not_read_out_as_the_time() {
         // REQ-TMR-009: a Dot with no RTC and no network boots at 2010-01-01.
         let (mut a, clock, _) = setup(false);

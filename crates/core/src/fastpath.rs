@@ -890,6 +890,12 @@ pub const BUILTIN: &[(&str, &[&str])] = &[
             "how much time (is|do i have) (left|remaining) [on [the] [{label:text}] timer]",
             "how long (is|until) (left|remaining|the timer) [on [the] [{label:text}] timer]",
             "(check|show) [the] [{label:text}] timer",
+            "(list|show|read|tell me|give me) [me] [all] [of] [the|my] [running|active] timers",
+            "what [are] [the|my] [running|active] timers [(do i have|are there|are running|are set|are active)]",
+            "what timers (do i have|are (there|running|set|active)) [running|set|right now]",
+            "which timers (do i have|are (there|running|set|active))",
+            "(do i have|are there) any [running|active] timers [running|set|right now]",
+            "how many timers (do i have|are (there|running|set))",
         ],
     ),
     (
@@ -1067,6 +1073,35 @@ mod tests {
         assert_eq!(
             intent("how much time is left on the pasta timer").as_deref(),
             Some("timer.query")
+        );
+    }
+
+    #[test]
+    fn timers_can_be_listed_in_many_phrasings() {
+        // REQ-TMR-008, REQ-AST-010: listing must not need the model.
+        for u in [
+            "list timers",
+            "list my timers",
+            "list all timers",
+            "list all of my timers",
+            "show my timers",
+            "show me the running timers",
+            "what timers do I have",
+            "what timers are running",
+            "what timers are set?",
+            "which timers do I have",
+            "what are my timers",
+            "do I have any timers",
+            "are there any timers running",
+            "how many timers do I have",
+            "please list the timers",
+        ] {
+            assert_eq!(intent(u).as_deref(), Some("timer.query"), "{u}");
+        }
+        // Naming a timer still means that timer.
+        assert_eq!(
+            m("show the pasta timer").unwrap().text("label"),
+            Some("pasta")
         );
     }
 
