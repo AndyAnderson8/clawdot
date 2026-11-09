@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.17 |
+| **Version** | 0.18 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -168,6 +168,11 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-029 | The Tools and Connections tabs MUST list what the backend knows: every tool the assistant can call (built in, HTTP, MCP) with its source and whether it asks for confirmation, and every configured MCP server with its connection status and discovered tools. | Must | M4 | T |
 | REQ-CFG-030 | The Settings tab MUST show the settings the device is running with (time zone, language model, persona, voice, listen address, public URL, usage limits), pre-fill a time zone hint from the browser (never from IP geolocation), never show a secret, and say plainly that a setting is changed in the configuration file and applied by restarting, until editing from the page exists. | Must | M4 | I |
 | REQ-CFG-031 | Any portal control whose backend does not exist yet MUST NOT be shown as a working control. It MUST show an honest "coming soon" state that says what it will do. | Must | M4 | I |
+| REQ-CFG-032 | The Tools tab MUST let an administrator add an HTTP tool (name, description, method, URL, optional token environment variable NAME, parameters, confirm policy), delete a tool added there, and turn any tool (built in, from the configuration file, or added in the portal) off and on. Changes MUST apply at once without a restart and be stored as atomic JSON in the data directory; the hand-written configuration file MUST NOT be rewritten. A tool defined in the configuration file can be turned off but is removed only by editing that file. | Must | M5 | T |
+| REQ-CFG-033 | The Connections tab MUST let an administrator add and remove MCP servers (URL, optional token environment variable NAME, confirm policy), test a connection before saving it, turn a server off and on, and turn each discovered tool off and on. Changes MUST apply without a restart and be stored like REQ-CFG-032 (servers from the configuration file can be turned off but not removed from the portal). | Must | M5 | T |
+| REQ-CFG-034 | The portal MUST accept a credential only as the NAME of an environment variable and MUST NOT accept, store, return, or log a secret value. A named variable that is not set MUST be refused with a message that says which variable to set. | Must | M5 | T |
+| REQ-CFG-035 | Every endpoint that changes tools, connections, or skills MUST require the administrator (REQ-CFG-005). Tool names, descriptions, results, and errors that come from an MCP server or an HTTP tool are untrusted: the page MUST show them as text only and the core MUST NOT act on them without a user turn (REQ-INB-010, REQ-AST-015). | Must | M5 | T |
+| REQ-CFG-036 | **Skills.** A skill is a named bundle of instructions for the assistant (at most 2000 characters) with an optional list of the tools it relies on, and can be turned on and off. The Skills tab MUST add, edit, delete, enable, disable, export, and import skills. Skills are plain data stored as atomic JSON in the data directory (at most 16). The instructions of every enabled skill are added to the assistant's system prompt after the persona, labelled as the user's own instructions; they MUST NOT be able to turn off the confirm policy or the untrusted-text rules (REQ-AST-013), and a tool that is off stays off whatever a skill says. Imported skills MUST arrive turned off so the administrator reviews them first. | Must | M5 | T |
 
 ### 4.7 Non-functional (`NFR`)
 
@@ -286,3 +291,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.15 | 2026-11-09 | Security review F4: the plain-http exception in SEC-001 is stated once for the language model as well as the speech clients |
 | 0.16 | 2026-11-09 | Security review F2 and F9: pre-authentication resources are bounded per source address with header, hello and body timeouts (SEC-008) |
 | 0.17 | 2026-11-09 | Tabbed web portal with plain names (CFG-025..031): header and version footer, Reminders management, Webhooks snippets, read-only Tools and Connections, Settings overview, honest coming-soon states |
+| 0.18 | 2026-11-09 | Portal management of tools, MCP connections, and skills (CFG-032..036): add, turn on and off, delete, test; secrets only as environment variable names; skills defined as named instruction bundles with import and export |
