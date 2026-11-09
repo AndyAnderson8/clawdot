@@ -764,7 +764,10 @@ fn looks_like_token(w: &str) -> bool {
 /// parts of URLs, well-known token formats, and long token-like strings.
 #[must_use]
 pub fn redact_text(text: &str) -> String {
-    let text = printable(&clip(text, 4 * MAX_VALUE_CHARS));
+    redact_words(&printable(&clip(text, 4 * MAX_VALUE_CHARS)))
+}
+
+fn redact_words(text: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut after_scheme = false;
     for word in text.split(' ') {
@@ -875,6 +878,29 @@ fn redact_value(v: &Value, depth: usize) -> Value {
         }
         other => other.clone(),
     }
+}
+
+/// Strings longer than this are spoken as "a long value" instead of being read out.
+pub const MAX_SPOKEN_VALUE_CHARS: usize = 60;
+
+/// Arguments as they are read aloud when a call is held (REQ-SEC-011): the same redaction as the audit log
+/// (`redact_value`), and any text value longer than [`MAX_SPOKEN_VALUE_CHARS`] replaced by "a long value".
+/// For speech only: the stored action keeps its exact arguments.
+#[must_use]
+pub fn spoken_args(args: &Value) -> Value {
+    fn shorten(v: Value) -> Value {
+        match v {
+            Value::String(s) if s.chars().count() > MAX_SPOKEN_VALUE_CHARS => {
+                json!("a long value")
+            }
+            Value::Array(a) => Value::Array(a.into_iter().map(shorten).collect()),
+            Value::Object(m) => {
+                Value::Object(m.into_iter().map(|(k, x)| (k, shorten(x))).collect())
+            }
+            other => other,
+        }
+    }
+    shorten(redact_value(args, 0))
 }
 
 /// Arguments as they are kept: secrets replaced, values clipped, the whole bounded.
@@ -991,6 +1017,23 @@ mod tests {
         let r = excerpt("token=abc and cdt_0123456789abcdef and password: hunter2");
         assert!(!r.contains("abc") || r.contains(REDACTED));
         assert!(!r.contains("hunter2") && !r.contains("cdt_0123"), "{r}");
+    }
+
+    // REQ-SEC-011, REQ-SEC-014
+    #[test]
+    fn spoken_arguments_hide_secrets_and_shorten_long_values() {
+        let args = json!({
+            "note": "use Bearer abcdefghijklmnop1234",
+            "api_key": "sk-live-0123456789abcdef",
+            "url": "https://bob:hunter2@example.com/x",
+            "body": "word ".repeat(40),
+            "room": "den",
+        });
+        let s = spoken_args(&args).to_string();
+        for leak in ["abcdefghijklmnop1234", "sk-live", "hunter2", "word word"] {
+            assert!(!s.contains(leak), "{leak} leaked in {s}");
+        }
+        assert!(s.contains("a long value") && s.contains("den"), "{s}");
     }
 
     // REQ-SEC-014
