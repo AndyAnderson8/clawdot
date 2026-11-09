@@ -108,6 +108,34 @@ else
   skipped+=("portal checks")
 fi
 
+# The Python sidecars (bridges/, the recipe helpers in examples/recipes/) use only the standard library for
+# their tests, which run offline. ruff (pinned in bridges/requirements-dev.txt) lints and checks formatting
+# when it is installed; CI installs it. python3 on a Windows PC may be the Store stub, so fall back to WSL.
+py_re='^(bridges/|examples/recipes/).*\.(py|toml|txt)$'
+if [ "$fast" -eq 0 ] || changed_matches "$py_re"; then
+  py=()
+  if python3 -c 'import sys' >/dev/null 2>&1; then py=(python3)
+  elif command -v wsl.exe >/dev/null 2>&1 && scripts/in-wsl.sh python3 -c 'import sys' >/dev/null 2>&1; then py=(scripts/in-wsl.sh python3)
+  fi
+  if [ "${#py[@]}" -eq 0 ]; then
+    echo "note: python3 not found; the Python sidecar tests were skipped (CI runs them)"
+    skipped+=("python checks")
+  else
+    step "python sidecars: offline unit tests"
+    run "${py[@]}" -B -m unittest discover -s bridges/tests -t bridges -q
+    run "${py[@]}" -B -m unittest discover -s examples/recipes -p 'test_*.py' -q
+    if "${py[@]}" -m ruff --version >/dev/null 2>&1; then
+      step "python sidecars: ruff lint and formatting"
+      run "${py[@]}" -m ruff check --config bridges/ruff.toml bridges examples
+      run "${py[@]}" -m ruff format --check --config bridges/ruff.toml bridges examples
+    else
+      echo "note: ruff not installed locally (pip install -r bridges/requirements-dev.txt; CI runs it)"
+    fi
+  fi
+else
+  skipped+=("python checks")
+fi
+
 if [ "$fast" -eq 0 ] || changed_matches '\.md$'; then
   step "documentation: links and requirement IDs"
   run scripts/check-docs.sh

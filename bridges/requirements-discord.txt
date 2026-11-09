@@ -1,0 +1,6 @@
+# The Discord bridge's only third-party dependency, pinned to an exact version (REQ-INB-031).
+# discord.py 2.7.0 was released on 2026-02-27 (PyPI, read 2026-11-09); MIT licence.
+# Its own dependencies (aiohttp and friends) are resolved by pip; for a hash-pinned install generate
+#   pip-compile --generate-hashes requirements-discord.txt
+# on your own machine and deploy that file.
+discord.py==2.7.0

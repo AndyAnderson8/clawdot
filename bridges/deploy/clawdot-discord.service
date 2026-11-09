@@ -1,0 +1,29 @@
+# /etc/systemd/system/clawdot-discord.service
+# Install the pinned library into a virtual environment first:
+#   python3 -m venv /opt/clawdot-bridges/venv && /opt/clawdot-bridges/venv/bin/pip install -r requirements-discord.txt
+# Secrets go in /etc/clawdot/discord.env (mode 0600, owned by root):
+#   CLAWDOT_TOKEN=cdt_...
+#   DISCORD_TOKEN=...
+[Unit]
+Description=ClawDot Discord bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=/etc/clawdot/discord.env
+Environment=PYTHONPATH=/opt/clawdot-bridges PYTHONUNBUFFERED=1
+ExecStart=/opt/clawdot-bridges/venv/bin/python -m clawdot_bridges.discord_bridge --config /etc/clawdot/discord.toml
+Restart=on-failure
+RestartSec=15
+RestartPreventExitStatus=1 2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+MemoryMax=192M
+
+[Install]
+WantedBy=multi-user.target

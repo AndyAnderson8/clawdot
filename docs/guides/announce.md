@@ -120,6 +120,8 @@ action:
     CLAWDOT_TOKEN: ${{ secrets.CLAWDOT_TOKEN }}
 ```
 
+**ntfy and Discord** do not need hand-written scripts: the [bridges](../../bridges/README.md) subscribe to a topic or channel and post here, with filters, rate limits and cleaned text.
+
 ## Failure modes
 
 | Symptom | Cause |
