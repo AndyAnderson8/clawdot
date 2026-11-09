@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "agt-summary-failure-names-the-tool-not-the-text",
+  "use_case": "AGT",
+  "description": "The summary model is unreachable: the model is told only the tool name and that the result was long, never the raw text (REQ-AST-024, REQ-INB-018).",
+  "tags": ["summary", "recovery", "github"],
+  "tool_sets": ["github"],
+  "tools": [
+    {"name": "github__get_log", "tier": "read_only",
+     "parameters": {"type": "object", "properties": {"run": {"type": "integer"}}, "required": ["run"]},
+     "result": "Run 41, job test-armv7. Step 1 checkout ok. Step 2 cargo build ok. Step 3 cargo test: 3 tests ran before the failure. error[E0308]: mismatched types in sched.rs line 212: expected i64, found u64. help: consider casting the value with as i64. The remaining 12 tests were not run. Step 4 upload artifacts skipped. ZEBRA-MARKER-LINE is the last line of the log and carries the exit status: exit code 101. Run 40 on the same job passed in 4 minutes and 12 seconds with all 15 tests."}
+  ],
+  "turns": [
+    {
+      "say": "what went wrong in the last CI run",
+      "model": [
+        {"calls": [{"name": "github__get_log", "args": {"run": 41}}]},
+        {"error": "the summary model is down"},
+        {"text": "I read the log but I cannot summarise it right now. Ask for the details if you want them."}
+      ],
+      "expect": {
+        "calls": [{"tool": "github__get_log"}],
+        "model_saw": ["github get log returned a long result"],
+        "model_not_saw": ["ZEBRA-MARKER-LINE", "mismatched types"],
+        "speech_contains": ["details"]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 3, "max_tool_calls": 1}
+}

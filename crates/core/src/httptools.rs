@@ -521,6 +521,10 @@ impl<H: crate::session::ToolHost> crate::session::ToolHost for WithHttp<'_, H> {
         }
     }
 
+    fn expected_slow(&self, name: &str) -> bool {
+        self.http.owns(name) || self.inner.expected_slow(name)
+    }
+
     fn begin_turn(&mut self, user_text: &str) {
         self.inner.begin_turn(user_text);
     }

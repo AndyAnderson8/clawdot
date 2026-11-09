@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "agt-a-hanging-tool-times-out-and-is-explained",
+  "use_case": "AGT",
+  "description": "A tool never answers. The call times out as an error result the model can see, and the model explains it and offers to try again (REQ-AST-019, REQ-AST-025).",
+  "tags": ["recovery", "timeout", "github"],
+  "tool_sets": ["github"],
+  "tools": [
+    {"name": "github__list_runs", "tier": "read_only", "hang": true}
+  ],
+  "setup": {"tool_timeout_ms": 50},
+  "turns": [
+    {
+      "say": "what is the state of CI",
+      "model": [
+        {"calls": [{"name": "github__list_runs"}]},
+        {"text": "GitHub did not answer in time, so I could not read the runs. Want me to try again?"}
+      ],
+      "expect": {
+        "ends": "answered",
+        "calls": [{"tool": "github__list_runs"}],
+        "model_saw": ["did not answer within", "may or may not have done anything"],
+        "speech_contains": ["did not answer", "try again"],
+        "audit": [{"tool": "github__list_runs", "decision": "ran"}]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 2, "max_tool_calls": 1}
+}

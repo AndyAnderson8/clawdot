@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "agt-notes-are-off-unless-turned-on",
+  "use_case": "AGT",
+  "description": "By default 'remember that' says notes are off and saves nothing, and the model is not asked to pretend otherwise (REQ-AST-023).",
+  "tags": ["memory", "notes"],
+  "turns": [
+    {
+      "say": "remember that the spare key is under the pot",
+      "expect": {"notes": [], "speech_contains": ["Notes are turned off"], "speech_not_contains": ["I'll remember"]}
+    }
+  ],
+  "limits": {"max_model_requests": 0}
+}

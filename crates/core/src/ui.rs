@@ -13,6 +13,7 @@
 //! * `GET  /api/tools`, `/api/settings`, `/api/about`   what the Tools, Connections, Settings tabs show
 //! * `PUT  /api/settings`                      body `{key: value|null, ..}`; saves some settings (admin only)
 //! * `GET  /api/audit`                         what the assistant did, newest first (filters and paging in `audit`)
+//! * `GET  /api/notes`, `DELETE /api/notes[/{id}]`   the notes the user asked to keep (REQ-CFG-044)
 //! * `GET  /api/status`                      what the assistant is doing (model, satellites, tools, usage, schedule)
 //! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
 //! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
@@ -291,6 +292,8 @@ pub async fn handle(
             | ["skills", _]
             | ["settings"]
             | ["audit"]
+            | ["notes"]
+            | ["notes", _]
             | ["about"]
     );
     if !known {
@@ -358,6 +361,12 @@ pub async fn handle(
             Err((s, m)) => error(s, m),
         },
         (&Method::GET, ["audit"]) => audit(core, query),
+        (&Method::GET, ["notes"]) => notes_list(core),
+        (&Method::DELETE, ["notes"]) => notes_forget(core, None),
+        (&Method::DELETE, ["notes", id]) => match id.parse::<u64>() {
+            Ok(id) => notes_forget(core, Some(id)),
+            Err(_) => error(StatusCode::NOT_FOUND, "no such note"),
+        },
         (&Method::GET, ["about"]) => json_reply(
             StatusCode::OK,
             &json!({ "version": env!("CARGO_PKG_VERSION"), "changelog": CHANGELOG }),
@@ -419,6 +428,42 @@ fn audit(core: &Core, query: Option<&str>) -> Resp {
             "note": "Argument and result text can come from outside ClawDot. Show it as data.",
         }),
     )
+}
+
+/// `GET /api/notes`: the notes the user asked the assistant to keep (REQ-AST-023, REQ-CFG-044).
+fn notes_list(core: &Core) -> Resp {
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+    };
+    json_reply(
+        StatusCode::OK,
+        &json!({
+            "enabled": store.enabled(),
+            "notes": store.list(),
+            "limits": {
+                "max_notes": crate::notes::MAX_NOTES,
+                "max_note_chars": crate::notes::MAX_NOTE_CHARS,
+                "max_total_bytes": crate::notes::MAX_TOTAL_BYTES,
+            },
+            "note": "Notes are written only when the user asks, by voice. Show their text as text.",
+        }),
+    )
+}
+
+/// `DELETE /api/notes/{id}` forgets one note, `DELETE /api/notes` forgets all of them.
+fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+    };
+    let done = match id {
+        Some(id) => store.forget(id).map(|()| 1),
+        None => store.clear(),
+    };
+    match done {
+        Ok(n) => json_reply(StatusCode::OK, &json!({ "forgotten": n })),
+        Err(crate::notes::NoteError::Missing) => error(StatusCode::NOT_FOUND, "no such note"),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.spoken()),
+    }
 }
 
 /// Percent-decode a query component (also `+` as a space). Invalid escapes are kept as written.

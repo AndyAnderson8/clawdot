@@ -87,6 +87,17 @@ impl Core {
         self.audit.get().cloned()
     }
 
+    /// Hand over the notes the portal lists and clears (REQ-CFG-044). Only the first call has an effect.
+    pub fn set_notes(&self, notes: std::sync::Arc<crate::notes::NoteStore>) {
+        let _ = self.notes.set(notes);
+    }
+
+    /// The notes, if the assistant keeps any.
+    #[must_use]
+    pub fn notes(&self) -> Option<std::sync::Arc<crate::notes::NoteStore>> {
+        self.notes.get().cloned()
+    }
+
     /// Hand over the settings state (all layers and the saved file). Nothing in it is a secret.
     pub fn set_settings(&self, state: crate::settings::SettingsState) {
         *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);

@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "id": "agt-missing-detail-is-asked-then-resumed",
+  "use_case": "AGT",
+  "description": "The user does not say which device. The assistant asks instead of guessing, the question ends the turn and costs no tool budget, and the next turn answers it with the context kept (REQ-AST-021).",
+  "tags": ["clarify", "media"],
+  "tool_sets": ["media"],
+  "turns": [
+    {
+      "say": "play some jazz",
+      "model": [
+        {"calls": [{"name": "ask_user", "args": {"question": "Which device should I play it on, the kitchen or the den"}}]}
+      ],
+      "expect": {
+        "ends": "asked",
+        "calls": [],
+        "speech_is_question": true,
+        "speech_contains": ["Which device", "kitchen or the den"],
+        "expects_reply": true,
+        "max_sentences": 1
+      }
+    },
+    {
+      "say": "the kitchen",
+      "model": [
+        {"calls": [{"name": "spotify__play", "args": {"query": "jazz", "device": "Kitchen"}}]},
+        {"text": "Playing jazz in the kitchen."}
+      ],
+      "expect": {
+        "ends": "answered",
+        "calls": [{"tool": "spotify__play", "args": {"query": "jazz", "device": "Kitchen"}}],
+        "model_saw": ["play some jazz", "Which device should I play it on", "the kitchen"],
+        "expects_reply": false
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 3, "max_tool_calls": 1}
+}

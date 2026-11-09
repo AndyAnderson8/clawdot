@@ -40,6 +40,29 @@ pub struct LimitsConfig {
     pub dry_run: Option<bool>,
 }
 
+/// How a turn behaves (REQ-AST-019 to REQ-AST-025). Every value can be lowered; a value above the ceiling is
+/// clamped to it.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// Most model rounds in one turn (default 8, ceiling 20).
+    pub max_rounds: Option<usize>,
+    /// Most tool calls in one turn (default 12, ceiling 20).
+    pub max_tool_calls: Option<usize>,
+    /// Seconds one turn may take (default 60, ceiling 300).
+    pub deadline_secs: Option<u64>,
+    /// Seconds one tool call may take before it counts as failed (default 45, at most 120).
+    pub tool_timeout_secs: Option<u64>,
+    /// Say the plan before multi-step work (default true).
+    pub plan_speech: Option<bool>,
+    /// Say short progress phrases while tools run (default true).
+    pub progress_speech: Option<bool>,
+    /// Summarise tool results longer than this many characters; 0 turns it off (default 400).
+    pub summarize_over_chars: Option<usize>,
+    /// Keep notes the user asks for (default false, REQ-AST-023).
+    pub notes: Option<bool>,
+}
+
 /// Speech-to-text and text-to-speech provider (OpenAI-compatible).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +121,9 @@ pub struct Config {
     /// Usage caps.
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// How a turn behaves: limits, speech while working, notes.
+    #[serde(default)]
+    pub agent: AgentConfig,
     /// Speech provider.
     #[serde(default)]
     pub speech: SpeechConfig,
@@ -172,6 +198,19 @@ impl Config {
         }
         if self.limits.max_requests_per_day == Some(0) {
             return Err("config: `limits.max_requests_per_day` must be at least 1".into());
+        }
+        for (name, v) in [
+            ("max_rounds", self.agent.max_rounds.map(|n| n as u64)),
+            (
+                "max_tool_calls",
+                self.agent.max_tool_calls.map(|n| n as u64),
+            ),
+            ("deadline_secs", self.agent.deadline_secs),
+            ("tool_timeout_secs", self.agent.tool_timeout_secs),
+        ] {
+            if v == Some(0) {
+                return Err(format!("config: `agent.{name}` must be at least 1"));
+            }
         }
         if let Some(s) = self.limits.daily_spend_usd
             && (!s.is_finite() || s < 0.0)
@@ -359,5 +398,32 @@ mod tests {
             let e = Config::parse(text).unwrap_err();
             assert!(e.contains(needle), "{text}: {e}");
         }
+    }
+
+    // REQ-AST-019, REQ-AST-023
+    #[test]
+    fn the_agent_section_is_read_and_a_zero_limit_is_refused() {
+        let c = Config::parse(
+            r#"{"agent": {"max_rounds": 4, "max_tool_calls": 6, "deadline_secs": 30,
+                "tool_timeout_secs": 10, "plan_speech": false, "progress_speech": false,
+                "summarize_over_chars": 0, "notes": true}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.agent.max_rounds, Some(4));
+        assert_eq!(c.agent.deadline_secs, Some(30));
+        assert_eq!(c.agent.plan_speech, Some(false));
+        assert_eq!(c.agent.notes, Some(true));
+        assert_eq!(Config::parse("{}").unwrap().agent, AgentConfig::default());
+        for bad in [
+            "max_rounds",
+            "max_tool_calls",
+            "deadline_secs",
+            "tool_timeout_secs",
+        ] {
+            let e = Config::parse(&format!(r#"{{"agent": {{"{bad}": 0}}}}"#)).unwrap_err();
+            assert!(e.contains(bad) && e.contains("at least 1"), "{e}");
+        }
+        // a typo is an error, not a silently ignored setting
+        assert!(Config::parse(r#"{"agent": {"max_round": 4}}"#).is_err());
     }
 }

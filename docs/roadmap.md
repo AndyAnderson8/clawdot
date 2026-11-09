@@ -202,7 +202,7 @@ REQ-INB-001..018, 020, REQ-SEC-004, REQ-EXT-004, 006
 
 **Exit:** the v1 exit items 2, 3 and 4 pass in replay mode and once live; the default toolset is shipped as recipes and verified against real servers where the server's terms allow.
 
-*Status: not started.* Today the loop is bounded to five rounds and per-tool timeouts only; `run_turn` makes a single non-streaming call.
+*Status: the loop is built (branch `feature/agent-loop`, REQ-AST-019 to REQ-AST-025, REQ-VOI-020, REQ-SEC-017; [architecture/agent-loop.md](architecture/agent-loop.md)); not started: rules, background tasks with ids, the recipes, and the portal screens for these settings.* Built and tested against fakes and in the replay set (25 `AGT`/`INJ` scenarios): limits and their spoken account, the spoken plan and progress phrases (sentence-level, not token streaming), clarifying questions, cooperative cancel (button, or wake word and a stop phrase while the assistant is silent), recent actions and opt-in notes, long-result summaries with the full text in the audit record, and error recovery. Not built: stop over the assistant's own voice (needs echo cancellation, B3), a local stop-word check, and any of it verified on a device or with a live model.
 
 ## A6. Web UI (old M4)
 REQ-CFG-001..006, 008, 009, 012, 013, REQ-INB-019, REQ-NFR-006

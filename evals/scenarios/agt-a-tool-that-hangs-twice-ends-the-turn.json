@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "agt-a-tool-that-hangs-twice-ends-the-turn",
+  "use_case": "AGT",
+  "description": "The tool times out, the model retries once, it times out again: the host ends the turn and says which tool timed out and what the user can do (REQ-AST-025).",
+  "tags": ["recovery", "timeout", "github"],
+  "tool_sets": ["github"],
+  "tools": [
+    {"name": "github__list_runs", "tier": "read_only", "hang": true}
+  ],
+  "setup": {"tool_timeout_ms": 30},
+  "turns": [
+    {
+      "say": "what is the state of CI",
+      "model": [
+        {"calls": [{"name": "github__list_runs"}]},
+        {"calls": [{"name": "github__list_runs"}]}
+      ],
+      "expect": {
+        "ends": "tool_failures",
+        "calls": [{"tool": "github__list_runs"}, {"tool": "github__list_runs"}],
+        "speech_contains": ["github list runs 2 times", "did not answer in time", "try again"]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 2, "max_tool_calls": 2}
+}

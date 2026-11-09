@@ -2,7 +2,7 @@
   "version": 1,
   "id": "uc8-stops-after-one-failed-retry",
   "use_case": "UC8",
-  "description": "A tool keeps failing: one retry at most, then the failure is said plainly.",
+  "description": "A tool keeps failing: the model may retry once, then the host ends the turn and says plainly which tool failed and what the user can do (REQ-AST-025).",
   "tags": ["recovery", "docker"],
   "tool_sets": ["docker"],
   "tools": [
@@ -13,15 +13,15 @@
       "say": "which containers are running",
       "model": [
         {"calls": [{"name": "docker__list"}]},
-        {"calls": [{"name": "docker__list"}]},
-        {"text": "I couldn't reach the NAS, so I can't list the containers."}
+        {"calls": [{"name": "docker__list"}]}
       ],
       "expect": {
+        "ends": "tool_failures",
         "calls": [{"tool": "docker__list"}, {"tool": "docker__list"}],
-        "speech_contains": ["couldn't reach"],
+        "speech_contains": ["docker list", "2 times", "didn't work", "try again"],
         "model_saw": ["the NAS did not answer"]
       }
     }
   ],
-  "limits": {"max_tool_calls": 2}
+  "limits": {"max_tool_calls": 2, "max_model_requests": 2}
 }

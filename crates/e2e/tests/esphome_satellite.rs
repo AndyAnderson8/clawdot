@@ -193,6 +193,7 @@ async fn rig_keys(
             let _ = ask.reply.send(Answer {
                 say: "You have nothing.".into(),
                 effects: vec![clawdot_core::assistant::Effect::VolumeSet(40)],
+                ..Answer::default()
             });
         }
     });
