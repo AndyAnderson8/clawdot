@@ -51,6 +51,7 @@ On a wide screen the same single column is kept (max 44 rem) so that nothing mov
 | Home | Status | The first thing to see: is it working, plus the setup checklist and the test-speak box |
 | Reminders | "Scheduled" | Covers alarms, timers, and reminders, which are the three things people already say out loud |
 | Agents | Inbox | What arrives here is news from your coding agents (Claude Code and others); "Agents" says whose news it is |
+| Activity | n/a | What the assistant did and what waited for your yes: the audit log in plain words, read-only, with filters and paging (REQ-CFG-060) |
 | Tools | n/a | Everything the assistant can do besides talking |
 | Connections | n/a | Outside tool servers (MCP). The page explains MCP in a sentence the first time |
 | Skills | n/a | Named instructions you write for the assistant, each switchable, with export and import |

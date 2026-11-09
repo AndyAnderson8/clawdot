@@ -165,12 +165,12 @@ await step("header, status, tabs, titles, keyboard", async () => {
   await eq(`T.text('#devname')`, "Kitchen Dot", "device name from settings");
   await eq(
     `T.all('#tabs a').map((a) => a.textContent)`,
-    ["Home", "Reminders", "Agents", "Tools", "Connections", "Skills", "Webhooks", "Settings"],
+    ["Home", "Reminders", "Agents", "Activity", "Tools", "Connections", "Skills", "Webhooks", "Settings"],
     "tab names (REQ-CFG-026)",
   );
   await eq(`T.q('#tabs').getAttribute('role')`, "tablist", "tablist role");
   await eq(`T.all('#tabs a[aria-selected="true"]').map((a) => a.id)`, ["tab-home"], "home selected first");
-  await eq(`T.all('#tabs a').map((a) => a.tabIndex)`, [0, -1, -1, -1, -1, -1, -1, -1], "roving tab index");
+  await eq(`T.all('#tabs a').map((a) => a.tabIndex)`, [0, -1, -1, -1, -1, -1, -1, -1, -1], "roving tab index");
   await eq(`T.q('#panel').getAttribute('aria-labelledby')`, "tab-home", "panel labelled by its tab");
   await b.until(`document.title === "Home - ClawDot"`, "the Home title");
   // arrow keys move through the tabs, wrapping, and focus follows
@@ -263,6 +263,87 @@ await step("Agents: text from agents is shown as text", async () => {
   await eq(`T.rows()[0].includes('<script>alert(2)</script> all green')`, true, "text shown literally");
   await eq(`T.all('#panel img, #panel script').length`, 0, "no elements were created from it");
   await eq(`T.text('.badge')`, "Waiting to be read out", "state wording");
+});
+
+await step("Activity: plain outcomes, filters, paging, text only, read-only", async () => {
+  await open("open", "#/activity");
+  await b.until(`T.rows("#auditlist > li").length === 7`, "seven records");
+  await shot("activity");
+  await eq(`T.rows("#auditlist > li")[0].startsWith("fetch_page")`, true, "newest first");
+  await eq(
+    `T.rows("#auditlist > li")[0].includes("<script>alert(3)</script> long page")`,
+    true,
+    "result shown literally",
+  );
+  await eq(`T.all("#panel img, #panel script, #auditlist b").length`, 0, "no elements were created from record text");
+  await T(`clickText("#auditlist > li:nth-child(1)", "Show the longer result")`);
+  await eq(
+    `T.q("#auditlist details").open && T.text("#auditlist details pre").includes("<img src=x")`,
+    true,
+    "long detail",
+  );
+  await eq(
+    `T.all("#auditlist .badge").map((x) => x.textContent)`,
+    ["Ran", "Suggested", "Blocked", "Declined", "Approved", "Held", "Ran"],
+    "outcome labels",
+  );
+  await eq(`T.rows("#auditlist > li")[5].includes("waiting for your yes")`, true, "held is explained");
+  await eq(`T.rows("#auditlist > li")[5].includes("token: [redacted]")`, true, "redacted argument shown");
+  await eq(`T.text("#policy").includes("100 actions, 20 of them")`, true, "policy line");
+  await eq(
+    `T.all("#panel button").map((x) => x.textContent).filter((x) => /delete|clear all|remove/i.test(x)).length`,
+    0,
+    "read-only",
+  );
+  await T(`set("#a-decision", "blocked:")`);
+  await b.until(`T.rows("#auditlist > li").length === 1`, "blocked filter");
+  await T(`set("#a-decision", "")`);
+  await T(`set("#a-tier", "reversible")`);
+  await b.until(
+    `T.rows("#auditlist > li").length === 1 && T.rows("#auditlist > li")[0].startsWith("set_timer")`,
+    "tier filter",
+  );
+  await T(`set("#a-tier", "")`);
+  await T(`set("#a-trigger", "event")`);
+  await b.until(
+    `T.rows("#auditlist > li").length === 1 && T.rows("#auditlist > li")[0].includes("Event from claude-code")`,
+    "trigger filter",
+  );
+  await T(`clickText("#auditfilter", "Clear filters")`);
+  await b.until(`T.rows("#auditlist > li").length === 7`, "cleared");
+  await T(`set("#a-tool", "set_light")`);
+  await T(`submit("#auditfilter")`);
+  await b.until(`T.rows("#auditlist > li").length === 3`, "tool filter");
+  const q = mock.log.filter((l) => l.path === "/api/audit").pop()!;
+  assert.equal(q.method, "GET");
+  assert.ok(
+    mock.log.every((l) => l.path !== "/api/audit" || l.method === "GET"),
+    "only reads",
+  );
+});
+
+await step("Activity: older records load a page at a time", async () => {
+  await open("open", "#/activity");
+  await b.until(`T.rows("#auditlist > li").length === 7`, "seven records");
+  await eq(`T.q("#auditmore") === null`, true, "no more button when all fit");
+  const more = Array.from({ length: 33 }, (_, i) => ({
+    v: 1,
+    id: 8 + i,
+    ts: 1,
+    day: 1,
+    turn: 8 + i,
+    trigger: "voice",
+    tool: "set_timer",
+    tier: "reversible",
+    args: {},
+    decision: "ran",
+    status: "ok",
+  }));
+  (mock.state["audit"] as unknown[]).push(...more);
+  await T(`clickText("#auditfilter", "Refresh")`);
+  await b.until(`T.rows("#auditlist > li").length === 25 && !!T.q("#auditmore")`, "first page of 25");
+  await T(`click("#auditmore")`);
+  await b.until(`T.rows("#auditlist > li").length === 40 && T.q("#auditmore") === null`, "all 40, no more button");
 });
 
 await step("Tools: turn off, add a web tool, delete", async () => {

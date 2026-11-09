@@ -41,6 +41,53 @@ const pageFile = join(
 );
 const now = () => Math.floor(Date.now() / 1000);
 
+function auditSeed(t: number): Json[] {
+  const rec = (id: number, o: Json): Json => ({
+    v: 1,
+    id,
+    ts: t - (100 - id) * 60,
+    day: 1,
+    turn: id,
+    trigger: "voice",
+    args: {},
+    ...o,
+  });
+  return [
+    rec(1, {
+      tool: "set_timer",
+      tier: "reversible",
+      decision: "ran",
+      status: "ok",
+      result: "Timer set for 5 minutes.",
+      args: { seconds: 300, label: "tea" },
+    }),
+    rec(2, {
+      tool: "set_light",
+      tier: "costly",
+      decision: "held",
+      args: { room: "<b>kitchen</b>", token: "[redacted]" },
+    }),
+    rec(3, { tool: "set_light", tier: "costly", decision: "approved", held_id: 2, status: "ok", result: "ok" }),
+    rec(4, { tool: "set_light", tier: "costly", decision: "declined", held_id: 2 }),
+    rec(5, { tool: "home_toggle", tier: "costly", decision: "blocked:cap", args: { id: 7 }, note: "daily cap" }),
+    rec(6, {
+      tool: "github_prs",
+      tier: "costly",
+      trigger: "event:claude-code",
+      decision: "proposed",
+      args: { repo: "a/b" },
+    }),
+    rec(7, {
+      tool: "fetch_page",
+      tier: "costly",
+      decision: "ran",
+      status: "ok",
+      result: "<script>alert(3)</script> long page",
+      detail: "LONGER <img src=x onerror=alert(4)> text ".repeat(20),
+    }),
+  ];
+}
+
 function seed(mode: string): Json {
   const t = now();
   return {
@@ -137,6 +184,7 @@ function seed(mode: string): Json {
         ],
       },
     ],
+    audit: auditSeed(t),
     skills: [{ name: "Good night", instructions: "Turn off the lights.", tools: ["set_light"], enabled: true }],
     problems: [],
   };
@@ -262,6 +310,34 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         st["password"] = body.password;
         st["session"] = "sess-pw";
         return send(200, { mode: "password", token: st["session"] });
+      }
+
+      if (m === "GET" && path === "/api/audit") {
+        const q = new URL(req.url ?? "", "http://x").searchParams;
+        const limit = Number(q.get("limit") ?? 50);
+        const before = q.has("before") ? Number(q.get("before")) : Infinity;
+        const hit = (st["audit"] as Json[])
+          .filter(
+            (r) =>
+              r["id"] < before &&
+              (!q.get("tool") || r["tool"] === q.get("tool")) &&
+              (!q.get("tier") || r["tier"] === q.get("tier")) &&
+              (!q.get("decision") ||
+                (q.get("decision")!.endsWith(":")
+                  ? r["decision"].startsWith(q.get("decision")!)
+                  : r["decision"] === q.get("decision"))) &&
+              (!q.get("trigger") ||
+                r["trigger"] === q.get("trigger") ||
+                r["trigger"].startsWith(q.get("trigger") + ":")),
+          )
+          .sort((a, b) => b["id"] - a["id"]);
+        const records = hit.slice(0, limit);
+        return send(200, {
+          records,
+          next_before: hit.length > limit ? records[records.length - 1]!["id"] : null,
+          log: { bytes: 2048, max_file_bytes: 262144, corrupt_lines: 0, write_errors: 0 },
+          policy: { dry_run: false, max_actions_per_day: 100, max_costly_per_day: 20 },
+        });
       }
 
       if (seg[0] === "schedule") {
