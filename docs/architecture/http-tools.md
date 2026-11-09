@@ -29,7 +29,8 @@ file (REQ-AST-014). The core never runs third-party code (REQ-EXT-001); it only 
 | `headers` | Extra fixed headers. |
 | `auth_env` | Environment variable holding a bearer token. The value is read at startup and never written to the configuration file. |
 | `params` | What the model may fill in: `type` (`string`, `integer`, `number`, `boolean`), `description`, `enum` (strings only), `required`. |
-| `confirm` | Default `true`: the assistant must ask the user and get a spoken yes before the call runs. |
+| `tier` | How risky the tool is: `read_only`, `reversible`, `costly` or `destructive` (REQ-SEC-010). Default `costly`, which makes the host ask the user and wait for a spoken yes before the call runs. Only you can set it. See [action-safety.md](action-safety.md). |
+| `confirm` | Older form of `tier`, ignored when `tier` is set: `true` (default) is `costly`, `false` is `reversible`. |
 | `timeout_secs` | 1 to 30, default 5. |
 
 ## What the model can and cannot do
@@ -38,8 +39,8 @@ file (REQ-AST-014). The core never runs third-party code (REQ-EXT-001); it only 
 - It cannot choose the URL, host, headers, or credential.
 - Placeholder values are percent-encoded, so a value cannot add path segments or query parameters.
 - For `GET` and `DELETE` the other parameters go in the query string; for `POST` and `PUT` they go in a JSON body.
-- With `confirm` on, the session loop refuses to run the tool until the model calls it again with `confirmed: true`
-  after the user agreed (REQ-AST-008). The flag is not forwarded to the server.
+- With `confirm` on, the host holds the call: it speaks the tool and exact arguments, and runs them only after the user says yes in a later turn
+  (REQ-AST-008, REQ-SEC-011; see [action-safety.md](action-safety.md)). The model gets no `confirmed` parameter; a `confirmed` argument is dropped.
 - Responses are clipped to 1000 characters and are treated as data, not instructions.
 
 ## Limits
