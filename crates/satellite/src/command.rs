@@ -818,7 +818,14 @@ mod tests {
         p
     }
 
-    const STALL: Duration = Duration::from_millis(400);
+    /// Stall timeout for every test that expects success. Child start-up on a loaded machine can take
+    /// seconds, and the stall clock starts at spawn, so this must never be the thing that fires.
+    const STALL: Duration = Duration::from_secs(120);
+    /// The longest a test waits for something that must happen. Only ever reached when a test would fail.
+    const PATIENCE: Duration = Duration::from_secs(60);
+    /// Stall timeout used after the "not stalled yet" assertions, so detection is quick. It is injected by
+    /// overwriting the `stall` field, which makes the test independent of how long the child took to start.
+    const SHORT_STALL: Duration = Duration::from_millis(20);
 
     #[cfg(unix)]
     #[test]
@@ -832,12 +839,12 @@ mod tests {
         mic.start().unwrap();
         mic.start().unwrap();
         for f in 0..3usize {
-            let frame = mic.read_frame(Duration::from_secs(2)).unwrap().unwrap();
+            let frame = mic.read_frame(PATIENCE).unwrap().unwrap();
             assert_eq!(frame.len(), FRAME_SAMPLES);
             assert_eq!(frame[0], (f * 1000) as i16);
             assert_eq!(frame[319], (f * 1000 + 319) as i16);
         }
-        assert_eq!(mic.read_frame(Duration::from_secs(2)), Err(AudioError::Eof));
+        assert_eq!(mic.read_frame(PATIENCE), Err(AudioError::Eof));
         assert_eq!(
             mic.read_frame(Duration::ZERO),
             Err(AudioError::Eof),
@@ -846,10 +853,7 @@ mod tests {
         mic.stop();
         assert_eq!(mic.read_frame(Duration::ZERO), Err(AudioError::NotStarted));
         mic.start().unwrap();
-        assert!(
-            mic.read_frame(Duration::from_secs(2)).unwrap().is_some(),
-            "restartable"
-        );
+        assert!(mic.read_frame(PATIENCE).unwrap().is_some(), "restartable");
         let _ = std::fs::remove_file(p);
     }
 
@@ -863,8 +867,8 @@ mod tests {
             STALL,
         );
         mic.start().unwrap();
-        assert!(mic.read_frame(Duration::from_secs(2)).unwrap().is_some());
-        assert_eq!(mic.read_frame(Duration::from_secs(2)), Err(AudioError::Eof));
+        assert!(mic.read_frame(PATIENCE).unwrap().is_some());
+        assert_eq!(mic.read_frame(PATIENCE), Err(AudioError::Eof));
         let _ = std::fs::remove_file(p);
     }
 
@@ -873,14 +877,17 @@ mod tests {
     fn req_voi_014_a_silent_child_is_stalled_not_silence_and_is_killed() {
         let mut mic = CommandIn::new(sh("sleep 30"), STALL);
         mic.start().unwrap();
-        let t = Instant::now();
         assert_eq!(mic.read_frame(Duration::ZERO), Ok(None), "not stalled yet");
-        let e = mic.read_frame(Duration::from_secs(3)).unwrap_err();
+        mic.stall = SHORT_STALL;
+        let e = mic.read_frame(PATIENCE).unwrap_err();
         assert!(matches!(e, AudioError::Stalled(_)), "{e:?}");
-        assert!(t.elapsed() < Duration::from_secs(3));
+        // The child sleeps for 30 s, so a stop that returns sooner than that killed it.
         let t = Instant::now();
         mic.stop();
-        assert!(t.elapsed() < Duration::from_secs(2), "stop kills the child");
+        assert!(
+            t.elapsed() < Duration::from_secs(25),
+            "stop kills the child"
+        );
     }
 
     #[cfg(unix)]
@@ -888,7 +895,7 @@ mod tests {
     fn req_voi_014_a_child_that_exits_at_once_is_end_of_input() {
         let mut mic = CommandIn::new(sh("exit 3"), STALL);
         mic.start().unwrap();
-        assert_eq!(mic.read_frame(Duration::from_secs(2)), Err(AudioError::Eof));
+        assert_eq!(mic.read_frame(PATIENCE), Err(AudioError::Eof));
     }
 
     #[test]
@@ -915,7 +922,7 @@ mod tests {
     }
 
     fn wait_done(out: &mut CommandOut) -> Result<bool, AudioError> {
-        let end = Instant::now() + Duration::from_secs(5);
+        let end = Instant::now() + PATIENCE;
         while Instant::now() < end {
             match out.poll_done() {
                 Ok(false) => thread::sleep(Duration::from_millis(10)),
@@ -949,21 +956,37 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn req_voi_018_a_long_reply_does_not_block_the_caller() {
-        // A player that drains slowly: play() must still return at once (the loop keeps answering pings).
-        let mut spk = CommandOut::new(sh("sleep 1; cat > /dev/null"), Duration::from_secs(5));
-        spk.begin().unwrap();
-        let t = Instant::now();
-        for _ in 0..20 {
-            spk.play(&vec![7; 16_000]).unwrap();
-        }
-        spk.finish();
-        assert!(
-            t.elapsed() < Duration::from_millis(500),
-            "queueing 20 s of audio took {:?}",
-            t.elapsed()
+        // The player takes nothing until the test opens a gate, so if play() ever waited on the player
+        // it could not return. No wall-clock threshold is involved: the queueing runs on its own thread
+        // and the test only fails if that thread never finishes.
+        let gate = temp("gate");
+        let mut spk = CommandOut::new(
+            sh(&format!(
+                "until [ -e '{0}' ]; do sleep 0.05; done; cat > /dev/null",
+                gate.display()
+            )),
+            STALL,
         );
-        assert_eq!(spk.poll_done(), Ok(false));
+        spk.begin().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for _ in 0..20 {
+                spk.play(&vec![7; 16_000]).unwrap();
+            }
+            spk.finish();
+            let _ = tx.send(spk);
+        });
+        let mut spk = rx
+            .recv_timeout(PATIENCE)
+            .expect("play() blocked on a player that was not reading");
+        assert_eq!(
+            spk.poll_done(),
+            Ok(false),
+            "still waiting on the gated player"
+        );
+        std::fs::write(&gate, b"go").unwrap();
         assert_eq!(wait_done(&mut spk), Ok(true));
+        let _ = std::fs::remove_file(gate);
     }
 
     #[cfg(unix)]
@@ -996,10 +1019,10 @@ mod tests {
         // More than a pipe buffer holds, so the writer blocks.
         spk.play(&vec![1; 200_000]).unwrap();
         spk.finish();
-        let t = Instant::now();
+        assert_eq!(spk.poll_done(), Ok(false), "not stalled yet");
+        spk.stall = SHORT_STALL;
         let e = wait_done(&mut spk).unwrap_err();
         assert!(matches!(e, AudioError::Stalled(_)), "{e:?}");
-        assert!(t.elapsed() < Duration::from_secs(4));
         assert_eq!(
             spk.poll_done(),
             Ok(true),
@@ -1012,7 +1035,8 @@ mod tests {
     fn req_voi_014_a_player_that_exits_early_is_an_error() {
         let mut spk = CommandOut::new(sh("exit 0"), STALL);
         spk.begin().unwrap();
-        thread::sleep(Duration::from_millis(200));
+        // No wait for the child to exit: 200 kB cannot fit in the pipe, so the write ends in an error
+        // whether the child has already gone or goes while it is being written.
         let r = spk.play(&vec![1; 200_000]).and_then(|()| {
             spk.finish();
             wait_done(&mut spk).map(|_| ())
@@ -1038,7 +1062,7 @@ mod tests {
         spk.play(&vec![1; 100_000]).unwrap();
         let t = Instant::now();
         spk.stop();
-        assert!(t.elapsed() < Duration::from_secs(2));
+        assert!(t.elapsed() < PATIENCE);
         assert_eq!(spk.poll_done(), Ok(true));
         spk.stop();
     }
