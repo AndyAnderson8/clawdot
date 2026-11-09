@@ -7,6 +7,11 @@
 //! collects the reply.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod audio;
+pub mod command;
+pub mod front;
+pub mod hw;
+
 use clawdot_protocol::message::{
     AudioFormat, Capabilities, Hello, Indicator, Message, PROTOCOL_VERSION, Wake,
 };
@@ -46,6 +51,24 @@ pub trait Device {
     /// Return true to disconnect cleanly (for development devices that do one exchange).
     fn finished(&self) -> bool {
         false
+    }
+    /// The core started (`true`) or stopped (`false`) asking for microphone audio. A device may open or close
+    /// its capture here.
+    fn mic_active(&mut self, _on: bool) {}
+    /// How many frames [`Device::read_mic`] may be called for in one pass of the loop, to catch up when the
+    /// loop was busy. One frame per pass cannot keep up with a live microphone.
+    fn mic_burst(&self) -> usize {
+        1
+    }
+    /// Called on every pass of the loop. Return true when the user pressed the talk key or a wake word was
+    /// heard; the satellite then sends `wake` (REQ-VOI-017). This is where a wake-word detector plugs in.
+    fn poll_wake(&mut self) -> bool {
+        false
+    }
+    /// Whether the reply has finished playing. The satellite reports `playback-done` only when this is true,
+    /// polling it on every pass so a long reply never stops the keepalive (REQ-VOI-018).
+    fn playback_idle(&mut self) -> bool {
+        true
     }
 }
 
@@ -190,9 +213,23 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
     let mut muted = false;
     let mut last_heard = Instant::now();
     let mut last_ping = Instant::now();
+    let mut done_pending = false;
     loop {
+        if done_pending && device.playback_idle() {
+            done_pending = false;
+            send(&mut sock, &Message::PlaybackDone { id: None })?;
+        }
         if closed || device.finished() {
             return Ok(report);
+        }
+        if device.poll_wake() {
+            send(
+                &mut sock,
+                &Message::Wake(Wake {
+                    name: "button".into(),
+                    timestamp_ms: None,
+                }),
+            )?;
         }
         if last_heard.elapsed() >= cfg.dead_after {
             return Err("the core stopped responding".into());
@@ -203,7 +240,8 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
             send(&mut sock, &Message::Ping)?;
         }
         if streaming && !muted {
-            if let Some(pcm) = device.read_mic() {
+            for _ in 0..device.mic_burst().max(1) {
+                let Some(pcm) = device.read_mic() else { break };
                 let payload: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
                 send(
                     &mut sock,
@@ -221,8 +259,14 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
         last_heard = Instant::now();
         match msg {
             Message::Ping => send(&mut sock, &Message::Pong)?,
-            Message::StreamStart => streaming = true,
-            Message::StreamStop => streaming = false,
+            Message::StreamStart => {
+                streaming = true;
+                device.mic_active(true);
+            }
+            Message::StreamStop => {
+                streaming = false;
+                device.mic_active(false);
+            }
             Message::SetIndicator(i) => {
                 report.indicators.push(i);
                 device.indicator(i);
@@ -247,7 +291,11 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
             }
             Message::AudioStop => {
                 device.end_playback();
-                send(&mut sock, &Message::PlaybackDone { id: None })?;
+                if device.playback_idle() {
+                    send(&mut sock, &Message::PlaybackDone { id: None })?;
+                } else {
+                    done_pending = true;
+                }
             }
             Message::Reject(r) => return Err(format!("the core ended the session: {}", r.reason)),
             // Welcome again, errors, events from the satellite side, and anything unknown: ignore (REQ-SAT-009).

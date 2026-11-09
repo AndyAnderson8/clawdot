@@ -5,7 +5,7 @@
 | **Status** | Draft |
 | **Version** | 0.2 |
 | **Created** | 2026-11-09 |
-| **Related** | [0003](0003-satellite-protocol.md), [0002](0002-resource-budget.md), [R-08](../research/08-existing-echo-dot-projects.md) section 4.2, roadmap B2, [ADR-0014](../adr/0014-language-rust-core-polyglot-edges.md) |
+| **Related** | [0003](0003-satellite-protocol.md), [0002](0002-resource-budget.md), [R-08](../research/08-existing-echo-dot-projects.md) section 4.2, roadmap B8, [ADR-0014](../adr/0014-language-rust-core-polyglot-edges.md) |
 
 ## 1. Summary
 
