@@ -30,3 +30,12 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Debug builds run unoptimised code, which makes the admin password hash (PBKDF2-HMAC-SHA256, 100,000
+# iterations, crates/core/src/admin.rs) slow in tests: every sign-in or setup in the HTTP tests pays for it.
+# Optimising the hashing crate and the crate that runs the loop makes `cargo test` several times faster
+# without touching the iteration count or release behaviour. The test profile inherits from dev.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.clawdot-core]
+opt-level = 1
