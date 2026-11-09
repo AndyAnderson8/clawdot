@@ -28,3 +28,13 @@ Message numbers, field numbers, and the Noise framing are facts about a wire for
 
 No file or generated code from either repository is included. The message encoder and decoder are written
 independently from the documented wire behaviour. If a `.proto` file is ever vendored, add its MIT notice here.
+
+Wake-word runtime (crates/wake)
+-------------------------------
+The audio frontend in crates/wake/src/frontend.rs implements the algorithm of the TensorFlow Lite Micro
+microfrontend (tensorflow/lite/experimental/microfrontend, Apache License 2.0, Copyright The TensorFlow Authors)
+and of the kiss FFT in its 16-bit fixed-point configuration (BSD 3-Clause, Copyright (c) 2003-2010 Mark
+Borgerding). It is written independently and checked against the reference output; no source file is copied.
+The test models in crates/wake/tests/golden/models are the official microWakeWord v2 models from
+esphome/micro-wake-word-models (Apache License 2.0, Open Home Foundation); their LICENSE and NOTICE are kept beside
+them, with the provenance record in crates/wake/tests/golden/PROVENANCE.txt.

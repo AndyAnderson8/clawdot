@@ -103,12 +103,29 @@ Spec [0006](../specs/0006-device-layer-contract.md); the daemon is `crates/devic
 | DEV-014 local tones | Done | `tone`, `daemon` | `tone` and `daemon` tests |
 | DEV-015 honest mute | Done | `daemon`, `caps` | `daemon` and `caps` tests |
 | DEV-016 ducking | Partial: software, the daemon's own audio only | `daemon::GainOut` | `daemon` tests |
-| DEV-017 push-to-talk and wake seam | Done (no engine) | `wake`, `button` | `wake` tests |
+| DEV-017 push-to-talk and wake seam | Done; first engine behind the `mww` feature (not fed by the daemon yet) | `wake`, `wake_mww`, `button` | `wake` and `wake_mww` tests |
 | DEV-019 forbidden paths | Done | `BoardFile::path_allowed` | `board_file` tests |
 | DEV-020 bounded queues, local functions offline | Done | `button::KeyButtons`, `daemon::run_forever` | `button` and `daemon` tests |
 | DEV-021 no C in the default build | Done | manifest | inspection |
 | DEV-022 resource profile | Binary size measured (649 KiB armv7); RSS and CPU not measured | | |
 | DEV-023, 024 Bluetooth, Spotify Connect | Not started (optional) | | |
+
+## Wake-word runtime (WAK)
+
+| ID | Status | Where | Verified by |
+|---|---|---|---|
+| WAK-001 operators, reference arithmetic, refuse others | Done | `clawdot-wake` `model`, `kernels`, `interp` | `model` tests, golden interpreter tests (bit-exact under the library rounding) |
+| WAK-002 hostile model files | Done | `flat`, `model`, `interp` | `hostile` tests: truncations and 12,000 corruptions, no panic |
+| WAK-003 memory from the model, no allocation | Done (no-allocation by construction, not measured) | `interp` | `req_wak_003` test: 8 KB, constant |
+| WAK-004 frontend | Done, 99.3 to 99.8 % identical | `frontend` | `golden` tests |
+| WAK-005 streaming state, chunk invariance, reset | Done | `interp`, `engine` | `engine` tests |
+| WAK-006 detection rule | Done | `engine` | `engine` tests |
+| WAK-007 sensitivity, shared frontend | Done | `wake_mww`, `engine` | `wake_mww` tests |
+| WAK-008 feature-gated adapter, refractory, provenance | Done | `crates/device/src/wake_mww.rs` | `wake_mww` tests |
+| WAK-009 no dependencies, no unsafe | Done | manifest | inspection |
+| WAK-010 model provenance, no recordings | Done | `crates/wake/tests/golden/PROVENANCE.txt` | inspection |
+| WAK-011 agreement with the reference | Done, figures in [wake-word-runtime](../architecture/wake-word-runtime.md) | tests above | `golden`, `engine` tests |
+| WAK-012 CPU on an A53 | Estimated only (1.5 to 3 %), not measured on a device | | |
 
 ## Security and non-functional
 
