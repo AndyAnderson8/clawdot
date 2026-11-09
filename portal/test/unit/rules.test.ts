@@ -7,9 +7,13 @@ import { fileURLToPath } from "node:url";
 
 const root = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 function files(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((d) => (d.isDirectory() ? files(join(dir, d.name)) : [join(dir, d.name)]));
+  return readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+    d.isDirectory() ? files(join(dir, d.name)) : [join(dir, d.name)],
+  );
 }
-const sources = files(join(root, "src")).filter((f) => /\.(ts|tsx)$/.test(f)).map((f) => ({ f: f.slice(root.length + 1), text: readFileSync(f, "utf8") }));
+const sources = files(join(root, "src"))
+  .filter((f) => /\.(ts|tsx)$/.test(f))
+  .map((f) => ({ f: f.slice(root.length + 1), text: readFileSync(f, "utf8") }));
 
 function none(re: RegExp, why: string, allow: string[] = []) {
   const bad = sources.filter((s) => !allow.includes(s.f.replaceAll("\\", "/")) && re.test(s.text)).map((s) => s.f);
@@ -19,11 +23,17 @@ function none(re: RegExp, why: string, allow: string[] = []) {
 test("there is source to check", () => assert.ok(sources.length >= 15));
 
 test("untrusted text is never injected as HTML", () => {
-  none(/dangerouslySetInnerHTML|innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser/, "no HTML injection APIs");
+  none(
+    /dangerouslySetInnerHTML|innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser/,
+    "no HTML injection APIs",
+  );
 });
 
 test("no dynamic code", () => {
-  none(/\beval\s*\(|new\s+Function\s*\(|setTimeout\s*\(\s*["'`]|setInterval\s*\(\s*["'`]|import\s*\(/, "no eval, Function, string timers, or dynamic import");
+  none(
+    /\beval\s*\(|new\s+Function\s*\(|setTimeout\s*\(\s*["'`]|setInterval\s*\(\s*["'`]|import\s*\(/,
+    "no eval, Function, string timers, or dynamic import",
+  );
 });
 
 test("only api.ts talks to the network, and only to this origin", () => {

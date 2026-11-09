@@ -22,20 +22,31 @@ const here = join(dirname(fileURLToPath(import.meta.url)), "..");
 const roots = [join(here, "node_modules"), join(here, "lint", "node_modules")];
 
 function packages(dir) {
-  return readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory() && d.name !== ".bin").flatMap((d) =>
-    d.name.startsWith("@") ? packages(join(dir, d.name)) : [join(dir, d.name)]);
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && d.name !== ".bin")
+    .flatMap((d) => (d.name.startsWith("@") ? packages(join(dir, d.name)) : [join(dir, d.name)]));
 }
 
 const bad = [];
 let n = 0;
 for (const p of roots.flatMap((r) => packages(r))) {
   let meta;
-  try { meta = JSON.parse(readFileSync(join(p, "package.json"), "utf8")); } catch { continue; }
+  try {
+    meta = JSON.parse(readFileSync(join(p, "package.json"), "utf8"));
+  } catch {
+    continue;
+  }
   n++;
   const lic = typeof meta.license === "string" ? meta.license : meta.license?.type;
-  const parts = String(lic ?? "UNKNOWN").replace(/[()]/g, "").split(/\s+(?:OR|AND)\s+/);
+  const parts = String(lic ?? "UNKNOWN")
+    .replace(/[()]/g, "")
+    .split(/\s+(?:OR|AND)\s+/);
   if (EXCEPTIONS.get(meta.name) === lic) continue;
-  if (!parts.every((x) => ALLOWED.has(x)) && !parts.some((x) => ALLOWED.has(x) && / OR /.test(String(lic)))) bad.push(`${meta.name}@${meta.version}: ${lic}`);
+  if (!parts.every((x) => ALLOWED.has(x)) && !parts.some((x) => ALLOWED.has(x) && / OR /.test(String(lic))))
+    bad.push(`${meta.name}@${meta.version}: ${lic}`);
 }
-if (bad.length) { console.error("portal: licences outside the allow-list:\n  " + bad.join("\n  ")); process.exit(1); }
+if (bad.length) {
+  console.error("portal: licences outside the allow-list:\n  " + bad.join("\n  "));
+  process.exit(1);
+}
 console.log(`portal: ${n} installed packages, all licences on the allow-list`);

@@ -2,19 +2,35 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import { api, ApiError, failText, hasToken, keep } from "../../src/api.ts";
 
-interface Call { url: string; init: RequestInit }
+interface Call {
+  url: string;
+  init: RequestInit;
+}
 let calls: Call[] = [];
 const realFetch = globalThis.fetch;
 
 function reply(status: number, body: unknown) {
   globalThis.fetch = (async (url: string, init: RequestInit) => {
     calls.push({ url, init });
-    return { ok: status >= 200 && status < 300, status, json: async () => { if (body === undefined) throw new Error("no body"); return body; } } as Response;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => {
+        if (body === undefined) throw new Error("no body");
+        return body;
+      },
+    } as Response;
   }) as typeof fetch;
 }
 
-beforeEach(() => { calls = []; keep(""); });
-afterEach(() => { globalThis.fetch = realFetch; keep(""); });
+beforeEach(() => {
+  calls = [];
+  keep("");
+});
+afterEach(() => {
+  globalThis.fetch = realFetch;
+  keep("");
+});
 
 test("a call without a session sends no Authorization header", async () => {
   reply(200, { ok: 1 });
@@ -40,17 +56,26 @@ test("after keep(), calls carry the bearer token and JSON bodies", async () => {
 
 test("errors carry the device's message and status", async () => {
   reply(400, { error: "Timers run from 1 second to 24 hours." });
-  await assert.rejects(api("POST", "/api/schedule", {}), (e: unknown) => e instanceof ApiError && e.status === 400 && e.message === "Timers run from 1 second to 24 hours.");
+  await assert.rejects(
+    api("POST", "/api/schedule", {}),
+    (e: unknown) => e instanceof ApiError && e.status === 400 && e.message === "Timers run from 1 second to 24 hours.",
+  );
 });
 
 test("an error without a JSON body still says what happened", async () => {
   reply(502, undefined);
-  await assert.rejects(api("GET", "/api/status"), (e: unknown) => e instanceof ApiError && e.status === 502 && e.message === "The device answered with error 502.");
+  await assert.rejects(
+    api("GET", "/api/status"),
+    (e: unknown) => e instanceof ApiError && e.status === 502 && e.message === "The device answered with error 502.",
+  );
 });
 
 test("failText wording", () => {
   assert.deepEqual(failText(new ApiError("x", 401)), { text: "Please sign in again.", signIn: true });
-  assert.deepEqual(failText(new ApiError("x", 429)), { text: "Too many attempts. Wait a few seconds and try again.", signIn: false });
+  assert.deepEqual(failText(new ApiError("x", 429)), {
+    text: "Too many attempts. Wait a few seconds and try again.",
+    signIn: false,
+  });
   assert.deepEqual(failText(new ApiError("Nope.", 400)), { text: "Nope.", signIn: false });
   assert.deepEqual(failText("weird"), { text: "Something went wrong. Try again.", signIn: false });
   assert.deepEqual(failText(new Error("")), { text: "Something went wrong. Try again.", signIn: false });

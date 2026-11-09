@@ -37,7 +37,10 @@ export default tseslint.config(
       // tsconfig sets noPropertyAccessFromIndexSignature-style access on env and records; brackets are deliberate there.
       "@typescript-eslint/dot-notation": "off",
       "@typescript-eslint/switch-exhaustiveness-check": ["error", { considerDefaultExhaustiveForUnions: false }],
-      "@typescript-eslint/consistent-type-imports": ["error", { prefer: "type-imports", fixStyle: "inline-type-imports" }],
+      "@typescript-eslint/consistent-type-imports": [
+        "error",
+        { prefer: "type-imports", fixStyle: "inline-type-imports" },
+      ],
       "@typescript-eslint/consistent-type-exports": "error",
       "@typescript-eslint/explicit-module-boundary-types": "error",
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
@@ -58,7 +61,10 @@ export default tseslint.config(
       "no-script-url": "error",
       "no-restricted-properties": [
         "error",
-        ...htmlSinks.map((property) => ({ property, message: `${property} turns text into HTML; build elements or use JSX text instead.` })),
+        ...htmlSinks.map((property) => ({
+          property,
+          message: `${property} turns text into HTML; build elements or use JSX text instead.`,
+        })),
         { object: "document", property: "write", message: "document.write injects HTML." },
         { object: "document", property: "writeln", message: "document.writeln injects HTML." },
       ],

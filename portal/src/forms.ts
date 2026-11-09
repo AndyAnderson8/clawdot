@@ -42,7 +42,13 @@ export function reminderBody(f: ReminderForm): ReminderBody | string {
   return body;
 }
 
-export interface ParamForm { id: number; name: string; type: string; required: boolean; description: string }
+export interface ParamForm {
+  id: number;
+  name: string;
+  type: string;
+  required: boolean;
+  description: string;
+}
 export interface ToolForm {
   name: string;
   description: string;
@@ -63,7 +69,14 @@ export interface ToolDefinition {
 }
 
 export function toolDefinition(f: ToolForm): ToolDefinition | string {
-  const def: ToolDefinition = { name: f.name.trim(), description: f.description.trim(), method: f.method, url: f.url.trim(), confirm: f.confirm, params: {} };
+  const def: ToolDefinition = {
+    name: f.name.trim(),
+    description: f.description.trim(),
+    method: f.method,
+    url: f.url.trim(),
+    confirm: f.confirm,
+    params: {},
+  };
   if (f.tokenVar.trim()) def.auth_env = f.tokenVar.trim();
   for (const p of f.params) {
     const name = p.name.trim();
@@ -74,8 +87,18 @@ export function toolDefinition(f: ToolForm): ToolDefinition | string {
   return def;
 }
 
-export interface ConnectionForm { name: string; url: string; tokenVar: string; confirm: boolean }
-export interface ConnectionDefinition { name: string; url: string; confirm: boolean; auth_env?: string }
+export interface ConnectionForm {
+  name: string;
+  url: string;
+  tokenVar: string;
+  confirm: boolean;
+}
+export interface ConnectionDefinition {
+  name: string;
+  url: string;
+  confirm: boolean;
+  auth_env?: string;
+}
 
 export function connectionDefinition(f: ConnectionForm): ConnectionDefinition {
   const d: ConnectionDefinition = { name: f.name.trim(), url: f.url.trim(), confirm: f.confirm };
@@ -92,29 +115,76 @@ export function snippets(base: string, name: string, adapter: string, tok: strin
   const url = base + "/hook/" + name;
   const t = tok || "YOUR_TOKEN";
   const out: [string, string][] = [
-    ["Try it from a terminal", "curl -X POST " + url + " \\\n  -H 'Authorization: Bearer " + t + "' \\\n  -d '{\"title\":\"Backup finished\",\"summary\":\"12 GB copied\"}'"],
+    [
+      "Try it from a terminal",
+      "curl -X POST " +
+        url +
+        " \\\n  -H 'Authorization: Bearer " +
+        t +
+        '\' \\\n  -d \'{"title":"Backup finished","summary":"12 GB copied"}\'',
+    ],
   ];
   if (adapter === "claude-code") {
-    const hook = (ev: string) => '    "' + ev + '": [{ "hooks": [{ "type": "http", "url": "' + url + '", "headers": { "Authorization": "Bearer ' + t + '" }, "timeout": 5 }] }]';
-    out.unshift(["Claude Code: add to ~/.claude/settings.json", '{\n  "hooks": {\n' + hook("Stop") + ",\n" + hook("Notification") + "\n  }\n}"]);
-    out.push(["Let your voice replies reach Claude Code (run on the computer where it works)", "CLAWDOT_TOKEN=" + t + " clawdot-bridge --url " + base + " --endpoint " + name]);
+    const hook = (ev: string) =>
+      '    "' +
+      ev +
+      '": [{ "hooks": [{ "type": "http", "url": "' +
+      url +
+      '", "headers": { "Authorization": "Bearer ' +
+      t +
+      '" }, "timeout": 5 }] }]';
+    out.unshift([
+      "Claude Code: add to ~/.claude/settings.json",
+      '{\n  "hooks": {\n' + hook("Stop") + ",\n" + hook("Notification") + "\n  }\n}",
+    ]);
+    out.push([
+      "Let your voice replies reach Claude Code (run on the computer where it works)",
+      "CLAWDOT_TOKEN=" + t + " clawdot-bridge --url " + base + " --endpoint " + name,
+    ]);
   }
-  out.push(["GitHub Actions: add as the last step of a job", "- name: Tell ClawDot\n  if: always()\n  run: |\n    curl -fsS -X POST " + url + " \\\n      -H \"Authorization: Bearer ${{ secrets.CLAWDOT_TOKEN }}\" \\\n      -d '{\"title\":\"Build ${{ job.status }}\",\"summary\":\"${{ github.repository }}\"}'"]);
+  out.push([
+    "GitHub Actions: add as the last step of a job",
+    "- name: Tell ClawDot\n  if: always()\n  run: |\n    curl -fsS -X POST " +
+      url +
+      ' \\\n      -H "Authorization: Bearer ${{ secrets.CLAWDOT_TOKEN }}" \\\n      -d \'{"title":"Build ${{ job.status }}","summary":"${{ github.repository }}"}\'',
+  ]);
   return out;
 }
 
 export const LABEL: Record<string, string> = {
-  device_name: "Device name", zone: "Time zone", persona: "Personality", llm_url: "Language model address", llm_model: "Model",
-  llm_fallback_model: "Backup model", summary_model: "Summary model", llm_key_env: "Key variable", voice: "Voice",
-  listen: "Address this page uses", public_url: "Address agents use", max_requests_per_day: "Requests per day",
-  daily_spend_usd: "Daily spend limit", board: "Board",
+  device_name: "Device name",
+  zone: "Time zone",
+  persona: "Personality",
+  llm_url: "Language model address",
+  llm_model: "Model",
+  llm_fallback_model: "Backup model",
+  summary_model: "Summary model",
+  llm_key_env: "Key variable",
+  voice: "Voice",
+  listen: "Address this page uses",
+  public_url: "Address agents use",
+  max_requests_per_day: "Requests per day",
+  daily_spend_usd: "Daily spend limit",
+  board: "Board",
 };
-export const FROM: Record<string, string> = { default: "Default", file: "Configuration file", saved: "Saved here", flag: "Command-line flag" };
+export const FROM: Record<string, string> = {
+  default: "Default",
+  file: "Configuration file",
+  saved: "Saved here",
+  flag: "Command-line flag",
+};
 
 export type SettingKind = "text" | "zone" | "area" | "board" | "number";
-export interface SettingSpec { key: string; kind: SettingKind; hint?: string; off?: boolean }
+export interface SettingSpec {
+  key: string;
+  kind: SettingKind;
+  hint?: string;
+  off?: boolean;
+}
 
-export function labelOf(key: string): string { return LABEL[key] ?? key; }
+export function labelOf(key: string): string {
+  return LABEL[key] ?? key;
+}
 
 /** The current value of a setting as the text a form field starts with. */
 export function currentText(s: Settings, key: string): string {
@@ -123,7 +193,11 @@ export function currentText(s: Settings, key: string): string {
 }
 
 /** Only the values that changed, ready for `PUT /api/settings`; an emptied box becomes null (back to the default). */
-export function settingsPatch(specs: SettingSpec[], current: Record<string, string>, edited: Record<string, string>): Record<string, string | number | null> {
+export function settingsPatch(
+  specs: SettingSpec[],
+  current: Record<string, string>,
+  edited: Record<string, string>,
+): Record<string, string | number | null> {
   const body: Record<string, string | number | null> = {};
   for (const sp of specs) {
     if (sp.off) continue;

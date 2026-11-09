@@ -10,9 +10,15 @@ export class ApiError extends Error {
 
 const KEY = "clawdot-session";
 let token = "";
-try { token = sessionStorage.getItem(KEY) ?? ""; } catch { token = ""; }
+try {
+  token = sessionStorage.getItem(KEY) ?? "";
+} catch {
+  token = "";
+}
 
-export function hasToken(): boolean { return token !== ""; }
+export function hasToken(): boolean {
+  return token !== "";
+}
 
 /** Remember the session token for this tab only (sessionStorage), or forget it with an empty string. */
 export function keep(t: string | undefined): void {
@@ -20,7 +26,9 @@ export function keep(t: string | undefined): void {
   try {
     if (token) sessionStorage.setItem(KEY, token);
     else sessionStorage.removeItem(KEY);
-  } catch { /* storage may be blocked; the token then lives in memory only */ }
+  } catch {
+    /* storage may be blocked; the token then lives in memory only */
+  }
 }
 
 export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
@@ -28,7 +36,11 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   if (token) headers["Authorization"] = "Bearer " + token;
   const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   let data: { error?: string } = {};
-  try { data = (await r.json()) as { error?: string }; } catch { data = {}; }
+  try {
+    data = (await r.json()) as { error?: string };
+  } catch {
+    data = {};
+  }
   if (!r.ok) throw new ApiError(data.error ?? `The device answered with error ${r.status}.`, r.status);
   return data as T;
 }
