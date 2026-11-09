@@ -9,6 +9,7 @@ use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, Effect, describe_fired};
 use clawdot_core::config::{Config, SatelliteConfig, SpeechConfig};
+#[cfg(feature = "esphome-satellite")]
 use clawdot_core::esphome_cfg::EsphomeConfig;
 use clawdot_core::extensions::{ExtOp, Extensions, WithPolicy};
 use clawdot_core::http::{ServeOptions, serve};
@@ -110,7 +111,7 @@ struct Args {
     stations: Vec<Station>,
     speech: SpeechConfig,
     satellite: SatelliteConfig,
-    #[cfg_attr(not(feature = "esphome-satellite"), allow(dead_code))]
+    #[cfg(feature = "esphome-satellite")]
     esphome: EsphomeConfig,
     voice_in: Option<PathBuf>,
     voice_out: Option<PathBuf>,
@@ -147,6 +148,7 @@ fn parse() -> Result<Args, String> {
         stations: Vec::new(),
         speech: SpeechConfig::default(),
         satellite: SatelliteConfig::default(),
+        #[cfg(feature = "esphome-satellite")]
         esphome: EsphomeConfig::default(),
         voice_in: None,
         voice_out: None,
@@ -262,6 +264,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.stations.clone_from(&c.stations);
     a.speech.clone_from(&c.speech);
     a.satellite.clone_from(&c.satellite);
+    #[cfg(feature = "esphome-satellite")]
     a.esphome.clone_from(&c.esphome);
     a.create.extend(c.endpoints.iter().cloned());
     let mut put = |k: &str, v: Option<serde_json::Value>| {

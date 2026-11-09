@@ -99,8 +99,14 @@ pub struct Config {
     #[serde(default)]
     pub satellite: SatelliteConfig,
     /// ESPHome voice satellites to dial (optional feature `esphome-satellite`; see spec 0004).
+    #[cfg(feature = "esphome-satellite")]
     #[serde(default)]
     pub esphome: crate::esphome_cfg::EsphomeConfig,
+    /// Without the feature the section is kept unparsed (so the default build carries no code for it) and
+    /// refused by `validate` unless it is empty.
+    #[cfg(not(feature = "esphome-satellite"))]
+    #[serde(default)]
+    pub esphome: Option<serde_json::Value>,
     /// Radio stations for the music commands.
     #[serde(default)]
     pub stations: Vec<crate::media::Station>,
@@ -181,9 +187,23 @@ impl Config {
                 "config: `satellite.listen` is needed for the other `satellite` settings".into(),
             );
         }
-        self.esphome.validate()?;
-        if !self.esphome.is_empty() && self.speech.url.is_none() {
-            return Err("config: `esphome` needs the `speech` section".into());
+        #[cfg(feature = "esphome-satellite")]
+        {
+            self.esphome.validate()?;
+            if !self.esphome.is_empty() && self.speech.url.is_none() {
+                return Err("config: `esphome` needs the `speech` section".into());
+            }
+        }
+        #[cfg(not(feature = "esphome-satellite"))]
+        if self
+            .esphome
+            .as_ref()
+            .is_some_and(|v| !v.as_object().is_some_and(serde_json::Map::is_empty))
+        {
+            return Err(
+                "config: the `esphome` section needs a build with the `esphome-satellite` feature"
+                    .into(),
+            );
         }
         let sp = &self.speech;
         if sp.url.is_some() {
@@ -249,6 +269,28 @@ mod tests {
         assert_eq!(c.listen_addr().unwrap().unwrap().port(), 8080);
         assert_eq!(c.endpoints.len(), 2);
         assert_eq!(c.limits.max_requests_per_day, Some(200));
+    }
+
+    // REQ-ESP-002
+    #[cfg(not(feature = "esphome-satellite"))]
+    #[test]
+    fn req_esp_002_a_default_build_refuses_a_real_esphome_section() {
+        assert!(Config::parse(r#"{"esphome": {}}"#).is_ok());
+        let e = Config::parse(r#"{"esphome": {"devices": [{"name": "a", "address": "h"}]}}"#)
+            .unwrap_err();
+        assert!(e.contains("esphome-satellite"), "{e}");
+    }
+
+    // REQ-ESP-002
+    #[cfg(feature = "esphome-satellite")]
+    #[test]
+    fn req_esp_002_the_esphome_section_needs_speech() {
+        let dev = r#""esphome": {"devices": [{"name": "a", "address": "h"}]}"#;
+        let e = Config::parse(&format!("{{{dev}}}")).unwrap_err();
+        assert!(e.contains("speech"), "{e}");
+        let speech = r#""speech": {"url": "https://x/v1", "stt_model": "w", "tts_model": "t", "voice": "v"}"#;
+        let c = Config::parse(&format!("{{{dev}, {speech}}}")).unwrap();
+        assert_eq!(c.esphome.devices[0].host_port(), "h:6053");
     }
 
     #[test]

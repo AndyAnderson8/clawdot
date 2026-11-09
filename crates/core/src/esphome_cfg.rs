@@ -1,8 +1,8 @@
 //! Configuration for the optional ESPHome voice-satellite client (spec 0004, REQ-ESP-002).
 //!
-//! The settings are always parsed so a typo is reported, but a build without the `esphome-satellite` feature
-//! refuses a non-empty section instead of silently ignoring it. The Noise key is never in the file: `psk_env`
-//! names the environment variable that holds it.
+//! Only built with the `esphome-satellite` feature, so the default binary carries no code for it (a default
+//! build keeps the section unparsed and refuses it unless it is empty; see `config.rs`). The Noise key is never
+//! in the file: `psk_env` names the environment variable that holds it.
 
 use serde::Deserialize;
 
@@ -82,12 +82,6 @@ impl EsphomeConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.is_empty() {
             return Ok(());
-        }
-        if !cfg!(feature = "esphome-satellite") {
-            return Err(
-                "config: the `esphome` section needs a build with the `esphome-satellite` feature"
-                    .into(),
-            );
         }
         if self.devices.is_empty() {
             return Err("config: `esphome.media_listen` and `media_url` need at least one `esphome.devices` entry".into());
@@ -199,7 +193,6 @@ mod tests {
         assert_eq!(d("[fe80::1]:99").host_port(), "[fe80::1]:99");
     }
 
-    #[cfg(feature = "esphome-satellite")]
     #[test]
     fn a_good_section_parses_and_bad_ones_say_why() {
         let c = parse(
@@ -252,12 +245,5 @@ mod tests {
                 .unwrap_err()
                 .contains("at most")
         );
-    }
-
-    #[cfg(not(feature = "esphome-satellite"))]
-    #[test]
-    fn req_esp_002_a_build_without_the_feature_refuses_the_section() {
-        let e = parse(r#"{"devices":[{"name":"a","address":"h"}]}"#).unwrap_err();
-        assert!(e.contains("esphome-satellite"), "{e}");
     }
 }
