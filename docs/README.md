@@ -23,15 +23,15 @@
 | Quality | [quality/traceability.md](quality/traceability.md) | Requirement-to-test map and measured results |
 | Security | [security/threat-model.md](security/threat-model.md) | Assets, threats, mitigations |
 | Design | [design/brand.md](design/brand.md) | Logo, colour tokens, contrast, usage rules, trademark stance |
+| Design | [design/portal.md](design/portal.md) | The tabbed web portal: palette, type, layout, tab names, principles |
 | Design | [design/ui-stack.md](design/ui-stack.md) | Proposed: raw JS, esbuild TypeScript, or Preact for the web UI |
 | Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
 | Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |
+| Planning | [open-questions.md](open-questions.md) | Questions for the maintainer, each with the default chosen meanwhile |
 | Planning | [roadmap.md](roadmap.md) | Milestones, feasibility gate, exit criteria, initial backlog |
 | Reports | [reports/2026-11-07-overnight-session.md](reports/2026-11-07-overnight-session.md) | Overnight session: what was built, measurements, decisions, open items |
 | Planning | [future-scope.md](future-scope.md) | Parked ideas with promotion conditions |
-| Planning | [open-questions.md](open-questions.md) | Decisions an agent assumed and the maintainer should confirm |
-
 ## Document precedence
 
 If documents disagree: **Accepted spec > ADR > architecture overview > roadmap**. Fix the inconsistency in the same PR.

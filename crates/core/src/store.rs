@@ -116,17 +116,44 @@ impl JsonStore {
         let bytes =
             serde_json::to_vec_pretty(&env).map_err(|e| StoreError::Corrupt(e.to_string()))?;
         if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
+            create_private_dir(dir)?;
         }
         let tmp = self.path.with_extension("tmp");
         {
-            let mut f = fs::File::create(&tmp)?;
+            let mut f = create_private_file(&tmp)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
         }
         fs::rename(&tmp, &self.path)?;
         Ok(())
     }
+}
+
+/// Create `dir` and any missing parents readable only by the service user (0700 on Unix). A directory
+/// that already exists keeps its mode: it may be shared on purpose, and the files inside are private
+/// either way (REQ-SEC-009).
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut b = fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    b.create(dir)
+}
+
+/// Create (or truncate) a file that only the service user can read or write (0600 on Unix), with the
+/// mode set at creation so there is no window in which it is world-readable.
+fn create_private_file(path: &Path) -> io::Result<fs::File> {
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path)
 }
 
 #[cfg(test)]
@@ -190,6 +217,24 @@ mod tests {
             !dir.0.join("sub/d.tmp").exists(),
             "temp file must not linger"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_is_private_to_the_service_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = TempDir::new("private");
+        let path = dir.0.join("data/inner/d.json");
+        let store = JsonStore::new(path.clone(), 1);
+        store.save(&Doc::default()).unwrap();
+        assert_eq!(mode(&dir.0.join("data")), 0o700, "new directory");
+        assert_eq!(mode(&dir.0.join("data/inner")), 0o700, "new subdirectory");
+        assert_eq!(mode(&path), 0o600, "new file");
+        // A rewrite (temp file renamed over the old one) stays private, even if the old file was open.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        store.save(&Doc::default()).unwrap();
+        assert_eq!(mode(&path), 0o600, "rewritten file");
     }
 
     #[test]

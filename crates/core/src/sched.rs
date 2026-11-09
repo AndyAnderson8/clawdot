@@ -407,6 +407,24 @@ impl Scheduler {
         Ok(self.state.items.remove(pos))
     }
 
+    /// Give item `from` the identifier `to` (used by an edit, which creates the new item before it is known to
+    /// succeed). Does nothing when `from` does not exist or `to` is taken.
+    pub fn renumber(&mut self, from: u64, to: u64) {
+        if self.state.items.iter().any(|i| i.id == to) {
+            return;
+        }
+        if let Some(i) = self.state.items.iter_mut().find(|i| i.id == from) {
+            i.id = to;
+        }
+    }
+
+    /// Put back an item taken out by [`Scheduler::cancel`] (an edit that failed). Ignored if its id is in use.
+    pub fn restore(&mut self, item: Item) {
+        if !self.state.items.iter().any(|i| i.id == item.id) {
+            self.state.items.push(item);
+        }
+    }
+
     /// Remove every item of one kind; returns how many.
     pub fn cancel_kind(&mut self, kind: Kind) -> usize {
         let before = self.state.items.len();

@@ -51,7 +51,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 ## Web UI
 
 The core serves a small page at `/` and `/ui` (REQ-CFG-001, 008): no external assets, no frameworks, usable on a
-phone. It shows endpoints and the recent inbox, and creates, rotates, and deletes endpoints (REQ-CFG-003, 004).
+phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, Webhooks, Settings; see [design/portal.md](../design/portal.md)) with a header and a version footer (REQ-CFG-025, 026). Webhooks (REQ-CFG-003, 028) create, rotate, and delete endpoints and show copy-paste snippets; Reminders (REQ-CFG-027) manages timers, alarms, and reminders; Tools, Connections, and Settings (REQ-CFG-029, 030) show what the device is running with.
 
 - **First run** (REQ-CFG-018). Start `clawdot`, then open the address it prints. While nothing is configured the
   page shows one setup screen with two choices: **protect with an admin password** (recommended), or **leave the
@@ -86,6 +86,6 @@ phone. It shows endpoints and the recent inbox, and creates, rotates, and delete
 - **Console.** Type `quit` or `exit`, or press Ctrl-D, to stop (REQ-CFG-017).
 - **Throttling.** Wrong sessions, sign-in attempts, and setup tries share the authentication rate limit.
 - **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
-- **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), radio stations, and the schedule. It contains no secrets and no agent text.
+- **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), and the clock state. It contains no secrets and no agent text. Radio and music are not shown in the portal.
 - **Test speak** makes the speaker say a short phrase (up to 200 characters, a few at a time) on the console and on any free satellite, a quick way to check the speaker end to end.
-- Not yet in the UI: provider keys, voice and wake word settings, logs, history search, and editing the configuration (change the file and restart).
+- Not yet in the UI: editing settings (the Settings tab shows them; change the file and restart), adding or removing tools, connections, and skills (REQ-CFG-031 coming-soon states), provider keys, wake word settings, logs, and history search.

@@ -5,6 +5,7 @@
   --bg: #f4f8f7; --surface: #fff; --fg: #0e2a33; --mut: #476068; --line: #cbdad7; --edge: #6f8c88;
   --acc: #0b6e63; --on-acc: #fff; --bad: #b42318; --bad-bg: #b42318; --on-bad: #fff; --focus: #0b6e63;
   --ring: #2ee6c5; --shell: #f2644f;
+  --band: #0e2a33; --on-band: #e8f3f1; --band-mut: #9fb7b4; --band-line: #24414a;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --t-s: .875rem; --t-m: 1rem; --t-l: 1.25rem; --t-xl: 1.563rem; --t-xxl: 1.953rem;
