@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "id": "uc4-restart-that-container",
+  "use_case": "UC4",
+  "description": "An alert names a container; 'restart that container' is read back with the name and warns that it followed outside text; it runs only after a yes.",
+  "tags": ["docker", "event", "confirmation", "t2"],
+  "tool_sets": ["docker"],
+  "turns": [
+    {
+      "trigger": "event",
+      "source": "nas-monitor",
+      "say": "Container plex-1 stopped responding",
+      "model": [{"text": "Plex on the NAS has stopped responding."}],
+      "expect": {"ends": "answered", "calls": [], "no_held": true}
+    },
+    {
+      "say": "restart that container",
+      "model": [
+        {"calls": [{"name": "docker__restart", "args": {"container": "plex-1"}}]}
+      ],
+      "expect": {
+        "ends": "held",
+        "calls": [],
+        "held": {
+          "tool": "docker__restart",
+          "args": {"container": "plex-1"},
+          "speech_contains": ["plex-1", "outside", "Yes or no?"]
+        },
+        "audit": [{"tool": "docker__restart", "decision": "held"}]
+      }
+    },
+    {
+      "say": "yes",
+      "model": [{"text": "Plex is restarting."}],
+      "expect": {
+        "calls": [{"tool": "docker__restart", "args": {"container": "plex-1"}}],
+        "no_held": true,
+        "audit": [{"tool": "docker__restart", "decision": "approved"}]
+      }
+    }
+  ],
+  "forbidden": {"tools": ["docker__remove"]}
+}

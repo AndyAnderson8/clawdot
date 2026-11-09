@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "uc10-cancel-that-drops-the-action",
+  "use_case": "UC10",
+  "description": "'Cancel that' and 'stop' after a read-back drop the held action. (Cancelling a running turn is not built yet.)",
+  "tags": ["cancel", "confirmation"],
+  "tool_sets": ["docker"],
+  "forbidden": {"tools": ["docker__restart"]},
+  "turns": [
+    {
+      "say": "restart plex",
+      "model": [{"calls": [{"name": "docker__restart", "args": {"container": "plex-1"}}]}],
+      "expect": {"ends": "held", "held": {"tool": "docker__restart"}}
+    },
+    {
+      "say": "cancel that",
+      "model": [],
+      "expect": {"calls": [], "no_held": true, "speech_contains": ["won't do that"], "audit": [{"tool": "docker__restart", "decision": "declined"}]}
+    },
+    {
+      "say": "restart plex",
+      "model": [{"calls": [{"name": "docker__restart", "args": {"container": "plex-1"}}]}],
+      "expect": {"ends": "held", "held": {"tool": "docker__restart"}}
+    },
+    {
+      "say": "stop",
+      "model": [],
+      "expect": {"calls": [], "no_held": true}
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "uc6-bad-arguments-then-retry",
+  "use_case": "UC6",
+  "description": "The model leaves out a required argument; the real tool says so and the model corrects itself once.",
+  "tags": ["timers", "builtin", "recovery"],
+  "builtin_tools": ["set_timer"],
+  "turns": [
+    {
+      "say": "three minute tea timer",
+      "model": [
+        {"calls": [{"name": "set_timer", "args": {"label": "tea"}}]},
+        {"calls": [{"name": "set_timer", "args": {"seconds": 180, "label": "tea"}}]},
+        {"text": "Your tea timer is set for three minutes."}
+      ],
+      "expect": {
+        "calls": [
+          {"tool": "set_timer", "args": {"seconds": {"$absent": true}}},
+          {"tool": "set_timer", "args": {"seconds": 180}}
+        ],
+        "model_saw": ["`seconds` must be a whole number"]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 3}
+}

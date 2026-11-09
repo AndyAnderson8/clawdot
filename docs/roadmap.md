@@ -143,7 +143,7 @@ The default toolset is a set of **recipes** (configuration that the portal can a
 
 **Exit:** replay mode is a `check.sh` gate with the injection set at 100 percent; live mode runs once against the default recommended model and the result is recorded.
 
-*Status: not started.* Unit tests use a scripted fake model in `session.rs`; there is no scenario format, replay or live mode.
+*Status: replay mode and the scenario set are built (`feature/eval-harness`, REQ-AST-016..018; [evals.md](architecture/evals.md)): about 45 scenarios including 15 injection scenarios, run by `scripts/check.sh` and `cargo test --workspace`. Live mode is built and tested against a fake provider only; the exit item "live mode runs once against the default recommended model" is still open and needs the maintainer's go and an API key.*
 
 ## A2. Audio interface
 **Goal:** one small audio in/out trait, so real sound reaches the core on a PC and later on the Dot without changing the core.

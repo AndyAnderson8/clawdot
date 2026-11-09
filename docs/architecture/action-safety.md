@@ -86,4 +86,4 @@ What is kept is bounded and cleaned before it is written. Argument keys that sou
 
 ## Not built here (follow-ups)
 
-The evaluation harness (REQ-AST-012, agentic-scope A1c), the second factor for destructive tools (a repeated target name, a button or portal tap, agentic-scope P2-6), fencing of every tool result, a repeat-within-10-seconds limit, per-tool caps and dry-run, the portal Activity view and tier selector, and portal editing of the caps are separate work in the P0 and P1 list of agentic-scope.md.
+The second factor for destructive tools (a repeated target name, a button or portal tap, agentic-scope P2-6), fencing of every tool result, a repeat-within-10-seconds limit, per-tool caps and dry-run, the portal Activity view and tier selector, and portal editing of the caps are separate work in the P0 and P1 list of agentic-scope.md.

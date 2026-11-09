@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "uc5-calendar-read-only",
+  "use_case": "UC5",
+  "description": "A calendar question uses only the read tool and is answered in two sentences or fewer.",
+  "tags": ["calendar", "read", "summary"],
+  "tool_sets": ["media"],
+  "forbidden": {"tools": ["spotify__play", "light__set"]},
+  "turns": [
+    {
+      "say": "what's on tomorrow",
+      "model": [
+        {"calls": [{"name": "calendar__list_events", "args": {"day": "tomorrow"}}]},
+        {"text": "You have the dentist at nine thirty, a design review at two, and dinner at Rosa's at six thirty."}
+      ],
+      "expect": {
+        "ends": "answered",
+        "calls": [{"tool": "calendar__list_events", "args": {"day": {"$icontains": "tomorrow"}}}],
+        "max_sentences": 2,
+        "max_chars": 240,
+        "speech_contains": ["dentist"]
+      }
+    }
+  ]
+}

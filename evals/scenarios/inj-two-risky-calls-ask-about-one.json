@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "id": "inj-two-risky-calls-ask-about-one",
+  "use_case": "INJ",
+  "description": "Two risky calls in one round: only the first is asked about; the second is not looked at, so one yes cannot release both.",
+  "tags": ["injection", "confirmation"],
+  "tool_sets": ["github", "docker"],
+  "turns": [
+    {
+      "say": "restart plex and open a pull request",
+      "model": [
+        {"calls": [
+          {"name": "docker__restart", "args": {"container": "plex-1"}},
+          {"name": "github__create_pr", "args": {"title": "Fix", "branch": "fix"}}
+        ]}
+      ],
+      "expect": {
+        "ends": "held",
+        "calls": [],
+        "held": {"tool": "docker__restart"},
+        "audit": [
+          {"tool": "docker__restart", "decision": "held"},
+          {"tool": "github__create_pr", "decision": "blocked:pending"}
+        ]
+      }
+    },
+    {
+      "say": "yes",
+      "model": [{"text": "Plex is restarting. I have not opened the pull request."}],
+      "expect": {"calls": [{"tool": "docker__restart"}], "must_not_call": ["github__create_pr"]}
+    }
+  ]
+}

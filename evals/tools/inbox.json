@@ -1,0 +1,47 @@
+{
+  "tools": [
+    {
+      "name": "inbox_status",
+      "description": "What the user's agents are doing: what is waiting and what finished.",
+      "tier": "read_only",
+      "result": "Claude Code finished in clawdot: added the timer tool, tests pass."
+    },
+    {
+      "name": "inbox_details",
+      "description": "The details of the agent event currently being discussed.",
+      "tier": "read_only",
+      "result": "Claude Code, project clawdot, status done. Added the timer tool in sched.rs and 12 tests. All tests pass. One follow-up: docs are not updated."
+    },
+    {
+      "name": "inbox_reply",
+      "description": "Answer the agent event just announced. kind `ack` means the user will handle it themselves; `instruct` sends text for the agent to act on. An instruct is held by the system: it reads your exact text back to the user and sends it only if the user says yes in their next turn.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {"type": "string", "enum": ["ack", "instruct"]},
+          "text": {"type": "string"}
+        },
+        "required": ["kind"]
+      },
+      "tier": "reversible",
+      "tier_by_arg": {"arg": "kind", "values": {"instruct": "costly", "ack": "reversible"}},
+      "untrusted": false,
+      "result": "Sent to the agent."
+    },
+    {
+      "name": "inbox_snooze",
+      "description": "Postpone the current agent event.",
+      "parameters": {"type": "object", "properties": {"seconds": {"type": "integer"}}, "required": ["seconds"]},
+      "tier": "reversible",
+      "untrusted": false,
+      "result": "Snoozed."
+    },
+    {
+      "name": "inbox_dismiss",
+      "description": "Dismiss the current agent event.",
+      "tier": "reversible",
+      "untrusted": false,
+      "result": "Dismissed."
+    }
+  ]
+}

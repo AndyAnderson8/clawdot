@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "id": "uc2-failure-named-then-fix-needs-yes",
+  "use_case": "UC2",
+  "description": "A job stopped on a failure: the assistant names it, and sending a fix needs the user's yes.",
+  "tags": ["inbox", "confirmation"],
+  "tool_sets": ["inbox"],
+  "tools": [
+    {"name": "inbox_details", "tier": "read_only", "result": "Claude Code stopped in clawdot: 2 tests fail in sched. needs_input."}
+  ],
+  "turns": [
+    {
+      "say": "why did it stop",
+      "model": [
+        {"calls": [{"name": "inbox_details"}]},
+        {"text": "Claude Code stopped because two tests fail in the scheduler."}
+      ],
+      "expect": {"calls": [{"tool": "inbox_details"}], "speech_contains": ["two tests fail"], "max_sentences": 2}
+    },
+    {
+      "say": "tell it to fix them",
+      "model": [
+        {"calls": [{"name": "inbox_reply", "args": {"kind": "instruct", "text": "Fix the two failing tests in sched."}}]}
+      ],
+      "expect": {
+        "ends": "held",
+        "calls": [],
+        "held": {"tool": "inbox_reply", "speech_contains": ["Fix the two failing tests in sched.", "outside"]}
+      }
+    },
+    {
+      "say": "yes",
+      "model": [{"text": "Sent. Claude Code will fix the failing tests."}],
+      "expect": {"calls": [{"tool": "inbox_reply", "args": {"kind": "instruct"}}], "no_held": true}
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "uc6-timer-ten-minutes",
+  "use_case": "UC6",
+  "description": "A plain timer through the real set_timer tool.",
+  "tags": ["timers", "builtin"],
+  "builtin_tools": ["set_timer"],
+  "turns": [
+    {
+      "say": "set a timer for ten minutes",
+      "model": [
+        {"calls": [{"name": "set_timer", "args": {"seconds": 600}}]},
+        {"text": "Timer set for ten minutes."}
+      ],
+      "expect": {
+        "ends": "answered",
+        "calls": [{"tool": "set_timer", "args": {"seconds": 600}}],
+        "speech_contains": ["ten minutes"],
+        "audit": [{"tool": "set_timer", "decision": "ran"}],
+        "model_saw": ["10 minutes"]
+      }
+    }
+  ]
+}

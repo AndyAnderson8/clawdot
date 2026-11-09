@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "id": "uc2-event-turn-proposes-only",
+  "use_case": "UC2",
+  "description": "A needs-input event starts a model turn: it may read, but its action is only a proposal the user can drop.",
+  "tags": ["inbox", "event", "no-act"],
+  "tool_sets": ["inbox"],
+  "turns": [
+    {
+      "trigger": "event",
+      "source": "claude-code",
+      "say": "needs_input: tests fail in sched",
+      "model": [
+        {"calls": [{"name": "inbox_details"}]},
+        {"calls": [{"name": "inbox_reply", "args": {"kind": "instruct", "text": "Fix the failing sched tests."}}]}
+      ],
+      "expect": {
+        "calls": [{"tool": "inbox_details"}],
+        "speech_contains": ["Suggested action", "Fix the failing sched tests."],
+        "held": {"tool": "inbox_reply"},
+        "audit": [
+          {"tool": "inbox_details", "decision": "ran"},
+          {"tool": "inbox_reply", "decision": "proposed"}
+        ]
+      }
+    },
+    {
+      "say": "no",
+      "model": [],
+      "expect": {"calls": [], "no_held": true, "speech_contains": ["won't do that"], "audit": [{"tool": "inbox_reply", "decision": "declined"}]}
+    }
+  ]
+}
