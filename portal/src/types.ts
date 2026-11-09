@@ -69,6 +69,11 @@ export interface Tool {
   origin?: string;
   server?: string;
   deletable?: boolean;
+  /** The risk tier in force, the one it was declared with, whether the portal changed it, and what may be chosen. */
+  tier?: string;
+  tier_default?: string;
+  tier_set?: boolean;
+  tier_options?: string[];
 }
 export interface McpServer {
   name: string;

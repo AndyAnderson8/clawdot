@@ -115,3 +115,28 @@ export function argsText(args: unknown): string {
 export function kb(bytes: number): string {
   return bytes < 1024 ? bytes + " B" : (bytes / 1024).toFixed(1) + " KB";
 }
+
+/** How a tier reads in the list a person chooses from. */
+export function tierChoice(tier: string): string {
+  switch (tier) {
+    case "read_only":
+      return "Only reads. Runs right away";
+    case "reversible":
+      return "Can be undone. Runs right away";
+    case "costly":
+      return "Asks you out loud first";
+    default:
+      return tierLabel(tier);
+  }
+}
+
+/** The question to answer before a tool is allowed to run without asking, or "" when nothing is relaxed. */
+export function relaxWarning(name: string, from: string, to: string): string {
+  const rank = ["read_only", "reversible", "costly", "destructive"];
+  if (rank.indexOf(to) >= rank.indexOf(from)) return "";
+  return (
+    "Let " +
+    name +
+    " run right away without asking you first? If something it reads, such as a web page or a message, tries to trick the assistant, ClawDot still asks you first in that conversation, but otherwise this tool will act on a spoken request alone."
+  );
+}

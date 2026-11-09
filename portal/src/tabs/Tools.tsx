@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
+import { relaxWarning, tierChoice, tierLabel } from "../activity.ts";
 import { ConfirmBadge, Field, OffBadge } from "../parts.tsx";
 import { change, loadExt, say, useApp, usePolled } from "../store.ts";
 import { toolDefinition, type ParamForm } from "../forms.ts";
@@ -35,6 +36,43 @@ export function OnOffButton(props: { path: string; on: boolean; what: string }):
   );
 }
 
+/** The risk level of a tool: what the assistant must ask before using it (REQ-SEC-030). */
+function TierChoice(props: { t: Tool }): JSX.Element {
+  const { t } = props;
+  const id = "tier-" + t.name;
+  const pick = (to: string) => {
+    const warn = relaxWarning(t.name, t.tier ?? "costly", to);
+    if (warn && !confirm(warn)) return;
+    void change(
+      "POST",
+      "/api/tools/" + t.name + "/tier",
+      { tier: to === "" ? null : to },
+      to === "" ? "Back to the usual level." : "Saved. It applies from the next request.",
+    );
+  };
+  return (
+    <div>
+      <label for={id}>How careful</label>
+      <select id={id} value={t.tier} onChange={(e) => pick(e.currentTarget.value)}>
+        {(t.tier_options ?? []).map((o) => (
+          <option key={o} value={o}>
+            {tierChoice(o)}
+          </option>
+        ))}
+        {t.tier_set ? (
+          <option value="">Back to the usual level ({tierLabel(t.tier_default ?? "costly")})</option>
+        ) : null}
+        <option value="destructive" disabled>
+          Destructive: not available here
+        </option>
+      </select>
+      {t.tier_set ? (
+        <p class="mut">Changed here. The usual level is “{tierLabel(t.tier_default ?? "costly")}”.</p>
+      ) : null}
+    </div>
+  );
+}
+
 function ToolRow(props: { t: Tool }) {
   const t = props.t;
   const remove = () => {
@@ -46,7 +84,12 @@ function ToolRow(props: { t: Tool }) {
       <div class="rowhead">
         <strong>{t.name}</strong>
         <span>
-          <OffBadge enabled={t.enabled} /> <ConfirmBadge confirm={t.confirm} />
+          <OffBadge enabled={t.enabled} />{" "}
+          {t.tier ? (
+            <span class={"badge" + (t.confirm ? " good" : "")}>{tierLabel(t.tier)}</span>
+          ) : (
+            <ConfirmBadge confirm={t.confirm} />
+          )}
         </span>
       </div>
       <div class="mut">{t.description}</div>
@@ -54,6 +97,7 @@ function ToolRow(props: { t: Tool }) {
         <div class="mut">{t.origin === "config" ? "From your configuration file." : "Added here."}</div>
       ) : null}
       {t.source === "mcp" ? <div class="mut">From the connection {t.server}.</div> : null}
+      {t.tier && t.tier_options?.length ? <TierChoice t={t} /> : null}
       <div class="acts">
         <OnOffButton path={"/api/tools/" + t.name + "/enabled"} on={t.enabled} what={t.name} />
         {t.deletable ? (
@@ -255,6 +299,15 @@ export function Tools(): JSX.Element {
         Everything the assistant can do besides talk. Turn any tool off or on. Tools that change things in the outside
         world ask you out loud first.
       </p>
+      <details id="tier-help">
+        <summary>What do “Asks you first” and the other levels mean?</summary>
+        <p>
+          Every tool has a level. “Asks you out loud first” tools are read back to you and run only when you say yes.
+          “Can be undone” and “Only reads” tools run right away. Web tools and connections start at “Asks you out loud
+          first”, and you can relax one only for a tool you trust. A built-in tool can only be made stricter. Nothing
+          can be made destructive here.
+        </p>
+      </details>
       <div>
         {ext ? (
           <>

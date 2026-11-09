@@ -53,7 +53,7 @@ On a wide screen the same single column is kept (max 44 rem) so that nothing mov
 | Notes | n/a | The short facts you asked the assistant to remember: list, add, forget one or all after a confirmation (REQ-CFG-061) |
 | Agents | Inbox | What arrives here is news from your coding agents (Claude Code and others); "Agents" says whose news it is |
 | Activity | n/a | What the assistant did and what waited for your yes: the audit log in plain words, read-only, with filters and paging (REQ-CFG-060) |
-| Tools | n/a | Everything the assistant can do besides talking |
+| Tools | n/a | Everything the assistant can do besides talking. Each tool shows how careful it is and has a "How careful" list (REQ-SEC-030): web tools and connections can be relaxed from "Asks you out loud first" after a confirmation, built-in tools can only be made stricter, and "Destructive" is shown but never selectable |
 | Connections | n/a | Outside tool servers (MCP). The page explains MCP in a sentence the first time |
 | Skills | n/a | Named instructions you write for the assistant, each switchable, with export and import |
 | Webhooks | Endpoints | A webhook is the web address an agent posts to; this tab creates them and gives copy-paste setup |

@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { argsText, auditQuery, kb, NO_FILTERS, outcome, tierLabel, triggerLabel } from "../../src/activity.ts";
+import {
+  argsText,
+  auditQuery,
+  kb,
+  NO_FILTERS,
+  outcome,
+  relaxWarning,
+  tierChoice,
+  tierLabel,
+  triggerLabel,
+} from "../../src/activity.ts";
 
 // REQ-CFG-060
 test("every decision the core writes has a plain label", () => {
@@ -62,4 +72,14 @@ test("arguments are listed one per line, as text", () => {
 test("sizes", () => {
   assert.equal(kb(900), "900 B");
   assert.equal(kb(262144), "256.0 KB");
+});
+
+// REQ-SEC-030
+test("relaxing a tool asks first, raising it does not", () => {
+  assert.ok(relaxWarning("set_light", "costly", "reversible").startsWith("Let set_light run right away"));
+  assert.ok(relaxWarning("set_light", "costly", "read_only"));
+  assert.equal(relaxWarning("set_light", "reversible", "costly"), "");
+  assert.equal(relaxWarning("set_light", "costly", "costly"), "");
+  assert.equal(tierChoice("costly"), "Asks you out loud first");
+  assert.equal(tierChoice("odd"), "odd");
 });
