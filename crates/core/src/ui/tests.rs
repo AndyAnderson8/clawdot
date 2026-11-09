@@ -657,3 +657,101 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
     }
     assert_eq!(store.list().len(), 1);
 }
+
+// REQ-CFG-063, REQ-CFG-064, REQ-CFG-065, REQ-CFG-066
+#[tokio::test]
+async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secret() {
+    let p = start(false).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    for path in ["/api/diagnostics", "/api/logs", "/api/settings/export"] {
+        let s = call(&p, "GET", path, "", "").await.0;
+        assert!(s == 401 || s == 429, "{path}: {s}");
+    }
+    // An endpoint with a token, a saved setting with a secret-looking name, and a long persona.
+    let (_, e) = call(
+        &p,
+        "POST",
+        "/api/endpoints",
+        &session,
+        r#"{"name":"ci","adapter":"generic"}"#,
+    )
+    .await;
+    let token = e["token"].as_str().unwrap().to_owned();
+    let (s, _) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        r#"{"device_name":"Den","persona":"Secret persona text"}"#,
+    )
+    .await;
+    assert_eq!(s, 200);
+    crate::diag::error(
+        "diag-api-test could not do a thing with Bearer abcdefghijklmnopqrstuvwxyz123456",
+    );
+
+    let (s, d) = call(&p, "GET", "/api/diagnostics", &session, "").await;
+    assert_eq!(s, 200, "{d}");
+    assert_eq!(d["format"], "clawdot-diagnostics");
+    assert_eq!(d["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(d["settings"]["fields"]["device_name"]["value"], "Den");
+    assert_eq!(d["settings"]["fields"]["device_name"]["source"], "saved");
+    assert_eq!(d["endpoints"][0]["name"], "ci");
+    assert!(d["build"]["os"].is_string());
+    let text = d.to_string();
+    for forbidden in [
+        token.as_str(),
+        "token_hash",
+        "Secret persona text",
+        "abcdefghijklmnopqrstuvwxyz123456",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "diagnostics must not hold {forbidden}"
+        );
+    }
+    assert!(
+        text.contains("diag-api-test"),
+        "recent problems are included"
+    );
+
+    let (s, l) = call(&p, "GET", "/api/logs?limit=5", &session, "").await;
+    assert_eq!(s, 200);
+    assert!(l["lines"].as_array().unwrap().len() <= 5);
+    assert_eq!(l["max_lines"], crate::diag::MAX_LINES);
+    assert!(!l.to_string().contains("abcdefghijklmnopqrstuvwxyz123456"));
+
+    let (s, x) = call(&p, "GET", "/api/settings/export", &session, "").await;
+    assert_eq!(s, 200);
+    assert_eq!(x["format"], "clawdot-settings");
+    assert_eq!(x["settings"]["device_name"], "Den");
+    assert!(
+        x["settings"].get("zone").is_none(),
+        "only what was saved is exported"
+    );
+    // Importing is the same call as saving, with the same checks.
+    let (s, _) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        &x["settings"].to_string(),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, v) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        r#"{"zone":"Mars/Base"}"#,
+    )
+    .await;
+    assert_eq!(s, 400, "{v}");
+
+    let (_, a) = call(&p, "GET", "/api/about", &session, "").await;
+    assert_eq!(a["build"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(a["build"]["features"].is_array());
+}

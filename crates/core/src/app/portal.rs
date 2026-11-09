@@ -113,6 +113,16 @@ impl Core {
             .map_or(Value::Null, crate::settings::SettingsState::json)
     }
 
+    /// The saved settings as an export file (`null` before the settings are handed over).
+    #[must_use]
+    pub fn export_settings(&self) -> Value {
+        self.settings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map_or(Value::Null, crate::settings::SettingsState::export)
+    }
+
     /// Validate and save a change to settings (REQ-CFG-040). Returns the new listing and the values the
     /// main loop must apply now.
     ///

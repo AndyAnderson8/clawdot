@@ -695,7 +695,7 @@ fn apply_live(
         let z = text("zone").filter(|z| *z != "UTC");
         match zone_for(z) {
             Ok(zone) => brain.assistant.set_zone(zone),
-            Err(e) => eprintln!("clawdot: cannot switch time zone: {e}"),
+            Err(e) => clawdot_core::diag::error(&format!("cannot switch time zone: {e}")),
         }
     }
     if changed("persona")
@@ -773,7 +773,7 @@ fn apply_live(
             &brain.agent,
         ) {
             Ok(l) => brain.llm = l,
-            Err(e) => eprintln!("clawdot: cannot switch language model: {e}"),
+            Err(e) => clawdot_core::diag::error(&format!("cannot switch language model: {e}")),
         }
     }
     *applied = live.clone();
@@ -950,10 +950,10 @@ impl Brain {
         )
         .await;
         if let Err(e) = self.usage.save(&self.usage_store) {
-            eprintln!("clawdot: could not save usage counters: {e}");
+            clawdot_core::diag::error(&format!("could not save usage counters: {e}"));
         }
         if let TurnEnd::Failed(e) = &r.end {
-            eprintln!("clawdot: language model error: {e}");
+            clawdot_core::diag::error(&format!("language model error: {e}"));
         }
         // Without a speech sink (the console, a recorded utterance) plan and progress phrases come first.
         let say = if ctl.speak.is_some() || r.early.is_empty() {
@@ -1592,7 +1592,7 @@ async fn main() -> ExitCode {
                         Some(l) => {
                             let s = summarise(l, &mut brain.usage, brain.assistant.local_day(), &next.event).await;
                             if let Err(e) = brain.usage.save(&brain.usage_store) {
-                                eprintln!("clawdot: could not save usage counters: {e}");
+                                clawdot_core::diag::error(&format!("could not save usage counters: {e}"));
                             }
                             s
                         }

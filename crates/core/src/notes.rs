@@ -159,7 +159,7 @@ impl NoteStore {
     fn persist(&self, doc: &Doc) -> Result<(), NoteError> {
         match &self.file {
             Some(f) => f.save(doc).map_err(|e| {
-                eprintln!("clawdot: could not save the notes: {e}");
+                crate::diag::error(&format!("could not save the notes: {e}"));
                 NoteError::Storage
             }),
             None => Ok(()),

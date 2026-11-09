@@ -80,6 +80,8 @@ core cannot restart itself safely (it may run under systemd, a container, or a t
 changed separately and is stored hashed in `admin.json`. `PUT /api/settings` needs the administrator, like every
 mutating endpoint.
 
+**Moving and diagnosing (About view, REQ-CFG-063 to 066).** `GET /api/settings/export` returns the settings saved on this device as `{"format":"clawdot-settings","version":1,"settings":{...}}`; loading a file is `PUT /api/settings` with its `settings`, so the same all-or-nothing validation applies and a file cannot set anything the page could not. `GET /api/diagnostics` returns one JSON document for a bug report: versions and build information, the settings with their sources (the persona as a length only), webhook names without tokens or hashes, tool and connection counts, audit counts by decision and tier, and recent problems; it contains no secret, audio, spoken words, note text or event text. `GET /api/logs?limit=` returns the core's own recent warnings and errors (`diag.rs`: at most 200 lines of 300 characters, redacted, in memory only, lost at restart). `GET /api/about` also returns the build profile, platform and compiled-in features.
+
 ## Rules
 
 - **Secrets are never in the file, and never in `settings.json`.** The API key comes from the environment variable
