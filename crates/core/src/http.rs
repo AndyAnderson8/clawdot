@@ -14,6 +14,7 @@
 //! `X-ClawDot-Event` header instead.
 
 use crate::app::{Core, HookError, HookOutcome};
+use crate::limit::IpLimiter;
 use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
 use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::header::{
@@ -45,21 +46,40 @@ pub struct ServeOptions {
     pub max_connections: usize,
     /// Reply streams open at once (each holds a connection for a long time).
     pub max_streams: usize,
+    /// Connections one address may hold at once, so a single host cannot take every slot (T12).
+    pub max_per_ip: usize,
     /// How long a client may take to send request headers.
     pub header_timeout: Duration,
+    /// How long a client may take to send a request body, once its credentials were accepted.
+    pub body_timeout: Duration,
     /// Idle time before an SSE comment keeps the connection alive.
     pub heartbeat: Duration,
 }
+
+/// How long the web UI waits for a request body.
+pub const BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Default for ServeOptions {
     fn default() -> Self {
         Self {
             max_connections: 32,
             max_streams: 8,
-            header_timeout: Duration::from_secs(10),
+            max_per_ip: 8,
+            header_timeout: Duration::from_secs(3),
+            body_timeout: BODY_TIMEOUT,
             heartbeat: Duration::from_secs(15),
         }
     }
+}
+
+/// Read a request body of at most `max` bytes within `wait`; `None` if it is too big, unreadable, or too
+/// slow (a stalled sender must not hold a connection slot indefinitely, REQ-SEC-004).
+pub(crate) async fn read_body(body: Incoming, max: usize, wait: Duration) -> Option<Bytes> {
+    let collected = tokio::time::timeout(wait, Limited::new(body, max).collect())
+        .await
+        .ok()?
+        .ok()?;
+    Some(collected.to_bytes())
 }
 
 /// Serve until `shutdown` completes.
@@ -74,13 +94,19 @@ pub async fn serve(
 ) -> io::Result<()> {
     let slots = Arc::new(Semaphore::new(opts.max_connections));
     let streams = Arc::new(AtomicUsize::new(0));
+    let per_ip = IpLimiter::new(opts.max_per_ip);
     tokio::pin!(shutdown);
     loop {
         let (stream, peer) = tokio::select! {
             accepted = listener.accept() => accepted?,
             () = &mut shutdown => return Ok(()),
         };
-        // Shed load instead of queueing it: a flood must not grow memory (REQ-NFR-110).
+        // Shed load instead of queueing it: a flood must not grow memory (REQ-NFR-110), and one
+        // address must not be able to take every slot by opening sockets and saying nothing.
+        let Some(ip_guard) = per_ip.try_acquire(peer.ip()) else {
+            drop(stream);
+            continue;
+        };
         let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
             drop(stream);
             continue;
@@ -90,6 +116,7 @@ pub async fn serve(
         let peer = peer.ip();
         tokio::spawn(async move {
             let _permit = permit;
+            let _ip_guard = ip_guard;
             let service = service_fn(move |req| {
                 route(Arc::clone(&core), Arc::clone(&streams), opts, peer, req)
             });
@@ -188,7 +215,7 @@ async fn route(
             _ => method_not_allowed(),
         },
         ["hook", name] if valid_name(name) => match parts.method {
-            Method::POST => hook(&core, &parts.headers, name, body).await,
+            Method::POST => hook(&core, &parts.headers, name, body, opts.body_timeout).await,
             _ => method_not_allowed(),
         },
         ["bridge", name, "replies"] if valid_name(name) => match parts.method {
@@ -208,7 +235,13 @@ async fn route(
     Ok(resp)
 }
 
-async fn hook(core: &Core, headers: &HeaderMap, name: &str, body: Incoming) -> Resp {
+async fn hook(
+    core: &Core,
+    headers: &HeaderMap,
+    name: &str,
+    body: Incoming,
+    body_timeout: Duration,
+) -> Resp {
     let max = core.limits().max_body;
     // Refuse oversized bodies before reading any of them.
     let declared = headers
@@ -228,14 +261,11 @@ async fn hook(core: &Core, headers: &HeaderMap, name: &str, body: Incoming) -> R
     if let Err(e) = core.bridge_check(name, &token) {
         return error_response(&e);
     }
-    let bytes = match Limited::new(body, max).collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => {
-            return json(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"body too large or unreadable"}"#,
-            );
-        }
+    let Some(bytes) = read_body(body, max, body_timeout).await else {
+        return json(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            r#"{"error":"body too large, too slow or unreadable"}"#,
+        );
     };
     match core.ingest_hook(name, &token, &bytes) {
         Ok(outcome) => {
@@ -755,6 +785,75 @@ mod tests {
             .0,
             404
         );
+        assert!(
+            h.core
+                .bridge_pending("claude-code", &h.token, 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// True when the server closes `s` (end of stream or reset) within `ms` milliseconds.
+    async fn closed_within(s: &mut TcpStream, ms: u64) -> bool {
+        let mut buf = [0_u8; 512];
+        matches!(
+            timeout(Duration::from_millis(ms), async {
+                loop {
+                    match s.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                }
+            })
+            .await,
+            Ok(())
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_sockets_cannot_hold_slots_one_address_cannot_take_them_all_and_they_time_out() {
+        let h = start(
+            Limits::default(),
+            ServeOptions {
+                max_per_ip: 2,
+                header_timeout: Duration::from_millis(300),
+                ..ServeOptions::default()
+            },
+        )
+        .await;
+        // Two idle sockets use this address's share; the third is refused at once.
+        let mut a = TcpStream::connect(h.addr).await.unwrap();
+        let mut b = TcpStream::connect(h.addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut c = TcpStream::connect(h.addr).await.unwrap();
+        assert!(closed_within(&mut c, 200).await, "over the per-address cap");
+        // The idle ones are dropped by the header timeout, freeing the share again.
+        assert!(closed_within(&mut a, 2_000).await && closed_within(&mut b, 2_000).await);
+        let (status, _, _) = call(h.addr, "GET", "/healthz", &[], "").await;
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stalled_request_body_is_cut_off() {
+        let h = start(
+            Limits::default(),
+            ServeOptions {
+                body_timeout: Duration::from_millis(300),
+                ..ServeOptions::default()
+            },
+        )
+        .await;
+        let mut s = TcpStream::connect(h.addr).await.unwrap();
+        let head = format!(
+            "POST /hook/claude-code HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\nContent-Length: 1000\r\n\r\n{{\"a\":",
+            h.token
+        );
+        s.write_all(head.as_bytes()).await.unwrap();
+        // The server answers (413) and closes instead of waiting for the other 994 bytes.
+        let mut got = Vec::new();
+        let done = timeout(Duration::from_secs(3), s.read_to_end(&mut got)).await;
+        assert!(done.is_ok(), "the stalled body kept the connection open");
+        assert!(String::from_utf8_lossy(&got).contains("413"));
         assert!(
             h.core
                 .bridge_pending("claude-code", &h.token, 0)

@@ -62,6 +62,8 @@ pub struct Settings {
     pub dead_after: Duration,
     /// How long a new connection has to say hello.
     pub hello_timeout: Duration,
+    /// Connections one address may hold at once, so one host cannot fill every session slot (T12).
+    pub max_per_ip: usize,
     /// Simultaneous satellites.
     pub max_sessions: usize,
     /// Lets the rest of the program speak to connected satellites.
@@ -75,7 +77,8 @@ impl Default for Settings {
             dialog: DialogConfig::default(),
             keepalive: Duration::from_secs(5),
             dead_after: Duration::from_secs(20),
-            hello_timeout: Duration::from_secs(10),
+            hello_timeout: Duration::from_secs(5),
+            max_per_ip: 2,
             max_sessions: 4,
             announcer: Announcer::default(),
         }
@@ -599,11 +602,16 @@ where
     T: Synthesizer + Send + Sync + 'static,
 {
     let slots = Arc::new(Semaphore::new(settings.max_sessions));
+    let per_ip = crate::limit::IpLimiter::new(settings.max_per_ip);
     tokio::pin!(shutdown);
     loop {
         let (stream, peer) = tokio::select! {
             accepted = listener.accept() => accepted?,
             () = &mut shutdown => return Ok(()),
+        };
+        let Some(ip_guard) = per_ip.try_acquire(peer.ip()) else {
+            drop(stream);
+            continue;
         };
         let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
             drop(stream);
@@ -617,6 +625,7 @@ where
         );
         tokio::spawn(async move {
             let _permit = permit;
+            let _ip_guard = ip_guard;
             if let Err(e) = run_session(stream, stt, tts, asks, settings).await {
                 eprintln!("clawdot: satellite {peer}: {e}");
             }
@@ -1049,6 +1058,56 @@ mod tests {
                 .unwrap()
                 .is_ok()
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_address_cannot_fill_every_session_slot_with_silent_sockets() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, _rx) = mpsc::channel::<Ask>(1);
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let settings = Settings {
+            max_sessions: 4,
+            max_per_ip: 1,
+            hello_timeout: Duration::from_millis(400),
+            ..fast()
+        };
+        let server = tokio::spawn(serve(
+            l,
+            Arc::new(Ears("x")),
+            Arc::new(Mouth),
+            tx,
+            settings,
+            async {
+                let _ = stop_rx.await;
+            },
+        ));
+        // A silent socket holds this address's only share; the next one is closed at once.
+        let mut silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut extra = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 16];
+        let n = timeout(Duration::from_millis(300), extra.read(&mut buf))
+            .await
+            .expect("the extra connection was not refused")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        // The silent one is dropped when the hello deadline passes, and the address can connect again.
+        let n = timeout(Duration::from_secs(3), silent.read(&mut buf))
+            .await
+            .expect("the silent connection was not dropped")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut again = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(150), again.read(&mut buf))
+                .await
+                .is_err(),
+            "a fresh connection is accepted once the silent one is gone"
+        );
+        stop_tx.send(()).unwrap();
+        assert!(timeout(Duration::from_secs(2), server).await.is_ok());
     }
 
     async fn connect_and_register(s: Settings) -> (Peer, Announcer) {

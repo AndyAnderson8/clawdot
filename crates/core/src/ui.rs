@@ -22,8 +22,9 @@
 
 use crate::admin::{self, AdminError};
 use crate::app::Core;
+use crate::http::{BODY_TIMEOUT, read_body};
 use crate::inbox::endpoint::EndpointError;
-use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_TYPE, HeaderMap, HeaderValue, WWW_AUTHENTICATE};
 use hyper::{Method, Response, StatusCode};
@@ -258,9 +259,8 @@ pub async fn handle(
 async fn read_json<T: serde::de::DeserializeOwned>(
     body: Incoming,
 ) -> Result<T, (StatusCode, &'static str)> {
-    let bytes = match Limited::new(body, MAX_BODY).collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => return Err((StatusCode::PAYLOAD_TOO_LARGE, "body too large")),
+    let Some(bytes) = read_body(body, MAX_BODY, BODY_TIMEOUT).await else {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "body too large or too slow"));
     };
     serde_json::from_slice(&bytes).map_err(|_| (StatusCode::BAD_REQUEST, "bad request body"))
 }
@@ -375,9 +375,8 @@ struct Speak {
 
 /// "Test speak": queue a phrase for the speaker to say.
 async fn speak(core: &Core, body: Incoming) -> Resp {
-    let bytes = match Limited::new(body, MAX_BODY).collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "body too large"),
+    let Some(bytes) = read_body(body, MAX_BODY, BODY_TIMEOUT).await else {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "body too large or too slow");
     };
     let Ok(req) = serde_json::from_slice::<Speak>(&bytes) else {
         return error(StatusCode::BAD_REQUEST, "expected {\"text\":..}");
@@ -393,9 +392,8 @@ async fn speak(core: &Core, body: Incoming) -> Resp {
 }
 
 async fn create(core: &Core, body: Incoming) -> Resp {
-    let bytes = match Limited::new(body, MAX_BODY).collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "body too large"),
+    let Some(bytes) = read_body(body, MAX_BODY, BODY_TIMEOUT).await else {
+        return error(StatusCode::PAYLOAD_TOO_LARGE, "body too large or too slow");
     };
     let Ok(req) = serde_json::from_slice::<NewEndpoint>(&bytes) else {
         return error(
