@@ -12,7 +12,7 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
         die "pushes to ${remote_ref#refs/heads/} must go through scripts/land.sh or scripts/release.sh"
       [ "$local_sha" != "$zero" ] || die "deleting ${remote_ref#refs/heads/} is not allowed"
       ;;
-    refs/heads/release/* | refs/heads/hotfix/*)
+    refs/heads/release/* | refs/heads/hotfix/* | refs/heads/integration/*)
       if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null &&
         ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
         die "force-pushing $remote_ref is not allowed"

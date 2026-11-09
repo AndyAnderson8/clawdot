@@ -93,6 +93,8 @@ has 'git[[:space:]]+push[^|;&\]*(--delete|[[:space:]]:[a-z])' &&
   block "deleting remote branches by hand is not allowed; scripts/land.sh cleans up merged branches."
 has 'git[[:space:]]+branch[^|;&\]*-d[^|;&\]*[[:space:]](main|dev)([[:space:]"\\]|$)' &&
   block "never delete main or dev."
+has 'git[[:space:]]+(update-ref|branch[^|;&\]*(-f|--force))[^|;&\]*([[:space:]/](main|dev)([[:space:]"\\]|$)|integration/)' &&
+  block "do not move main, dev, or integration branches by hand; scripts/land.sh does it after the gates."
 has 'git[[:space:]]+tag[[:space:]]+(-[asdf]|[^-])' &&
   block "tags are created only by scripts/release.sh."
 has 'gh[[:space:]]+(pr[[:space:]]+merge|release[[:space:]]+(create|delete)|repo[[:space:]]+(create|delete))' &&
@@ -111,6 +113,9 @@ if has 'git[[:space:]]+(commit|merge|cherry-pick|revert|rebase|am)([[:space:]"\\
       else
         block "on dev, integrate with scripts/land.sh; do not merge, rebase, or cherry-pick here."
       fi
+      ;;
+    integration/*)
+      block "integration branches change only through scripts/land.sh <branch> --into $branch (or --update $branch); do not commit, merge, rebase, or cherry-pick on them."
       ;;
     *)
       if has 'git[[:space:]]+commit' && [[ $branch != "(detached)" ]] && ! valid_branch_name "$branch"; then

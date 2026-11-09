@@ -20,6 +20,10 @@ case "$branch" in
     fi
     ;;
   "(detached)") ;;
+  integration/*)
+    is_integration "$branch" || die "'$branch' is not a valid integration branch name (integration/<kebab-name>)."
+    die "commits are never made by hand on an integration branch. Batch with scripts/land.sh <branch> --into $branch (or --update $branch to bring in dev)."
+    ;;
   *)
     valid_branch_name "$branch" ||
       die "'$branch' is not a valid git-flow branch name. Use (feature|bugfix|hotfix|release|docs|chore|spike)/<kebab-name>."
