@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "agt-deadline-stops-new-calls",
+  "use_case": "AGT",
+  "description": "Each call takes 40 seconds on the scenario clock and the turn may take 60: no third call starts, and the host says it ran out of time (REQ-AST-019).",
+  "tags": ["limits", "deadline", "github"],
+  "tool_sets": ["github"],
+  "tools": [
+    {"name": "github__list_runs", "tier": "read_only", "result": "run 41 failed. run 40 passed.", "duration_secs": 40}
+  ],
+  "setup": {"deadline_secs": 60},
+  "turns": [
+    {
+      "say": "keep checking the CI runs",
+      "model": [
+        {"calls": [{"name": "github__list_runs"}]},
+        {"calls": [{"name": "github__list_runs"}]}
+      ],
+      "expect": {
+        "ends": "deadline",
+        "calls": [{"tool": "github__list_runs"}, {"tool": "github__list_runs"}],
+        "speech_contains": ["stopped after 2 steps", "ran out of time", "60 seconds", "carry on"]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 2, "max_tool_calls": 2}
+}

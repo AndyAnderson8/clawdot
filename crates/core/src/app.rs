@@ -209,6 +209,7 @@ pub struct Core {
     settings: Mutex<Option<crate::settings::SettingsState>>,
     jobs: Mutex<Option<tokio::sync::mpsc::Sender<portal::Job>>>,
     audit: std::sync::OnceLock<Arc<crate::audit::AuditLog>>,
+    notes: std::sync::OnceLock<Arc<crate::notes::NoteStore>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -302,6 +303,7 @@ impl Core {
             settings: Mutex::new(None),
             jobs: Mutex::new(None),
             audit: std::sync::OnceLock::new(),
+            notes: std::sync::OnceLock::new(),
         }
     }
 

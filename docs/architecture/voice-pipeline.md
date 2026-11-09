@@ -20,10 +20,16 @@ pure logic, tested with synthetic audio and fake providers, so they run in CI wi
 
 - **Mute really mutes.** While muted the dialog asks for no audio (`wants_audio` is false), ignores the wake word,
   and drops any capture in progress. Muting and unmuting each produce a cue so the state is observable.
-- **Half-duplex.** Audio and wake events are ignored while the assistant is thinking or speaking, so it never hears
-  itself. (A satellite that declares echo cancellation may opt into barge-in later; that is not built.)
+- **Half-duplex.** Audio is ignored while the assistant is thinking or speaking, and the wake word is ignored while
+  it speaks, so it never hears itself. (A satellite that declares echo cancellation may opt into barge-in later;
+  that is not built.) One exception while it is *thinking and silent*: a wake word opens a short capture that is
+  checked for a stop phrase only, and the action button cancels at once (REQ-VOI-020, [agent-loop.md](agent-loop.md)).
+  `interrupt_while_working` turns the capture off.
 - **Follow-up window.** After a reply finishes, listening re-opens for `follow_up_secs` (default 8) without the
-  wake word. If nobody speaks, the dialog goes idle with the error cue. Set it to 0 to turn this off.
+  wake word; after a question or a held action it stays open for `follow_up_question_secs` (default 15). If nobody
+  speaks, the dialog goes idle with the error cue. Set `follow_up_secs` to 0 to turn this off.
+- **Speech while working.** Plan and progress phrases from the assistant are played as they arrive without ending the
+  "thinking" state, so the follow-up window opens only after the final answer (REQ-AST-020).
 - **Thinking cue.** Played once if the reply takes longer than `thinking_delay_ms` (default 1000), and never if the
   reply starts sooner.
 
@@ -50,6 +56,10 @@ provider has been called.
   processes and recordings, not with a real microphone.
 - Opt-in barge-in and adaptive end-of-utterance thresholds (REQ-VOI-005, REQ-VOI-011, both later milestones).
 - Starting synthesis while the model is still streaming: replies are split into sentences after they are complete.
+  (Plan and progress phrases are spoken as each model round returns, which is the sentence-level streaming that
+  exists; token streaming from the provider is not built.)
+- A local stop-word check, so that the stop capture does not cost a speech-to-text call, and "stop" over the
+  assistant's own voice (barge-in).
 
 ## Trying it without a microphone
 

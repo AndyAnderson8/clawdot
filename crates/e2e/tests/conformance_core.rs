@@ -59,6 +59,7 @@ fn start(settings: Settings) -> Core {
                     let _ = ask.reply.send(Answer {
                         say: "Nothing is waiting.".to_owned(),
                         effects: vec![Effect::VolumeSet(40)],
+                        ..Answer::default()
                     });
                 }
             });

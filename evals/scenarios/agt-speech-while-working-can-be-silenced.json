@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "agt-speech-while-working-can-be-silenced",
+  "use_case": "AGT",
+  "description": "With plan and progress speech turned off nothing is said until the answer (REQ-AST-020).",
+  "tags": ["speech", "silent", "github"],
+  "tool_sets": ["github"],
+  "tools": [
+    {"name": "github__get_log", "tier": "read_only", "slow": true, "parameters": {"type": "object", "properties": {"run": {"type": "integer"}}, "required": ["run"]}, "result": "error[E0308]: mismatched types"}
+  ],
+  "setup": {"plan_speech": false, "progress_speech": false},
+  "turns": [
+    {
+      "say": "why did the last CI run fail",
+      "model": [
+        {"text": "I'll check the runs first.", "calls": [{"name": "github__list_runs"}, {"name": "github__list_prs"}, {"name": "github__get_log", "args": {"run": 41}}]},
+        {"text": "Run 41 failed with a type mismatch."}
+      ],
+      "expect": {
+        "early_max": 0,
+        "speech_contains": ["type mismatch"]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 2}
+}

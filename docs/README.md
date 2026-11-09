@@ -14,6 +14,7 @@
 | Architecture | [architecture/http-tools.md](architecture/http-tools.md) | Declarative HTTP tools: schema, safety rules, confirmation |
 | Architecture | [architecture/mcp.md](architecture/mcp.md) | MCP client: pinned revision, safety rules, configuration |
 | Architecture | [architecture/action-safety.md](architecture/action-safety.md) | How actions are held, tiered and scoped: host-held confirmation, risk tiers, untrusted turns, skill allow-lists |
+| Architecture | [architecture/agent-loop.md](architecture/agent-loop.md) | One multi-step turn: limits, plan and progress speech, questions, cancel, memory and notes, long-result summaries, error recovery |
 | Architecture | [architecture/evals.md](architecture/evals.md) | The scenario eval harness: format, replay gate, live mode with a spend cap, the shipped scenario set |
 | Architecture | [architecture/media.md](architecture/media.md) | Music and radio: backend shapes, built-in stations, control recipes |
 | Architecture | [architecture/voice-pipeline.md](architecture/voice-pipeline.md) | Dialog state machine, endpointing, and the speech turn |

@@ -50,6 +50,7 @@ fn start_core() -> (SocketAddr, oneshot::Sender<()>, mpsc::Receiver<String>) {
                     let _ = ask.reply.send(Answer {
                         say: "Nothing is waiting.".to_owned(),
                         effects: vec![Effect::VolumeSet(40)],
+                        ..Answer::default()
                     });
                 }
             });

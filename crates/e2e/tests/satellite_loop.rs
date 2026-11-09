@@ -39,6 +39,7 @@ fn start_core(token: Option<&str>) -> (SocketAddr, oneshot::Sender<()>, mpsc::Re
     start_core_with(token, |_| Answer {
         say: "Nothing is waiting.".to_owned(),
         effects: vec![Effect::VolumeSet(40)],
+        ..Answer::default()
     })
 }
 
@@ -160,6 +161,7 @@ fn radio_reaches_a_satellite_that_can_play_streams() {
             url: "http://radio.example/jazz".into(),
             title: "jazz".into(),
         }],
+        ..Answer::default()
     });
     let mut dev = FileDevice::new(utterance());
     dev.can_stream = true;
