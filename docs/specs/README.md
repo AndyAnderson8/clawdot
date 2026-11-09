@@ -11,6 +11,7 @@ Specs define **what the system does** and the contracts it must honour. Code imp
 | [0003](0003-satellite-protocol.md) | Satellite protocol | Draft (skeleton) |
 | [0004](0004-esphome-satellite-client.md) | ESPHome voice-satellite client | Draft |
 | [0006](0006-device-layer-contract.md) | Device layer contract (portable daemon, board files, capabilities) | Draft |
+| [0007](0007-wake-word-runtime.md) | Wake-word runtime (model reader, audio frontend, int8 interpreter, detection rule) | Draft |
 
 ## Lifecycle
 
@@ -56,6 +57,7 @@ Draft → In Review → Accepted → Implemented
 | `BRD` | Board support (buttons, LED ring, mute, Wi-Fi, clock, audio device names) |
 | `ESP` | ESPHome native-API voice-satellite client |
 | `DEV` | Device layer contract: the portable device daemon, board files, capability model, conformance |
+| `WAK` | Wake-word runtime: model reader, audio frontend, interpreter, detection rule, validation against the reference |
 
 ## Change process
 

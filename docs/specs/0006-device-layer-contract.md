@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.1 |
+| **Version** | 0.2 |
 | **Author(s)** | Maintainer direction, drafted by an agent |
 | **Created** | 2026-11-09 |
 | **Related** | [ADR-0015](../adr/0015-own-the-device-layer.md) (Proposed), [ADR-0012](../adr/0012-board-support-layer.md), [0001](0001-product-requirements.md) (REQ-BRD, REQ-VOI-013..019), [0002](0002-resource-budget.md), [0003](0003-satellite-protocol.md), [R-11](../research/11-wake-word-spike.md), [R-07](../research/07-echo-dot-gen2-hardware.md) |
@@ -167,7 +167,7 @@ The daemon exposes the seam recommended by [R-11 section 9](../research/11-wake-
 5. **Provenance.** Each word reports its phrase, model hash and licence so status can show them and REQ-VOI-009 can be checked at startup.
 6. **Push-to-talk is another source of the same event** (a reserved word id, score 1.0), so there is one entry point.
 
-The daemon ships the seam and push-to-talk, not an engine. An engine is a separate step (A3 on the PC, B3 on the Dot).
+The daemon ships the seam and push-to-talk. The first engine, microWakeWord on a small Rust runtime, is specified in [0007](0007-wake-word-runtime.md) and is behind an off-by-default cargo feature; feeding it needs always-on capture, which is a later step (A3 on the PC, B3 on the Dot).
 
 ## 8. Wire additions this contract needs (to be made in spec 0003)
 
@@ -219,3 +219,4 @@ The format is defined by [`schemas/board/board-1.schema.json`](../../schemas/boa
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-11-09 | First draft from ADR-0015's proposed text, refined: REQ-DEV-001..024, capability model, minimum hardware profile, board-file schema 1. |
+| 0.2 | 2026-11-09 | Section 7 points at spec 0007 for the first engine (REQ-DEV-017 is unchanged); the engine is a feature-gated adapter, not part of the default build. |
