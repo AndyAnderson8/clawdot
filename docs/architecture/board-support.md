@@ -44,117 +44,128 @@ Logical LED states (REQ-BRD-006): `idle`, `wake`, `listening`, `thinking`, `spea
 
 Gestures (REQ-BRD-007): `press`, `long_press`, `double_press`, with thresholds in the board file. Actions: `volume_up`, `volume_down`, `mute_toggle`, `action`, `stop`.
 
-## Board file sketch: `boards/echo-dot2.toml`
+## Board file sketch: `boards/echo-dot2.json`
 
 Illustrative; the key names and values are proposals until the board is built. Pattern names are real files in `/system/etc/led-resources/`; key codes and nodes are from the kernel capability bitmaps and Amazon's `acebutton_config.json`. Items marked `verify` need a real button press (R-07 unknown 1).
 
-```toml
-board = "echo-dot2"
-schema = 1
-
-[detect]                      # used by board = "auto"
-i2c_name = { path = "/sys/bus/i2c/devices/0-003f/name", equals = "is31fl3236" }
-
-[[button]]                    # raw evdev key -> logical button
-node = "/dev/input/event2"    # gpio "keys"
-code = 115
-name = "volume_up"
-
-[[button]]
-node = "/dev/input/event2"
-code = 114
-name = "volume_down"          # verify: also emitted on event1 (reset key binding)
-
-[[button]]
-node = "/dev/input/event1"    # matrix keypad "mtk-kpd"
-code = 138                    # KEY_HELP, Amazon's "uber" = the action button
-name = "action"               # verify
-
-[[button]]
-node = "/dev/input/event1"
-code = 113                    # KEY_MUTE
-name = "mute"
-
-[gesture]
-long_press_ms = 700
-double_press_ms = 350
-
-[actions]                     # logical button + gesture -> action
-"volume_up.press"     = "volume_up"
-"volume_up.long_press" = "volume_up"        # repeats
-"volume_down.press"   = "volume_down"
-"action.press"        = "action"
-"action.long_press"   = "stop"
-"mute.press"          = "mute_toggle"
-
-[led]
-driver = "ledctrl"            # route A (ADR-0012); "frame" is route B, later
-count = 12
-unset_before_set = true       # unset the previous pattern when the state changes
-
-[led.states]                  # logical state -> preloaded pattern name
-idle      = ""                # clear (ledctrl -c)
-wake      = "active-start"
-listening = "active-on"
-thinking  = "active-thinking"
-speaking  = "active-talking"
-muted     = "mics-off_on"
-error     = "error"
-offline   = "setup-mode"      # verify look
-timer     = "ready-timer"
-alarm     = "ready-alarm"
-inbox     = "notice"
-volume    = "volume_step-{nn}"   # nn = 01..30
-
-[mute]
-kind = "software"             # upgrade to "hardware" only after R-07 unknown 3 is resolved
-state_file = "/sys/devices/soc/10010000.keypad/amz_privacy/state"
-
-[wifi]
-control_dir = "/data/misc/wifi/sockets"
-interface = "wlan0"
-
-[clock]
-floor = "2023-11-14"
-prefer_verified_by = "https-date"   # core-side check
-
-[audio.capture]
-device = "/dev/snd/pcmC0D24c"
-card = 0
-device_number = 24
-rate = 16000
-format = "S24_3LE"
-channels = 9
-mic_channels = "verify"       # R-07 unknown 5
-reference_channels = "verify"
-
-[audio.playback]
-device = "/dev/snd/pcmC0D23p"
-card = 0
-device_number = 23
-rate = 48000
-format = "S16_LE"
-channels = 2
-volume_control = "PCM Playback Volume"
-mixer_setup = "/system/etc/audio_device.xml"
-
-[takeover]                    # stopped on prepare(), restored on exit; ordered; all UNTESTED
-stop = []                     # populated only from staged tests (R-07 unknown 6)
-
-forbidden = [                 # the shared code refuses these (REQ-BRD-013)
-  "/sys/devices/soc/10010000.keypad/amz_privacy/power_button_state",
-  "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_trigger",
-  "/sys/devices/soc/10010000.keypad/amz_privacy/shutdown_dialog_state",
-]
+```json
+{
+  "board": "echo-dot2",
+  "schema": 1,
+  "detect": {
+    "i2c_name": {
+      "path": "/sys/bus/i2c/devices/0-003f/name",
+      "equals": "is31fl3236"
+    }
+  },
+  "button": [
+    {
+      "node": "/dev/input/event2",
+      "code": 115,
+      "name": "volume_up"
+    },
+    {
+      "node": "/dev/input/event2",
+      "code": 114,
+      "name": "volume_down"
+    },
+    {
+      "node": "/dev/input/event1",
+      "code": 138,
+      "name": "action"
+    },
+    {
+      "node": "/dev/input/event1",
+      "code": 113,
+      "name": "mute"
+    }
+  ],
+  "gesture": {
+    "long_press_ms": 700,
+    "double_press_ms": 350
+  },
+  "actions": {
+    "volume_up.press": "volume_up",
+    "volume_up.long_press": "volume_up",
+    "volume_down.press": "volume_down",
+    "action.press": "action",
+    "action.long_press": "stop",
+    "mute.press": "mute_toggle"
+  },
+  "led": {
+    "driver": "ledctrl",
+    "count": 12,
+    "unset_before_set": true,
+    "states": {
+      "idle": "",
+      "wake": "active-start",
+      "listening": "active-on",
+      "thinking": "active-thinking",
+      "speaking": "active-talking",
+      "muted": "mics-off_on",
+      "error": "error",
+      "offline": "setup-mode",
+      "timer": "ready-timer",
+      "alarm": "ready-alarm",
+      "inbox": "notice",
+      "volume": "volume_step-{nn}"
+    }
+  },
+  "mute": {
+    "kind": "software",
+    "state_file": "/sys/devices/soc/10010000.keypad/amz_privacy/state"
+  },
+  "wifi": {
+    "control_dir": "/data/misc/wifi/sockets",
+    "interface": "wlan0"
+  },
+  "clock": {
+    "floor": "2023-11-14",
+    "prefer_verified_by": "https-date"
+  },
+  "audio": {
+    "capture": {
+      "device": "/dev/snd/pcmC0D24c",
+      "card": 0,
+      "device_number": 24,
+      "rate": 16000,
+      "format": "S24_3LE",
+      "channels": 9,
+      "mic_channels": "verify",
+      "reference_channels": "verify"
+    },
+    "playback": {
+      "device": "/dev/snd/pcmC0D23p",
+      "card": 0,
+      "device_number": 23,
+      "rate": 48000,
+      "format": "S16_LE",
+      "channels": 2,
+      "volume_control": "PCM Playback Volume",
+      "mixer_setup": "/system/etc/audio_device.xml"
+    }
+  },
+  "takeover": {
+    "stop": [],
+    "forbidden": [
+      "/sys/devices/soc/10010000.keypad/amz_privacy/power_button_state",
+      "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_trigger",
+      "/sys/devices/soc/10010000.keypad/amz_privacy/shutdown_dialog_state"
+    ]
+  }
+}
 ```
 
-A note on format: the rest of ClawDot's configuration is JSON ([configuration](configuration.md)). Board files are TOML in this design because they are hand-edited, commented, and per-device, but TOML needs one extra parsing dependency that JSON does not (ADR-0012, dependencies). If the size is not justified, the same schema works as JSON with no new dependency.
+Notes carried over from the draft (JSON has no comments): `volume_down` is also emitted on `event1` (verify); the `action` binding is Amazon's `KEY_HELP` "uber" button (verify); the `offline` pattern look needs checking; `mute.kind` stays `software` until R-07 unknown 3 is resolved; `led.driver = "ledctrl"` is route A (ADR-0012) and `frame` is route B, later; `clock.floor` is checked by the core, which also does its own HTTPS `Date` check.
+
+
+A note on format: board files are JSON, like the rest of ClawDot's configuration ([configuration](configuration.md)). The maintainer chose this over TOML, which would have needed an extra parsing dependency; the cost is no comments in the file, so the `verify` notes live in the prose.
 
 ## Build and selection
 
 | Step | Mechanism |
 |---|---|
-| Build for the Dot | `scripts/build-dot2.sh` runs the repository's cargo wrapper with `--profile dot2 --target armv7-unknown-linux-musleabihf --features board-dot2`, checks the binary against the size gate, and stages `clawdot` and `echo-dot2.toml` |
+| Build for the Dot | `scripts/build-dot2.sh` runs the repository's cargo wrapper with `--profile dot2 --target armv7-unknown-linux-musleabihf --features board-dot2`, checks the binary against the size gate, and stages `clawdot` and `echo-dot2.json` |
 | Profile | `[profile.dot2]` inherits `release` (size optimisation, LTO, `panic = "abort"`, stripped); it exists so the Dot build has its own name in CI and reports |
 | Run | `board = "echo-dot2"` (or `auto`) in the configuration; `board_file` to override the shipped data |
 | Default build | No features: `NullBoard` only |

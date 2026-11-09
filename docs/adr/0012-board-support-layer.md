@@ -53,24 +53,24 @@ How it meets the protocol: in the all-in-one build the core calls the board dire
 
 - **Compile time:** Cargo features decide which boards exist. The default build contains `NullBoard` only; the board crate's code for other boards is not compiled (REQ-BRD-003, REQ-NFR-115).
 - **Run time:** a `board` setting in the existing JSON configuration: `none` (default), `auto` (probe only among compiled-in boards: for the Dot, the I2C device `0-003f` named `is31fl3236` and the `biscuit_puffin` product), or a name. A named board that is missing stops startup with a message naming the key (REQ-BRD-004). An optional `board_file` overrides the shipped data file.
-- **Per-device data:** `boards/echo-dot2.toml` (sketched in [board-support](../architecture/board-support.md)) maps: raw keys to logical buttons; gestures to actions; logical LED states to device patterns; the `takeover` list; and a `forbidden` list of paths the board must never touch (REQ-BRD-005, 013). It is data only: no commands assembled from text.
+- **Per-device data:** `boards/echo-dot2.json` (sketched in [board-support](../architecture/board-support.md)) maps: raw keys to logical buttons; gestures to actions; logical LED states to device patterns; the `takeover` list; and a `forbidden` list of paths the board must never touch (REQ-BRD-005, 013). It is data only: no commands assembled from text.
 
 ### Echo Dot Gen 2 board
 
-- Feature `board-dot2`, file `boards/echo-dot2.toml`, target `armv7-unknown-linux-musleabihf` (REQ-BRD-014).
+- Feature `board-dot2`, file `boards/echo-dot2.json`, target `armv7-unknown-linux-musleabihf` (REQ-BRD-014).
 - Buttons: read `/dev/input/event1` and `/dev/input/event2` with plain file reads (no grab, so Amazon's daemons keep working).
 - LEDs, route A first: ask the running `ledcontroller` with `ledctrl -s/-u/-c/-b`. Route B (stop `ledcontroller`, write `0-003f/frame`) is a later option behind the same logical states, once the `frame` format is verified.
 - Wi-Fi: the supplicant control socket at `/data/misc/wifi/sockets/wlan0` (a datagram socket, `std` only) or `wpa_cli`; DHCP stays with `dhcpcd`.
 - Clock: read the system clock; report `unverified` until the board sees evidence of a sync; optionally set the clock from a verified source.
 - Audio: describe the devices; takeover is explicit. How the process actually opens ALSA (spawn `tinycap`/`tinyplay`, or a small reviewed module that is allowed `unsafe` for ioctls) is deferred to SPIKE-006 on the device.
-- Build: `[profile.dot2]` inheriting `release` (same size flags, `panic = "abort"`, LTO), and `scripts/build-dot2.sh`, which builds with `--profile dot2 --target armv7-unknown-linux-musleabihf --features board-dot2`, checks the size gate, and stages `clawdot` and `echo-dot2.toml`. Deployment to a device stays manual.
+- Build: `[profile.dot2]` inheriting `release` (same size flags, `panic = "abort"`, LTO), and `scripts/build-dot2.sh`, which builds with `--profile dot2 --target armv7-unknown-linux-musleabihf --features board-dot2`, checks the size gate, and stages `clawdot` and `echo-dot2.json`. Deployment to a device stays manual.
 
 ### Dependencies and the budget
 
 | Item | Cost | Justification |
 |---|---|---|
 | Board code (`NullBoard`, gestures, mapping, Dot 2 module) | Estimated well under 100 KB of code and under 1 MB RSS (two reader threads, fixed queues). **Estimate, to be measured** and recorded per REQ-NFR-115 | No new dependency required |
-| TOML parsing | One new dependency. Candidates: `basic-toml` (small, serde-based) or `toml` with only the parsing feature. Binary delta must be measured (`cargo bloat`); a delta above 100 KB needs a PR note (spec 0002 §5). Linked **only** when a board feature is enabled | The maintainer asked for TOML; see the open question below |
+| Board file format | JSON, parsed by `serde_json` which the core already links: no new dependency. Chosen by the maintainer over TOML (which would have added `basic-toml` or `toml`) | Decided |
 | Everything else | `std` only: files, `UnixDatagram`, `Command`, threads, bounded channels | Keeps `unsafe_code = "forbid"` intact |
 
 Resource picture on the device: the stock stack leaves about 290 MB free and ClawDot's hard gate is 64 MB, so memory is not the limit. Device ownership is.
@@ -99,7 +99,7 @@ Resource picture on the device: the stock stack leaves about 290 MB free and Cla
 - Boards cannot be validated on CI hardware; real-device checks stay manual per release (spec 0002 §5).
 
 **Follow-ups:**
-- Maintainer decisions: TOML vs JSON for board files (the rest of the configuration is JSON); LED route A first; `software` mute declaration; whether the board crate lives in this workspace as proposed.
+- Maintainer decisions: board files are JSON (decided 2026-11-09); LED route A first; `software` mute declaration; whether the board crate lives in this workspace as proposed.
 - Resolve the unknowns in [R-07](../research/07-echo-dot-gen2-hardware.md) §11 (buttons with real presses, `frame` format, audio takeover, autostart) before the `board-dot2` milestone.
 - Update the satellite-porting guide when the first board lands.
 - Roadmap items 1 and 2 under "Beyond v1.0" carry the implementation.

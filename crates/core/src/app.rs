@@ -528,19 +528,9 @@ impl Core {
         )
     }
 
-    /// Tell the administrator logic where the core listens (decides whether open mode is allowed and whether
-    /// setup needs a code).
+    /// Tell the administrator logic where the core listens (decides whether open mode is allowed).
     pub fn set_listen_ip(&self, ip: IpAddr) {
         self.admin_lock().set_listen_ip(ip);
-    }
-
-    /// While setup is pending and the listen address is not loopback, make (and return) the one-time setup
-    /// code for the console to print.
-    ///
-    /// # Errors
-    /// If the OS cannot supply random bytes.
-    pub fn make_setup_code(&self) -> Result<Option<String>, AdminError> {
-        self.admin_lock().make_setup_code()
     }
 
     /// The administrator state the page needs to decide what to show.
@@ -551,7 +541,6 @@ impl Core {
             "mode": a.mode().label(),
             "legacy": a.legacy(),
             "open_allowed": a.open_allowed(),
-            "code_needed": a.code_needed(),
         })
     }
 
@@ -575,38 +564,33 @@ impl Core {
         }
     }
 
-    /// Whether setup may proceed from `peer` with `code`. Every call spends an attempt, so a wrong setup
-    /// code cannot be guessed quickly (call this before doing any expensive hashing).
+    /// Whether setup may proceed from `peer`. Every call spends an attempt, so setup attempts share the
+    /// authentication rate limit (call this before doing any expensive hashing).
     ///
     /// # Errors
     /// See [`AdminError`].
-    pub fn admin_check_setup(&self, peer: IpAddr, code: Option<&str>) -> Result<(), AdminError> {
+    pub fn admin_check_setup(&self, peer: IpAddr) -> Result<(), AdminError> {
         if !self.spend_attempt() {
             return Err(AdminError::RateLimited);
         }
-        self.admin_lock().check_setup(peer, code)
+        self.admin_lock().check_setup(peer)
     }
 
     /// Finish setup in open mode.
     ///
     /// # Errors
     /// See [`AdminError`].
-    pub fn admin_setup_open(&self, peer: IpAddr, code: Option<&str>) -> Result<(), AdminError> {
-        self.admin_lock().setup_open(peer, code)
+    pub fn admin_setup_open(&self, peer: IpAddr) -> Result<(), AdminError> {
+        self.admin_lock().setup_open(peer)
     }
 
     /// Finish setup with a password hash (from [`crate::admin::hash_password`]); returns a session token.
     ///
     /// # Errors
     /// See [`AdminError`].
-    pub fn admin_setup_password(
-        &self,
-        peer: IpAddr,
-        code: Option<&str>,
-        hash: String,
-    ) -> Result<String, AdminError> {
+    pub fn admin_setup_password(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
         let now = self.clock.now();
-        self.admin_lock().setup_password(peer, code, hash, now)
+        self.admin_lock().setup_password(peer, hash, now)
     }
 
     /// Start a sign-in: spends an attempt and returns the stored hash to verify (do that off the async

@@ -2,8 +2,8 @@
 //!
 //! * `GET /` and `GET /ui`: one static page. No external assets, no frameworks, works on a phone. It holds no
 //!   data, so it needs no credentials; everything it shows comes from the API below.
-//! * `GET  /api/auth`                          mode (setup, password, open), whether a setup code is needed (no sign-in)
-//! * `POST /api/setup`                         first run: `{"mode":"password","password":..}` or `{"mode":"open"}`, plus `"code"` when asked
+//! * `GET  /api/auth`                          mode (setup, password, open) (no sign-in)
+//! * `POST /api/setup`                         first run: `{"mode":"password","password":..}` or `{"mode":"open"}`
 //! * `POST /api/login`                         `{"password":..}`; returns a session token
 //! * `POST /api/logout`                        ends the session
 //! * `POST /api/admin/password`                `{"password":..}`; sets a new password
@@ -91,10 +91,9 @@ fn admin_error(e: AdminError) -> Resp {
     let status = match e {
         AdminError::Unauthorized => StatusCode::UNAUTHORIZED,
         AdminError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-        AdminError::SetupRequired
-        | AdminError::NotPrivate
-        | AdminError::OpenRefused
-        | AdminError::BadCode => StatusCode::FORBIDDEN,
+        AdminError::SetupRequired | AdminError::NotPrivate | AdminError::OpenRefused => {
+            StatusCode::FORBIDDEN
+        }
         AdminError::AlreadySetUp => StatusCode::CONFLICT,
         AdminError::BadPassword => StatusCode::BAD_REQUEST,
         AdminError::Storage | AdminError::NoRandomness => StatusCode::INTERNAL_SERVER_ERROR,
@@ -271,7 +270,6 @@ async fn hash_in_background(password: String) -> Result<String, AdminError> {
 struct Setup {
     mode: String,
     password: Option<String>,
-    code: Option<String>,
 }
 
 /// First-run setup (REQ-CFG-018): a password or open mode, from a private address only.
@@ -280,13 +278,12 @@ async fn setup(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
         Ok(r) => r,
         Err((s, m)) => return error(s, m),
     };
-    let code = req.code.as_deref();
-    // Refuse strangers and wrong codes before any expensive work.
-    if let Err(e) = core.admin_check_setup(peer, code) {
+    // Refuse strangers before any expensive work.
+    if let Err(e) = core.admin_check_setup(peer) {
         return admin_error(e);
     }
     match req.mode.as_str() {
-        "open" => match core.admin_setup_open(peer, code) {
+        "open" => match core.admin_setup_open(peer) {
             Ok(()) => json_reply(StatusCode::OK, &json!({ "mode": "open" })),
             Err(e) => admin_error(e),
         },
@@ -298,7 +295,7 @@ async fn setup(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
                 Ok(h) => h,
                 Err(e) => return admin_error(e),
             };
-            match core.admin_setup_password(peer, code, hash) {
+            match core.admin_setup_password(peer, hash) {
                 Ok(token) => json_reply(
                     StatusCode::OK,
                     &json!({ "mode": "password", "token": token }),

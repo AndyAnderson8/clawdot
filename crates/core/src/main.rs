@@ -42,7 +42,7 @@ USAGE:
 OPTIONS:
     --config FILE              JSON configuration file (flags override it); see docs/architecture/configuration.md
     --data-dir DIR             Where state is kept (default: ./clawdot-data)
-    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:8765)
+    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:3335)
     --public-url URL           How agents reach this device, used in printed snippets (default: from --listen)
     --zone NAME                IANA time zone, for example America/New_York (default: UTC)
     --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once and exits
@@ -102,7 +102,7 @@ struct Args {
 fn parse() -> Result<Args, String> {
     let mut a = Args {
         data_dir: PathBuf::from("clawdot-data"),
-        listen: "127.0.0.1:8765"
+        listen: "127.0.0.1:3335"
             .parse()
             .map_err(|_| "internal: bad default address".to_owned())?,
         public_url: None,
@@ -247,19 +247,16 @@ fn reset_admin(dir: &std::path::Path) -> ExitCode {
     }
 }
 
-/// Tell the person at the console how the web UI is protected, and print the one-time setup code when setup is
-/// pending on a listen address other hosts can reach (REQ-CFG-018, REQ-CFG-021).
-fn announce_admin(core: &Core, public: &str) -> Result<(), String> {
+/// Tell the person at the console where the web UI is and how it is protected. No secret is printed: the
+/// device may have no visible console (REQ-CFG-018, REQ-CFG-021).
+fn announce_admin(core: &Core, public: &str) {
     use clawdot_core::admin::Mode;
     match core.admin_mode() {
         Mode::Setup => {
-            println!("\nWeb UI: {public}/  (open it to finish first-run setup)");
-            if let Some(code) = core.make_setup_code().map_err(|e| e.to_string())? {
-                println!(
-                    "Setup code (asked for once, on the setup page): {code}\n\
-                     Setup is open to anyone on a private network until it is done."
-                );
-            }
+            println!(
+                "\nWeb UI: {public}/  (open it to finish first-run setup)\n\
+                 Until setup is done, the first person on a private network to open it can set the password."
+            );
         }
         Mode::Password => println!("\nWeb UI: {public}/"),
         Mode::Open => println!(
@@ -267,7 +264,6 @@ fn announce_admin(core: &Core, public: &str) -> Result<(), String> {
              Set a password in the page, or run `clawdot --reset-admin` and start again."
         ),
     }
-    Ok(())
 }
 
 /// True if a console line asks to leave (REQ-CFG-017).
@@ -286,7 +282,7 @@ fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
     }
 }
 
-const DEFAULT_PORT: u16 = 8765;
+const DEFAULT_PORT: u16 = 3335;
 
 /// An actionable message for a failed bind (REQ-CFG-014).
 fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
@@ -871,10 +867,7 @@ async fn main() -> ExitCode {
     }
 
     core.set_listen_ip(args.listen.ip());
-    if let Err(e) = announce_admin(&core, &public) {
-        eprintln!("clawdot: web UI administrator setup: {e}");
-        return ExitCode::from(1);
-    }
+    announce_admin(&core, &public);
     println!(
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         args.listen,
@@ -1020,6 +1013,6 @@ mod tests {
         let e = std::io::Error::from(std::io::ErrorKind::AddrInUse);
         let m = bind_error(addr("0.0.0.0:8080"), &e);
         assert!(m.contains("0.0.0.0:8080"), "{m}");
-        assert!(m.contains("--listen 0.0.0.0:8765"), "{m}");
+        assert!(m.contains("--listen 0.0.0.0:3335"), "{m}");
     }
 }
