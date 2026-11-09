@@ -109,6 +109,12 @@ pub struct Event {
     /// The agent session this belongs to, so a reply can resume it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,
+    /// A one-way announcement: a spoken reply is never sent to it (REQ-INB-023).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_reply: bool,
+    /// Not spoken after this time (REQ-INB-023).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Ts>,
     /// When it arrived.
     pub received_at: Ts,
     /// Where it is in its life.
@@ -146,6 +152,16 @@ mod tests {
         assert_eq!(Priority::parse("HIGH"), Priority::Urgent);
         assert_eq!(Priority::parse(""), Priority::Normal);
         assert!(Priority::Urgent > Priority::Normal && Priority::Normal > Priority::Low);
+    }
+
+    #[test]
+    fn events_saved_before_announcements_existed_still_load() {
+        let old = r#"{"id":1,"endpoint":"cc","source":"Claude Code","kind":"done","title":"t","text":"x",
+            "priority":"normal","received_at":5,"state":{"state":"new"}}"#;
+        let e: Event = serde_json::from_str(old).unwrap();
+        assert!(!e.no_reply && e.expires_at.is_none());
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(!json.contains("no_reply") && !json.contains("expires_at"));
     }
 
     #[test]

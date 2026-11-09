@@ -260,6 +260,10 @@ pub struct Mapped {
     pub priority: Priority,
     /// Agent session reference.
     pub session_ref: Option<String>,
+    /// A spoken reply must not be sent to this event (a one-way announcement, REQ-INB-023).
+    pub no_reply: bool,
+    /// Drop it if it is still unspoken after this many seconds (REQ-INB-023).
+    pub ttl_secs: Option<i64>,
 }
 
 impl Adapter {
@@ -334,6 +338,8 @@ impl Adapter {
             status: non_empty(rule.status.render(payload)).map(|s| truncate_chars(&s, MAX_REF)),
             session_ref: non_empty(rule.session_ref.render(payload))
                 .map(|s| truncate_chars(&s, MAX_REF)),
+            no_reply: false,
+            ttl_secs: None,
         })
     }
 }

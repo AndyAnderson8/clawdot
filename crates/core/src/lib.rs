@@ -11,6 +11,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod admin;
+mod announce_api;
 pub mod app;
 pub mod assistant;
 pub mod audit;
@@ -31,6 +32,7 @@ pub mod mcp;
 pub mod media;
 pub mod notes;
 pub mod satellite;
+pub mod say;
 pub mod sched;
 pub mod session;
 pub mod settings;
