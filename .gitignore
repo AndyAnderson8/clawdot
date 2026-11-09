@@ -24,3 +24,6 @@ Thumbs.db
 .claude/settings.local.json
 .claude/*.local.*
 .run/
+
+# Portal (Node is a dev and CI tool only; the built page is committed)
+/portal/node_modules/

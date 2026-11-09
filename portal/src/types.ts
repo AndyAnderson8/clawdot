@@ -1,0 +1,87 @@
+// Shapes of the JSON the device sends. Only the fields the portal reads are listed.
+
+export type AuthMode = "setup" | "password" | "open";
+
+export interface AuthState {
+  mode: AuthMode;
+  version: string;
+  legacy?: boolean;
+  open_allowed?: boolean;
+  peer_private?: boolean;
+}
+
+export interface Status {
+  clock_valid?: boolean;
+  satellites?: number;
+  llm?: { configured?: boolean };
+  usage?: { requests_today: number; max_requests_per_day: number; spend_today: number };
+}
+
+export type EventState = "new" | "announced" | "acknowledged" | "dismissed" | "snoozed";
+export interface AgentEvent {
+  id: number;
+  endpoint: string;
+  source: string;
+  title: string;
+  text: string;
+  state: EventState | string;
+  received_at: number;
+}
+export interface Endpoint { name: string; adapter: string; enabled: boolean; created_at: number }
+export interface Overview { now: number; endpoints: Endpoint[]; events: AgentEvent[] }
+
+export type ScheduleKind = "timer" | "alarm" | "reminder";
+export interface Repeat { hour: number; minute: number; days: number[]; every_day: boolean }
+export interface ScheduleItem {
+  id: number;
+  kind: ScheduleKind;
+  label: string;
+  fire_at: number;
+  seconds_left: number;
+  repeat?: Repeat | null;
+}
+export interface ScheduleList { now: number; clock_valid: boolean; items: ScheduleItem[] }
+
+export interface Tool {
+  name: string;
+  description: string;
+  enabled: boolean;
+  confirm: boolean;
+  source: "builtin" | "http" | "mcp" | string;
+  origin?: string;
+  server?: string;
+  deletable?: boolean;
+}
+export interface McpServer {
+  name: string;
+  url: string;
+  enabled: boolean;
+  connected: boolean;
+  deletable?: boolean;
+  origin?: string;
+  error?: string;
+  token_env?: string;
+  tools: Tool[];
+}
+export interface Skill { name: string; instructions: string; tools?: string[]; enabled: boolean }
+export interface Problem { kind: string; name: string; reason: string }
+export interface Extensions { tools?: Tool[]; mcp?: McpServer[]; skills?: Skill[]; problems?: Problem[] }
+
+export interface SettingField {
+  value: string | number | null;
+  source: "default" | "file" | "saved" | "flag" | string;
+  live?: boolean;
+  ignored?: boolean;
+}
+export interface Settings {
+  fields: Record<string, SettingField>;
+  restart_needed?: string[];
+  llm?: { key_present?: boolean };
+  voice_info?: { language?: string; stt_model?: string; tts_model?: string };
+  speech_configured?: boolean;
+  speakers_listen?: string;
+  note?: string;
+}
+
+export interface WebhookToken { name: string; token: string }
+export interface ConnectionTest { tools: { name: string }[] }

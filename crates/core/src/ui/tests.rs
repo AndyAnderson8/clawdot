@@ -139,7 +139,8 @@ fn the_page_uses_plain_names_and_no_radio() {
     ] {
         assert!(PAGE.contains(&format!("\"{tab}\"")), "missing tab {tab}");
     }
-    assert!(PAGE.contains(r#"role="tablist""#) && PAGE.contains(r#"id="foot""#));
+    // The page is built from TypeScript (portal/), so the markup lives in the script as `role:"tablist"`.
+    assert!(PAGE.contains("tablist") && PAGE.contains("\"foot\""));
 }
 
 // REQ-CFG-027

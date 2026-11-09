@@ -1,7 +1,8 @@
 //! The embedded web UI and its JSON API (REQ-CFG-001, 003..006, 008, 018..024).
 //!
-//! * `GET /` and `GET /ui`: one static page. No external assets, no frameworks, works on a phone. It holds no
-//!   data, so it needs no credentials; everything it shows comes from the API below.
+//! * `GET /` and `GET /ui`: one static page. No external assets, works on a phone, built from `portal/` (Preact
+//!   and TypeScript, bundled into the one file). It holds no data, so it needs no credentials; everything it
+//!   shows comes from the API below.
 //! * `GET  /api/auth`                          mode (setup, password, open) (no sign-in)
 //! * `POST /api/setup`                         first run: `{"mode":"password","password":..}` or `{"mode":"open"}`
 //! * `POST /api/login`                         `{"password":..}`; returns a session token
@@ -20,7 +21,7 @@
 //! The rest needs a session token as `Authorization: Bearer ...` (password mode) or a private-network peer
 //! (open mode). Failed attempts, sign-ins, and setup tries share the
 //! authentication rate limit. Secrets are write-only: tokens and the password are stored hashed.
-//! Text from agents is untrusted: the page renders it with `textContent` only, and the response carries a
+//! Text from agents is untrusted: the page renders it as text only (Preact text children, never HTML injection), and the response carries a
 //! strict Content-Security-Policy as a second line of defence.
 
 use crate::admin::{self, AdminError};
@@ -43,9 +44,9 @@ mod tests;
 
 type Resp = Response<BoxBody<Bytes, Infallible>>;
 
-/// The page with the theme (`ui-theme.css`, kept as its own file so a later toolchain can reuse it) spliced
-/// in at the `/*@theme*/` marker, and a gzip copy of it. Both are made by `build.rs`, so the program carries no
-/// compression code (REQ-CFG-043).
+/// The page and a gzip copy of it. `ui.html` is generated from the TypeScript sources in `portal/` and
+/// committed (ADR-0016); `build.rs` copies it and makes the gzip, so the program carries no compression code
+/// (REQ-CFG-043).
 const PAGE: &str = include_str!(concat!(env!("OUT_DIR"), "/ui-page.html"));
 const PAGE_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui-page.html.gz"));
 /// The release notes, shown on the About card (REQ-CFG-013, 025).
