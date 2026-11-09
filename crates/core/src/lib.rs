@@ -17,6 +17,7 @@ pub mod fastpath;
 pub mod http;
 pub mod httptools;
 pub mod inbox;
+pub mod limit;
 pub mod llm;
 pub mod mcp;
 pub mod media;
