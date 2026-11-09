@@ -12,19 +12,22 @@ Milestones are releasable increments with exit criteria, not dates. Order may sh
 Foundations
 - [ ] Specs 0001 and 0002 reviewed by the maintainer and Accepted; 0003 completed after SPIKE-005
 - [ ] ADRs 0002, 0006, 0008 decided (ADR-0007 licence and ADR-0009 name: done)
-- [ ] `deny.toml` licence allowlist and `license = "Apache-2.0"` in manifests (TASK-002)
+- [x] `deny.toml` licence allowlist and `license = "Apache-2.0"` in manifests (TASK-002)
 - [x] Repo: Cargo workspace, `rust-toolchain.toml`, `justfile`, `.editorconfig`, `.gitattributes`
 - [ ] Dev environment validated ([dev-environment.md](process/dev-environment.md), TASK-001)
 - [x] Git flow enforcement: hooks, agent guard, landing and release scripts, CI skeleton with the `gate` job ([ADR-0011](adr/0011-git-flow-merge-commits.md)). Rust, deny, cross-armv7, and budget jobs activate with the workspace (TASK-001..003).
 - [ ] GitHub repository created; rulesets applied ([repo-settings.md](process/repo-settings.md)); signed commits once keys exist; Project board configured
+  - *Status:* the repository exists with an `origin` remote and the CI `gate` job; `dev` was published through `scripts/land.sh`. Rulesets, signing and the Project board are not verified from the repo.
 - [x] SPIKE-001 (desk phase): specs sourced, no known unlock, see [R-04](research/04-echo-dot-gen2.md). Hands-on teardown is opportunistic.
 
 Feasibility spikes (each ends with a written finding)
-- [ ] SPIKE-003: TLS + HTTP client/server footprint on armv7 (x86_64 musl with rustls measured: idle 2.8 MiB; armv7 run still to do)
+- [ ] SPIKE-003: TLS + HTTP client/server footprint on armv7 (x86_64 musl with rustls measured: idle 2.8 MiB; armv7 run still to do; the full binary has since run on a real Echo Dot at about 1.4 MB idle RSS, see the baseline below, but that is not a spike finding)
 - [ ] SPIKE-002: wake-word runtime footprint on armv7
 - [ ] SPIKE-006: audio capture and playback on armv7 Linux
 - [ ] SPIKE-005: Wyoming-compatible framing with token `hello` and TLS; client code size
-- [x] Baseline budget measurement: x86_64 musl 2.35 MiB binary, 3.8 MiB peak RSS under load, armv7 binary 1.89 MiB (armv7 memory and CPU unmeasured; see the [overnight report](reports/2026-11-07-overnight-session.md))
+- [x] Baseline budget measurement: x86_64 musl 2.35 MiB binary, 3.8 MiB peak RSS under load, armv7 binary 1.89 MiB (see the [overnight report](reports/2026-11-07-overnight-session.md))
+  - *Status, full feature set (`scripts/budget.sh`, x86_64 musl):* binary 2.62 MiB, idle RSS 3.0 MiB, peak 4.3 MiB under load, armv7 binary 2.10 MiB. The ratchet limits have not been tightened yet.
+  - *Status, real hardware (Echo Dot, maintainer's 2026-11 test; not yet written up in `docs/reports/`):* about 1.4 MB idle RSS, 12 MB virtual peak, 2.1 MB binary. The write-up is still to do.
 
 ### Feasibility gate (go/no-go before M1)
 Thresholds are provisional and set at the maintainer's review. Outcomes: **Go** (proceed), **Investigate** (adjust the approach, rerun), **Revise** (amend spec 0002 and/or ADR-0003 through an ADR *before* M1).
