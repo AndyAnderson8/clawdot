@@ -65,7 +65,7 @@ One message is one **frame**:
 4. A header whose `data` is not an object, whose lengths are negative or fractional, or that exceeds the limits in REQ-SAT-017 is a framing error.
 5. Unknown header fields are ignored. Unknown `data` fields are ignored (REQ-SAT-009).
 
-The default transport is a TCP connection to the core's `satellite.listen` address (the reference port is 10400). TLS is **not specified yet** (section 9).
+The default transport is a TCP connection to the core's `satellite.listen` address (the reference port is 10400). TLS is **not specified yet** (section 10).
 
 ## 6. Message catalogue
 
@@ -106,7 +106,7 @@ Uplink audio in any other format is dropped by the core after one `error` with c
 | `error` | `text` string; `code` string (optional) | A fault report; the core logs and ignores it |
 | `ping` / `pong` | none | Keepalive |
 
-Note on field names: `detection` carries `timestamp_ms` but `audio-chunk` carries `timestamp`, and stock Wyoming uses `timestamp` for both. The schemas record what is on the wire today; unifying them is an open question (section 9).
+Note on field names: `detection` carries `timestamp_ms` but `audio-chunk` carries `timestamp`, and stock Wyoming uses `timestamp` for both. The schemas record what is on the wire today; unifying them is an open question (section 10).
 
 ### 6.4 Commands, core to satellite
 
@@ -135,7 +135,14 @@ A known event whose fields are missing or out of range (for example `level` of 1
 
 `hello.protocol` and `welcome.protocol` carry `{major, minor}`. The current version is 0.1. Peers are compatible when `major` matches and, while `major` is 0, `minor` matches too. A mismatch is a `reject` whose reason names both versions.
 
-## 9. Open questions
+## 9. Conformance
+
+- **Schemas:** `schemas/satellite/frame-0.1.schema.json`, checked against the Rust types by `crates/protocol/tests/schema.rs`.
+- **Harness:** `crates/e2e` provides `FakeSatellite` (drives a core) and `FakeCore` (drives a satellite), both built on the protocol decoder. `tests/conformance_core.rs` and `tests/conformance_satellite.rs` hold the scenarios; each test name starts with the requirement it covers (`req_sat_008_...`). Run them with `cargo test -p clawdot-e2e`.
+- **A port** passes by running the satellite scenarios with its own launcher in place of `spawn_satellite`, pointed at `FakeCore::addr()`. The harness is Rust; a language-agnostic runner (recorded conversations a port replays) is not built yet.
+- **Not covered yet:** REQ-SAT-014 (Wyoming bridge), REQ-SAT-015 (Raspberry Pi satellite), REQ-SAT-016 (display events), TLS, and Opus; each is absent from the implementation.
+
+## 10. Open questions
 
 | # | Question | Status |
 |---|---|---|
@@ -149,11 +156,11 @@ A known event whose fields are missing or out of range (for example `level` of 1
 | 8 | Per-satellite tokens bound to a `device_id` (REQ-SAT-010) | Open. |
 | 9 | Wake-word detection in the core for satellites without it (REQ-SAT-013) | Open: such a satellite must send `detection` from a button today. |
 
-## 10. Changelog
+## 11. Changelog
 
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-11-07 | Skeleton |
 | 0.2 | 2026-11-07 | Framing changed to Wyoming-compatible (pending ADR-0008); audio front-end capabilities; Wyoming bridge requirement |
 | 0.3 | 2026-11-07 | `clawdot.play-url` and `clawdot.media-control` commands and the `media_url` capability for internet radio on satellites with a player (additive; unknown events are still ignored). |
-| 0.3.1 | 2026-11-08 | Wire format, field tables, session behaviour, and limits written down from the implementation; event names corrected to the wire names; REQ-SAT-017 and REQ-SAT-018 added; JSON Schemas published. No change to the protocol version number: the wire is unchanged. |
+| 0.3.1 | 2026-11-08 | Wire format, field tables, session behaviour, and limits written down from the implementation; event names corrected to the wire names; REQ-SAT-017 and REQ-SAT-018 added; JSON Schemas and the conformance harness added (section 9). No change to the protocol version number: the wire is unchanged. |

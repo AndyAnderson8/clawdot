@@ -220,7 +220,7 @@ fn req_sat_013_a_satellite_with_no_capabilities_can_hold_a_conversation() {
 
 #[test]
 fn req_sat_005_the_core_answers_pcm_even_when_opus_is_offered() {
-    // Opus downlink is not implemented yet (spec 0003 section 9, question 6). When it lands this test should
+    // Opus downlink is not implemented yet (spec 0003 section 10, question 6). When it lands this test should
     // change to expect Opus for a satellite that offers it.
     let core = open_core();
     let mut sat = FakeSatellite::connect(core.addr);
