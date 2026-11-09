@@ -54,6 +54,8 @@ OPTIONS:
     --voice-in FILE            Answer one recorded utterance (WAV, mono 16-bit 16 kHz) and exit; needs a `speech` config
     --voice-out FILE           With --voice-in, write the spoken reply to this WAV file
     --no-console               Do not read the console (run as a server only)
+    --echo-speech              With --no-console, still print what the speaker says to stdout (diagnosis;
+                               stdout may be kept by a service manager, so leave it off in production)
 
 LANGUAGE MODEL (optional; without it only the local fast path and fallback summaries work):
     --llm-url URL              OpenAI-compatible base URL, for example https://openrouter.ai/api/v1
@@ -84,6 +86,8 @@ struct Args {
     /// An endpoint command was given on the command line: print and exit instead of serving.
     manage: bool,
     console: bool,
+    /// Echo spoken text to stdout even without the console (diagnosis only).
+    echo_speech: bool,
     llm_url: Option<String>,
     llm_model: Option<String>,
     llm_fallback: Option<String>,
@@ -114,6 +118,7 @@ fn parse() -> Result<Args, String> {
         reset_admin: false,
         manage: false,
         console: true,
+        echo_speech: false,
         llm_url: None,
         llm_model: None,
         llm_fallback: None,
@@ -170,6 +175,7 @@ fn parse() -> Result<Args, String> {
             "--voice-in" => a.voice_in = Some(PathBuf::from(value("--voice-in")?)),
             "--voice-out" => a.voice_out = Some(PathBuf::from(value("--voice-out")?)),
             "--no-console" => a.console = false,
+            "--echo-speech" => a.echo_speech = true,
             "--llm-url" => a.llm_url = Some(value("--llm-url")?),
             "--llm-model" => a.llm_model = Some(value("--llm-model")?),
             "--llm-fallback-model" => a.llm_fallback = Some(value("--llm-fallback-model")?),
@@ -1046,15 +1052,21 @@ async fn main() -> ExitCode {
             _ = tick.tick() => {
                 let tool_counts = serde_json::json!({ "builtin": builtin.len(), "http": brain.http_tools.specs().len(), "mcp": brain.mcp.tools().len() });
                 core.set_ui_status(brain.status_json(announcer.connected(), &station_names, &tool_counts));
+                // Spoken text is echoed only to an interactive console: in server mode stdout goes to a
+                // journal or container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
                 while let Some(phrase) = core.take_speech() {
-                    println!("speaker> {phrase}");
+                    if args.console || args.echo_speech {
+                        println!("speaker> {phrase}");
+                    }
                     if announcer.connected() > 0 {
                         announcer.announce(&phrase).await;
                     }
                 }
                 for fired in brain.assistant.tick() {
                     let line = describe_fired(&fired);
-                    println!("speaker> {line}");
+                    if args.console || args.echo_speech {
+                        println!("speaker> {line}");
+                    }
                     if announcer.connected() > 0 {
                         // Best effort: a satellite that is busy or muted simply does not speak it.
                         announcer.announce(&line).await;
@@ -1076,7 +1088,9 @@ async fn main() -> ExitCode {
                         None => fallback_summary(&next.event),
                     };
                     let line = announcement(&next.event, &spoken, next.more_waiting);
-                    println!("speaker> {line}");
+                    if args.console || args.echo_speech {
+                        println!("speaker> {line}");
+                    }
                     let delivered = announcer.connected() == 0 || announcer.announce(&line).await;
                     if delivered {
                         core.mark_announced(&[next.event.id]);

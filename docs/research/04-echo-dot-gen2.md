@@ -33,5 +33,8 @@ Security and unlock:
 ## Correction (2026-11-08)
 A hands-on inspection ([R-07](07-echo-dot-gen2-hardware.md)) of one Dot that is reachable over `adb` as root found Fire OS 6.5.7.5 (Android 7.1.2, 32-bit kernel and userland), not 5.5.0.3, with an unlocked kernel flag and dm-verity disabled. So "no ADB" and "no unlock" describe retail units as reported by the sources above, not every unit in the maintainer's hands. The budget conclusions are unchanged; RAM measured at about 477 MiB total.
 
+## Correction (2026-11-09)
+"No published unlock or custom firmware found" is out of date. A community unlock for the Dot exists (R0rt1z2's amonet-biscuit, run from one command by bboe's firebreak), and earlier tethered roots date from 2023. The history, mechanism, risks and what we should and should not depend on are in [R-09](09-echo-unlock-history.md).
+
 ## Confidence
 Specs: medium-high (several teardowns agree). Unlock status: medium ("not found" ≠ "impossible").

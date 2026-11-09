@@ -18,8 +18,19 @@ Short, dated notes that capture what we learned from external sources and what i
 | [R-05](05-wyoming-and-local-intents.md) | Wyoming protocol, hassil, local intents | ADR-0005, spec 0003 |
 | [R-06](06-naming.md) | Name collision check | Public release |
 | [R-07](07-echo-dot-gen2-hardware.md) | Echo Dot Gen 2 hands-on hardware findings (buttons, LED ring, audio, Wi-Fi, clock, services) | ADR-0012, spec 0001 §4.10, board support |
+| [R-08](08-existing-echo-dot-projects.md) | Prior art for the Dot: EchoMuse, TECHO5 Dot, NEO (hardware drive, ESPHome link, licences, Phase B recommendation) | roadmap Phase B, ADR-0012, spec 0003 |
 
 An earlier survey of two reference repositories and the wider landscape (make-a-smart-speaker, chatgpt-openai-smart-speaker, Home Assistant, OpenVoiceOS, Willow, Pipecat, LiveKit) was done in conversation; its conclusions are the eight "ideas to add" reflected below.
+
+## Prior art
+
+Projects that already put the Echo Dot to work, studied in [R-08](08-existing-echo-dot-projects.md) (all MIT-licensed; none is standalone):
+
+- [EchoMuse](https://github.com/wilbowes/EchoMuse): own Linux userspace (emOS) or rooted Fire OS, on-device openWakeWord, a controller that impersonates ESPHome satellites for Home Assistant.
+- [TECHO5 Dot](https://github.com/HuskerMinion/techo5-dot): Alpine Linux image with signed A/B updates; the Dot itself speaks the ESPHome native API.
+- [NEO](https://github.com/techmiguel/neo-robot): ESP32-S3 assistant; useful only for ideas (streaming TTS, intents before the LLM).
+
+Their link to a "brain" is the ESPHome native API, not Wyoming. Reuse rules (what may be copied, depended on, or only learned from) are in R-08 section 6. Unlock tooling (`amonet`, `firebreak`) is credited and linked, never redistributed.
 
 ## Consolidated spec-change proposals
 
