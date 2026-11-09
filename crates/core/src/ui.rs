@@ -11,7 +11,8 @@
 //! * `GET  /api/schedule`, `POST /api/schedule`, `PUT|DELETE /api/schedule/{id}`   timers, alarms, reminders
 //! * `GET  /api/tools`, `/api/settings`, `/api/about`   what the Tools, Connections, Settings tabs show
 //! * `PUT  /api/settings`                      body `{key: value|null, ..}`; saves some settings (admin only)
-//! * `GET  /api/status`                        what the assistant is doing (model, satellites, tools, usage, schedule)
+//! * `GET  /api/audit`                         what the assistant did, newest first (filters and paging in `audit`)
+//! * `GET  /api/status`                      what the assistant is doing (model, satellites, tools, usage, schedule)
 //! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
 //! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
 //! * `POST /api/endpoints/{name}/rotate`       a new token, returned once
@@ -231,6 +232,7 @@ pub async fn handle(
     core: &Arc<Core>,
     method: &Method,
     segs: &[&str],
+    query: Option<&str>,
     headers: &HeaderMap,
     peer: IpAddr,
     body: Incoming,
@@ -287,6 +289,7 @@ pub async fn handle(
             | ["skills"]
             | ["skills", _]
             | ["settings"]
+            | ["audit"]
             | ["about"]
     );
     if !known {
@@ -353,6 +356,7 @@ pub async fn handle(
             Ok(v) => change_settings(core, &v).await,
             Err((s, m)) => error(s, m),
         },
+        (&Method::GET, ["audit"]) => audit(core, query),
         (&Method::GET, ["about"]) => json_reply(
             StatusCode::OK,
             &json!({ "version": env!("CARGO_PKG_VERSION"), "changelog": CHANGELOG }),
@@ -375,6 +379,91 @@ pub async fn handle(
         },
         _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     })
+}
+
+/// `GET /api/audit`: the record of what the assistant did (REQ-SEC-014), newest first. Filters: `limit`
+/// (default 50, at most 200), `before` (a record id, for the next page), `tool`, `tier`, `decision` (a value, or
+/// a prefix ending in `:` such as `blocked:`), `trigger` (`voice`, `event`, `event:<source>`) and `since` (Unix
+/// seconds). Argument and result text in the records comes from outside: show it as data.
+fn audit(core: &Core, query: Option<&str>) -> Resp {
+    let Some(log) = core.audit() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The audit log is not available.",
+        );
+    };
+    let q = match parse_audit_query(query.unwrap_or("")) {
+        Ok(q) => q,
+        Err(m) => return error(StatusCode::BAD_REQUEST, &m),
+    };
+    let page = log.query(&q);
+    let h = log.health();
+    let p = log.policy();
+    json_reply(
+        StatusCode::OK,
+        &json!({
+            "records": page.records,
+            "next_before": page.next_before,
+            "log": {
+                "bytes": h.bytes,
+                "max_file_bytes": h.max_file_bytes,
+                "corrupt_lines": h.corrupt_lines,
+                "write_errors": h.write_errors,
+            },
+            "policy": {
+                "dry_run": p.dry_run,
+                "max_actions_per_day": p.max_actions_per_day,
+                "max_costly_per_day": p.max_costly_per_day,
+            },
+            "note": "Argument and result text can come from outside ClawDot. Show it as data.",
+        }),
+    )
+}
+
+/// Percent-decode a query component (also `+` as a space). Invalid escapes are kept as written.
+fn query_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        let hex = |x: Option<&u8>| x.and_then(|d| char::from(*d).to_digit(16));
+        if c == b'%' {
+            if let (Some(h), Some(l)) = (hex(b.get(i + 1)), hex(b.get(i + 2))) {
+                out.push(u8::try_from(h * 16 + l).unwrap_or(b'?'));
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if c == b'+' { b' ' } else { c });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn parse_audit_query(raw: &str) -> Result<crate::audit::Query, String> {
+    let mut q = crate::audit::Query::default();
+    for pair in raw.split('&').filter(|p| !p.is_empty()).take(16) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let (k, v) = (query_decode(k), query_decode(v));
+        let num = |name: &str| {
+            v.parse::<u64>()
+                .map_err(|_| format!("`{name}` must be a whole number."))
+        };
+        if v.is_empty() {
+            continue;
+        }
+        match k.as_str() {
+            "limit" => q.limit = Some(usize::try_from(num("limit")?).unwrap_or(usize::MAX)),
+            "before" => q.before = Some(num("before")?),
+            "since" => q.since = Some(i64::try_from(num("since")?).unwrap_or(i64::MAX)),
+            "tool" => q.tool = Some(v),
+            "tier" => q.tier = Some(v),
+            "decision" => q.decision = Some(v),
+            "trigger" => q.trigger = Some(v),
+            _ => {}
+        }
+    }
+    Ok(q)
 }
 
 /// Map a failed portal request to a status code and a message the page can show as written.

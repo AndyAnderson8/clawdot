@@ -6,12 +6,14 @@
 //! user itself, and runs the stored action only when a later user turn is a plain yes. Nothing the model
 //! writes, and nothing a tool returns, can release it. The loop cannot run away.
 
+use crate::audit::{Act, AuditLog, Gate, TurnLog, decision};
 use crate::llm::{ChatRequest, Completion, LlmError, Message, Role, ToolCall, ToolSpec};
 use crate::sched::Ts;
 use crate::usage::{LimitReached, UsageTracker};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
+use std::sync::Arc;
 
 /// How much harm a tool call can do (REQ-SEC-010), lowest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -192,10 +194,14 @@ pub struct PendingAction {
     fingerprint: String,
     description: String,
     proposed_at: Ts,
+    /// The tier it was judged at, for the audit log.
+    tier: Tier,
+    /// The audit record that says it was held or proposed.
+    held_id: Option<u64>,
 }
 
 impl PendingAction {
-    fn new(tool: &str, args: Value, description: String, now: Ts) -> Self {
+    fn new(tool: &str, args: Value, description: String, now: Ts, tier: Tier) -> Self {
         let fingerprint = format!("{tool}\n{}", canonical(&args));
         Self {
             tool: tool.to_owned(),
@@ -203,6 +209,8 @@ impl PendingAction {
             fingerprint,
             description,
             proposed_at: now,
+            tier,
+            held_id: None,
         }
     }
 
@@ -279,6 +287,8 @@ pub struct Conversation {
     pending: Option<PendingAction>,
     /// Untrusted text (an event, a web page, a tool result) is in the context the model sees (REQ-SEC-012).
     tainted: bool,
+    /// Where actions are recorded and capped (REQ-SEC-014..016); none in tests that do not need it.
+    audit: Option<Arc<AuditLog>>,
 }
 
 impl Conversation {
@@ -299,7 +309,13 @@ impl Conversation {
             last_activity: 0,
             pending: None,
             tainted: false,
+            audit: None,
         }
+    }
+
+    /// Record every action of this conversation in `log`, and apply its daily caps and dry-run switch.
+    pub fn set_audit(&mut self, log: Arc<AuditLog>) {
+        self.audit = Some(log);
     }
 
     /// Replace the system prompt (the persona plus the user's enabled skills, REQ-CFG-036).
@@ -313,13 +329,16 @@ impl Conversation {
         &self.history
     }
 
-    fn expire_if_idle(&mut self, now: Ts) {
+    /// Forget everything after the idle time. Returns the held action that was dropped, if any.
+    fn expire_if_idle(&mut self, now: Ts) -> Option<PendingAction> {
+        let mut dropped = None;
         if self.last_activity != 0 && now - self.last_activity > self.idle_secs {
             self.history.clear();
-            self.pending = None;
+            dropped = self.pending.take();
             self.tainted = false;
         }
         self.last_activity = now;
+        dropped
     }
 
     /// Whether untrusted text is in the context the model sees.
@@ -451,6 +470,7 @@ pub async fn run_turn<B: ChatBackend, H: ToolHost>(
 ) -> TurnResult {
     run_turn_from(
         Trigger::User,
+        "voice",
         backend,
         host,
         conv,
@@ -476,8 +496,31 @@ pub async fn run_event_turn<B: ChatBackend, H: ToolHost>(
     now: Ts,
     text: &str,
 ) -> TurnResult {
+    run_event_turn_for("event", backend, host, conv, cfg, usage, day, now, text).await
+}
+
+/// Like [`run_event_turn`], naming what started the turn (an endpoint, a schedule) for the audit log. The
+/// name is clipped and made printable there; it is never trusted.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_event_turn_for<B: ChatBackend, H: ToolHost>(
+    source: &str,
+    backend: &B,
+    host: &mut H,
+    conv: &mut Conversation,
+    cfg: &TurnConfig,
+    usage: &mut UsageTracker,
+    day: i64,
+    now: Ts,
+    text: &str,
+) -> TurnResult {
+    let label = if source == "event" || source.is_empty() {
+        "event".to_owned()
+    } else {
+        format!("event:{source}")
+    };
     run_turn_from(
         Trigger::Event,
+        &label,
         backend,
         host,
         conv,
@@ -501,6 +544,7 @@ fn framed_event(text: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn run_turn_from<B: ChatBackend, H: ToolHost>(
     trigger: Trigger,
+    label: &str,
     backend: &B,
     host: &mut H,
     conv: &mut Conversation,
@@ -510,7 +554,20 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
     now: Ts,
     user_text: &str,
 ) -> TurnResult {
-    conv.expire_if_idle(now);
+    let turn: Option<TurnLog> = conv
+        .audit
+        .as_ref()
+        .map(|log| TurnLog::begin(log, label, day, now, usage.spend_today()));
+    let turn = turn.as_ref();
+    if let Some(dropped) = conv.expire_if_idle(now) {
+        note_resolved(
+            turn,
+            usage,
+            &dropped,
+            decision::EXPIRED,
+            "conversation expired",
+        );
+    }
     let by_user = trigger == Trigger::User;
     if by_user {
         host.begin_turn(user_text);
@@ -518,12 +575,11 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
     } else {
         conv.history.push(Message::user(framed_event(user_text)));
         conv.tainted = true;
-        if conv
+        if let Some(old) = conv
             .pending
-            .as_ref()
-            .is_some_and(|p| now - p.proposed_at > CONFIRM_WINDOW_SECS)
+            .take_if(|p| now - p.proposed_at > CONFIRM_WINDOW_SECS)
         {
-            conv.pending = None;
+            note_resolved(turn, usage, &old, decision::EXPIRED, "no answer in time");
         }
     }
     let mut result = TurnResult {
@@ -538,6 +594,7 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
     if let Some(held) = conv.pending.take_if(|_| by_user) {
         let expired = now - held.proposed_at > CONFIRM_WINDOW_SECS;
         if is_yes(user_text) && expired {
+            note_resolved(turn, usage, &held, decision::EXPIRED, "answered too late");
             return finish_with(
                 conv,
                 result,
@@ -545,16 +602,33 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
             );
         }
         if is_no(user_text) {
+            note_resolved(turn, usage, &held, decision::DECLINED, "the user said no");
             return finish_with(conv, result, "Okay, I won't do that.");
         }
         if is_yes(user_text) {
             let known: Vec<String> = offered(host, cfg).into_iter().map(|t| t.name).collect();
             let outcome = if known.contains(&held.tool) {
-                conv.tainted |= host.returns_untrusted_text(&held.tool);
-                host.call_tool(&held.tool, &held.args)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}"))
+                let gate = turn.map_or(Gate::Run, |t| t.gate(held.tier));
+                execute(
+                    host,
+                    conv,
+                    turn,
+                    usage,
+                    &held.tool,
+                    &held.args,
+                    held.tier,
+                    gate,
+                    held.held_id,
+                )
+                .await
             } else {
+                note_resolved(
+                    turn,
+                    usage,
+                    &held,
+                    decision::INVALID,
+                    "tool no longer offered",
+                );
                 "Error: that tool is no longer available.".to_owned()
             };
             result.tool_calls += 1;
@@ -567,8 +641,10 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
                 .push(Message::assistant_calls(String::new(), vec![call]));
             conv.history
                 .push(Message::tool_result("host_confirmed", clip(&outcome)));
+        } else {
+            // Anything else is an unrelated request: the held action is dropped and the turn goes on.
+            note_resolved(turn, usage, &held, decision::DECLINED, "unrelated request");
         }
-        // Anything else is an unrelated request: the held action is dropped and the turn goes on.
     }
 
     for round in 0..=cfg.max_tool_loops {
@@ -629,39 +705,112 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
             completion.tool_calls.clone(),
         ));
         let mut held: Option<PendingAction> = None;
+        let null = Value::Null;
         for call in &completion.tool_calls {
             result.tool_calls += 1;
+            let invalid = |why: &'static str| Act {
+                tool: &call.name,
+                tier: None,
+                args: &null,
+                decision: decision::INVALID,
+                held_id: None,
+                outcome: None,
+                note: Some(why),
+            };
             let outcome = if held.is_some() {
+                note(
+                    turn,
+                    usage,
+                    &Act {
+                        decision: decision::SKIPPED,
+                        ..invalid("another action is being asked about first")
+                    },
+                );
                 "Not run: the user is being asked about another action first.".to_owned()
             } else {
                 match serde_json::from_str::<Value>(&call.arguments) {
-                    Err(_) => "Error: the arguments were not valid JSON.".to_owned(),
+                    Err(_) => {
+                        note(turn, usage, &invalid("arguments were not valid JSON"));
+                        "Error: the arguments were not valid JSON.".to_owned()
+                    }
                     Ok(_) if !tools.iter().any(|t| t.name == call.name) => {
+                        note(turn, usage, &invalid("no such tool"));
                         format!("Error: there is no tool called `{}`.", call.name)
                     }
                     Ok(mut args) => {
                         // `confirmed` means nothing to the host: drop it unless the tool really declares it.
                         drop_confirmed(&mut args, tools.iter().find(|t| t.name == call.name));
                         let risk = host.risk(&call.name, &args).under(conv.tainted);
+                        let gate = turn.map_or(Gate::Run, |t| t.gate(risk.tier));
+                        let act = |d, held_id, why| Act {
+                            tool: &call.name,
+                            tier: Some(risk.tier),
+                            args: &args,
+                            decision: d,
+                            held_id,
+                            outcome: None,
+                            note: why,
+                        };
                         if risk.tier == Tier::Destructive && !cfg.allow_destructive {
+                            note(
+                                turn,
+                                usage,
+                                &act(
+                                    decision::INVALID,
+                                    None,
+                                    Some("destructive tools are not offered"),
+                                ),
+                            );
                             format!("Error: there is no tool called `{}`.", call.name)
                         } else if !by_user && risk.tier != Tier::ReadOnly {
                             // Nobody is here to ask: keep it as a proposal for the user's next turn.
                             let description = host.describe_action(&call.name, &args);
-                            held = Some(PendingAction::new(&call.name, args, description, now));
+                            let id = note(
+                                turn,
+                                usage,
+                                &act(
+                                    decision::PROPOSED,
+                                    None,
+                                    Some("turn not started by the user"),
+                                ),
+                            );
+                            let mut p = PendingAction::new(
+                                &call.name,
+                                args.clone(),
+                                description,
+                                now,
+                                risk.tier,
+                            );
+                            p.held_id = id;
+                            held = Some(p);
                             "Not run: this turn was not started by the user, so it can only read. The action was saved as a proposal and the user will be asked."
                                 .to_owned()
+                        } else if gate != Gate::Run {
+                            // Dry-run or a daily cap: nothing is asked and nothing runs.
+                            blocked(host, turn, usage, &call.name, &args, risk.tier, gate, None)
                         } else if risk.needs_hold() {
                             let description = host.describe_action(&call.name, &args);
-                            held = Some(PendingAction::new(&call.name, args, description, now));
+                            let id = note(
+                                turn,
+                                usage,
+                                &act(decision::HELD, None, Some("asked the user to confirm")),
+                            );
+                            let mut p = PendingAction::new(
+                                &call.name,
+                                args.clone(),
+                                description,
+                                now,
+                                risk.tier,
+                            );
+                            p.held_id = id;
+                            held = Some(p);
                             "Not run. The user is being asked to confirm; the answer arrives in their next turn."
                                 .to_owned()
                         } else {
-                            // Whatever it returns is now in the context the model reads.
-                            conv.tainted |= host.returns_untrusted_text(&call.name);
-                            host.call_tool(&call.name, &args)
-                                .await
-                                .unwrap_or_else(|e| format!("Error: {e}"))
+                            execute(
+                                host, conv, turn, usage, &call.name, &args, risk.tier, gate, None,
+                            )
+                            .await
                         }
                     }
                 }
@@ -684,11 +833,125 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
                     h.description.trim_end_matches('.')
                 )
             };
-            conv.pending = Some(h);
+            if let Some(old) = conv.pending.replace(h) {
+                note_resolved(
+                    turn,
+                    usage,
+                    &old,
+                    decision::DECLINED,
+                    "replaced by a newer request",
+                );
+            }
             return finish_with(conv, result, &speech);
         }
     }
     result
+}
+
+/// Write one record, if this conversation has an audit log (REQ-SEC-014).
+fn note(turn: Option<&TurnLog>, usage: &UsageTracker, a: &Act<'_>) -> Option<u64> {
+    turn.and_then(|t| t.record(usage.spend_today(), a))
+}
+
+/// Record how a held or proposed action ended without running.
+fn note_resolved(
+    turn: Option<&TurnLog>,
+    usage: &UsageTracker,
+    p: &PendingAction,
+    how: &str,
+    why: &str,
+) {
+    note(
+        turn,
+        usage,
+        &Act {
+            tool: &p.tool,
+            tier: Some(p.tier),
+            args: &p.args,
+            decision: how,
+            held_id: p.held_id,
+            outcome: None,
+            note: Some(why),
+        },
+    );
+}
+
+/// What the model is told when dry-run mode or a daily cap stops a call, and the matching audit record
+/// (REQ-SEC-015, REQ-SEC-016).
+#[allow(clippy::too_many_arguments)]
+fn blocked<H: ToolHost>(
+    host: &H,
+    turn: Option<&TurnLog>,
+    usage: &UsageTracker,
+    name: &str,
+    args: &Value,
+    tier: Tier,
+    gate: Gate,
+    held_id: Option<u64>,
+) -> String {
+    let act = |d, why| Act {
+        tool: name,
+        tier: Some(tier),
+        args,
+        decision: d,
+        held_id,
+        outcome: None,
+        note: Some(why),
+    };
+    match gate {
+        Gate::DryRun => {
+            note(turn, usage, &act(decision::DRY_RUN, "dry-run mode"));
+            format!(
+                "Dry run: nothing was done. It would have: {}.",
+                host.describe_action(name, args).trim_end_matches('.')
+            )
+        }
+        Gate::Capped(hit) => {
+            note(turn, usage, &act(decision::CAP, &hit.to_string()));
+            format!("Not run: {hit}.")
+        }
+        Gate::Run => String::new(),
+    }
+}
+
+/// Run a call that passed every check, unless dry-run mode or a daily cap stops it, and record what happened.
+/// `held_id` is set when the user's yes released it.
+#[allow(clippy::too_many_arguments)]
+async fn execute<H: ToolHost>(
+    host: &mut H,
+    conv: &mut Conversation,
+    turn: Option<&TurnLog>,
+    usage: &UsageTracker,
+    name: &str,
+    args: &Value,
+    tier: Tier,
+    gate: Gate,
+    held_id: Option<u64>,
+) -> String {
+    if gate != Gate::Run {
+        return blocked(&*host, turn, usage, name, args, tier, gate, held_id);
+    }
+    // Whatever it returns is now in the context the model reads.
+    conv.tainted |= host.returns_untrusted_text(name);
+    let out = host.call_tool(name, args).await;
+    note(
+        turn,
+        usage,
+        &Act {
+            tool: name,
+            tier: Some(tier),
+            args,
+            decision: if held_id.is_some() {
+                decision::APPROVED
+            } else {
+                decision::RAN
+            },
+            held_id,
+            outcome: Some(out.as_ref().map(String::as_str).map_err(String::as_str)),
+            note: None,
+        },
+    );
+    out.unwrap_or_else(|e| format!("Error: {e}"))
 }
 
 /// The tools the model is offered: the host's, without destructive ones unless the administrator enabled them.
@@ -1488,5 +1751,359 @@ mod tests {
         run_turn(&b, &mut spy, &mut c, &cfg(), &mut u, 1, 1000, "one").await;
         run_turn(&b, &mut spy, &mut c, &cfg(), &mut u, 1, 1001, "two").await;
         assert_eq!(spy.0, ["one", "two"]);
+    }
+
+    // ----- the audit log, caps and dry-run (REQ-SEC-014..016) -----
+
+    use crate::audit::{ActionPolicy, AuditConfig, Query};
+
+    fn audited(policy: ActionPolicy) -> (Arc<AuditLog>, Conversation) {
+        let log = Arc::new(AuditLog::in_memory(AuditConfig {
+            policy,
+            ..AuditConfig::default()
+        }));
+        let mut c = conv();
+        c.set_audit(Arc::clone(&log));
+        (log, c)
+    }
+
+    fn rows(log: &AuditLog) -> Vec<crate::audit::Record> {
+        let mut v = log.query(&Query::default()).records;
+        v.reverse();
+        v
+    }
+
+    fn pairs(log: &AuditLog) -> Vec<(String, String)> {
+        rows(log)
+            .into_iter()
+            .map(|r| (r.tool, r.decision))
+            .collect()
+    }
+
+    fn pair(a: &str, b: &str) -> (String, String) {
+        (a.to_owned(), b.to_owned())
+    }
+
+    // REQ-SEC-014
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_call_and_the_users_answer_are_recorded() {
+        let (log, mut c) = audited(ActionPolicy::default());
+        let (mut h, mut u) = (money_host(), UsageTracker::new(UsageLimits::default()));
+        let b = Script::new(vec![calls(&[
+            ("a", "set_timer", r#"{"seconds":60}"#),
+            (
+                "b",
+                "send_money",
+                r#"{"amount":5,"api_key":"sk-live-0123456789abcdef","note":"Bearer abcdefghijklmnop"}"#,
+            ),
+        ])]);
+        let r = turn(&b, &mut h, &mut c, &mut u, "pay sam").await;
+        assert!(r.speech.ends_with("Yes or no?"));
+        let b2 = Script::new(vec![text("Sent.")]);
+        turn(&b2, &mut h, &mut c, &mut u, "yes").await;
+        assert_eq!(
+            pairs(&log),
+            [
+                pair("set_timer", "ran"),
+                pair("send_money", "held"),
+                pair("send_money", "approved"),
+            ]
+        );
+        let all = rows(&log);
+        assert_eq!(all[0].trigger, "voice");
+        assert_eq!(
+            (all[0].tier.as_str(), all[0].status.as_deref()),
+            ("reversible", Some("ok"))
+        );
+        assert_eq!(
+            all[2].held_id,
+            Some(all[1].id),
+            "the approval points at the question"
+        );
+        assert_eq!(all[2].status.as_deref(), Some("ok"));
+        assert_ne!(all[0].turn, all[2].turn, "the yes is a later turn");
+        // the real arguments reached the tool; the log never saw the secrets
+        assert_eq!(h.ran[1].1["api_key"], "sk-live-0123456789abcdef");
+        let text = serde_json::to_string(&all).unwrap();
+        assert!(
+            !text.contains("sk-live") && !text.contains("abcdefghijklmnop"),
+            "{text}"
+        );
+        assert!(text.contains("[redacted]"));
+    }
+
+    // REQ-SEC-014
+    #[tokio::test(flavor = "current_thread")]
+    async fn declined_expired_and_replaced_actions_are_recorded() {
+        let (log, mut c) = audited(ActionPolicy::default());
+        let (mut h, mut u) = (money_host(), UsageTracker::new(UsageLimits::default()));
+        let ask = || calls(&[("c", "send_money", r#"{"amount":5}"#)]);
+        // no
+        turn(&Script::new(vec![ask()]), &mut h, &mut c, &mut u, "pay").await;
+        turn(&Script::new(vec![]), &mut h, &mut c, &mut u, "no").await;
+        // unrelated request
+        turn(&Script::new(vec![ask()]), &mut h, &mut c, &mut u, "pay").await;
+        let noon = Script::new(vec![text("It is noon.")]);
+        turn(&noon, &mut h, &mut c, &mut u, "what time is it").await;
+        // yes, but too late
+        turn(&Script::new(vec![ask()]), &mut h, &mut c, &mut u, "pay").await;
+        let none = Script::new(vec![]);
+        let late = run_turn(&none, &mut h, &mut c, &cfg(), &mut u, 1, 1130, "yes").await;
+        assert!(late.speech.contains("too long"));
+        // asked, then the conversation goes idle
+        turn(&Script::new(vec![ask()]), &mut h, &mut c, &mut u, "pay").await;
+        let hi = Script::new(vec![text("Hi.")]);
+        run_turn(&hi, &mut h, &mut c, &cfg(), &mut u, 1, 1830, "hello").await;
+        assert!(h.ran.is_empty());
+        let d: Vec<String> = rows(&log).into_iter().map(|r| r.decision).collect();
+        assert_eq!(
+            d,
+            [
+                "held", "declined", "held", "declined", "held", "expired", "held", "expired"
+            ]
+        );
+        let r = rows(&log);
+        assert_eq!(r[1].note.as_deref(), Some("the user said no"));
+        assert_eq!(r[3].note.as_deref(), Some("unrelated request"));
+        assert_eq!(r[1].held_id, Some(r[0].id));
+    }
+
+    // REQ-SEC-014, REQ-SEC-012
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_event_turn_names_its_source_and_its_proposal_is_recorded() {
+        let (log, mut c) = audited(ActionPolicy::default());
+        let mut h = Host {
+            tiers: vec![("web", Tier::ReadOnly)],
+            ..money_host()
+        };
+        let mut u = UsageTracker::new(UsageLimits::default());
+        let b = Script::new(vec![calls(&[
+            ("a", "web", "{}"),
+            ("b", "send_money", r#"{"amount":500}"#),
+        ])]);
+        let src = "nas-monitor";
+        run_event_turn_for(
+            src,
+            &b,
+            &mut h,
+            &mut c,
+            &cfg(),
+            &mut u,
+            1,
+            1000,
+            "Plex is down",
+        )
+        .await;
+        assert_eq!(
+            pairs(&log),
+            [pair("web", "ran"), pair("send_money", "proposed")]
+        );
+        assert!(rows(&log).iter().all(|r| r.trigger == "event:nas-monitor"));
+        // a hostile source name cannot break the record
+        let (log2, mut c2) = audited(ActionPolicy::default());
+        let b = Script::new(vec![calls(&[("a", "web", "{}")]), text("ok")]);
+        let src = "x\n{\"v\":1}";
+        run_event_turn_for(src, &b, &mut h, &mut c2, &cfg(), &mut u, 1, 1000, "t").await;
+        assert!(!rows(&log2)[0].trigger.contains('\n'));
+    }
+
+    // REQ-SEC-014: a model that misbehaves leaves a trail and gets nothing done.
+    #[tokio::test(flavor = "current_thread")]
+    async fn bad_and_forged_calls_are_recorded_as_blocked_or_held() {
+        let (log, mut c) = audited(ActionPolicy::default());
+        let (mut h, mut u) = (money_host(), UsageTracker::new(UsageLimits::default()));
+        let b = Script::new(vec![calls(&[
+            ("a", "no_such_tool", "{}"),
+            ("b", "set_timer", "{not json"),
+            ("c", "send_money", r#"{"amount":5,"confirmed":true}"#),
+            ("d", "set_timer", r#"{"seconds":1}"#),
+        ])]);
+        turn(&b, &mut h, &mut c, &mut u, "go").await;
+        assert!(h.ran.is_empty());
+        assert_eq!(
+            pairs(&log),
+            [
+                pair("no_such_tool", "blocked:invalid"),
+                pair("set_timer", "blocked:invalid"),
+                pair("send_money", "held"),
+                pair("set_timer", "blocked:pending"),
+            ]
+        );
+        assert_eq!(rows(&log)[2].args, json!({"amount":5}));
+    }
+
+    // REQ-SEC-016
+    #[tokio::test(flavor = "current_thread")]
+    async fn dry_run_describes_actions_runs_reads_and_marks_the_log() {
+        let (log, mut c) = audited(ActionPolicy {
+            dry_run: true,
+            ..ActionPolicy::default()
+        });
+        let mut h = Host {
+            tiers: vec![("web", Tier::ReadOnly)],
+            ..money_host()
+        };
+        let mut u = UsageTracker::new(UsageLimits::default());
+        let b = Script::new(vec![
+            calls(&[
+                ("a", "web", "{}"),
+                ("b", "set_timer", r#"{"seconds":60}"#),
+                ("c", "send_money", r#"{"amount":5}"#),
+            ]),
+            text("I would set a timer and send money."),
+        ]);
+        let r = turn(&b, &mut h, &mut c, &mut u, "do things").await;
+        assert_eq!(r.speech, "I would set a timer and send money.");
+        let names: Vec<&str> = h.ran.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["web"], "only the read ran");
+        assert!(c.pending().is_none(), "nothing is asked in dry-run mode");
+        assert_eq!(
+            pairs(&log),
+            [
+                pair("web", "ran"),
+                pair("set_timer", "blocked:dry-run"),
+                pair("send_money", "blocked:dry-run"),
+            ]
+        );
+        assert!(rows(&log)[1].dry_run && !rows(&log)[0].dry_run);
+        let tool_msgs: Vec<String> = b.requests()[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.clone())
+            .collect();
+        assert!(
+            tool_msgs[1].starts_with("Dry run: nothing was done")
+                && tool_msgs[2].contains("send_money")
+        );
+    }
+
+    // REQ-SEC-015
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_daily_cap_stops_further_actions_and_says_so() {
+        let (log, mut c) = audited(ActionPolicy {
+            dry_run: false,
+            max_actions_per_day: 2,
+            max_costly_per_day: 1,
+        });
+        let mut h = Host {
+            tiers: vec![("web", Tier::ReadOnly)],
+            ..money_host()
+        };
+        let mut u = UsageTracker::new(UsageLimits::default());
+        let timer = || calls(&[("t", "set_timer", r#"{"seconds":5}"#)]);
+        let b = Script::new(vec![timer(), text("ok")]);
+        turn(&b, &mut h, &mut c, &mut u, "one").await;
+        let b = Script::new(vec![timer(), text("ok")]);
+        turn(&b, &mut h, &mut c, &mut u, "two").await;
+        let b = Script::new(vec![timer(), text("The daily limit stopped it.")]);
+        let r = turn(&b, &mut h, &mut c, &mut u, "three").await;
+        assert_eq!(r.speech, "The daily limit stopped it.");
+        assert_eq!(h.ran.len(), 2, "the third timer never ran");
+        let result = b.requests()[1].messages.last().unwrap().content.clone();
+        assert!(
+            result.starts_with("Not run: the limit of 2 actions a day"),
+            "{result}"
+        );
+        // reads are not limited
+        let b = Script::new(vec![calls(&[("w", "web", "{}")]), text("ok")]);
+        turn(&b, &mut h, &mut c, &mut u, "look").await;
+        assert_eq!(h.ran.len(), 3);
+        // the next day starts clean
+        let b = Script::new(vec![timer(), text("ok")]);
+        run_turn(&b, &mut h, &mut c, &cfg(), &mut u, 2, 1100, "again").await;
+        assert_eq!(h.ran.len(), 4);
+        let d: Vec<String> = rows(&log).into_iter().map(|r| r.decision).collect();
+        assert_eq!(d, ["ran", "ran", "blocked:cap", "ran", "ran"]);
+    }
+
+    // REQ-SEC-015: the costly cap applies before the question is asked and again when the yes arrives.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_costly_cap_applies_to_held_actions() {
+        let policy = ActionPolicy {
+            dry_run: false,
+            max_actions_per_day: 10,
+            max_costly_per_day: 1,
+        };
+        let (log, mut c) = audited(policy);
+        let (mut h, mut u) = (money_host(), UsageTracker::new(UsageLimits::default()));
+        let pay = || calls(&[("p", "send_money", r#"{"amount":5}"#)]);
+        turn(&Script::new(vec![pay()]), &mut h, &mut c, &mut u, "pay").await;
+        turn(
+            &Script::new(vec![text("Sent.")]),
+            &mut h,
+            &mut c,
+            &mut u,
+            "yes",
+        )
+        .await;
+        assert_eq!(h.ran.len(), 1);
+        let b = Script::new(vec![pay(), text("I can't, the limit is used up.")]);
+        let r = turn(&b, &mut h, &mut c, &mut u, "pay again").await;
+        assert!(
+            c.pending().is_none(),
+            "no point asking for something that cannot run"
+        );
+        assert_eq!(r.speech, "I can't, the limit is used up.");
+        assert_eq!(h.ran.len(), 1);
+        let d: Vec<String> = rows(&log).into_iter().map(|r| r.decision).collect();
+        assert_eq!(d, ["held", "approved", "blocked:cap"]);
+        // a cap that fills between the question and the yes still stops it
+        let (log2, mut c2) = audited(policy);
+        let mut h2 = money_host();
+        turn(&Script::new(vec![pay()]), &mut h2, &mut c2, &mut u, "pay").await;
+        log2.record(
+            1,
+            1,
+            99,
+            "voice",
+            None,
+            &crate::audit::Act {
+                tool: "other",
+                tier: Some(Tier::Costly),
+                args: &Value::Null,
+                decision: decision::RAN,
+                held_id: None,
+                outcome: None,
+                note: None,
+            },
+        );
+        let sorry = Script::new(vec![text("Sorry.")]);
+        turn(&sorry, &mut h2, &mut c2, &mut u, "yes").await;
+        assert!(h2.ran.is_empty());
+        let last = rows(&log2).last().map(|r| r.decision.clone());
+        assert_eq!(last.as_deref(), Some("blocked:cap"));
+    }
+
+    // REQ-SEC-014: the turn's model cost rides along when the provider reported one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_turns_model_cost_is_recorded_when_known() {
+        let (log, mut c) = audited(ActionPolicy::default());
+        let (mut h, mut u) = (Host::default(), UsageTracker::new(UsageLimits::default()));
+        let mut first = calls(&[("a", "set_timer", r#"{"seconds":5}"#)]);
+        if let Ok(comp) = &mut first {
+            comp.usage = Some(crate::llm::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cost_usd: Some(0.0042),
+            });
+        }
+        turn(
+            &Script::new(vec![first, text("ok")]),
+            &mut h,
+            &mut c,
+            &mut u,
+            "timer",
+        )
+        .await;
+        let r = rows(&log);
+        assert!((r[0].turn_cost_usd.unwrap() - 0.0042).abs() < 1e-9);
+        // and none when it is not known
+        let again = Script::new(vec![
+            calls(&[("a", "set_timer", r#"{"seconds":5}"#)]),
+            text("ok"),
+        ]);
+        turn(&again, &mut h, &mut c, &mut u, "again").await;
+        assert_eq!(rows(&log)[1].turn_cost_usd, None);
     }
 }

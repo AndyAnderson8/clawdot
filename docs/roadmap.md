@@ -127,7 +127,8 @@ The default toolset is a set of **recipes** (configuration that the portal can a
 - **Event-turn read-only rule:** turns started by events, schedules or rules run in no-act mode (T0 and propose-only)
 - **Untrusted-content rule:** text from any tool result is fenced as data, and untrusted text in a turn's context forces full confirmation on T2 and T3 calls
 - **Enforced skill allow-lists:** a skill's tool list narrows the tool set when that skill is the active scope (amends REQ-CFG-036; today the list is advisory)
-- **Audit log:** a bounded private record of every tool call, confirmation, refusal and cap hit, with a portal view (the view is an A6 item)
+- **Audit log:** a bounded private record of every tool call, confirmation, refusal and cap hit, with a portal view (the view is an A6 item). *Built* (`feature/audit-log`, REQ-SEC-014): JSON lines, rotation, redaction, `GET /api/audit`; see [action-safety.md](architecture/action-safety.md)
+- **Daily caps and dry-run:** a per-day cap on actions and a stricter one on costly actions, and a dry-run mode that describes instead of running. *Built* (REQ-SEC-015, REQ-SEC-016), configured in the file or by `--dry-run`; the portal setting is an A6 item
 
 **Exit:** the injection and confirmation scenarios pass (A1c); AC-14 to AC-16 as proposed hold; every write-capable tool has a tier.
 

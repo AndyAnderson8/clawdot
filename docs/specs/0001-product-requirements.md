@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.22 |
+| **Version** | 0.23 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -220,6 +220,9 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-SEC-011 | A costly or destructive call MUST be held by the host, not run: the host records the exact tool, its canonical arguments and a plain-language description, speaks that description and asks, and runs the stored action only when a later user turn is a plain yes. A different argument, a different tool, a timeout (120 s), an unrelated utterance or a no discards it. A model-supplied `confirmed` argument MUST be ignored. | Must | M5 | T |
 | REQ-SEC-012 | A turn not started by the user (an inbox event, a schedule, a rule) MUST be able to call only read-only tools; anything else is kept as a proposal for the user to approve in a later turn. When a turn's context holds untrusted text (inbox or webhook text, web, HTTP or MCP tool results), costly and destructive calls MUST be held for full confirmation even if the administrator lowered the tool's tier. | Must | M5 | T |
 | REQ-SEC-013 | A turn MAY run in a scope (an active skill) whose tool list can only narrow the tools available; the core MUST refuse any other tool in that turn. | Must | M5 | T |
+| REQ-SEC-014 | Every action the assistant takes MUST be recorded in an append-only, bounded audit log kept as JSON lines in the data directory (readable only by the service user, REQ-SEC-009): time, what started the turn (user voice, or an event with its source), the tool, its risk tier, the arguments, whether the call was held for confirmation and how that ended (approved, declined, expired), the decision (ran, held, proposed, or blocked with the rule), the result status with a short excerpt, and the turn's model cost when known. Secrets and tokens in arguments and results MUST be redacted and every value clipped; audio, the user's words and untrusted text beyond a short excerpt MUST NOT be written. The log MUST be size-capped with rotation, MUST survive a crash or damaged lines at start-up, and MUST be readable through an authenticated JSON endpoint with paging and filters. | Must | M5 | T |
+| REQ-SEC-015 | The core MUST enforce a per-day cap on actions (calls that are not read-only) and a stricter per-day cap on costly and destructive calls. A call over a cap MUST NOT run, MUST tell the model and the user plainly, and MUST be recorded as blocked. | Must | M5 | T |
+| REQ-SEC-016 | A dry-run setting MUST make every call that is not read-only return what it would have done without running it. Read-only tools still run. Each such call MUST be recorded in the audit log and marked as a dry run. | Should | M5 | T |
 
 ### 4.9 Extensibility (`EXT`)
 
@@ -315,3 +318,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.20 | 2026-11-09 | Editable settings in the portal (CFG-037..042): layered `settings.json` over the configuration file under flags, live versus restart, whole-change validation, environment-variable names for keys; compressed page (CFG-043); CFG-030 amended |
 | 0.21 | 2026-11-09 | Audio input/output interface, command-backed and WAV backends, push-to-talk, and non-blocking playback in the satellite loop, optional hardware capabilities (VOI-013..019) |
 | 0.22 | 2026-11-09 | Host-held action safety (agentic-scope P0-1 to P0-5): risk tiers, host-enforced confirmation bound to the exact action, read-only-only turns that the user did not start, the taint rule, enforced skill allow-lists (SEC-010..013; AST-008, AST-015, INB-010, CFG-036 amended) |
+| 0.23 | 2026-11-09 | Audit log of every action, per-day action caps, and dry-run mode (agentic-scope P0-4, P1-4; SEC-014..016) |
