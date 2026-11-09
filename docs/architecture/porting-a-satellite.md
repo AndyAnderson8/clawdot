@@ -57,3 +57,29 @@ check that a core is set up correctly before any hardware exists.
 - A conformance test suite you can run against a port (REQ-SAT-012). Today the reference satellite and the end to
   end tests in `crates/e2e` are the closest thing.
 - Opus downlink and TLS.
+
+## Audio on a desktop: the audio interface
+
+The reference satellite can run real turns. `clawdot_satellite::front::AudioDevice` is a `Device` built from three small
+parts ([spec 0001](../specs/0001-product-requirements.md) REQ-VOI-013..018):
+
+| Part | Trait | Backends |
+|---|---|---|
+| Microphone | `audio::AudioIn`: `start`, `read_frame` (20 ms, 16 kHz mono s16), `stop` | `command::CommandIn` (a capture program's stdout), `audio::WavIn` (a recording) |
+| Speaker | `audio::AudioOut`: `begin`, `play`, `finish`, `poll_done`, `stop`, `duck`, `set_volume` | `command::CommandOut` (a player's stdin), `audio::WavOut` (memory or a WAV file) |
+| Turn trigger | `front::Trigger`: `poll` returns `Talk` or `Quit` | `LineTrigger` (Enter on the terminal), `Immediate`, `NoTrigger`; a wake-word detector goes here |
+
+The command backends start a program from an argument vector (no shell), pass audio only through its pipes, bound their
+buffers, kill the program when stopped or dropped, and report a silent or exited program as `Stalled` or `Eof`, never as
+silence. Programs are found on `PATH` (`command::default_capture` and `default_playback`); the order and the Windows
+caveats are in [the PC voice loop guide](../guides/pc-voice-loop.md).
+
+The `Device` trait gained four optional methods with defaults, so existing devices are unchanged: `mic_active` (the
+core started or stopped asking for audio), `mic_burst` (frames per loop pass, to keep up with a live microphone),
+`poll_wake` (called every pass; true sends `wake`) and `playback_idle` (the satellite sends `playback-done` only when
+this is true, and keeps answering pings meanwhile). A port to new hardware can ignore all four.
+
+Optional hardware lives in `satellite::hw` and is independent of the core and of the protocol: `Leds` (`LedState`), `Buttons`
+(`Talk`, `Mute`, `Stop`), and `AudioOut::capabilities()` (`duck`, `volume`, `stop`). Attach them with
+`AudioDevice::with_leds` and `with_buttons`; a board without them gets the `Null` versions. The `Mute` button is defined but
+not yet wired (the core owns mute, and reporting a hardware mute needs a `mute-changed` hook in the loop).
