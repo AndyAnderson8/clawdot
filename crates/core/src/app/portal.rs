@@ -76,6 +76,17 @@ impl Core {
             .clone()
     }
 
+    /// Hand over the audit log the portal reads (REQ-SEC-014). Only the first call has an effect.
+    pub fn set_audit(&self, log: std::sync::Arc<crate::audit::AuditLog>) {
+        let _ = self.audit.set(log);
+    }
+
+    /// The audit log, if the assistant has one.
+    #[must_use]
+    pub fn audit(&self) -> Option<std::sync::Arc<crate::audit::AuditLog>> {
+        self.audit.get().cloned()
+    }
+
     /// Hand over the settings state (all layers and the saved file). Nothing in it is a secret.
     pub fn set_settings(&self, state: crate::settings::SettingsState) {
         *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);
