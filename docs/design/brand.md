@@ -31,6 +31,7 @@ The wordmark is live text in the system UI font (bold, fixed width through `text
 | `--bad-bg` / `--on-bad` | `#b42318` / `#fff` | `#a32115` / `#fff` | Open-mode banner |
 | `--ring` | `#2ee6c5` | same | The light ring (logo only) |
 | `--shell` | `#f2644f` | same | The crab (logo, banner accent) |
+| `--band` / `--on-band` / `--band-mut` | `#0e2a33` / `#e8f3f1` / `#9fb7b4` | same | The portal header and tab band (7.0:1 for the muted text, 11:1 for the ring on it) |
 
 Type scale (ratio 1.25, system fonts only): 0.875, 1, 1.25, 1.563, 1.953 rem. Spacing: 0.25, 0.5, 0.75, 1, 1.5, 2.5 rem. Radii: 8 px (controls), 14 px (panels), pill (buttons, echoing the ring).
 
@@ -72,4 +73,4 @@ The mark is a crab on a generic round puck with a ring of light. It does not use
 
 ## Screenshots
 
-The web UI on a phone-width window (headless Chrome against the real binary): [setup, dark](screenshots/ui-setup-dark.png), [setup, light](screenshots/ui-setup-light.png), [sign-in, dark](screenshots/ui-login-dark.png), [open-mode banner, light](screenshots/ui-open-banner-light.png).
+The web UI on a phone-width window (headless Chrome against the real binary): [setup, dark](screenshots/ui-setup-dark.png), [setup, light](screenshots/ui-setup-light.png), [sign-in, dark](screenshots/ui-login-dark.png), [open-mode banner, light](screenshots/ui-open-banner-light.png). Tabbed portal (dark, 500 px wide): [Home](screenshots/portal-home-dark.png), [Reminders](screenshots/portal-reminders-dark.png), [Agents](screenshots/portal-agents-dark.png), [Tools](screenshots/portal-tools-dark.png), [Connections](screenshots/portal-connections-dark.png), [Webhooks](screenshots/portal-webhooks-dark.png). Layout and tab names: [portal.md](portal.md).

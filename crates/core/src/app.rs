@@ -15,6 +15,9 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Notify;
 
+mod portal;
+pub use portal::{Fail, Job, Op, SchedOp};
+
 /// Adapters available to endpoints, by name.
 #[derive(Debug, Clone, Default)]
 pub struct Adapters(BTreeMap<String, Adapter>);
@@ -202,6 +205,9 @@ pub struct Core {
     admin: Mutex<crate::admin::Admin>,
     status: Mutex<serde_json::Value>,
     speech: Mutex<std::collections::VecDeque<String>>,
+    tools: Mutex<serde_json::Value>,
+    settings: Mutex<serde_json::Value>,
+    jobs: Mutex<Option<tokio::sync::mpsc::Sender<portal::Job>>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -291,6 +297,9 @@ impl Core {
             admin: Mutex::new(crate::admin::Admin::new()),
             status: Mutex::new(serde_json::Value::Null),
             speech: Mutex::new(std::collections::VecDeque::new()),
+            tools: Mutex::new(serde_json::Value::Null),
+            settings: Mutex::new(serde_json::Value::Null),
+            jobs: Mutex::new(None),
         }
     }
 
