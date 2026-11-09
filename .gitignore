@@ -27,6 +27,7 @@ Thumbs.db
 
 # Portal (Node is a dev and CI tool only; the built page is committed)
 /portal/node_modules/
+/portal/lint/node_modules/
 
 # Stray build directories from older scripts/cargo.sh runs in linked worktrees
 /-agent-*

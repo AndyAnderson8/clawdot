@@ -1,0 +1,5 @@
+# Adds to the repository .editorconfig (this file is not a root). Prettier reads both.
+[*.{ts,tsx,mjs,css,json}]
+indent_style = space
+indent_size = 2
+max_line_length = 120
