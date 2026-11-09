@@ -58,7 +58,29 @@ pub struct Config {
     pub token: Option<String>,
     /// Send `wake` right after the handshake, as a device with a wake word or button would.
     pub wake_on_connect: bool,
+    /// Treat the core as gone after this long without hearing anything (REQ-SAT-008). The core pings every
+    /// 5 s, so silence this long means the connection is dead. [`DEAD_AFTER`] is the protocol default.
+    pub dead_after: Duration,
 }
+
+/// Default dead-peer timeout (REQ-SAT-008).
+pub const DEAD_AFTER: Duration = Duration::from_secs(20);
+
+/// How long to wait before reconnect attempt number `attempt` (0 is the first retry): 1 s, doubling, at most 30 s
+/// (REQ-SAT-008).
+#[must_use]
+pub fn backoff(attempt: u32) -> Duration {
+    Duration::from_secs((1u64 << attempt.min(5)).min(30))
+}
+
+/// Whether an error from [`run`] is the core refusing this satellite (bad token or version). Retrying cannot fix
+/// that, so a reconnect loop should stop and show the reason.
+#[must_use]
+pub fn is_refusal(error: &str) -> bool {
+    error.starts_with(REFUSED)
+}
+
+const REFUSED: &str = "the core refused this satellite";
 
 /// What happened during a session.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -143,7 +165,7 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
         match poll(&mut sock, &mut dec, &mut closed)? {
             Some(Message::Welcome(_)) => break,
             Some(Message::Reject(r)) => {
-                return Err(format!("the core refused this satellite: {}", r.reason));
+                return Err(format!("{REFUSED}: {}", r.reason));
             }
             Some(_) => {}
             None if closed => {
@@ -166,9 +188,19 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
     let mut report = Report::default();
     let mut streaming = false;
     let mut muted = false;
+    let mut last_heard = Instant::now();
+    let mut last_ping = Instant::now();
     loop {
         if closed || device.finished() {
             return Ok(report);
+        }
+        if last_heard.elapsed() >= cfg.dead_after {
+            return Err("the core stopped responding".into());
+        }
+        // Either side may ping (REQ-SAT-008); this also exposes a half-open connection when the core is quiet.
+        if last_ping.elapsed() >= cfg.dead_after / 4 {
+            last_ping = Instant::now();
+            send(&mut sock, &Message::Ping)?;
         }
         if streaming && !muted {
             if let Some(pcm) = device.read_mic() {
@@ -186,6 +218,7 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
         let Some(msg) = poll(&mut sock, &mut dec, &mut closed)? else {
             continue;
         };
+        last_heard = Instant::now();
         match msg {
             Message::Ping => send(&mut sock, &Message::Pong)?,
             Message::StreamStart => streaming = true,
@@ -341,6 +374,7 @@ mod tests {
             device_id: "t".into(),
             token: Some("tok".into()),
             wake_on_connect: true,
+            dead_after: DEAD_AFTER,
         }
     }
 
@@ -350,6 +384,38 @@ mod tests {
             session_id: "s".into(),
             audio_out: AudioCodec::Pcm,
         })
+    }
+
+    #[test]
+    fn req_sat_008_a_silent_core_is_declared_dead_and_the_satellite_pings() {
+        let (port, h) = fake_core(|s, dec| {
+            let mut closed = false;
+            send(s, &welcome()).unwrap();
+            // Say nothing more; the satellite must ping on its own, then give up.
+            assert!(matches!(next(s, dec, &mut closed), Message::Ping));
+            let end = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < end && !closed {
+                let _ = poll(s, dec, &mut closed);
+            }
+            assert!(closed, "the satellite hung up on the silent core");
+        });
+        let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let cfg = Config {
+            wake_on_connect: false,
+            dead_after: Duration::from_millis(400),
+            ..cfg()
+        };
+        let e = run(sock, &mut FileDevice::new(vec![]), &cfg).unwrap_err();
+        assert!(e.contains("stopped responding"), "{e}");
+        assert!(!is_refusal(&e), "a dead link is worth retrying");
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn req_sat_008_backoff_doubles_and_is_capped() {
+        let secs: Vec<u64> = (0..8).map(|n| backoff(n).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(backoff(u32::MAX).as_secs(), 30, "no overflow");
     }
 
     #[test]
@@ -366,6 +432,7 @@ mod tests {
         let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let e = run(sock, &mut FileDevice::new(vec![]), &cfg()).unwrap_err();
         assert!(e.contains("unauthorized"), "{e}");
+        assert!(is_refusal(&e), "retrying with the same token cannot help");
         h.join().unwrap();
     }
 

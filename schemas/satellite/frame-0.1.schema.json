@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AndyAnderson8/clawdot/schemas/satellite/frame-0.1.schema.json",
+  "title": "ClawDot satellite protocol 0.1: frame header",
+  "$comment": "Validates the JSON header line of one frame (spec 0003 section 5), including its inline `data` object. The binary payload is not JSON and is not described here. A frame whose `type` is not listed in $defs MUST be ignored by a receiver (REQ-SAT-009), so this root schema is deliberately open: pick the definition by `type`, e.g. #/$defs/clawdot.hello.",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": { "type": "string", "minLength": 1 },
+    "data": { "type": "object" },
+    "data_length": { "type": "integer", "minimum": 0, "maximum": 65536 },
+    "payload_length": { "type": "integer", "minimum": 0, "maximum": 1048576 }
+  },
+  "$defs": {
+    "version": {
+      "type": "object",
+      "required": ["major", "minor"],
+      "properties": {
+        "major": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "minor": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "codec": { "enum": ["pcm", "opus"] },
+    "pcm-format": {
+      "type": "object",
+      "required": ["rate", "width", "channels"],
+      "properties": {
+        "rate": { "type": "integer", "minimum": 1 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 255 }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "wake_word": { "type": "boolean" },
+        "leds": { "type": "boolean" },
+        "buttons": { "type": "boolean" },
+        "display": { "type": "boolean" },
+        "hardware_mute": { "type": "boolean" },
+        "aec": { "type": "boolean" },
+        "noise_suppression": { "type": "boolean" },
+        "vad": { "type": "boolean" },
+        "beamforming": { "type": "boolean" },
+        "media_url": { "type": "boolean" },
+        "audio_out": { "type": "array", "items": { "$ref": "#/$defs/codec" } }
+      }
+    },
+
+    "clawdot.hello": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.hello" },
+        "data": {
+          "type": "object",
+          "required": ["protocol", "device_id"],
+          "properties": {
+            "protocol": { "$ref": "#/$defs/version" },
+            "device_id": { "type": "string", "minLength": 1 },
+            "name": { "type": "string" },
+            "token": { "type": "string" },
+            "capabilities": { "$ref": "#/$defs/capabilities" }
+          }
+        }
+      }
+    },
+    "clawdot.welcome": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.welcome" },
+        "data": {
+          "type": "object",
+          "required": ["protocol", "session_id", "audio_out"],
+          "properties": {
+            "protocol": { "$ref": "#/$defs/version" },
+            "session_id": { "type": "string" },
+            "audio_out": { "$ref": "#/$defs/codec" }
+          }
+        }
+      }
+    },
+    "clawdot.reject": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.reject" },
+        "data": {
+          "type": "object",
+          "required": ["reason"],
+          "properties": { "reason": { "type": "string" } }
+        }
+      }
+    },
+
+    "ping": { "type": "object", "required": ["type"], "properties": { "type": { "const": "ping" } } },
+    "pong": { "type": "object", "required": ["type"], "properties": { "type": { "const": "pong" } } },
+
+    "audio-start": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": { "type": { "const": "audio-start" }, "data": { "$ref": "#/$defs/pcm-format" } }
+    },
+    "audio-chunk": {
+      "type": "object",
+      "required": ["type", "data", "payload_length"],
+      "properties": {
+        "type": { "const": "audio-chunk" },
+        "data": {
+          "type": "object",
+          "required": ["rate", "width", "channels"],
+          "properties": {
+            "rate": { "type": "integer", "minimum": 1 },
+            "width": { "type": "integer", "minimum": 1, "maximum": 255 },
+            "channels": { "type": "integer", "minimum": 1, "maximum": 255 },
+            "timestamp": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "payload_length": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+      }
+    },
+    "audio-stop": { "type": "object", "required": ["type"], "properties": { "type": { "const": "audio-stop" } } },
+
+    "detection": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "detection" },
+        "data": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string" },
+            "timestamp_ms": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "clawdot.button": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.button" },
+        "data": {
+          "type": "object",
+          "required": ["name"],
+          "properties": { "name": { "type": "string" }, "long": { "type": "boolean" } }
+        }
+      }
+    },
+    "clawdot.mute-changed": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.mute-changed" },
+        "data": { "type": "object", "required": ["muted"], "properties": { "muted": { "type": "boolean" } } }
+      }
+    },
+    "clawdot.playback-done": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "clawdot.playback-done" },
+        "data": { "type": "object", "properties": { "id": { "type": "string" } } }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "error" },
+        "data": {
+          "type": "object",
+          "required": ["text"],
+          "properties": { "text": { "type": "string" }, "code": { "type": "string" } }
+        }
+      }
+    },
+
+    "clawdot.stream-start": { "type": "object", "required": ["type"], "properties": { "type": { "const": "clawdot.stream-start" } } },
+    "clawdot.stream-stop": { "type": "object", "required": ["type"], "properties": { "type": { "const": "clawdot.stream-stop" } } },
+    "clawdot.stop-playback": { "type": "object", "required": ["type"], "properties": { "type": { "const": "clawdot.stop-playback" } } },
+    "clawdot.set-volume": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.set-volume" },
+        "data": {
+          "type": "object",
+          "required": ["level"],
+          "properties": { "level": { "type": "integer", "minimum": 0, "maximum": 100 } }
+        }
+      }
+    },
+    "clawdot.set-indicator": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.set-indicator" },
+        "data": {
+          "type": "object",
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "enum": ["idle", "wake-detected", "listening", "thinking", "speaking", "error", "muted", "notification"]
+            }
+          }
+        }
+      }
+    },
+    "clawdot.set-mute": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.set-mute" },
+        "data": { "type": "object", "required": ["muted"], "properties": { "muted": { "type": "boolean" } } }
+      }
+    },
+    "clawdot.play-url": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.play-url" },
+        "data": {
+          "type": "object",
+          "required": ["url", "title"],
+          "properties": {
+            "url": { "type": "string", "maxLength": 2048, "pattern": "^https?://[^\\s]+$" },
+            "title": { "type": "string", "maxLength": 200 }
+          }
+        }
+      }
+    },
+    "clawdot.media-control": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.media-control" },
+        "data": {
+          "type": "object",
+          "required": ["action"],
+          "properties": { "action": { "enum": ["pause", "resume"] } }
+        }
+      }
+    }
+  }
+}

@@ -122,6 +122,7 @@ fn main() -> ExitCode {
             device_id: id.clone(),
             token,
             wake_on_connect: true,
+            dead_after: clawdot_satellite::DEAD_AFTER,
         };
         let report = run(sock, &mut dev, &cfg)?;
         println!("states: {:?}", report.indicators);

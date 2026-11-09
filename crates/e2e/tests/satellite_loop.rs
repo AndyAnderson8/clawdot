@@ -96,6 +96,7 @@ fn cfg(token: Option<&str>) -> Config {
         device_id: "e2e".into(),
         token: token.map(str::to_owned),
         wake_on_connect: true,
+        dead_after: clawdot_satellite::DEAD_AFTER,
     }
 }
 
