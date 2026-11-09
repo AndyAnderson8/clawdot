@@ -5,6 +5,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod board_file;
+pub mod button;
+pub mod caps;
 pub mod led;
 pub mod quiet;
 pub mod tone;
