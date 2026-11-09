@@ -21,7 +21,7 @@
 //! strict Content-Security-Policy as a second line of defence.
 
 use crate::admin::{self, AdminError};
-use crate::app::Core;
+use crate::app::{Core, Fail, Op, SchedOp};
 use crate::inbox::endpoint::EndpointError;
 use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
 use hyper::body::{Bytes, Incoming};
@@ -33,12 +33,17 @@ use std::convert::Infallible;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+#[cfg(test)]
+mod tests;
+
 type Resp = Response<BoxBody<Bytes, Infallible>>;
 
 const PAGE: &str = include_str!("ui.html");
 /// The theme (colour, type, spacing tokens) lives in its own plain CSS file so a later toolchain can reuse it;
 /// it is spliced into the page at the `/*@theme*/` marker.
 const THEME: &str = include_str!("ui-theme.css");
+/// The release notes, shown on the About card (REQ-CFG-013, 025).
+const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 /// Only the page's own inline script and style, and only calls back to this origin.
 const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; \
                    base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -205,6 +210,7 @@ pub async fn handle(
         (&Method::GET, ["auth"]) => {
             let mut state = core.admin_state();
             state["peer_private"] = json!(admin::is_private(peer));
+            state["version"] = json!(env!("CARGO_PKG_VERSION"));
             return Some(json_reply(StatusCode::OK, &state));
         }
         (&Method::POST, ["setup"]) => return Some(setup(core, peer, body).await),
@@ -226,6 +232,11 @@ pub async fn handle(
             | ["endpoints", _]
             | ["endpoints", _, "rotate"]
             | ["admin", "password"]
+            | ["schedule"]
+            | ["schedule", _]
+            | ["tools"]
+            | ["settings"]
+            | ["about"]
     );
     if !known {
         return Some(error(StatusCode::NOT_FOUND, "not found"));
@@ -251,8 +262,49 @@ pub async fn handle(
             Err(e) => endpoint_error(&e),
         },
         (&Method::POST, ["admin", "password"]) => change_password(core, body).await,
+        (&Method::GET, ["tools"]) => json_reply(StatusCode::OK, &core.ui_tools()),
+        (&Method::GET, ["settings"]) => json_reply(StatusCode::OK, &core.ui_settings()),
+        (&Method::GET, ["about"]) => json_reply(
+            StatusCode::OK,
+            &json!({ "version": env!("CARGO_PKG_VERSION"), "changelog": CHANGELOG }),
+        ),
+        (&Method::GET, ["schedule"]) => schedule(core, SchedOp::List).await,
+        (&Method::POST, ["schedule"]) => match read_json::<Value>(body).await {
+            Ok(v) => schedule(core, SchedOp::Add(v)).await,
+            Err((s, m)) => error(s, m),
+        },
+        (&Method::PUT, ["schedule", id]) => {
+            match (id.parse::<u64>(), read_json::<Value>(body).await) {
+                (Ok(id), Ok(v)) => schedule(core, SchedOp::Edit(id, v)).await,
+                (Err(_), _) => error(StatusCode::NOT_FOUND, "no such timer, alarm, or reminder"),
+                (_, Err((s, m))) => error(s, m),
+            }
+        }
+        (&Method::DELETE, ["schedule", id]) => match id.parse::<u64>() {
+            Ok(id) => schedule(core, SchedOp::Cancel(id)).await,
+            Err(_) => error(StatusCode::NOT_FOUND, "no such timer, alarm, or reminder"),
+        },
         _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     })
+}
+
+/// Map a failed portal request to a status code and a message the page can show as written.
+fn fail_reply(f: &Fail) -> Resp {
+    let status = match f {
+        Fail::NotFound(_) => StatusCode::NOT_FOUND,
+        Fail::Invalid(_) => StatusCode::BAD_REQUEST,
+        Fail::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    error(status, &f.to_string())
+}
+
+/// Timers, alarms, and reminders: the main loop does the work, so both the voice path and the portal use
+/// one scheduler (REQ-CFG-027).
+async fn schedule(core: &Core, op: SchedOp) -> Resp {
+    match core.portal_call(Op::Sched(op)).await {
+        Ok(v) => json_reply(StatusCode::OK, &v),
+        Err(f) => fail_reply(&f),
+    }
 }
 
 async fn read_json<T: serde::de::DeserializeOwned>(

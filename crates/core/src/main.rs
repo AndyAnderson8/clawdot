@@ -5,6 +5,7 @@
 //! transcribed utterance would be: the local fast path first, then the language model if one is
 //! configured.
 
+use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, Effect, describe_fired};
 use clawdot_core::config::{Config, SatelliteConfig, SpeechConfig};
@@ -336,6 +337,73 @@ fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
             "Post events with:\n  curl -X POST {public}/hook/{endpoint} -H 'Authorization: Bearer <token>' -d '{{\"title\":\"Backup finished\",\"summary\":\"12 GB copied\"}}'\n"
         );
     }
+}
+
+/// What the Tools and Connections tabs show (REQ-CFG-029). Holds no secrets. Radio and music tools are left out
+/// of the portal (REQ-CFG-026).
+fn tools_json(brain: &Brain) -> serde_json::Value {
+    let mut list = Vec::new();
+    for t in ToolHost::tool_specs(&brain.assistant) {
+        if matches!(t.name.as_str(), "play_music" | "music_control") {
+            continue;
+        }
+        list.push(serde_json::json!({ "name": t.name, "description": t.description, "source": "builtin", "confirm": false }));
+    }
+    for t in brain.http_tools.specs() {
+        let confirm = brain.http_tools.needs_confirmation(&t.name);
+        list.push(serde_json::json!({ "name": t.name, "description": t.description, "source": "http", "confirm": confirm }));
+    }
+    for t in brain.mcp.tools() {
+        list.push(serde_json::json!({ "name": t.exposed, "description": t.description, "source": "mcp", "confirm": t.confirm }));
+    }
+    serde_json::json!({ "tools": list, "mcp": brain.mcp.report() })
+}
+
+/// A name for the device: the host name, or "ClawDot".
+fn device_name() -> String {
+    let from_env = ["HOSTNAME", "COMPUTERNAME"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok());
+    let name = from_env
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .unwrap_or_default();
+    let name: String = name.trim().chars().take(40).collect();
+    if name.is_empty() {
+        "ClawDot".to_owned()
+    } else {
+        name
+    }
+}
+
+/// The settings the device is running with, for the Settings tab (REQ-CFG-030). Names of environment
+/// variables are shown; their values never are.
+fn settings_json(args: &Args, public: &str, llm_ready: bool) -> serde_json::Value {
+    let key_present = |name: &str| std::env::var(name).is_ok_and(|v| !v.is_empty());
+    serde_json::json!({
+        "device_name": device_name(),
+        "zone": args.zone.as_deref().unwrap_or("UTC"),
+        "listen": args.listen.to_string(),
+        "public_url": public,
+        "llm": {
+            "configured": llm_ready,
+            "url": args.llm_url.as_deref().map(clawdot_core::mcp::display_url),
+            "model": args.llm_model,
+            "fallback_model": args.llm_fallback,
+            "summary_model": args.summary_model,
+            "key_env": args.key_env,
+            "key_present": key_present(&args.key_env),
+        },
+        "persona": { "custom": args.persona_file.is_some() },
+        "voice": {
+            "configured": args.speech.url.is_some(),
+            "voice": args.speech.voice,
+            "language": args.speech.language,
+            "stt_model": args.speech.stt_model,
+            "tts_model": args.speech.tts_model,
+        },
+        "speakers_listen": args.satellite.listen,
+        "limits": { "max_requests_per_day": args.max_requests, "daily_spend_usd": args.daily_spend },
+    })
 }
 
 /// The language model and everything needed to use it.
@@ -794,6 +862,8 @@ async fn main() -> ExitCode {
         "http": brain.http_tools.specs().len(),
         "mcp": brain.mcp.tools().len(),
     });
+    core.set_ui_tools(tools_json(&brain));
+    core.set_ui_settings(settings_json(&args, &public, brain.llm.is_some()));
     if let Some(input) = args.voice_in.clone() {
         return match voice_once(&mut brain, &args.speech, &input, args.voice_out.as_deref()).await {
             Ok(()) => ExitCode::SUCCESS,
@@ -906,9 +976,16 @@ async fn main() -> ExitCode {
         println!("clawdot: console ready. Type what you would say; \"quit\" or Ctrl-D to leave.");
     }
 
+    let mut portal_rx = core.attach_portal();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
+            Some(job) = portal_rx.recv() => {
+                let answer = match job.op {
+                    Op::Sched(op) => brain.assistant.admin_sched(op),
+                };
+                let _ = job.reply.send(answer);
+            }
             line = line_rx.recv(), if args.console => {
                 let Some(line) = line else { return ExitCode::SUCCESS };
                 if line.is_empty() { continue; }
