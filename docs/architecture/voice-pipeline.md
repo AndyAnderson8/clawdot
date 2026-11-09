@@ -45,8 +45,9 @@ provider has been called.
 
 ## Not built yet
 
-- The satellite that feeds live microphone audio and plays the reply.
-- Wake-word detection, audio capture and playback, and the satellite itself.
+- Wake-word detection (push-to-talk exists). The desktop satellite can feed live microphone audio and play the reply through
+  external programs ([guides/pc-voice-loop.md](../guides/pc-voice-loop.md)), but it has only been exercised with scripted
+  processes and recordings, not with a real microphone.
 - Opt-in barge-in and adaptive end-of-utterance thresholds (REQ-VOI-005, REQ-VOI-011, both later milestones).
 - Starting synthesis while the model is still streaming: replies are split into sentences after they are complete.
 
