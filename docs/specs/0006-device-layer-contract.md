@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.2 |
+| **Version** | 0.3 |
 | **Author(s)** | Maintainer direction, drafted by an agent |
 | **Created** | 2026-11-09 |
 | **Related** | [ADR-0015](../adr/0015-own-the-device-layer.md) (Proposed), [ADR-0012](../adr/0012-board-support-layer.md), [0001](0001-product-requirements.md) (REQ-BRD, REQ-VOI-013..019), [0002](0002-resource-budget.md), [0003](0003-satellite-protocol.md), [R-11](../research/11-wake-word-spike.md), [R-07](../research/07-echo-dot-gen2-hardware.md) |
@@ -64,6 +64,12 @@ IDs are stable. Priorities are MoSCoW; "Ver" is Test, Inspection, Analysis or De
 | REQ-DEV-020 | The daemon's queues MUST be bounded and drop the oldest event on overflow (REQ-BRD-016, REQ-NFR-110). On disconnect it MUST keep serving local functions (stop, mute, quiet hours, LEDs, tones) and reconnect with backoff (REQ-SAT-008). | Must | B2 | T |
 | REQ-DEV-021 | The daemon's default build MUST NOT link C code. Echo cancellation or wake-word code in C is allowed only inside one isolated optional crate that is not part of the default build, with its size and memory cost and licence recorded (ADR-0015 point 6). | Must | B2 | I |
 | REQ-DEV-022 | The daemon MUST fit the resource profile of section 6.2 on the reference board; the figures are measured at B3 and recorded in the traceability document. | Must | B3 | T/A |
+| REQ-DEV-025 | **Always-on capture.** When `always_on` is set, the audio front end MUST open the microphone once and keep it open between turns, instead of opening it at a press. Frames are read continuously: while idle they go to the wake engine (if any) and are otherwise discarded; after a wake or a press and until the core asks for audio they are kept in a queue of at most 2 s, which is sent first when the core asks, so the first words are not lost. No audio is stored beyond that queue, logged or sent to the core except as the core asked. | Must | A3 | T |
+| REQ-DEV-026 | **Half-duplex and hold-off.** While the assistant speaks, frames MUST be discarded and the engine not fed, so the device never hears itself. When the reply (or a local stop) ends, the engine MUST be reset and ignored for a hold-off of 500 ms. When the core stops asking for audio (end of speech) the engine MUST be reset too. A wake word while thinking is sent to the core, which decides (REQ-VOI-020). | Must | A3 | T |
+| REQ-DEV-027 | **Mute really mutes.** Muting MUST release the microphone (not merely stop reading it), discard the queue and reset the engine; unmuting MUST reopen it and reset the engine before any frame is fed. | Must | A3 | T |
+| REQ-DEV-028 | **Microphone faults.** A stalled, ended or failed capture in always-on mode MUST be reported once per attempt as a status line and a problem entry, and the microphone MUST be reopened with a backoff of 1 s doubling to at most 10 s, reset by the first good frame. A program that is not installed MUST be reported once and not retried. A fault is never taken for silence. | Must | A3 | T |
+| REQ-DEV-029 | **Wake word configuration.** The desktop daemon MUST load each wake model from a path given by the operator, with its manifest beside it (same name, `.json`), a recorded licence (default `Apache-2.0`, valid only for the official microWakeWord models), one sensitivity per word (default 0.5) and a refractory period (default 2000 ms). Push-to-talk MUST keep working whether or not an engine is loaded. A model that fails to load MUST stop startup with a message naming the file. The daemon MUST print the loaded words with their model hash and licence at start. | Must | A3 | T |
+| REQ-DEV-030 | **Status lines.** In verbose mode the daemon MUST print one short line per state change that a person needs (ready and how to talk, wake word heard, listening, thinking, speaking, muted, microphone fault and recovery), and MUST NOT print audio or transcripts of the user's speech. | Should | A3 | T |
 | REQ-DEV-023 | Bluetooth speaker mode (A2DP sink and source) MAY be offered, with arbitration against announcements defined: an announcement ducks or pauses the Bluetooth source and restores it. | May | B6 | T/D |
 | REQ-DEV-024 | A Spotify Connect receiver MAY be offered. It MUST be off by default, MUST show the terms-of-service notice of section 5.4 when enabled, and MUST NOT be a dependency of any other feature. Spotify control through the brain is a software feature and identical on every board. | May | B6 | I/D |
 
@@ -167,7 +173,7 @@ The daemon exposes the seam recommended by [R-11 section 9](../research/11-wake-
 5. **Provenance.** Each word reports its phrase, model hash and licence so status can show them and REQ-VOI-009 can be checked at startup.
 6. **Push-to-talk is another source of the same event** (a reserved word id, score 1.0), so there is one entry point.
 
-The daemon ships the seam and push-to-talk. The first engine, microWakeWord on a small Rust runtime, is specified in [0007](0007-wake-word-runtime.md) and is behind an off-by-default cargo feature; feeding it needs always-on capture, which is a later step (A3 on the PC, B3 on the Dot).
+The daemon ships the seam and push-to-talk. The first engine, microWakeWord on a small Rust runtime, is specified in [0007](0007-wake-word-runtime.md) and is behind an off-by-default cargo feature; feeding it needs always-on capture, which REQ-DEV-025..030 specify and which is built for the PC (A3); on the Dot it waits for B3.
 
 ## 8. Wire additions this contract needs (to be made in spec 0003)
 
@@ -220,3 +226,4 @@ The format is defined by [`schemas/board/board-1.schema.json`](../../schemas/boa
 |---|---|---|
 | 0.1 | 2026-11-09 | First draft from ADR-0015's proposed text, refined: REQ-DEV-001..024, capability model, minimum hardware profile, board-file schema 1. |
 | 0.2 | 2026-11-09 | Section 7 points at spec 0007 for the first engine (REQ-DEV-017 is unchanged); the engine is a feature-gated adapter, not part of the default build. |
+| 0.3 | 2026-11-09 | REQ-DEV-025..030: always-on capture, half-duplex hold-off, mute, microphone faults, wake word configuration and status lines, for the PC voice loop. |
