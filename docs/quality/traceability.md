@@ -68,7 +68,7 @@ Legend: **Done** = implemented and tested. **Partial** = some of the requirement
 
 ## Voice (VOI), config (CFG), music (MUS), extensions (EXT)
 
-Not started, except: **EXT-001** (no loaded third-party code) holds trivially, **EXT-004** (adapters as data) is Done, and **SEC-007** (no telemetry) holds because nothing sends anything. The voice pipeline needs audio hardware and a wake-word runtime (SPIKE-002, SPIKE-006), the portal is M4, and music is M5.
+Not started, except: **CFG-014..017** (listen default and bind failure message, bind before token and endpoint commands exit, snippet URL from `--listen`, console `quit`) are Done in `crates/core/src/main.rs` and verified by `crates/core/tests/binary.rs` (`a_taken_port_fails_without_revealing_a_token`, `snippets_follow_the_listen_address`, `quit_leaves_the_console`); **EXT-001** (no loaded third-party code) holds trivially, **EXT-004** (adapters as data) is Done, and **SEC-007** (no telemetry) holds because nothing sends anything. The voice pipeline needs audio hardware and a wake-word runtime (SPIKE-002, SPIKE-006), the portal is M4, and music is M5.
 
 ## Security and non-functional
 

@@ -63,7 +63,9 @@ fi
 data=$(mktemp -d)
 out="$data/out.txt"
 port=$((20000 + RANDOM % 30000))
-"$host_bin" --no-console --listen "127.0.0.1:$port" --data-dir "$data/state" --create-endpoint claude-code >"$out" 2>&1 &
+# --create-endpoint prints the token and exits (REQ-CFG-015), so create first, then serve.
+"$host_bin" --no-console --data-dir "$data/state" --create-endpoint claude-code >"$out" 2>&1
+"$host_bin" --no-console --listen "127.0.0.1:$port" --data-dir "$data/state" >>"$out" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; rm -rf "$data"' EXIT
 

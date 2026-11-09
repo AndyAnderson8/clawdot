@@ -42,11 +42,11 @@ USAGE:
 OPTIONS:
     --config FILE              JSON configuration file (flags override it); see docs/architecture/configuration.md
     --data-dir DIR             Where state is kept (default: ./clawdot-data)
-    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:8080)
-    --public-url URL           How agents reach this device, used in printed snippets
+    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:8765)
+    --public-url URL           How agents reach this device, used in printed snippets (default: from --listen)
     --zone NAME                IANA time zone, for example America/New_York (default: UTC)
-    --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once
-    --rotate-endpoint NAME     Issue a new token for an endpoint
+    --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once and exits
+    --rotate-endpoint NAME     Issue a new token for an endpoint, print it once, and exit
     --rotate-admin-token       Issue a new web UI administrator token (printed once)
     --voice-in FILE            Answer one recorded utterance (WAV, mono 16-bit 16 kHz) and exit; needs a `speech` config
     --voice-out FILE           With --voice-in, write the spoken reply to this WAV file
@@ -78,6 +78,8 @@ struct Args {
     create: Vec<String>,
     rotate: Vec<String>,
     rotate_admin: bool,
+    /// An endpoint command was given on the command line: print and exit instead of serving.
+    manage: bool,
     console: bool,
     llm_url: Option<String>,
     llm_model: Option<String>,
@@ -99,7 +101,7 @@ struct Args {
 fn parse() -> Result<Args, String> {
     let mut a = Args {
         data_dir: PathBuf::from("clawdot-data"),
-        listen: "127.0.0.1:8080"
+        listen: "127.0.0.1:8765"
             .parse()
             .map_err(|_| "internal: bad default address".to_owned())?,
         public_url: None,
@@ -107,6 +109,7 @@ fn parse() -> Result<Args, String> {
         create: Vec::new(),
         rotate: Vec::new(),
         rotate_admin: false,
+        manage: false,
         console: true,
         llm_url: None,
         llm_model: None,
@@ -146,8 +149,14 @@ fn parse() -> Result<Args, String> {
             }
             "--public-url" => a.public_url = Some(value("--public-url")?),
             "--zone" => a.zone = Some(value("--zone")?),
-            "--create-endpoint" => a.create.push(value("--create-endpoint")?),
-            "--rotate-endpoint" => a.rotate.push(value("--rotate-endpoint")?),
+            "--create-endpoint" => {
+                a.create.push(value("--create-endpoint")?);
+                a.manage = true;
+            }
+            "--rotate-endpoint" => {
+                a.rotate.push(value("--rotate-endpoint")?);
+                a.manage = true;
+            }
             "--rotate-admin-token" => a.rotate_admin = true,
             "--voice-in" => a.voice_in = Some(PathBuf::from(value("--voice-in")?)),
             "--voice-out" => a.voice_out = Some(PathBuf::from(value("--voice-out")?)),
@@ -243,6 +252,38 @@ Administrator token (shown only now):
 "
     );
     Ok(())
+}
+
+/// True if a console line asks to leave (REQ-CFG-017).
+fn is_quit(line: &str) -> bool {
+    let word = line.trim().trim_end_matches(['.', '!']);
+    word.eq_ignore_ascii_case("quit") || word.eq_ignore_ascii_case("exit")
+}
+
+/// The base URL printed in snippets when `--public-url` is absent, and whether the host was assumed
+/// because the listen address (`0.0.0.0`, `[::]`) cannot be dialled as written (REQ-CFG-016).
+fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
+    if listen.ip().is_unspecified() {
+        (format!("http://clawdot.local:{}", listen.port()), true)
+    } else {
+        (format!("http://{listen}"), false)
+    }
+}
+
+const DEFAULT_PORT: u16 = 8765;
+
+/// An actionable message for a failed bind (REQ-CFG-014).
+fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
+    let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
+        format!(
+            "another program is using port {}; choose a free one, for example --listen {}",
+            addr.port(),
+            SocketAddr::new(addr.ip(), DEFAULT_PORT)
+        )
+    } else {
+        "choose another address with --listen (or `listen` in the configuration file)".to_owned()
+    };
+    format!("cannot listen on {addr}: {e}. {hint}")
 }
 
 fn zone_for(name: Option<&str>) -> Result<Box<dyn Zone + Send + Sync>, String> {
@@ -564,10 +605,20 @@ async fn main() -> ExitCode {
         }
     };
 
-    let public = args
-        .public_url
-        .clone()
-        .unwrap_or_else(|| format!("http://{}", args.listen));
+    let public = match &args.public_url {
+        Some(u) => u.clone(),
+        None => {
+            let (url, assumed) = public_url_from_listen(args.listen);
+            if assumed {
+                eprintln!(
+                    "clawdot: {} is not reachable as written, so snippets use {url}; pass --public-url to change that",
+                    args.listen.ip()
+                );
+            }
+            url
+        }
+    };
+    let mut failed = false;
     for spec in &args.create {
         let (name, adapter) = spec.split_once(':').unwrap_or((spec, spec));
         let adapter = if matches!(adapter, "claude-code" | "generic") {
@@ -577,19 +628,24 @@ async fn main() -> ExitCode {
         };
         match core.create_endpoint(name, adapter) {
             Ok((_, token)) => print_snippet(&public, name, adapter, &token),
-            Err(e) => eprintln!("clawdot: endpoint `{name}`: {e}"),
+            Err(e) => {
+                eprintln!("clawdot: endpoint `{name}`: {e}");
+                failed = true;
+            }
         }
     }
     for name in &args.rotate {
         match core.rotate_endpoint(name) {
             Ok(token) => println!("New token for `{name}` (shown once): {token}"),
-            Err(e) => eprintln!("clawdot: endpoint `{name}`: {e}"),
+            Err(e) => {
+                eprintln!("clawdot: endpoint `{name}`: {e}");
+                failed = true;
+            }
         }
     }
-
-    if let Err(e) = setup_admin(&core, &args.data_dir, args.rotate_admin, &public) {
-        eprintln!("clawdot: web UI administrator token: {e}");
-        return ExitCode::from(1);
+    if args.manage {
+        // A management command: the token is printed; do not start a server (REQ-CFG-015).
+        return ExitCode::from(u8::from(failed));
     }
 
     let limits = UsageLimits {
@@ -723,36 +779,15 @@ async fn main() -> ExitCode {
         };
     }
 
+    // Bind before anything is created or printed, so a server that cannot start never reveals a token
+    // (REQ-CFG-015).
     let listener = match TcpListener::bind(args.listen).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("clawdot: cannot listen on {}: {e}", args.listen);
+            eprintln!("clawdot: {}", bind_error(args.listen, &e));
             return ExitCode::from(1);
         }
     };
-    println!(
-        "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
-        args.listen,
-        core.endpoints().len(),
-        if brain.llm.is_some() {
-            "connected"
-        } else {
-            "not configured"
-        }
-    );
-    let server_core = Arc::clone(&core);
-    tokio::spawn(async move {
-        if let Err(e) = serve(
-            listener,
-            server_core,
-            ServeOptions::default(),
-            std::future::pending(),
-        )
-        .await
-        {
-            eprintln!("clawdot: server stopped: {e}");
-        }
-    });
 
     // Satellites (speakers) connect here; their questions come back to this loop through `ask_rx`.
     let (ask_tx, mut ask_rx) = mpsc::channel::<Ask>(8);
@@ -806,6 +841,34 @@ async fn main() -> ExitCode {
         }
     }
 
+    if let Err(e) = setup_admin(&core, &args.data_dir, args.rotate_admin, &public) {
+        eprintln!("clawdot: web UI administrator token: {e}");
+        return ExitCode::from(1);
+    }
+    println!(
+        "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
+        args.listen,
+        core.endpoints().len(),
+        if brain.llm.is_some() {
+            "connected"
+        } else {
+            "not configured"
+        }
+    );
+    let server_core = Arc::clone(&core);
+    tokio::spawn(async move {
+        if let Err(e) = serve(
+            listener,
+            server_core,
+            ServeOptions::default(),
+            std::future::pending(),
+        )
+        .await
+        {
+            eprintln!("clawdot: server stopped: {e}");
+        }
+    });
+
     let (line_tx, mut line_rx) = mpsc::channel::<String>(8);
     if args.console {
         std::thread::spawn(move || {
@@ -817,7 +880,7 @@ async fn main() -> ExitCode {
                 buf.clear();
             }
         });
-        println!("clawdot: console ready. Type what you would say; Ctrl-D to quit.");
+        println!("clawdot: console ready. Type what you would say; \"quit\" or Ctrl-D to leave.");
     }
 
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -826,6 +889,7 @@ async fn main() -> ExitCode {
             line = line_rx.recv(), if args.console => {
                 let Some(line) = line else { return ExitCode::SUCCESS };
                 if line.is_empty() { continue; }
+                if is_quit(&line) { return ExitCode::SUCCESS; }
                 let reply = brain.respond(&line).await;
                 if reply.say.is_empty() {
                     println!("speaker> (done)");
@@ -881,5 +945,51 @@ async fn main() -> ExitCode {
                 core.maintain();
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn quit_and_exit_leave_the_console() {
+        for l in ["quit", "exit", "Quit", " EXIT ", "quit."] {
+            assert!(is_quit(l), "{l}");
+        }
+        for l in ["quit smoking", "what time is it", "exit the building", ""] {
+            assert!(!is_quit(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn snippet_urls_follow_the_listen_address() {
+        assert_eq!(
+            public_url_from_listen(addr("192.168.1.20:9000")),
+            ("http://192.168.1.20:9000".to_owned(), false)
+        );
+        assert_eq!(
+            public_url_from_listen(addr("[fe80::1]:9000")),
+            ("http://[fe80::1]:9000".to_owned(), false)
+        );
+        for unspecified in ["0.0.0.0:9000", "[::]:9000"] {
+            assert_eq!(
+                public_url_from_listen(addr(unspecified)),
+                ("http://clawdot.local:9000".to_owned(), true)
+            );
+        }
+    }
+
+    #[test]
+    fn a_taken_port_gets_an_actionable_message() {
+        let e = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        let m = bind_error(addr("0.0.0.0:8080"), &e);
+        assert!(m.contains("0.0.0.0:8080"), "{m}");
+        assert!(m.contains("--listen 0.0.0.0:8765"), "{m}");
     }
 }

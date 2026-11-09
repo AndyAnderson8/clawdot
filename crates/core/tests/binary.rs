@@ -33,10 +33,53 @@ fn post_hook(port: u16, token: &str, body: &str) -> u16 {
         .unwrap_or(0)
 }
 
+/// Run `clawdot --create-endpoint claude-code` against `data_dir`: it must print the token and exit
+/// by itself (REQ-CFG-015). Returns the token.
+fn create_endpoint(data_dir: &std::path::Path) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--no-console",
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "--create-endpoint",
+            "claude-code",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "--create-endpoint should exit by itself"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success());
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    out.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("cdt_"))
+        .expect("the endpoint token is printed once")
+        .to_owned()
+}
+
 #[test]
 fn the_binary_serves_hooks_and_announces_them() {
     let port = free_port();
     let dir = std::env::temp_dir().join(format!("clawdot-bin-test-{}", std::process::id()));
+    let token = create_endpoint(&dir);
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
@@ -44,8 +87,6 @@ fn the_binary_serves_hooks_and_announces_them() {
             &format!("127.0.0.1:{port}"),
             "--data-dir",
             dir.to_str().unwrap(),
-            "--create-endpoint",
-            "claude-code",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -61,20 +102,15 @@ fn the_binary_serves_hooks_and_announces_them() {
         }
     });
 
-    let mut token = None;
     let mut listening = false;
     let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !(token.is_some() && listening) {
+    while Instant::now() < deadline && !listening {
         if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            if token.is_none() && line.trim_start().starts_with("cdt_") {
-                token = Some(line.trim().to_owned());
-            }
             if line.contains("listening on") {
                 listening = true;
             }
         }
     }
-    let token = token.expect("the binary should print the endpoint token once");
     assert!(listening, "the binary should report that it is listening");
 
     assert_eq!(post_hook(port, &token, STOP), 202);
@@ -721,6 +757,7 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
         ),
     )
     .unwrap();
+    let token = create_endpoint(&dir.join("state"));
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
@@ -730,8 +767,6 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
             &format!("127.0.0.1:{http_port}"),
             "--data-dir",
             dir.join("state").to_str().unwrap(),
-            "--create-endpoint",
-            "claude-code",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -745,17 +780,13 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
             let _ = tx.send(line);
         }
     });
-    let (mut token, mut ready) = (None, false);
+    let mut ready = false;
     let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !(token.is_some() && ready) {
+    while Instant::now() < deadline && !ready {
         if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            if token.is_none() && line.trim_start().starts_with("cdt_") {
-                token = Some(line.trim().to_owned());
-            }
             ready |= line.contains("satellites connect to");
         }
     }
-    let token = token.expect("endpoint token");
     assert!(ready);
 
     // The satellite connects and waits.
@@ -1107,4 +1138,112 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(spoken, "the test phrase should be spoken");
+}
+
+/// A taken port stops startup with a message that names `--listen`, and no administrator token is
+/// created or printed for a server that never started (REQ-CFG-014, REQ-CFG-015).
+#[test]
+fn a_taken_port_fails_without_revealing_a_token() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let dir = std::env::temp_dir().join(format!("clawdot-bind-{}", std::process::id()));
+    let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--no-console",
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--data-dir",
+            dir.to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(stderr.contains("--listen"), "{stderr}");
+    assert!(
+        !stdout.contains("cdt_"),
+        "no token may be printed: {stdout}"
+    );
+    assert!(!dir.join("admin-token.hash").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Printed snippets use the listen address when `--public-url` is absent (REQ-CFG-016), and the
+/// command exits after printing (REQ-CFG-015).
+#[test]
+fn snippets_follow_the_listen_address() {
+    let dir = std::env::temp_dir().join(format!("clawdot-snippet-{}", std::process::id()));
+    let run = |n: u8, listen: &str, extra: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+            .args([
+                "--no-console",
+                "--listen",
+                listen,
+                "--data-dir",
+                dir.join(n.to_string()).to_str().unwrap(),
+                "--create-endpoint",
+                "claude-code",
+            ])
+            .args(extra)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let lan = run(1, "192.168.1.20:9000", &[]);
+    assert!(
+        lan.contains("http://192.168.1.20:9000/hook/claude-code"),
+        "{lan}"
+    );
+    assert!(!lan.contains("127.0.0.1:8080"));
+    let any = run(2, "0.0.0.0:9000", &[]);
+    assert!(
+        any.contains("http://clawdot.local:9000/hook/claude-code"),
+        "{any}"
+    );
+    let explicit = run(3, "0.0.0.0:9000", &["--public-url", "http://dot:1"]);
+    assert!(
+        explicit.contains("http://dot:1/hook/claude-code"),
+        "{explicit}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Typing `quit` leaves the console (REQ-CFG-017).
+#[test]
+fn quit_leaves_the_console() {
+    let port = free_port();
+    let dir = std::env::temp_dir().join(format!("clawdot-quit-{}", std::process::id()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .args([
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--data-dir",
+            dir.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    child.stdin.as_mut().unwrap().write_all(b"quit\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break Some(s);
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(status.expect("`quit` should end the program").success());
 }
