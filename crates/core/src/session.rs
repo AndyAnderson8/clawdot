@@ -225,6 +225,18 @@ impl PendingAction {
     pub fn tool(&self) -> &str {
         &self.tool
     }
+
+    /// The exact arguments it will run with.
+    #[must_use]
+    pub fn args(&self) -> &Value {
+        &self.args
+    }
+
+    /// The tier it was judged at.
+    #[must_use]
+    pub fn tier(&self) -> Tier {
+        self.tier
+    }
 }
 
 /// Where completions come from. Implemented over HTTP in [`crate::transport`] and by fakes in tests.
