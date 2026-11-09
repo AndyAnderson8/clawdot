@@ -221,7 +221,7 @@ fn new_session_id() -> String {
 }
 
 /// Read the next message, or `None` when the peer closed the connection.
-async fn next_message<R: AsyncRead + Unpin>(
+pub(crate) async fn next_message<R: AsyncRead + Unpin>(
     r: &mut R,
     dec: &mut Decoder,
 ) -> Result<Option<Message>, String> {

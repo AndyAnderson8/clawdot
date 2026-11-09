@@ -9,6 +9,8 @@ use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, Effect, describe_fired};
 use clawdot_core::config::{Config, SatelliteConfig, SpeechConfig};
+#[cfg(feature = "esphome-satellite")]
+use clawdot_core::esphome_cfg::EsphomeConfig;
 use clawdot_core::extensions::{ExtOp, Extensions, WithPolicy};
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
@@ -109,6 +111,8 @@ struct Args {
     stations: Vec<Station>,
     speech: SpeechConfig,
     satellite: SatelliteConfig,
+    #[cfg(feature = "esphome-satellite")]
+    esphome: EsphomeConfig,
     voice_in: Option<PathBuf>,
     voice_out: Option<PathBuf>,
     max_requests: u32,
@@ -144,6 +148,8 @@ fn parse() -> Result<Args, String> {
         stations: Vec::new(),
         speech: SpeechConfig::default(),
         satellite: SatelliteConfig::default(),
+        #[cfg(feature = "esphome-satellite")]
+        esphome: EsphomeConfig::default(),
         voice_in: None,
         voice_out: None,
         max_requests: UsageLimits::default().max_requests_per_day,
@@ -258,6 +264,8 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.stations.clone_from(&c.stations);
     a.speech.clone_from(&c.speech);
     a.satellite.clone_from(&c.satellite);
+    #[cfg(feature = "esphome-satellite")]
+    a.esphome.clone_from(&c.esphome);
     a.create.extend(c.endpoints.iter().cloned());
     let mut put = |k: &str, v: Option<serde_json::Value>| {
         if let Some(v) = v {
@@ -1133,6 +1141,33 @@ async fn main() -> ExitCode {
                 }
             });
             Ok::<(), String>(())
+        };
+        if let Err(e) = started.await {
+            eprintln!("clawdot: {e}");
+            return ExitCode::from(1);
+        }
+    }
+
+    // ESPHome voice satellites (optional feature; spec 0004) share the satellite pipeline and announcer.
+    #[cfg(feature = "esphome-satellite")]
+    if !args.esphome.is_empty() {
+        let started = async {
+            let (stt, tts) = build_speech(&args.speech)?;
+            let mut settings = satellite::Settings {
+                announcer: announcer.clone(),
+                ..satellite::Settings::default()
+            };
+            if let Some(s) = args.satellite.follow_up_secs {
+                settings.dialog.follow_up_secs = s;
+            }
+            clawdot_core::esphome::start(
+                &args.esphome,
+                Arc::new(stt),
+                Arc::new(tts),
+                ask_tx.clone(),
+                settings,
+            )
+            .await
         };
         if let Err(e) = started.await {
             eprintln!("clawdot: {e}");

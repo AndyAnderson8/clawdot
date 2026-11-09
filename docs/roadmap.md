@@ -25,8 +25,8 @@ Work is now in three phases: **A** (PC loop, hardware-agnostic core), **B** (boa
 | M3 Time and local intelligence | A7 (offline mode, eval set, persona); scheduler is built | AC-2, AC-4, AC-7, AC-8, AC-9 are checked in A7 |
 | M4 Web UI | A6 | Device auto-detection moves to B1 |
 | M5 Tools and music | A7 (radio, recipes) | Radio and MCP/HTTP tools are built |
-| M6 Hardening and Raspberry Pi | C; the Pi item is B6 | |
-| (new) | A1 process and safety; B0 to B5 Echo Dot Gen 2 | |
+| M6 Hardening and Raspberry Pi | C; the Pi item is B7 | |
+| (new) | A1 process and safety; B0 to B8 device layer and Echo Dot Gen 2 | |
 
 Release mapping in [git-workflow.md](process/git-workflow.md#7-versioning-and-tags) uses the old milestone names; read it through this table.
 
@@ -47,7 +47,7 @@ Foundations
 Feasibility spikes (each ends with a written finding)
 - [ ] SPIKE-003: TLS + HTTP client/server footprint on armv7 (x86_64 musl with rustls measured: idle 2.8 MiB; armv7 run still to do; the full binary has since run on a real Echo Dot at about 1.4 MB idle RSS, see the baseline below, but that is not a spike finding)
 - [ ] SPIKE-002: wake-word runtime footprint on armv7 (PC evaluation in A3 first)
-- [ ] SPIKE-006: audio capture and playback on armv7 Linux (PC in A2 first, device in B0/B5, if the base leaves any audio to us)
+- [ ] SPIKE-006: audio capture and playback on armv7 Linux (PC in A2 first, device in B3, through the portable daemon)
 - [ ] SPIKE-005: Wyoming-compatible framing with token `hello` and TLS; client code size. The frame JSON Schemas and the conformance harness now exist (TASK-004, TASK-005, below), which narrows what is left to the size and TLS measurements
 - [x] Baseline budget measurement: x86_64 musl 2.35 MiB binary, 3.8 MiB peak RSS under load, armv7 binary 1.89 MiB (see the [overnight report](reports/2026-11-07-overnight-session.md))
   - *Status, full feature set (`scripts/budget.sh`, x86_64 musl):* binary 2.62 MiB, idle RSS 3.0 MiB, peak 4.3 MiB under load, armv7 binary 2.10 MiB. The ratchet limits have not been tightened yet.
@@ -95,6 +95,8 @@ Everything in this phase runs on a desktop. Nothing here may depend on a particu
 
 **Exit:** a microphone-to-file and file-to-speaker round trip on a PC through the trait, with a written SPIKE-006 PC finding. (Not yet claimed anywhere: no audio has run.)
 
+*Status: built, not yet run on real audio.* The traits (`AudioIn`, `AudioOut`), the command backend (arecord, aplay, sox, ffmpeg, ffplay from `PATH`), the WAV backend and push-to-talk are in `crates/satellite` (REQ-VOI-013..018), tested with scripted child processes. The manual smoke test is [guides/pc-voice-loop.md](guides/pc-voice-loop.md). Still open: the first real run, and the SPIKE-006 PC measurements (latency, underruns over 10 minutes, RSS delta). The `tinycap`/`tinyplay` presets for the Dot are not written.
+
 ## A3. Wake word
 **Goal:** hands-free start, reusing an existing model.
 
@@ -104,6 +106,8 @@ Everything in this phase runs on a desktop. Nothing here may depend on a particu
 
 **Exit:** a written SPIKE-002 PC finding; wake or hotkey starts a turn on a PC.
 
+*Status:* push-to-talk exists on the desktop satellite (`--ptt`, Enter to talk). The seam for a wake word is `front::Trigger` (REQ-VOI-017): a detector that implements `poll` and reads frames from the same `AudioIn` replaces `LineTrigger`. What remains is everything else in A3: the engine evaluation, a detector, keeping the microphone open between turns (today it opens at the press and closes after the utterance), and the SPIKE-002 finding.
+
 ## A4. End-to-end voice turn on a PC (old M1 exit)
 REQ-VOI-001..004, 006..010, 012, REQ-AST-001..003, 006, 007, 009, REQ-CFG-007, REQ-NFR-001/003/005/007, REQ-SEC-001..003, 006, 007
 
@@ -112,7 +116,7 @@ REQ-VOI-001..004, 006..010, 012, REQ-AST-001..003, 006, 007, 009, REQ-CFG-007, R
 
 **Exit:** AC-1 and AC-10 pass on a PC.
 
-*Status: partly built.* Done and tested against fakes: in-process and remote (TCP) transport, voice dialog state machine, energy-based endpointing, STT/TTS clients, streaming LLM client, half-duplex, JSON config file and the reference satellite (`crates/core/src/{voice,vad,speech,satellite,transport,config}.rs`, `crates/satellite`, [voice-pipeline](architecture/voice-pipeline.md)). The satellite frame JSON Schemas (`schemas/satellite`, TASK-004) and the conformance harness that checks the reference satellite against a fake core (TASK-005) are done. Not done: real microphone and speaker I/O (A2), wake-word detection (A3), a real STT/TTS provider run, and the ratchet. AC-1 and AC-10 are not demonstrated anywhere.
+*Status: partly built.* Done and tested against fakes: in-process and remote (TCP) transport, voice dialog state machine, energy-based endpointing, STT/TTS clients, streaming LLM client, half-duplex, JSON config file and the reference satellite (`crates/core/src/{voice,vad,speech,satellite,transport,config}.rs`, `crates/satellite`, [voice-pipeline](architecture/voice-pipeline.md)). The satellite frame JSON Schemas (`schemas/satellite`, TASK-004) and the conformance harness that checks the reference satellite against a fake core (TASK-005) are done. Real microphone and speaker I/O now exists through the desktop satellite (A2 status) but has not run on real audio. Not done: wake-word detection (A3), a real STT/TTS provider run, and the ratchet. AC-1 and AC-10 are not demonstrated anywhere.
 
 ## A5. Agent loop by voice with Claude Code (old M2 exit)
 REQ-INB-001..018, 020, REQ-SEC-004, REQ-EXT-004, 006
@@ -161,14 +165,14 @@ Announce and integrations
 
 # Phase B: Board layer and the Echo Dot Gen 2
 
-*Reworked 2026-11-09 from the recommendation in [R-08](research/08-existing-echo-dot-projects.md) section 9. The earlier plan (own audio, own LED ring, staged Alexa removal on Fire OS) is superseded; see the note at the end of this phase. Nothing here is decided beyond what the maintainer approves; the open points are in [open-questions.md](open-questions.md).*
+*Reworked 2026-11-09 from R-08 section 9, then revised the same day for the maintainer's decision to own the device layer ([ADR-0015](adr/0015-own-the-device-layer.md), Proposed): one portable device daemon on every Linux board, a board file and an image recipe per device. The earlier plan (own audio and LEDs on Fire OS) is superseded; see the note at the end of this phase. Nothing here is decided beyond what the maintainer approves; the open points are in [open-questions.md](open-questions.md).*
 
-Starts after the PC loop works (A4 and A5 at least) and the feasibility gate for the device spikes is Go. Hardware facts are in [R-07](research/07-echo-dot-gen2-hardware.md), the unlock history in [R-09](research/09-echo-unlock-history.md), and the existing Dot projects in R-08. The board design is [ADR-0012](adr/0012-board-support-layer.md), [board-support](architecture/board-support.md) and spec REQ-BRD (all Proposed). **Every step that changes the device, and every single device write inside a step, needs the maintainer's explicit go. Stop and ask before each one.**
+Starts after the PC loop works (A4 and A5 at least) and the feasibility gate for the device spikes is Go. The sequence: finish the PC voice loop; build the portable daemon on PC and Pi (B2) so the contract is real; run the TECHO5 trial (B0, which needs the maintainer and can run beside B2) to learn the Dot; spike the wake word and echo canceller on the Dot (B3) and pass the [ADR-0015](adr/0015-own-the-device-layer.md) gate; then bring up the Dot on T5D's OS image with our daemon (B4) and add images per board. Hardware facts are in [R-07](research/07-echo-dot-gen2-hardware.md), the unlock history in [R-09](research/09-echo-unlock-history.md), and the existing Dot projects in R-08. The device layer decision is ADR-0015; the board design is [ADR-0012](adr/0012-board-support-layer.md), [board-support](architecture/board-support.md) and spec REQ-BRD (all Proposed). **Every step that changes the device, and every single device write inside a step, needs the maintainer's explicit go. Stop and ask before each one.**
 
 The maintainer's unit is a Dot 2 that is already unlocked: rooted Fire OS with TWRP. It is the test unit for B0 and the entry state for B3.
 
 ## B0. Trial of the TECHO5 Dot base image (spike)
-Goal: find out whether a ready-made Dot image can be ClawDot's front end, instead of ClawDot owning the Dot's audio and LEDs.
+Goal: learn the hardware and the image and update process from a working Dot image (TECHO5), so ClawDot's own daemon and board file can be built from its findings. B0 is the gate input for [ADR-0015](adr/0015-own-the-device-layer.md); it is learning from unmodified TECHO5, not choosing a permanent front end.
 
 - Trial the TECHO5 Dot (T5D) base image on the maintainer's unit, which is rooted Fire OS with TWRP. Installing it writes to the recovery partition and replaces the system, so **each device write waits for the maintainer's explicit go**
 - Before any write: full partition backups taken and checked, and the installer's `--dry-run` read first
@@ -176,7 +180,7 @@ Goal: find out whether a ready-made Dot image can be ClawDot's front end, instea
 - Measure idle RSS, CPU and boot time; check whether the base's `echod` serves an ESPHome client that is not Home Assistant (voice subscribe, announce, ring entity); check how the Noise key is handled
 - This trial is also how Alexa gets wiped: **removing Alexa is achieved by installing the base image, not by our own staged removal on Fire OS**, and every step of it is gated on the maintainer's go
 
-**Exit:** a written spike finding and an ADR-0013 proposal "Dot front end base" (Proposed). If `echod` cannot serve a non-Home-Assistant client at all, fall back to the EchoMuse controller route for early testing and to replacing `echod` on the T5D rootfs as the long-term plan (R-08 section 4.5), reusing B1.
+**Exit:** a written spike finding that records mixer routes, LED format, button codes, channel map, the image and update flow, and idle figures, as input to the B3 gate. (The "Dot front end base" ADR proposed in R-08 is replaced by ADR-0015.) If T5D cannot be installed or restored safely, evaluate EchoMuse or LibreEcho instead.
 
 ## B1. Board crate (reduced)
 REQ-BRD-001..014
@@ -189,47 +193,66 @@ REQ-BRD-001..014
 
 **Exit:** the desktop board drives the core on a PC through the trait; ADR-0012 Accepted; budget impact measured, not estimated.
 
-## B2. ESPHome native-API voice-satellite client
-Goal: a Dot running a base image (or any ESPHome voice satellite, such as a Pi running linux-voice-assistant) can use ClawDot as its brain without Home Assistant. Spec-level item: see the [future-scope](future-scope.md) row and R-08 sections 4.2 and 4.3.
+## B2. Device contract and the portable daemon, on PC and Pi first
+REQ-DEV-001..012 (proposed in [ADR-0015](adr/0015-own-the-device-layer.md); a new spec `0006-device-layer-contract.md` lands with this step)
 
-- A new optional core feature (`esphome-satellite`) behind the existing satellite interface: frame layer, minimal hand-written protobuf for about 20 messages, voice session (subscribe, wake, audio, events, TTS return, abort, reconnect), announce-then-listen for the inbox, media player play, optional light command
-- Estimate **about 1,100 to 1,300 lines**. Not in the default Dot budget unless chosen
-- **Optional Noise encryption on `ring`** (the `Noise_NNpsk0_25519_ChaChaPoly_SHA256` initiator, tested with published vectors), with no `snow` and no `prost` so the dependency budget is protected. Revisit with measured binary size once code exists
-- **Test against a fake ESPHome server on a PC first**, then against `aioesphomeapi` as the peer, before any real device is involved
+- The **device layer contract** as a spec, the **board-file JSON Schema** (mixer routes, LED frame format, button codes, mic channel map, forbidden paths) and a **device conformance suite** that runs against a fake board on a PC
+- The **portable device daemon** (Rust): ALSA in and out, tones, ducking, buttons and LED states driven only from the board file, local stop without the wake word, quiet-hours hook, native satellite protocol. **No per-device code paths**
+- Echo cancellation and noise suppression behind **one isolated crate** that wraps a proven C library (WebRTC audio processing or SpeexDSP); it is the only place allowed `unsafe`; notices in `NOTICE`
+- Runs first on the PC and then on a Raspberry Pi through board files, so the contract is exercised before any Dot work. Spec 0003 amendments (logical LED states, tone, quiet hours, update messages) as minor `clawdot.` additions
+- The default core build and budget are unaffected (REQ-NFR-115)
 
-**Exit:** a desktop run in which a real ESPHome satellite wakes, a voice turn runs through ClawDot's pipeline, and an inbox announcement gets a spoken reply.
+**Exit:** the PC and the Pi run the full voice loop through the daemon and a board file, and the conformance suite passes against a fake board.
 
-## B3. Per-device install guide
-- **docs/guides/install-on-echo-dot-2.md**, plus a guide template for other devices
-- **Starts from the already-unlocked state** (adb root, TWRP), the state R-07 found. It links the unlock procedure and does not redistribute it
-- **Pins the firebreak version** the guide was tested with (v1.0.0 is current at the time of writing), links the upstream projects and **credits** the people involved (R-09 section 9)
-- Install the base image, pair ClawDot, open the firewall rule for the ClawDot listener (default port 3335), and the restore path from B0
-- A short frozen developer path for rooted Fire OS, as R-07 describes it
+## B3. Daemon feasibility spike on the Dot (the main unknowns)
+- Measure on the Dot (maintainer's go for every device write): wake-word engine CPU and RSS (research says about 23 to 30 percent of one core), echo-canceller cost on the Cortex-A53, capture-to-wake latency, with the base OS idle figures from B0
+- Pick the wake-word runtime: pure Rust, then an engine already in the base, then a statically linked C runtime behind the isolated crate (ADR-0014 point 4). Models only with recorded licence provenance; no pretrained openWakeWord models are bundled
+- Decide whether AEC fits at all on the Dot; if not, barge-in stays off and the board file says so
 
-**Exit:** a fresh unlocked Dot reaches a voice turn following only the guide.
+**Exit:** a written spike finding and the **go/no-go gate of [ADR-0015](adr/0015-own-the-device-layer.md)**. Go moves the ADR toward Accepted; no-go falls back to a fork of `echod` (kept in the image repository) or to the unmodified-base route in B8.
 
-## B4. Dot features through the base
-- LED states (`inbox`, `listening`, `error`) through ring entities if the base exposes them; mute state from the entity; volume; clock trust via an HTTPS `Date` check
-- **Wake word choice with licence-clean models.** **No pretrained openWakeWord models are bundled** (their licence is not clean); the guide says how to pick or train one, and the choice is recorded with licence provenance (EPIC-001)
-- Anything the base cannot do becomes a documented gap or an upstream request, not our code
-- **Bluetooth speaker mode** (a phone plays through the Dot as an A2DP sink, and the Dot can play to a Bluetooth speaker) is a supported capability of the base image and stays available beside ClawDot; how it shares the speaker with announcements is measured in B0 ([trial plan](guides/b0-techo5-trial-plan.md))
+## B4. Image repository and Dot bring-up
+- **The maintainer creates the image repository** (working name `clawdot-os`); no agent creates repositories. This step starts only after the gate in B3 is Go
+- The **Echo Dot 2 recipe** starts from T5D's OS image (kernel, rootfs, install and update flow, MIT, notices kept) with **our daemon in place of `echod`**, and a board file built from T5D's findings (mixer routes, LED format, button codes, channel map). Strip what we do not want; brand it
+- Track upstream T5D; send generic fixes back; `NOTICE` credit; **never redistribute Amazon files or unlock tooling**, and never a boot image containing Amazon's kernel (publish the recipe)
+- **docs/guides/install-on-echo-dot-2.md** plus a guide template for other devices; starts from the already-unlocked state, links the unlock procedure, pins the firebreak version, credits the people involved (R-09 section 9), and keeps the restore path from B0
 
-**Exit:** the Dot shows the inbox, listening and error states; no ClawDot code opens ALSA.
+**Exit:** a fresh unlocked Dot reaches a voice turn through our daemon following only the guide.
 
-## B5. ClawDot running on the Dot itself
-- ClawDot as a service on the base's rootfs, dialling `127.0.0.1:6053` (static armv7 musl build via `[profile.dot2]`, size gate, firewall rule)
-- Autostart on boot
+## B5. Image build and signed A/B update pipeline
+REQ-DEV-007
 
-**Exit:** a single-box Dot run recorded, with the budget gates green.
+- Reproducible image build, a project signing key (held by the maintainer) and a **signed A/B update with automatic rollback** on the Dot partition layout (or the documented `update: manual` alternative, if the layout allows no A/B)
+- The conformance suite gains update tests (bad signature rejected, failed boot rolls back)
+- Wi-Fi setup without a keyboard and clock trust on the image
 
-## B6. Raspberry Pi board and guide (old M6 Pi item)
-- Board for the Pi (GPIO buttons, optional ring), guide from the B3 template, satellite passes the conformance suite
-- **Wyoming satellites stay for the Pi** (REQ-SAT-014); ESPHome is the integration surface for the Dot
-- Headless Wi-Fi documented (shared with A6)
+**Exit:** an update is signed, installed and confirmed on the Dot, and a deliberately broken update rolls back on its own; recorded run.
 
-**Exit:** Pi satellite passes the conformance suite; real-hardware run recorded.
+## B6. Device features through the daemon
+- LED states for agent events on the ring (`inbox`, `listening`, `thinking`, `speaking`, `error`, `timer`, `updating`), the documented equivalent on boards without a ring
+- Buttons and gestures, mute with its honest kind, **stop without the wake word**, follow-up listening, **quiet hours** applied locally
+- **Wake word** with licence-clean models and recorded provenance (EPIC-001); **Bluetooth speaker mode** (A2DP sink and source, arbitration with announcements measured in B0)
+- **Spotify Connect receiver** as an opt-in with the terms-of-service notice; Spotify *control* through the brain is a software feature and needs no device work
+- Anything the hardware cannot do is a documented gap, not a faked capability
 
-**What was superseded.** The former B3 (own audio, buttons and LED ring on Fire OS), B4 (Wi-Fi, clock and mute on Fire OS) and B5 (staged Alexa removal) are replaced by B0, B4 and B5 above, and the Fire OS route is frozen as a developer path only. The reasons are in R-08 section 9.1. The hazards in R-07 section 10 (for example the sysfs file that panics the kernel) still apply to any work on the stock system.
+**Exit:** the Dot shows the agent states, honours stop and quiet hours without the brain, and the recorded conformance run on the unit is green for every Must.
+
+## B7. Pi and PC parity, and more boards
+- Raspberry Pi image recipe and install guide from the B4 template; PC satellite (the daemon in a desktop package). Both pass the same conformance suite with the same daemon logic and only a different board file and recipe
+- A third board (for example a smart-calendar-class device) is the test of the claim "the only per-device difference is how you install it": a board file, a recipe, a passing run, and no daemon change. Boards below the minimum contract (not Linux-capable, too little RAM, no microphone or speaker) are documented as unsupported
+
+**Exit:** Pi and PC satellites pass the conformance suite; real-hardware run recorded; the third board needs no daemon code change.
+
+## B8. ESPHome native-API client (compatibility mode)
+Goal: third-party ESPHome voice satellites (stock T5D or LibreEcho images, a Pi running linux-voice-assistant) can use ClawDot as their brain without Home Assistant. Not the path for our own devices. Spec-level item: see the [future-scope](future-scope.md) row and R-08 sections 4.2 and 4.3.
+
+- A new optional core feature (`esphome-satellite`) behind the existing satellite interface: frame layer, minimal hand-written protobuf for about 20 messages, voice session, announce-then-listen for the inbox, media player play, optional light command. Estimate about 1,100 to 1,300 lines; not in the default Dot budget
+- Optional Noise encryption on `ring`, with no `snow` and no `prost`; tested against a fake ESPHome server on a PC first, then `aioesphomeapi`
+- **Status (2026-11-09):** the client is built behind the cargo features `esphome-satellite` and `esphome-noise` ([spec 0004](specs/0004-esphome-satellite-client.md), [architecture/esphome-satellite.md](architecture/esphome-satellite.md)) and tested against the fake device in `crates/e2e`. The Noise handshake was also checked once against an independent responder (`noiseprotocol`). Still to do: run against `aioesphomeapi`'s own voice client and then a real satellite (blocked on the B0 trial and the maintainer's go for any device)
+
+**Exit:** a real ESPHome satellite wakes, a voice turn runs through ClawDot's pipeline, and an inbox announcement gets a spoken reply.
+
+**What changed (2026-11-09).** The earlier plan (own audio and LED ring on Fire OS, staged Alexa removal) was replaced by an unmodified third-party base. The maintainer then decided to own the device layer: one portable daemon, per-device board files and image recipes ([ADR-0015](adr/0015-own-the-device-layer.md)). The ESPHome client is now B8, the install guide is part of B4, "ClawDot on the Dot itself" is the daemon on the image, and the Pi board is B7. The Fire OS route stays a developer path only; the hazards in R-07 section 10 (for example the sysfs file that panics the kernel) still apply to any work on the stock system.
 
 ---
 
