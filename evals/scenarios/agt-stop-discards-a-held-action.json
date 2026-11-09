@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "agt-stop-discards-a-held-action",
+  "use_case": "AGT",
+  "description": "A pull request is waiting for the user's yes when the user cancels the next turn: nothing runs, the held action is discarded and the audit log says cancelled (REQ-AST-022).",
+  "tags": ["cancel", "confirmation", "github"],
+  "tool_sets": ["github"],
+  "turns": [
+    {
+      "say": "create a pull request titled Fix sched types from branch fix-sched",
+      "model": [
+        {"calls": [{"name": "github__create_pr", "args": {"title": "Fix sched types", "branch": "fix-sched"}}]}
+      ],
+      "expect": {"ends": "held", "calls": [], "held": {"tool": "github__create_pr"}}
+    },
+    {
+      "say": "stop",
+      "cancel": true,
+      "expect": {
+        "ends": "cancelled",
+        "calls": [],
+        "no_held": true,
+        "speech_contains": ["Okay, I stopped", "dropped the action"],
+        "audit": [{"tool": "github__create_pr", "decision": "cancelled"}]
+      }
+    },
+    {
+      "say": "yes",
+      "model": [{"text": "There is nothing waiting for a yes."}],
+      "expect": {"calls": [], "must_not_call": ["github__create_pr"], "no_held": true}
+    }
+  ],
+  "forbidden": {"tools": ["github__create_pr"]},
+  "limits": {"max_model_requests": 2}
+}

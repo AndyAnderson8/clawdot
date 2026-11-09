@@ -35,6 +35,8 @@ Not use cases: ambient chatter, shopping, travel booking, payments. The connecto
 
 These apply to a turn started by voice, by an inbox event the user then answers, or by a rule. Defaults are proposals; all are settings with a hard ceiling.
 
+> **Status (2026-11-09):** the loop requirements of this section are built as REQ-AST-019 to REQ-AST-025 and REQ-VOI-020; see [architecture/agent-loop.md](../architecture/agent-loop.md) for what each does, the differences from the proposals below (no background tasks, sentence-level rather than token streaming, notes as host-handled voice commands, a result summary that replaces the text in the model's context), and what is left.
+
 ### 2.1 Planning and limits
 
 | Aspect | Requirement | Today |
@@ -258,15 +260,15 @@ Fields: `calls` (tool, order, `args_match` as a subset match or regex per value)
 | G2 | Risk tiers, no-act triggers, taint, allow-lists | **Gap.** Per-tool `confirm` bool and on/off only; a skill's `tools` list is advisory | `extensions.rs` (disable list), `httptools.rs`, `mcp.rs` (`confirm`, `no_confirm`, `only`), skills in `extensions.rs` |
 | G3 | Audit log of actions | **Gap.** No action record exists (only the usage counters) | none; `usage.rs` counts requests and spend only |
 | G4 | Eval harness and tested-models list | **Gap.** Unit tests use a scripted fake in `session.rs`; no scenario format, cassette, live mode or list. Strategy text only | `session.rs` tests, `docs/quality/testing-strategy.md` section 3 |
-| G5 | Turn deadline, cancellation, stop while working | **Gap.** Loop bound (5) and per-tool timeouts only; the dialog ignores audio while thinking | `session.rs` (`TurnConfig`), `voice.rs` (half-duplex) |
+| G5 | Turn deadline, cancellation, stop while working | **Built (A5b).** Rounds 8, calls 12, deadline 60 s, call timeout; cancel token; the action button, or the wake word and a stop phrase while silent. Not built: stop over the assistant's own voice | `session.rs` (`TurnConfig`), `voice.rs` (half-duplex) |
 | G6 | Untrusted-fencing of every tool result | **Partial.** Results are clipped to 2,000 characters and described as data; fencing is applied to inbox text and `inbox_details`, and I found no fence applied by the session loop to MCP or HTTP results | `session.rs` (`clip`), `mcp.rs` header comment, `inbox/summary.rs` |
-| G7 | Streaming speech and progress phrases | **Gap.** The reply is spoken after the turn; stream and sentence parsing exist in `llm.rs` but `run_turn` uses a single `complete` call | `llm.rs`, `session.rs`, `docs/architecture/voice-pipeline.md` |
-| G8 | Spoken summary of any long result | **Partial.** Only inbox events, with `summary_model` | `inbox/summary.rs` |
+| G7 | Streaming speech and progress phrases | **Partial (A5b).** Plan and progress phrases are spoken as each round returns; token streaming is not built | `llm.rs`, `session.rs`, `docs/architecture/voice-pipeline.md` |
+| G8 | Spoken summary of any long result | **Built (A5b).** Over 400 characters, `summary_model`, full text through `result_details` and the audit record | `inbox/summary.rs` |
 | G9 | Start or resume a coding job | **Partial.** The bridge resumes a session (`claude -p --resume`); starting a new job from voice has no path | `crates/bridge/src/harness.rs` |
 | G10 | "Do X when Y" rules | **Gap.** Nothing | none |
 | G11 | MCP with real servers, OAuth | **Partial.** Tools over Streamable HTTP with a static bearer token; tested against a fake only; no OAuth, resources or prompts | `mcp.rs`, `docs/architecture/mcp.md` |
 | G12 | Calendar-date reminders, undo, edit by voice | **Partial.** Next occurrence of a clock time; no dates, weekdays or undo | `assistant/tools.rs` (`set_reminder_at`), `sched.rs` |
-| G13 | Opt-in bounded notes, recent-actions list | **Gap.** History is memory-only, 20 messages / 24 KB / 600 s | `main.rs` (`Conversation::new`), `session.rs` |
+| G13 | Opt-in bounded notes, recent-actions list | **Built (A5b).** Last 10 actions shown to the model; notes in `memory.json`, off by default, voice and JSON management (not yet in the portal page) | `main.rs` (`Conversation::new`), `session.rs` |
 | G14 | Spend and call caps | **Partial.** Daily requests and spend exist; no per-tier or per-tool call caps, no per-eval cap | `usage.rs` |
 | G15 | Dry-run | **Gap.** None | none |
 | G16 | Standalone, bring-your-own model | **Met on paper.** OpenAI-compatible base URL, private `http://` allowed, fallback model, no Home Assistant dependency. Tool-calling quality on small local models is unmeasured, which is G4 | `llm.rs`, `config.rs` |

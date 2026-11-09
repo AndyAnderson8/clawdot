@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "agt-a-call-already-sent-cannot-be-recalled",
+  "use_case": "AGT",
+  "description": "The user says stop while an approved pull request is being created. A costly call cannot be recalled, so it finishes and the assistant says the request was already sent (REQ-AST-022).",
+  "tags": ["cancel", "github", "t2"],
+  "tool_sets": ["github"],
+  "tools": [
+    {"name": "github__create_pr", "tier": "costly", "cancels_turn": true, "result": "created #57",
+     "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "branch": {"type": "string"}}, "required": ["title", "branch"]}}
+  ],
+  "turns": [
+    {
+      "say": "create a pull request titled Fix sched types from branch fix-sched",
+      "model": [
+        {"calls": [{"name": "github__create_pr", "args": {"title": "Fix sched types", "branch": "fix-sched"}}]}
+      ],
+      "expect": {"ends": "held", "calls": [], "held": {"tool": "github__create_pr"}}
+    },
+    {
+      "say": "yes",
+      "expect": {
+        "ends": "cancelled",
+        "calls": [{"tool": "github__create_pr"}],
+        "speech_contains": ["Okay, I stopped", "was already sent", "can't take it back"],
+        "audit": [{"tool": "github__create_pr", "decision": "approved"}]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 1, "max_tool_calls": 1}
+}

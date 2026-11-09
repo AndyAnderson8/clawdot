@@ -40,6 +40,13 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `limits.max_actions_per_day` | Calls that are not read-only allowed per local day; 0 stops all actions (REQ-SEC-015) | 100 |
 | `limits.max_costly_per_day` | Costly and destructive calls allowed per local day (REQ-SEC-015) | 20 |
 | `limits.dry_run` | Describe actions instead of running them; also `--dry-run` (REQ-SEC-016) | off |
+| `agent.max_rounds` | Model rounds in one turn; at most 20 (REQ-AST-019) | 8 |
+| `agent.max_tool_calls` | Tool calls in one turn; at most 20 | 12 |
+| `agent.deadline_secs` | Seconds one turn may take; at most 300 | 60 |
+| `agent.tool_timeout_secs` | Seconds one tool call may take before it counts as failed; at most 120 | 45 |
+| `agent.plan_speech`, `agent.progress_speech` | Say the plan first, and short progress phrases while tools run (REQ-AST-020) | true, true |
+| `agent.summarize_over_chars` | Summarise tool results longer than this for speech; 0 turns it off (REQ-AST-024) | 400 |
+| `agent.notes` | Keep the notes the user asks for, in `memory.json` (REQ-AST-023) | false |
 | `tools` | Declarative HTTP tools the model may call; see [http-tools.md](http-tools.md) | none |
 | `mcp` | MCP servers whose tools the model may call; see [mcp.md](mcp.md) | none |
 | `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |

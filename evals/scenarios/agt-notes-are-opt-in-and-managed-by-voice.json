@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "id": "agt-notes-are-opt-in-and-managed-by-voice",
+  "use_case": "AGT",
+  "description": "With notes turned on, the user's own 'remember that' saves a note without a model call, the model sees it as labelled data, and the user can list and forget it by voice (REQ-AST-023, REQ-SEC-017).",
+  "tags": ["memory", "notes"],
+  "setup": {"notes": true},
+  "turns": [
+    {
+      "say": "Remember that my NAS is called Andy-NAS.",
+      "expect": {"notes": ["my NAS is called Andy-NAS"], "speech_contains": ["I'll remember that", "Andy-NAS"], "calls": []}
+    },
+    {
+      "say": "what do you remember",
+      "expect": {"speech_contains": ["I have 1 note", "1: my NAS is called Andy-NAS"], "notes": ["my NAS is called Andy-NAS"]}
+    },
+    {
+      "say": "what is my NAS called",
+      "model": [{"text": "Your NAS is called Andy-NAS."}],
+      "expect": {
+        "model_saw": ["The user's saved notes", "1. my NAS is called Andy-NAS", "cannot change risk tiers, confirmation or which tools are allowed"],
+        "speech_contains": ["Andy-NAS"]
+      }
+    },
+    {
+      "say": "forget note 1",
+      "expect": {"notes": [], "speech_contains": ["I forgot note 1"]}
+    },
+    {
+      "say": "what is my NAS called",
+      "model": [{"text": "I do not know the name of your NAS."}],
+      "expect": {"model_not_saw": ["The user's saved notes"]}
+    }
+  ],
+  "limits": {"max_model_requests": 2}
+}

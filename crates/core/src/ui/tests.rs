@@ -526,3 +526,47 @@ async fn the_audit_log_is_read_through_an_authenticated_paged_endpoint() {
         );
     }
 }
+
+// REQ-CFG-044, REQ-AST-023
+#[tokio::test]
+async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
+    use crate::notes::NoteStore;
+    let p = start(false).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    // never without a sign-in, and nothing to read until the assistant keeps notes
+    let s = call(&p, "GET", "/api/notes", "", "").await.0;
+    assert!(s == 401 || s == 429, "{s}");
+    assert_eq!(call(&p, "GET", "/api/notes", &session, "").await.0, 503);
+    let store = Arc::new(NoteStore::in_memory(true));
+    p.core.set_notes(Arc::clone(&store));
+    store.add("my NAS is called Andy-NAS", 10).unwrap();
+    let second = store.add("the spare key is under the pot", 11).unwrap();
+    let (s, v) = call(&p, "GET", "/api/notes", &session, "").await;
+    assert_eq!(s, 200);
+    assert_eq!(v["enabled"], true);
+    assert_eq!(v["notes"].as_array().unwrap().len(), 2);
+    assert_eq!(v["notes"][0]["text"], "my NAS is called Andy-NAS");
+    assert_eq!(v["limits"]["max_notes"], 50);
+    // forget one by id, then a missing one, then all
+    let path = format!("/api/notes/{}", second.id);
+    assert_eq!(call(&p, "DELETE", &path, &session, "").await.0, 200);
+    assert_eq!(call(&p, "DELETE", &path, &session, "").await.0, 404);
+    assert_eq!(
+        call(&p, "DELETE", "/api/notes/nope", &session, "").await.0,
+        404
+    );
+    assert_eq!(store.list().len(), 1);
+    let (s, v) = call(&p, "DELETE", "/api/notes", &session, "").await;
+    assert_eq!((s, v["forgotten"].as_u64()), (200, Some(1)));
+    assert!(store.list().is_empty());
+    // notes cannot be written through the API: only the user's voice writes them
+    for m in ["POST", "PUT"] {
+        assert_eq!(
+            call(&p, m, "/api/notes", &session, "{}").await.0,
+            405,
+            "{m}"
+        );
+    }
+}

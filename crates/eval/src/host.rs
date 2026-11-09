@@ -3,6 +3,7 @@
 
 use crate::scenario::{Scenario, ToolFixture};
 use clawdot_core::assistant::Assistant;
+use clawdot_core::cancel::CancelToken;
 use clawdot_core::llm::ToolSpec;
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, Ts};
 use clawdot_core::session::{Risk, Tier, ToolHost};
@@ -48,7 +49,9 @@ pub struct EvalHost {
     builtin: Vec<String>,
     fixtures: Vec<ToolFixture>,
     calls: Vec<usize>,
-    /// Every call that ran, in order.
+    clock: Arc<ManualClock>,
+    cancel: CancelToken,
+    /// Every call that started, in order (a call that hangs or is cancelled started).
     pub executed: Vec<Executed>,
 }
 
@@ -57,7 +60,7 @@ impl EvalHost {
     #[must_use]
     pub fn new(s: &Scenario, clock: Arc<ManualClock>) -> Self {
         let assistant = Assistant::new(
-            clock,
+            Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>,
             Box::new(FixedOffset(0)),
             Scheduler::new(64),
             None,
@@ -68,8 +71,15 @@ impl EvalHost {
             builtin: s.builtin_tools.clone(),
             calls: vec![0; s.tools.len()],
             fixtures: s.tools.clone(),
+            clock,
+            cancel: CancelToken::new(),
             executed: Vec::new(),
         }
+    }
+
+    /// The token of the turn about to run, for a tool that says the user stops it.
+    pub fn set_cancel(&mut self, token: CancelToken) {
+        self.cancel = token;
     }
 
     fn fixture(&self, name: &str) -> Option<(usize, &ToolFixture)> {
@@ -136,6 +146,10 @@ impl ToolHost for EvalHost {
         self.fixture(name).is_none_or(|(_, t)| t.untrusted)
     }
 
+    fn expected_slow(&self, name: &str) -> bool {
+        self.fixture(name).is_some_and(|(_, t)| t.slow)
+    }
+
     async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         self.executed.push(Executed {
             tool: name.to_owned(),
@@ -143,6 +157,17 @@ impl ToolHost for EvalHost {
         });
         if self.is_builtin(name) {
             return self.assistant.call_tool(name, args).await;
+        }
+        let Some((_, t)) = self.fixture(name) else {
+            return Err(format!("no fixture for `{name}`"));
+        };
+        let (hang, cancels, secs) = (t.hang, t.cancels_turn, t.duration_secs);
+        self.clock.set(self.clock.now() + secs);
+        if cancels {
+            self.cancel.cancel();
+        }
+        if hang {
+            std::future::pending::<()>().await;
         }
         let Some((i, t)) = self.fixture(name) else {
             return Err(format!("no fixture for `{name}`"));

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "agt-plan-and-progress-are-spoken-while-working",
+  "use_case": "AGT",
+  "description": "A multi-step request: the model's one-sentence plan is spoken before the first call, a host phrase comes before the slow call, and the answer follows (REQ-AST-020).",
+  "tags": ["speech", "plan", "progress", "github"],
+  "tool_sets": ["github"],
+  "tools": [
+    {"name": "github__list_runs", "tier": "read_only", "result": "run 41 failed: job test-armv7. run 40 passed.", "duration_secs": 12},
+    {"name": "github__get_log", "tier": "read_only", "slow": true, "parameters": {"type": "object", "properties": {"run": {"type": "integer"}}, "required": ["run"]}, "result": "error[E0308]: mismatched types in sched.rs line 212"}
+  ],
+  "turns": [
+    {
+      "say": "why did the last CI run fail",
+      "model": [
+        {"text": "I'll check the runs, then read the log of the failed one. This might take a moment.", "calls": [{"name": "github__list_runs"}]},
+        {"calls": [{"name": "github__get_log", "args": {"run": 41}}]},
+        {"text": "Run 41 failed with a type mismatch in the scheduler."}
+      ],
+      "expect": {
+        "calls": [{"tool": "github__list_runs"}, {"tool": "github__get_log", "args": {"run": 41}}],
+        "early_contains": ["I'll check the runs, then read the log of the failed one.", "Checking github get log."],
+        "early_not_contains": ["This might take a moment"],
+        "early_max": 2,
+        "speech_contains": ["type mismatch"],
+        "audit": [{"tool": "github__list_runs", "decision": "ran"}, {"tool": "github__get_log", "decision": "ran"}]
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 3, "max_tool_calls": 2}
+}
