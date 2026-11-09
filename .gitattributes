@@ -3,3 +3,6 @@
 *.opus binary
 *.tflite binary
 *.png binary
+*.s16 binary
+*.u16 binary
+*.i8 binary

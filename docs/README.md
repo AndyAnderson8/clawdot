@@ -21,6 +21,8 @@
 | Architecture | [architecture/satellite-server.md](architecture/satellite-server.md) | How speakers connect: handshake, a spoken turn, mute, limits |
 | Architecture | [architecture/board-support.md](architecture/board-support.md) | Board layer: buttons, LED ring, mute, Wi-Fi, clock, audio names; the Echo Dot Gen 2 board file |
 | Specs | [specs/0006-device-layer-contract.md](specs/0006-device-layer-contract.md) | Device layer contract: REQ-DEV, capability model, minimum hardware, conformance; board-file schema in [../schemas/board/](../schemas/board/README.md) |
+| Specs | [specs/0007-wake-word-runtime.md](specs/0007-wake-word-runtime.md) | Wake-word runtime: REQ-WAK, accepted operators, limits, agreement with the reference |
+| Architecture | [architecture/wake-word-runtime.md](architecture/wake-word-runtime.md) | The wake-word runtime: parts, validation against the reference, measurements |
 | Architecture | [architecture/device-daemon.md](architecture/device-daemon.md) | The portable device daemon: modules, what exists and what does not, running it, size |
 | Architecture | [architecture/device-conformance.md](architecture/device-conformance.md) | The device conformance suite: cases, running it, how a new board proves itself |
 | Architecture | [architecture/esphome-satellite.md](architecture/esphome-satellite.md) | Optional client for ESPHome voice satellites (a Dot base image, Voice PE): config, mapping, limits |

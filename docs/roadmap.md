@@ -166,7 +166,7 @@ The default toolset is a set of **recipes** (configuration that the portal can a
 
 **Exit:** a written SPIKE-002 PC finding; wake or hotkey starts a turn on a PC.
 
-*Status:* push-to-talk exists on the desktop satellite (`--ptt`, Enter to talk). The seam for a wake word is `front::Trigger` (REQ-VOI-017): a detector that implements `poll` and reads frames from the same `AudioIn` replaces `LineTrigger`. The wake-word spike is in progress (branch `docs/wake-word-spike`); no finding has landed. What remains is everything else in A3: the engine evaluation, a detector, keeping the microphone open between turns (today it opens at the press and closes after the utterance), and the SPIKE-002 finding.
+*Status:* push-to-talk exists on the desktop satellite (`--ptt`, Enter to talk). The seam for a wake word is `front::Trigger` (REQ-VOI-017): a detector that implements `poll` and reads frames from the same `AudioIn` replaces `LineTrigger`. The wake-word spike is in progress (branch `docs/wake-word-spike`); no finding has landed. A3b is built on the PC: `clawdot-wake` runs the official microWakeWord models ([spec 0007](specs/0007-wake-word-runtime.md), [runtime note](architecture/wake-word-runtime.md)). What remains is the evaluation set, always-on capture, device measurements and, from the old list: the engine evaluation, a detector, keeping the microphone open between turns (today it opens at the press and closes after the utterance), and the SPIKE-002 finding.
 
 ## A4. End-to-end voice turn on a PC (old M1 exit)
 REQ-VOI-001..004, 006..010, 012, REQ-AST-001..003, 006, 007, 009, REQ-CFG-007, REQ-NFR-001/003/005/007, REQ-SEC-001..003, 006, 007
