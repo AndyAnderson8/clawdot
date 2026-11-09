@@ -208,6 +208,7 @@ function seed(mode: string): Json {
       },
     ],
     audit: auditSeed(t),
+    logs: [{ ts: t - 30, level: "error", text: "could not save the notes: <b>disk full</b>" }],
     notesOn: true,
     notes: [{ id: 1, text: "my NAS is <b>Andy-NAS</b>", ts: t - 3600 }],
     nextNote: 2,
@@ -322,7 +323,23 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
       if (m === "POST" && path === "/api/speak")
         return body.text ? send(202, { queued: true }) : err(400, "give some text");
       if (m === "GET" && path === "/api/about")
-        return send(200, { version: "0.1.0-test", changelog: "## [0.1.0]\n- First release" });
+        return send(200, {
+          version: "0.1.0-test",
+          build: { version: "0.1.0-test", profile: "release", os: "linux", arch: "aarch64", features: ["tz", "tls"] },
+          changelog: "## [0.1.0]\n- First release",
+        });
+      if (m === "GET" && path === "/api/logs")
+        return send(200, {
+          lines: st["logs"],
+          max_lines: 200,
+        });
+      if (m === "GET" && path === "/api/diagnostics")
+        return send(200, { format: "clawdot-diagnostics", version: "0.1.0-test", endpoints: st["endpoints"] });
+      if (m === "GET" && path === "/api/settings/export") {
+        const saved: Json = {};
+        for (const [k, f] of Object.entries(st["settings"] as Json)) if (f["source"] === "saved") saved[k] = f["value"];
+        return send(200, { format: "clawdot-settings", version: 1, settings: saved });
+      }
       if (m === "GET" && path === "/api/settings") return send(200, settingsJson());
       if (m === "PUT" && path === "/api/settings") {
         if (body.llm_url === "http://insecure.example.com")

@@ -57,7 +57,7 @@ On a wide screen the same single column is kept (max 44 rem) so that nothing mov
 | Connections | n/a | Outside tool servers (MCP). The page explains MCP in a sentence the first time |
 | Skills | n/a | Named instructions you write for the assistant, each switchable, with export and import |
 | Webhooks | Endpoints | A webhook is the web address an agent posts to; this tab creates them and gives copy-paste setup |
-| Settings | Admin password | Device name, time zone, language model, personality, voice, addresses, limits, board, password, and About with the version. Grouped forms with one Save each; each field says where its value comes from and whether it needs a restart |
+| Settings | Admin password | Device name, time zone, language model, personality, voice, addresses, limits, board, password, and About (version, build, release notes, a diagnostics download, recent problems, and saving or loading a settings file; REQ-CFG-063 to 066). Grouped forms with one Save each; each field says where its value comes from and whether it needs a restart |
 
 ## Principles
 

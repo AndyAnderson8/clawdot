@@ -5,6 +5,7 @@ import { api, ApiError, keep } from "../api.ts";
 import { currentText, FROM, labelOf, restartText, settingsPatch, type SettingSpec } from "../forms.ts";
 import { fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
 import { zoneName } from "../time.ts";
+import { About } from "./About.tsx";
 import type { Settings as SettingsData } from "../types.ts";
 
 function browserZone(): string {
@@ -354,7 +355,6 @@ function Details(props: { settings: SettingsData }) {
 export function Settings(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
-  const [notes, setNotes] = useState("");
 
   const savePassword = async (ev: Event) => {
     ev.preventDefault();
@@ -379,16 +379,6 @@ export function Settings(): JSX.Element {
     signedOut();
     await start();
   };
-  const toggled = async (ev: Event) => {
-    const d = ev.currentTarget as HTMLDetailsElement;
-    if (!d.open || notes) return;
-    try {
-      setNotes((await api<{ changelog: string }>("GET", "/api/about")).changelog);
-    } catch (x) {
-      fail(x);
-    }
-  };
-
   return (
     <>
       <h2>Settings</h2>
@@ -414,15 +404,7 @@ export function Settings(): JSX.Element {
           <button>Save password</button>
         </div>
       </form>
-      <h3>About</h3>
-      <p id="aboutver">
-        ClawDot {s.version}. It runs entirely on your own device; this page never contacts anything outside your
-        network.
-      </p>
-      <details id="about" onToggle={toggled}>
-        <summary>Release notes</summary>
-        {notes ? <pre id="notes">{notes}</pre> : null}
-      </details>
+      <About />
       <div class="row">
         <button class="plain" type="button" onClick={signOut}>
           Sign out

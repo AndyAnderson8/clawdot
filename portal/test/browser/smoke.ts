@@ -616,6 +616,76 @@ await step("Settings: agent settings show their source, validate, and save boole
   assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { plan_speech: null });
 });
 
+await step("About: build info, diagnostics download, recent problems, settings export and import", async () => {
+  await open("open", "#/settings");
+  await b.until(`!!T.q('#buildinfo')`, "build information");
+  await shot("about");
+  await eq(`T.text('#buildinfo')`, "A release build for linux on aarch64. Built with: tz, tls.", "build line");
+  // downloads: catch the file instead of saving it
+  await b.ev(`(() => {
+    window.__files = [];
+    URL.createObjectURL = (blob) => { window.__files.push(blob); return 'blob:test'; };
+    HTMLAnchorElement.prototype.click = function () { window.__names = (window.__names || []).concat(this.download); };
+  })()`);
+  await T(`click('#diagdl')`);
+  await b.until(`window.__files.length === 1`, "diagnostics offered as a file");
+  await eq(`window.__names[0]`, "clawdot-diagnostics.json", "file name");
+  await eq(`(async () => JSON.parse(await window.__files[0].text()).format)()`, "clawdot-diagnostics", "file content");
+  // recent problems load when the section opens, as text
+  await T(`click('#logs summary')`);
+  await b.until(`!!T.q('#loglines')`, "log lines");
+  await eq(
+    `T.text('#loglines').includes('<b>disk full</b>') && T.all('#loglines b').length === 0`,
+    true,
+    "shown as text",
+  );
+  // export what is saved here
+  await T(`click('#exportdl')`);
+  await b.until(`window.__files.length === 2`, "settings offered as a file");
+  await eq(
+    `(async () => JSON.parse(await window.__files[1].text()).settings.device_name)()`,
+    "Kitchen Dot",
+    "only saved values",
+  );
+  // import: a wrong file is explained, a right one is previewed and then sent as one save
+  const pick = (text: string) => `(async () => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([${JSON.stringify(text)}], 'settings.json', { type: 'application/json' }));
+    const input = document.querySelector('#importfile');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await T.settle(); await T.settle();
+  })()`;
+  await b.ev(pick("{not json"));
+  await b.until(`T.text('#importform .errtext').startsWith('That is not a ClawDot settings file')`, "plain refusal");
+  await b.ev(
+    pick(JSON.stringify({ format: "clawdot-settings", version: 1, settings: { device_name: "Kitchen Dot" } })),
+  );
+  await b.until(`!!T.q('#importsame')`, "nothing to change");
+  await b.ev(
+    pick(
+      JSON.stringify({
+        format: "clawdot-settings",
+        version: 1,
+        settings: { device_name: "Den", dry_run: false, plan_speech: false },
+      }),
+    ),
+  );
+  await b.until(`T.all('#importlist li').length === 3`, "a preview of three changes");
+  await eq(
+    `T.rows('#importlist li')[0].startsWith('Device name') && T.rows('#importlist li')[0].includes('Kitchen Dot to Den')`,
+    true,
+    "from and to",
+  );
+  await T(`submit('#importform')`);
+  await b.until(`T.text('#devname') === 'Den'`, "imported and applied");
+  assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+    device_name: "Den",
+    dry_run: false,
+    plan_speech: false,
+  });
+});
+
 await step("a 10-second refresh keeps what you typed", async () => {
   await open("open", "#/reminders");
   await b.until(`T.rows().length === 2`, "rows");
