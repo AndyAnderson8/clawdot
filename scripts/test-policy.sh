@@ -250,5 +250,130 @@ rc=$?
 if [ "$rc" -eq 0 ]; then ok; else fail "commit-time check test failed at step code $rc (output: $(tail -3 "$fout" | tr '\n' ' '))"; fi
 rm -rf "$F" "$fout"
 
+# --- land.sh against a remote: rejected push, CI failure, held dev, verification (scratch repos, gh stub) ----
+R=$(mktemp -d)
+rout=$(mktemp)
+(
+  cd "$R" || exit 1
+  git init -q --bare origin.git
+  # The server can be told to refuse pushes to dev (as a repository rule would) or to accept and then
+  # silently drop them (so only the post-push verification can notice).
+  cat >origin.git/hooks/pre-receive <<'HOOK'
+#!/bin/sh
+while read -r old new ref; do
+  if [ "$ref" = refs/heads/dev ] && [ -f "$GIT_DIR/reject" ]; then echo "push declined due to repository rule violations" >&2; exit 1; fi
+done
+HOOK
+  cat >origin.git/hooks/post-receive <<'HOOK'
+#!/bin/sh
+while read -r old new ref; do
+  if [ "$ref" = refs/heads/dev ] && [ -f "$GIT_DIR/revert" ]; then git update-ref refs/heads/dev "$old"; fi
+done
+HOOK
+  chmod +x origin.git/hooks/*
+  # A gh stub: CI "runs" immediately and passes unless the file fail-ci exists.
+  mkdir -p bin
+  cat >bin/gh <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "run list") echo 1 ;;
+  "run watch") [ ! -f "$R_FAIL_CI" ] ;;
+esac
+STUB
+  chmod +x bin/gh
+  export R_FAIL_CI="$R/fail-ci" PATH="$R/bin:$PATH" LAND_CI_POLL=0 LAND_WAIT_INTERVAL=1
+
+  git init -q -b main work
+  cd work || exit 1
+  git config user.name T
+  git config user.email t@example.com
+  git config core.autocrlf false
+  git remote add origin "$R/origin.git"
+  git commit -q --allow-empty -m "chore: initialize repository"
+  git branch dev
+  git switch -q dev
+  mkdir -p scripts
+  for f in "$root"/scripts/*.sh; do [ "$(basename "$f")" = test-policy.sh ] || cp "$f" scripts/; done
+  cp "$root/.shellcheckrc" .shellcheckrc
+  git add scripts .shellcheckrc
+  git commit -q -m "build: add scripts"
+  git push -q origin main dev 2>/dev/null
+  git switch -q -c feature/x dev
+  echo hi >f.txt && git add f.txt && git commit -q -m "feat: add f"
+  prev=$(git rev-parse dev)
+  tip=$(git rev-parse feature/x)
+
+  # 1. the final push is rejected: non-zero exit, branch and candidate kept, dev recoverable, no "done"
+  : >"$R/origin.git/reject"
+  rc=0; scripts/land.sh feature/x >"$rout" 2>&1 || rc=$?
+  [ "$rc" -eq 4 ] || exit 51
+  grep -q "LOCAL dev" "$rout" || exit 52
+  grep -q "git reset --hard $prev" "$rout" || exit 53
+  ! grep -q "done" "$rout" || exit 54
+  git rev-parse -q --verify feature/x >/dev/null || exit 55
+  [ -n "$(git ls-remote origin 'refs/heads/ci/*')" ] || exit 56
+  [ "$(git rev-parse origin/dev)" = "$prev" ] || exit 57
+  [ "$(git rev-parse dev)" != "$prev" ] || exit 58
+  # recover as the message says, then land again
+  git switch -q dev && git reset -q --hard "$prev" && git switch -q feature/x
+  rm "$R/origin.git/reject"
+
+  # 2. the push "succeeds" but origin does not contain the commit: the verification catches it
+  : >"$R/origin.git/revert"
+  rc=0; scripts/land.sh feature/x >"$rout" 2>&1 || rc=$?
+  [ "$rc" -eq 4 ] || exit 59
+  grep -q "does not contain" "$rout" || exit 60
+  git rev-parse -q --verify feature/x >/dev/null || exit 61
+  git switch -q dev && git reset -q --hard "$prev" && git switch -q feature/x
+  rm "$R/origin.git/revert"
+
+  # 3. CI fails: dev is restored, exit 5, branch kept
+  : >"$R/fail-ci"
+  rc=0; scripts/land.sh feature/x >"$rout" 2>&1 || rc=$?
+  [ "$rc" -eq 5 ] || exit 62
+  [ "$(git rev-parse dev)" = "$prev" ] || exit 63
+  [ "$(git rev-parse origin/dev)" = "$prev" ] || exit 64
+  git rev-parse -q --verify feature/x >/dev/null || exit 65
+  rm "$R/fail-ci"
+  git switch -q feature/x
+
+  # 4. dev held by another worktree: clear message naming it, exit 3, nothing changed
+  git worktree add -q "$R/holder" dev
+  rc=0; scripts/land.sh feature/x >"$rout" 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || exit 66
+  grep -q "holder" "$rout" || exit 67
+  ! grep -q "nothing to merge" "$rout" || exit 68
+  git rev-parse -q --verify feature/x >/dev/null || exit 69
+  [ "$(git -C "$R/holder" rev-parse dev)" = "$prev" ] || exit 70
+  # --wait gives up after the bound (still held)...
+  rc=0; scripts/land.sh feature/x --wait 2 >"$rout" 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || exit 71
+  grep -q "retrying" "$rout" || exit 72
+  # ...and succeeds when the holder lets go in time
+  (sleep 2; git worktree remove --force "$R/holder") &
+  rc=0; scripts/land.sh feature/x --wait 30 >"$rout" 2>&1 || rc=$?
+  wait
+  [ "$rc" -eq 0 ] || exit 73
+
+  # 5. a clean landing is verified against origin and cleans up
+  git fetch -q origin
+  git merge-base --is-ancestor "$tip" origin/dev || exit 74
+  [ "$(git rev-parse dev)" = "$(git rev-parse origin/dev)" ] || exit 75
+  ! git rev-parse -q --verify feature/x >/dev/null || exit 76
+  grep -q "verified: origin/dev" "$rout" || exit 77
+  # candidate refs of the failed attempts are kept on purpose; the successful one is removed
+  [ -z "$(git ls-remote origin "refs/heads/ci/dev/$(git rev-parse origin/dev | cut -c1-10)")" ] || exit 78
+  exit 0
+)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else fail "land.sh remote test failed at step code $rc (output: $(tail -4 "$rout" | tr '\n' ' '))"; fi
+rm -rf "$R" "$rout"
+
+# --- scripts/cargo.sh must not build into the repository (stray '-agent-<id>' directories) -------------
+if grep -qE '\$\{?CARGO_TARGET_DIR' "$root/scripts/cargo.sh"; then
+  fail "scripts/cargo.sh expands CARGO_TARGET_DIR (can yield a relative '-agent-<id>' directory in the repo)"
+else ok; fi
+if grep -qxF '/-agent-*' "$root/.gitignore"; then ok; else fail ".gitignore lacks the /-agent-* entry"; fi
+
 echo "policy tests: $pass passed, $failn failed"
 [ "$failn" -eq 0 ]
