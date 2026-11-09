@@ -46,6 +46,8 @@ Gestures (REQ-BRD-007): `press`, `long_press`, `double_press`, with thresholds i
 
 ## Board file sketch: `boards/echo-dot2.json`
 
+> **Superseded 2026-11-09 by the schema.** The format is now defined by [`schemas/board/board-1.schema.json`](../../schemas/board/board-1.schema.json) and spec [0006](../specs/0006-device-layer-contract.md) (REQ-DEV-008); the real example files are in [`boards/`](../../boards/). Key names changed (`button` is `buttons` with a `source`; `gesture` is `gestures`; `actions` and `states` are as below; `forbidden` stays under `takeover`). The sketch below is kept for the `verify` notes that follow it.
+
 Illustrative; the key names and values are proposals until the board is built. Pattern names are real files in `/system/etc/led-resources/`; key codes and nodes are from the kernel capability bitmaps and Amazon's `acebutton_config.json`. Items marked `verify` need a real button press (R-07 unknown 1).
 
 ```json
