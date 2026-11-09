@@ -211,8 +211,6 @@ impl Declared {
     pub fn from_board(board: &BoardFile, build: Build) -> Self {
         use Capability as C;
         let mut present = vec![
-            C::AudioIn,
-            C::AudioOut,
             C::Tone,
             C::Mute,
             C::LocalStop,
@@ -228,6 +226,19 @@ impl Declared {
                 not_implemented.push((cap, why));
             }
         };
+        use crate::board_file::AudioKind;
+        gate(
+            C::AudioIn,
+            true,
+            board.audio.capture.kind != AudioKind::Alsa,
+            "the ALSA backend is not built; use `default` or `command`",
+        );
+        gate(
+            C::AudioOut,
+            true,
+            board.audio.playback.kind != AudioKind::Alsa,
+            "the ALSA backend is not built; use `default` or `command`",
+        );
         let led_console = board
             .leds
             .as_ref()
@@ -435,11 +446,25 @@ mod tests {
             let d = Declared::from_board(&board(json), Build::CURRENT);
             for cap in Capability::ALL {
                 assert!(!cap.equivalent().is_empty());
-                if cap.class() == Class::Required && !d.has(cap) {
+                // Audio has no equivalent: a board without it is unsupported, and this build cannot open the
+                // Dot's ALSA devices yet (see the next test).
+                if cap.class() == Class::Required
+                    && !d.has(cap)
+                    && !matches!(cap, Capability::AudioIn | Capability::AudioOut)
+                {
                     panic!("{} is required but absent", cap.name());
                 }
             }
         }
+    }
+
+    #[test]
+    fn req_dev_013_an_alsa_board_has_no_audio_in_this_build() {
+        let d = Declared::from_board(&board(DOT), Build::CURRENT);
+        assert!(!d.has(Capability::AudioIn) && !d.has(Capability::AudioOut));
+        assert!(d.report().contains("the ALSA backend is not built"));
+        let d = Declared::from_board(&board(DESKTOP), Build::CURRENT);
+        assert!(d.has(Capability::AudioIn) && d.has(Capability::AudioOut));
     }
 
     #[test]
