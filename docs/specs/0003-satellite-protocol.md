@@ -7,7 +7,7 @@
 | **Created** | 2026-11-07 |
 | **Related** | ADR-0005, [ADR-0008](../adr/0008-wyoming-compatible-framing.md), [0001](0001-product-requirements.md) |
 
-> Sections 5 to 8 were written from the working implementation (`crates/protocol`, the core's satellite server, and the reference satellite in `crates/satellite`). Where the code settles a question, this spec says so; what is still open is listed in section 9. Machine-readable schemas for every control message are in [`schemas/satellite/`](../../schemas/satellite/README.md).
+> Sections 5 to 8 were written from the working implementation (`crates/protocol`, the core's satellite server, and the reference satellite in `crates/satellite`). Where the code settles a question, this spec says so; what is still open is listed in section 10. Machine-readable schemas for every control message are in [`schemas/satellite/`](../../schemas/satellite/README.md).
 
 ## 1. Summary
 
