@@ -52,6 +52,12 @@ The taint lasts as long as the conversation's history does (it is cleared when t
 
 Not done here: fencing every tool result in angle brackets and naming which argument came from outside text (agentic-scope G6 and the read-back rule in section 3.4). The `Risk` baseline and `tainted` flag are the hooks for the second.
 
+## Skill allow-lists (REQ-SEC-013, REQ-CFG-036)
+
+A skill's `tools` list is a permission, not just a hint. In `extensions.rs`, `Extensions::active_scope(user_text)` finds the enabled skills the user named in this turn (the skill's name as whole words, any case) and, if any of them lists tools, returns the union of those lists. `WithPolicy` stores it at the start of the turn (`begin_turn`), then drops every other tool from what the model is offered and refuses a call to one by name. Because it only filters, a scope can narrow what is available but never turn a tool on, lower a tier or skip a confirmation: a tool that is off stays off, and the held-action rules above still apply to what remains. A skill with an empty list, a skill that is off, and a turn that names no skill have no scope. The scope lasts for one turn: the user's "yes" to a held action is a new turn and releases the stored action as proposed in the scoped turn.
+
+Not done: scopes for inbox endpoints and rules, and a tier ceiling per scope (agentic-scope P1-5), and showing an imported skill's allow-list in the portal before it is enabled (imported skills already arrive off).
+
 ## Not built here (follow-ups)
 
-The audit log of every call and decision (REQ-SEC-014), the evaluation harness (REQ-AST-012), per-day caps and dry-run (REQ-SEC-015, REQ-SEC-016) are separate branches in the P0 and P1 list of agentic-scope.md. Until the audit log exists, the console is the only record of a held action.
+The audit log of every call and decision (REQ-SEC-014), the evaluation harness (REQ-AST-012), per-day caps and dry-run (REQ-SEC-015, REQ-SEC-016), the second factor for destructive tools (a repeated target name, a button or portal tap, agentic-scope P2-6), fencing of every tool result, and a portal tier selector are separate branches in the P0 and P1 list of agentic-scope.md. Until the audit log exists, the console is the only record of a held action.

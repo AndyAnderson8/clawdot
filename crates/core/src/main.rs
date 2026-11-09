@@ -703,6 +703,7 @@ impl Brain {
             },
             ext: &self.ext,
             mcp: &self.mcp,
+            scope: None,
         };
         // The enabled skills ride along in the system prompt, after the persona (REQ-CFG-036).
         let available: Vec<String> = host.tool_specs().into_iter().map(|t| t.name).collect();
