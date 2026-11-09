@@ -122,7 +122,7 @@ The next version is derived from Conventional Commits since the last tag:
 | any `feat` | MINOR |
 | only `fix`, `perf`, etc. | PATCH |
 
-Planned mapping to roadmap milestones (minor version per milestone, patch for fixes):
+Planned mapping to roadmap milestones (minor version per milestone, patch for fixes). Milestone names are the old M0 to M6; the [roadmap](../roadmap.md#structure-and-mapping-from-the-old-milestones) maps them to the current phases A to C:
 
 | Milestone | Release |
 |---|---|
