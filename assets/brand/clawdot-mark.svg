@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="ClawDot mark">
+<title>ClawDot</title>
+<path d="M18 90v12c0 8 20.600 14 46 14s46-6 46-14V90Z" fill="#1F4D5B"/>
+<ellipse cx="64" cy="90" rx="46" ry="14" fill="#0E2A33"/>
+<ellipse cx="64" cy="90" rx="41" ry="10.500" fill="none" stroke="#2EE6C5" stroke-opacity=".28" stroke-width="7"/>
+<ellipse cx="64" cy="90" rx="41" ry="10.500" fill="none" stroke="#2EE6C5" stroke-width="2.600"/>
+<g fill="none" stroke="#C9402F" stroke-width="3.200" stroke-linecap="round">
+<path d="M47 78 38 84M49 82l-5 7M54 85l-3 7M81 78l9 6M79 82l5 7M74 85l3 7"/>
+<path d="M47 68 35 55M81 68l12-13" stroke-width="4.200"/>
+<path d="M57 62v-8M71 62v-8" stroke-width="2.400"/>
+</g>
+<g fill="#F2644F">
+<path d="M30 56c-10-2-14-14-8-24 3-4 7-2 8 4 1-6 6-8 9-5 5 6 2 21-9 25Z"/>
+<path d="M98 56c10-2 14-14 8-24-3-4-7-2-8 4-1-6-6-8-9-5-5 6-2 21 9 25Z"/>
+<ellipse cx="64" cy="74" rx="21" ry="14"/>
+</g>
+<path d="M56 78q8 5 16 0" fill="none" stroke="#7A1F14" stroke-width="2.200" stroke-linecap="round"/>
+<circle cx="57" cy="51" r="4" fill="#fff" stroke="#0E2A33" stroke-width="1.200"/><circle cx="71" cy="51" r="4" fill="#fff" stroke="#0E2A33" stroke-width="1.200"/>
+<circle cx="57.600" cy="51.400" r="1.800" fill="#0E2A33"/><circle cx="70.400" cy="51.400" r="1.800" fill="#0E2A33"/>
+</svg>

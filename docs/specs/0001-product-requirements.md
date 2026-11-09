@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.8 |
+| **Version** | 0.12 |
 | **Created** | 2026-11-07 |
-| **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006 |
+| **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
 ## 1. Summary
 
@@ -42,6 +42,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | **Pack** | A versioned, hash-pinned bundle of declarative data (adapter mappings, grammar, tool presets, prompt snippets). Never executable code. |
 | **Sidecar** | A separate process, normally off the device, that integrates through the documented core API. |
 | **Media backend** | A source or controller for audio, in the *playback* or *control* shape ([extensibility](../architecture/extensibility.md)). |
+| **Board** | Device-specific code and data that exposes a speaker's buttons, LED ring, mute, Wi-Fi, clock check and audio device names to the core (section 4.10, [ADR-0012](../adr/0012-board-support-layer.md)). |
 
 ## 4. Requirements
 
@@ -139,7 +140,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-002 | The UI MUST allow configuring providers (keys, models, endpoints), wake word, voice, volume, time zone, and tool policies. | Must | M4 | D |
 | REQ-CFG-003 | The UI MUST allow creating, viewing, rotating, and revoking inbox endpoints and show integration snippets. | Must | M4 | D |
 | REQ-CFG-004 | The UI MUST show inbox history, scheduled items, and recent logs, and offer a "test speak" action. | Should | M4 | D |
-| REQ-CFG-005 | The UI and API MUST require authentication and bind to the LAN only by default. | Must | M4 | T |
+| REQ-CFG-005 | The UI and API MUST require authentication, unless the administrator deliberately chose open mode on a private network (REQ-CFG-020), and MUST bind to loopback only by default (REQ-CFG-014). | Must | M4 | T |
 | REQ-CFG-006 | Secrets MUST be write-only in the UI (never displayed back in full). | Must | M4 | T |
 | REQ-CFG-007 | Configuration MUST be a single human-editable file, validated at startup with clear errors. Hot-reload SHOULD apply where safe. | Must | M1 | T |
 | REQ-CFG-008 | The UI SHOULD work on a phone-sized screen and without JavaScript frameworks. | Should | M4 | I |
@@ -148,10 +149,17 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-011 | The core SHOULD serve a read-only `/display` page (state, transcript, now-playing, timers, inbox cards) so a satellite with a screen can show it in a browser without new protocol work. | Should | v1.x | D |
 | REQ-CFG-012 | Documentation MUST cover headless network setup for the supported Raspberry Pi path (pre-seeded Wi-Fi). An on-device provisioning portal is post-1.0. | Must | M4 | I |
 | REQ-CFG-013 | The build MUST include the project changelog; the UI "About" page SHOULD show the running version, build information, and the release notes for that version. | Should | M4 | T |
-| REQ-CFG-014 | The default listen address MUST be `127.0.0.1:8765`: loopback only (REQ-CFG-005) and a port that does not collide with services on the reference device (Amazon's `oobed` holds 8080 on an Echo Dot). If the address cannot be bound, the error MUST name the address and tell the user to choose another with `--listen` or the `listen` setting. | Must | M4 | T |
-| REQ-CFG-015 | The core MUST bind its listening address before it creates or prints an administrator token, so a server that never started never reveals a token. `--create-endpoint` and `--rotate-endpoint` are management commands: they print the token once and exit without starting the server (endpoints listed in the configuration file are still created at every start). | Must | M4 | T |
+| REQ-CFG-014 | The default listen address MUST be `127.0.0.1:3335`: loopback only (REQ-CFG-005) and a port that does not collide with services on the reference device (Amazon's `oobed` holds 8080 on an Echo Dot). If the address cannot be bound, the error MUST name the address and tell the user to choose another with `--listen` or the `listen` setting. | Must | M4 | T |
+| REQ-CFG-015 | The core MUST bind its listening address before it writes any administrator setting (REQ-CFG-018), so a server that never started never reveals a secret. `--create-endpoint` and `--rotate-endpoint` are management commands: they print the token once and exit without starting the server (endpoints listed in the configuration file are still created at every start). | Must | M4 | T |
 | REQ-CFG-016 | Printed integration snippets MUST use `--public-url` when given, otherwise a URL derived from the listen address. An unspecified listen host (`0.0.0.0`, `[::]`) is not reachable as written, so the default name `clawdot.local` (REQ-CFG-009) is used with the listen port, and the core says the address was assumed. | Must | M4 | T |
 | REQ-CFG-017 | The text console (the stand-in for a satellite until audio ships) MUST end the program on `quit` or `exit` as well as on end of input. | Should | M1 | T |
+| REQ-CFG-018 | While no administrator setting exists, the UI MUST show one first-run setup screen with two choices: protect the UI with a single administrator password (recommended), or leave it open (unprotected) on this network, with a one-line warning. Until setup completes, the administrator API MUST refuse everything except reading the setup state and completing setup. There is exactly one administrator password; multi-user accounts are out of scope. No administrator token exists and none is printed. | Must | M4 | T |
+| REQ-CFG-019 | The administrator password MUST be stored only as a salted, iterated hash (PBKDF2-HMAC-SHA256, at least 100,000 iterations, 16-byte random salt, parameters stored with the hash) built on the dependencies already in the build, and MUST NOT be logged. Passwords MUST be 8 to 128 characters. A correct password yields a random, expiring, in-memory session token (at most 8 live sessions); API calls carry the session token, never the password. Sign-in attempts MUST share the authentication rate limit. | Must | M4 | T |
+| REQ-CFG-020 | Open mode MUST be refused unless the request that chooses it comes from a loopback, private, link-local, or shared (100.64.0.0/10) address and the listen address is not a specific public address. While open mode is active, any UI request from another address MUST be refused, and every UI view MUST show a persistent "unprotected" banner. Webhook, bridge, and satellite credentials are unaffected: endpoint tokens stay required in every UI mode (REQ-INB-002, REQ-SEC-006). | Must | M4 | T |
+| REQ-CFG-021 | Setup MUST complete only from a loopback, private, link-local, or shared address. No setup code or other console-printed secret is required (the reference device has no visible console, so a printed code would make first-run setup impossible); the core MUST instead print the web UI URL at start-up and, while setup is pending, one line saying that the first person on a private network to open the page can set the password. The accepted residual risk is recorded in threat T15. | Must | M4 | T |
+| REQ-CFG-022 | `clawdot --reset-admin` MUST remove the administrator setting (and any legacy `admin-token.hash`) from the data directory and exit, leaving endpoints, inbox, and other state untouched, so that setup shows again at the next start. It is run on the device with the server stopped. `--rotate-admin-token` no longer exists. | Must | M4 | T |
+| REQ-CFG-023 | An installation that has an `admin-token.hash` from an earlier version MUST keep working: on the first start the old token becomes the password-mode credential (entered in the password field), and the core converts the file without printing anything. The UI MUST let the signed-in administrator replace it with a real password (REQ-CFG-024). | Must | M4 | T |
+| REQ-CFG-024 | A signed-in administrator (or any private-address user in open mode) MUST be able to set a new administrator password in the UI; this moves an open installation to password mode and ends every other session. | Must | M4 | T |
 
 ### 4.7 Non-functional (`NFR`)
 
@@ -193,6 +201,29 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | REQ-EXT-005 | The core API surface for sidecars (inbox ingress, reply stream, status) MUST be documented and versioned. | Must | M5 | I |
 | REQ-EXT-006 | A ClawDot MCP server (agents calling `announce`/`ask_user`) is **not** part of v1.0. The inbox event model (`kind`, reply types) MUST NOT preclude it. | Must | M2 | I |
 
+### 4.10 Board support (`BRD`)
+
+See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architecture/board-support.md) and the hardware evidence in [R-07](../research/07-echo-dot-gen2-hardware.md). A **board** is the device-specific code and data that exposes a speaker's physical features (buttons, LED ring, microphone mute, Wi-Fi, clock, audio device names) to a hardware-agnostic core. It is separate from the satellite protocol, which carries audio and events; a board runs on the same device as the satellite or core that uses it.
+
+| ID | Requirement | Pri | Ms | Ver |
+|---|---|---|---|---|
+| REQ-BRD-001 | Device-specific hardware (buttons, LED ring, microphone mute, Wi-Fi, clock check, audio device names) MUST be reached only through one `Board` interface. The core and the reference satellites MUST NOT contain device-specific paths, key codes, or driver names. | Must | v1.x | I |
+| REQ-BRD-002 | Every board capability MUST be optional and declared (present or absent, in the style of REQ-SAT-003). The core MUST behave correctly, and remain fully usable, on a board that declares none. | Must | v1.x | T |
+| REQ-BRD-003 | The default build MUST include only a `NullBoard` (all capabilities absent). A `desktop` board (keyboard keys for buttons, a terminal indicator for LEDs) SHOULD exist for development and tests behind an optional feature. | Must | v1.x | T |
+| REQ-BRD-004 | A board MUST be compiled in by a Cargo feature and chosen at run time by the `board` setting (`none` by default, `auto`, or a board name). `auto` MUST choose only among compiled-in boards, by probing for the device. Naming a board that is not compiled in or not present MUST stop startup with a message that names the setting. | Must | v1.x | T |
+| REQ-BRD-005 | A board's button, LED and takeover behaviour MUST come from a per-device data file (JSON) validated at startup (unknown keys and impossible values stop startup and name the key), embedded in the binary and overridable with the `board_file` setting. The file holds data only: it MUST NOT contain code, shell commands built from untrusted text, or secrets. | Must | v1.x | T |
+| REQ-BRD-006 | The core MUST express LED feedback as a fixed set of logical states (`idle`, `wake`, `listening`, `thinking`, `speaking`, `muted`, `error`, `offline`, `timer`, `alarm`, `inbox`, `volume`); the board file maps each state to a device pattern. A state with no mapping MUST be a no-op, never an error. | Must | v1.x | T |
+| REQ-BRD-007 | A board MUST deliver raw button events (button, down, up, repeat, monotonic timestamp). The board file maps buttons and gestures (press, long press, double press) to logical actions (`volume_up`, `volume_down`, `mute_toggle`, `action`, `stop`). Gesture timing MUST be computed by shared board code, not per device, and MUST be testable without hardware. | Must | v1.x | T |
+| REQ-BRD-008 | The board MUST report the microphone mute state and whether the mute is `hardware` (the board can show the microphone path is cut) or `software` (capture is simply discarded). The core MUST treat a reported mute as authoritative (REQ-VOI-008, REQ-SEC-003) and MUST NOT state or imply the microphone is disconnected unless the board declared `hardware` mute. | Must | v1.x | T/I |
+| REQ-BRD-009 | A board that can manage Wi-Fi SHOULD report status (disconnected, connecting, connected, with signal strength and address) and accept a join request (network name and secret). The secret MUST NOT be logged, echoed in the API, or stored by ClawDot beyond handing it to the platform; join requests MUST be accepted only through the authenticated administrator path (REQ-CFG-005). | Should | v1.x | T |
+| REQ-BRD-010 | The board MUST report the clock as `unset`, `unverified` (restored from a saved value or otherwise not proven current) or `synced`. The core MUST treat `unset` and `unverified` like an unsynchronised clock (REQ-TMR-006, REQ-TMR-009) until the clock is `synced`, and MAY attempt verification by other means (for example an HTTPS `Date` check against a configured provider). | Must | v1.x | T |
+| REQ-BRD-011 | A board MUST describe its audio devices (capture and playback device names, sample rate, format, channel count, and which capture channels are microphones or echo reference) so the satellite can open them without device knowledge. | Must | v1.x | T |
+| REQ-BRD-012 | A board that must stop or reconfigure other software to own a device (for example a vendor voice stack) MUST list those actions in its board file as `takeover`, MUST perform them only when the board is enabled, and MUST restore them on a clean exit. The list MUST be shown in the UI status and logged at startup. | Must | v1.x | T/I |
+| REQ-BRD-013 | A board implementation MUST NOT read or write platform files known to be hazardous (listed in the board's research note and board file `forbidden` list); the shared board code MUST refuse such paths. | Must | v1.x | T |
+| REQ-BRD-014 | The Echo Dot Gen 2 board MUST ship as the optional feature `board-dot2`, with `boards/echo-dot2.json`, built by the `dot2` profile and `scripts/build-dot2.sh` for `armv7-unknown-linux-musleabihf`. It MUST add no mandatory dependency to the default build. | Must | v1.x | T/I |
+| REQ-BRD-015 | The Echo Dot Gen 2 board SHOULD drive the LED ring and read the buttons while the vendor LED and button daemons keep running, and SHOULD document which vendor services must be stopped for audio. Boards MUST report which parts they could not initialise (for example audio devices still held by another process) rather than failing the whole board. | Should | v1.x | T |
+| REQ-BRD-016 | Board events (buttons, mute changes, Wi-Fi changes) and board commands (LED states, volume) MUST be bounded: input queues have a fixed size and drop the oldest event on overflow (REQ-NFR-110). | Must | v1.x | T |
+
 ## 5. Key user scenarios (acceptance)
 
 - **AC-1 Q&A:** Given the device idle, when the user says the wake word and "what's the capital of Australia", then a spoken answer begins ≤ 2.5 s after speech ends.
@@ -207,6 +238,7 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 - **AC-10 Half-duplex:** Given the default configuration, when the assistant is speaking, then speech from the room is not transcribed, and the device does not trigger on its own output.
 - **AC-11 Summary:** Given a coding agent finishes with a 2,000-word final message, when the device announces it, then it plays a tone and speaks a summary of at most about two sentences without file paths, and "give me details" answers from the stored event without contacting the agent.
 - **AC-12 Integrations without code:** Given an HTTP tool configured for Home Assistant's conversation API, when the user says "turn off the living room lights", then the tool is called with the schema-validated utterance and the response is spoken. Given a Spotify control-shape backend, then "play some jazz" starts playback on the configured Connect device and the assistant states which device it is playing on.
+- **AC-13 Board:** Given an Echo Dot Gen 2 build with `board = "echo-dot2"`, when the user presses the mute button, then the microphone is discarded, the ring shows the `muted` pattern within 200 ms, and the status page reports mute as `software` or `hardware` exactly as the board declared. Given the same binary with `board = "none"`, the assistant works with no LED or button response and no error.
 
 ## 6. Open questions
 
@@ -236,3 +268,7 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | 0.6 | 2026-11-07 | Changelog shipped in the build and shown on the About page (CFG-013), following the git-flow release process (ADR-0011) |
 | 0.7 | 2026-11-08 | Hardware test on an Echo Dot with no network time: unsynchronised-clock behaviour defined (TMR-009) |
 | 0.8 | 2026-11-08 | Hardware test findings: default listen port, bind-before-token ordering, endpoint management commands exit, snippet URLs derived from the listen address, console `quit` (CFG-014..017) |
+| 0.9 | 2026-11-08 | First-run admin setup replaces the printed administrator token: one password or deliberate open mode on a private network, session sign-in, setup code, `--reset-admin`, legacy token migration (CFG-018..024; CFG-005 and CFG-015 amended) |
+| 0.10 | 2026-11-08 | The console-printed setup code is removed because the device has no visible console; CFG-021 now accepts first-visitor setup from private addresses as a documented residual risk (T15); CFG-015 amended |
+| 0.11 | 2026-11-08 | Default listen port changed from 8765 to 3335 at the maintainer's request (CFG-014 amended) |
+| 0.12 | 2026-11-08 | Board support layer (section 4.10, BRD-001..016, ADR-0012): one `Board` interface for buttons, LED ring, mute, Wi-Fi, clock trust and audio devices; null, desktop and Echo Dot Gen 2 boards chosen by Cargo feature and the `board` setting; per-device JSON; honest mute and clock reporting; AC-13. Evidence in R-07 |

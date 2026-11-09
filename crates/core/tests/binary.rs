@@ -1086,17 +1086,36 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
             let _ = tx.send(line);
         }
     });
-    let (mut admin, mut listening) = (None, false);
+    let (mut printed_token, mut listening) = (false, false);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !(admin.is_some() && listening) {
+    while Instant::now() < deadline && !listening {
         if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            if admin.is_none() && line.trim_start().starts_with("cdt_") {
-                admin = Some(line.trim().to_owned());
-            }
+            printed_token |= line.contains("cdt_");
             listening |= line.contains("listening on");
         }
     }
-    let admin = admin.expect("the administrator token is printed once");
+    assert!(
+        listening && !printed_token,
+        "no administrator token is printed (REQ-CFG-018)"
+    );
+    // First run: the API is closed until setup (REQ-CFG-018), then a password gives a session (REQ-CFG-019).
+    assert_eq!(http(port, "GET", "/api/status", "", "").0, 403);
+    let (status, b) = http(
+        port,
+        "POST",
+        "/api/setup",
+        "",
+        r#"{"mode":"password","password":"correct horse battery"}"#,
+    );
+    assert_eq!(status, 200, "{b}");
+    let admin = b
+        .split("\"token\":\"")
+        .nth(1)
+        .and_then(|t| t.split('"').next())
+        .expect("a session token")
+        .to_owned();
+    let saved = std::fs::read_to_string(dir.join("admin.json")).unwrap();
+    assert!(saved.contains("pbkdf2-sha256$") && !saved.contains("correct horse"));
 
     // Status appears within a tick or two of starting.
     let mut body = String::new();
@@ -1169,6 +1188,127 @@ fn a_taken_port_fails_without_revealing_a_token() {
         "no token may be printed: {stdout}"
     );
     assert!(!dir.join("admin-token.hash").exists());
+    assert!(!dir.join("admin.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Start the binary, wait for the "listening" line, and return it with everything printed so far.
+fn start_and_read(args: &[&str]) -> (std::process::Child, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .arg("--no-console")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let mut seen = String::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !seen.contains("listening on") {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            seen.push_str(&line);
+            seen.push('\n');
+        }
+    }
+    (child, seen)
+}
+
+/// No setup code is printed, whatever the listen address: the device may have no visible console
+/// (REQ-CFG-021). The URL and the first-visitor warning are, and setup completes without a code.
+#[test]
+fn setup_prints_the_url_and_a_warning_but_no_code() {
+    let dir = std::env::temp_dir().join(format!("clawdot-code-{}", std::process::id()));
+    let port = free_port();
+    let (mut child, seen) = start_and_read(&[
+        "--listen",
+        &format!("0.0.0.0:{port}"),
+        "--data-dir",
+        dir.to_str().unwrap(),
+    ]);
+    assert!(
+        seen.contains("Web UI: http://") && seen.contains("first-run setup"),
+        "{seen}"
+    );
+    assert!(seen.contains("first person on a private network"), "{seen}");
+    assert!(!seen.to_lowercase().contains("setup code"), "{seen}");
+    assert!(!seen.contains("cdt_"), "{seen}");
+    let body = r#"{"mode":"password","password":"correct horse battery"}"#;
+    assert_eq!(http(port, "POST", "/api/setup", "", body).0, 200);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An old admin-token.hash is converted and its token still signs in (REQ-CFG-023); --reset-admin clears
+/// only the administrator setting, then setup shows again (REQ-CFG-022).
+#[test]
+fn legacy_token_migration_and_reset_admin() {
+    let dir = std::env::temp_dir().join(format!("clawdot-reset-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = "cdt_oldtokenoldtokenoldtokenoldtokenoldtoken1";
+    std::fs::write(
+        dir.join("admin-token.hash"),
+        clawdot_core::inbox::endpoint::hash_token(old),
+    )
+    .unwrap();
+    let port = free_port();
+    let args = [
+        "--listen".to_owned(),
+        format!("127.0.0.1:{port}"),
+        "--data-dir".to_owned(),
+        dir.to_str().unwrap().to_owned(),
+    ];
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (mut child, seen) = start_and_read(&args);
+    assert!(
+        seen.contains("old administrator token still works"),
+        "{seen}"
+    );
+    assert!(!dir.join("admin-token.hash").exists() && dir.join("admin.json").exists());
+    let login = format!(r#"{{"password":"{old}"}}"#);
+    let (status, b) = http(port, "POST", "/api/login", "", &login);
+    assert_eq!(status, 200, "{b}");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Reset (server stopped): the setting goes, other state stays.
+    std::fs::write(dir.join("other.json"), "keep").unwrap();
+    let reset = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+            .args(["--reset-admin", "--data-dir", dir.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(reset().contains("cleared"));
+    assert!(!dir.join("admin.json").exists());
+    assert!(dir.join("other.json").exists());
+    assert!(reset().contains("no administrator setting"));
+    let (mut child, _) = start_and_read(&args);
+    assert_eq!(
+        http(port, "GET", "/api/status", "", "").0,
+        403,
+        "setup shows again"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // The removed flag explains itself.
+    let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .arg("--rotate-admin-token")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--reset-admin"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

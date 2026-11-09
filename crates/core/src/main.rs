@@ -42,12 +42,13 @@ USAGE:
 OPTIONS:
     --config FILE              JSON configuration file (flags override it); see docs/architecture/configuration.md
     --data-dir DIR             Where state is kept (default: ./clawdot-data)
-    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:8765)
+    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:3335)
     --public-url URL           How agents reach this device, used in printed snippets (default: from --listen)
     --zone NAME                IANA time zone, for example America/New_York (default: UTC)
     --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once and exits
     --rotate-endpoint NAME     Issue a new token for an endpoint, print it once, and exit
-    --rotate-admin-token       Issue a new web UI administrator token (printed once)
+    --reset-admin              Clear the web UI administrator setting and exit, so first-run setup shows again
+                               (run on the device with the server stopped)
     --voice-in FILE            Answer one recorded utterance (WAV, mono 16-bit 16 kHz) and exit; needs a `speech` config
     --voice-out FILE           With --voice-in, write the spoken reply to this WAV file
     --no-console               Do not read the console (run as a server only)
@@ -77,7 +78,7 @@ struct Args {
     zone: Option<String>,
     create: Vec<String>,
     rotate: Vec<String>,
-    rotate_admin: bool,
+    reset_admin: bool,
     /// An endpoint command was given on the command line: print and exit instead of serving.
     manage: bool,
     console: bool,
@@ -101,14 +102,14 @@ struct Args {
 fn parse() -> Result<Args, String> {
     let mut a = Args {
         data_dir: PathBuf::from("clawdot-data"),
-        listen: "127.0.0.1:8765"
+        listen: "127.0.0.1:3335"
             .parse()
             .map_err(|_| "internal: bad default address".to_owned())?,
         public_url: None,
         zone: None,
         create: Vec::new(),
         rotate: Vec::new(),
-        rotate_admin: false,
+        reset_admin: false,
         manage: false,
         console: true,
         llm_url: None,
@@ -157,7 +158,13 @@ fn parse() -> Result<Args, String> {
                 a.rotate.push(value("--rotate-endpoint")?);
                 a.manage = true;
             }
-            "--rotate-admin-token" => a.rotate_admin = true,
+            "--reset-admin" => a.reset_admin = true,
+            "--rotate-admin-token" => {
+                return Err(
+                    "--rotate-admin-token was removed: the web UI now asks for a password on first run; \n                     use --reset-admin to start setup again"
+                        .into(),
+                );
+            }
             "--voice-in" => a.voice_in = Some(PathBuf::from(value("--voice-in")?)),
             "--voice-out" => a.voice_out = Some(PathBuf::from(value("--voice-out")?)),
             "--no-console" => a.console = false,
@@ -218,40 +225,45 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// Load the web UI administrator token hash, creating a token on first run (printed once, stored hashed).
-fn setup_admin(
-    core: &Core,
-    dir: &std::path::Path,
-    rotate: bool,
-    public: &str,
-) -> Result<(), String> {
-    use clawdot_core::inbox::endpoint::{generate_token, hash_token};
-    let path = dir.join("admin-token.hash");
-    if !rotate && let Ok(h) = std::fs::read_to_string(&path) {
-        core.set_admin_token_hash(h.trim());
-        return Ok(());
+/// `--reset-admin`: forget the administrator setting so first-run setup shows again (REQ-CFG-022).
+fn reset_admin(dir: &std::path::Path) -> ExitCode {
+    match clawdot_core::admin::reset(dir) {
+        Ok(removed) => {
+            println!(
+                "{}Start clawdot and open the web UI to set an administrator password again.\n\
+                 Until you do, the setup page can be completed by anyone on a private network who reaches it.",
+                if removed {
+                    "The web UI administrator setting was cleared. Endpoints and other state are unchanged.\n"
+                } else {
+                    "There was no administrator setting to clear.\n"
+                }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("clawdot: cannot clear the administrator setting: {e}");
+            ExitCode::from(1)
+        }
     }
-    let token = generate_token().map_err(|e| e.to_string())?;
-    let hash = hash_token(&token);
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let tmp = dir.join("admin-token.hash.tmp");
-    std::fs::write(&tmp, &hash).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
+}
+
+/// Tell the person at the console where the web UI is and how it is protected. No secret is printed: the
+/// device may have no visible console (REQ-CFG-018, REQ-CFG-021).
+fn announce_admin(core: &Core, public: &str) {
+    use clawdot_core::admin::Mode;
+    match core.admin_mode() {
+        Mode::Setup => {
+            println!(
+                "\nWeb UI: {public}/  (open it to finish first-run setup)\n\
+                 Until setup is done, the first person on a private network to open it can set the password."
+            );
+        }
+        Mode::Password => println!("\nWeb UI: {public}/"),
+        Mode::Open => println!(
+            "\nWeb UI: {public}/  is UNPROTECTED (open mode): anyone on your network can use it.\n\
+             Set a password in the page, or run `clawdot --reset-admin` and start again."
+        ),
     }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    core.set_admin_token_hash(&hash);
-    println!(
-        "
-Web UI: {public}/
-Administrator token (shown only now):
-  {token}
-"
-    );
-    Ok(())
 }
 
 /// True if a console line asks to leave (REQ-CFG-017).
@@ -270,7 +282,7 @@ fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
     }
 }
 
-const DEFAULT_PORT: u16 = 8765;
+const DEFAULT_PORT: u16 = 3335;
 
 /// An actionable message for a failed bind (REQ-CFG-014).
 fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
@@ -578,6 +590,9 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.reset_admin {
+        return reset_admin(&args.data_dir);
+    }
     let zone = match zone_for(args.zone.as_deref()) {
         Ok(z) => z,
         Err(e) => {
@@ -591,6 +606,16 @@ async fn main() -> ExitCode {
         eprintln!(
             "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and              reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
         );
+    }
+    match clawdot_core::admin::migrate_legacy(&args.data_dir) {
+        Ok(true) => println!(
+            "clawdot: the old administrator token still works: sign in with it, then set a password in the web UI"
+        ),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("clawdot: cannot convert the old administrator token: {e}");
+            return ExitCode::from(1);
+        }
     }
     let core = match Core::open(
         clock.clone(),
@@ -841,10 +866,8 @@ async fn main() -> ExitCode {
         }
     }
 
-    if let Err(e) = setup_admin(&core, &args.data_dir, args.rotate_admin, &public) {
-        eprintln!("clawdot: web UI administrator token: {e}");
-        return ExitCode::from(1);
-    }
+    core.set_listen_ip(args.listen.ip());
+    announce_admin(&core, &public);
     println!(
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         args.listen,
@@ -990,6 +1013,6 @@ mod tests {
         let e = std::io::Error::from(std::io::ErrorKind::AddrInUse);
         let m = bind_error(addr("0.0.0.0:8080"), &e);
         assert!(m.contains("0.0.0.0:8080"), "{m}");
-        assert!(m.contains("--listen 0.0.0.0:8765"), "{m}");
+        assert!(m.contains("--listen 0.0.0.0:3335"), "{m}");
     }
 }

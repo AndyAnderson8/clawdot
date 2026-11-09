@@ -5,42 +5,94 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ClawDot</title>
 <style>
-  :root { color-scheme: light dark; --bg: #fafafa; --fg: #1b1b1f; --mut: #6b6b76; --line: #d9d9e0; --acc: #2b59c3; --bad: #b3261e; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #16161a; --fg: #ececf1; --mut: #9a9aa6; --line: #2e2e36; --acc: #7ea2ff; --bad: #ff8a80; } }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, sans-serif; }
-  main { max-width: 46rem; margin: 0 auto; padding: 1rem; }
-  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
-  h2 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
-  p.sub, .mut { color: var(--mut); font-size: .9rem; }
-  section { border-top: 1px solid var(--line); }
-  input, select, button { font: inherit; padding: .45rem .6rem; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
-  button { cursor: pointer; background: var(--acc); color: #fff; border-color: transparent; }
-  button.plain { background: transparent; color: var(--acc); border-color: var(--line); }
-  button.danger { background: transparent; color: var(--bad); border-color: var(--line); }
-  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: .4rem 0; }
-  .row > input { flex: 1 1 10rem; }
+/*@theme*/
+  main { max-width: 42rem; margin: 0 auto; padding: var(--s4) var(--s4) var(--s6); }
+  header { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) 0 var(--s4); }
+  .logo { width: 3.25rem; height: 3.25rem; flex: none; }
+  h1 { font-size: var(--t-xl); line-height: 1.1; margin: 0; letter-spacing: -.01em; }
+  h1 span { color: var(--acc); }
+  h2 { font-size: var(--t-l); line-height: 1.2; margin: 0 0 var(--s2); }
+  h3 { font-size: var(--t-m); margin: 0 0 var(--s2); }
+  p { margin: 0 0 var(--s3); max-width: 60ch; }
+  p.sub, .mut { color: var(--mut); font-size: var(--t-s); }
+  header p.sub { margin: var(--s1) 0 0; }
+  body.setup header, body.login header { flex-direction: column; text-align: center; padding: var(--s5) 0 var(--s4); animation: arrive .7s ease-out both; }
+  body.setup .logo, body.login .logo { width: 7rem; height: 7rem; }
+  body.setup h1, body.login h1 { font-size: var(--t-xxl); }
+  @keyframes arrive { from { opacity: 0; } }
+  section { padding: var(--s4) 0; border-top: 1px solid var(--line); }
+  #setup, #login { border-top: 0; max-width: 28rem; margin: 0 auto; }
+  form.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m); padding: var(--s4); margin: 0 0 var(--s4); }
+  form.panel.quiet { background: transparent; border-style: dashed; }
+  input, select, button { font: inherit; min-height: 2.75rem; padding: var(--s2) var(--s3); border: 1px solid var(--edge); border-radius: var(--r-s); background: var(--surface); color: inherit; }
+  input::placeholder { color: var(--mut); opacity: 1; }
+  button { cursor: pointer; background: var(--acc); color: var(--on-acc); border-color: transparent; border-radius: var(--r-pill); padding: var(--s2) var(--s4); font-weight: 600; transition: filter .15s; }
+  button:hover { filter: brightness(1.08); }
+  button:active { filter: brightness(.92); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.plain { background: transparent; color: var(--acc); border-color: var(--edge); }
+  button.danger { background: transparent; color: var(--bad); border-color: var(--bad); }
+  .row { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; margin: var(--s2) 0; }
+  .row > input { flex: 1 1 10rem; min-width: 0; }
+  #setup .row > input, #login .row > input { flex: 1 1 100%; }
+  #setup .row > button { width: 100%; }
   ul { list-style: none; padding: 0; margin: 0; }
-  li { padding: .6rem 0; border-bottom: 1px solid var(--line); }
-  code, .token { font-family: ui-monospace, monospace; word-break: break-all; }
-  .token { display: block; padding: .5rem; border: 1px dashed var(--acc); border-radius: 6px; margin: .4rem 0; }
-  #msg { min-height: 1.4rem; color: var(--bad); }
+  li { padding: var(--s3) 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  code, .token { font-family: var(--mono); font-size: .92em; word-break: break-all; }
+  .token { display: block; padding: var(--s3); border: 1px dashed var(--acc); border-radius: var(--r-s); margin: var(--s2) 0; background: var(--surface); }
+  #msg { min-height: 1.5rem; color: var(--bad); font-weight: 600; }
+  .warn { color: var(--bad); font-weight: 600; font-size: var(--t-s); }
+  #banner { position: sticky; top: 0; z-index: 10; background: var(--bad-bg); color: var(--on-bad); padding: var(--s2) var(--s4); text-align: center; font-weight: 600; border-bottom: 3px solid var(--shell); }
+  #banner a { color: inherit; text-underline-offset: 3px; }
+  #banner a:focus-visible { outline-color: var(--on-bad); }
   .hidden { display: none; }
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="mk" viewBox="0 0 128 128">
+<path d="M18 90v12c0 8 20.600 14 46 14s46-6 46-14V90Z" fill="#1f4d5b"/>
+<ellipse cx="64" cy="90" rx="46" ry="14" fill="#0e2a33"/>
+<ellipse cx="64" cy="90" rx="41" ry="10.500" fill="none" stroke="#2ee6c5" stroke-opacity=".28" stroke-width="7"/>
+<ellipse cx="64" cy="90" rx="41" ry="10.500" fill="none" stroke="#2ee6c5" stroke-width="2.600"/>
+<g fill="none" stroke="#c9402f" stroke-width="3.200" stroke-linecap="round"><path d="M47 78 38 84M49 82l-5 7M54 85l-3 7M81 78l9 6M79 82l5 7M74 85l3 7"/><path d="M47 68 35 55M81 68l12-13" stroke-width="4.200"/><path d="M57 62v-8M71 62v-8" stroke-width="2.400"/></g>
+<g fill="#f2644f"><path d="M30 56c-10-2-14-14-8-24 3-4 7-2 8 4 1-6 6-8 9-5 5 6 2 21-9 25Z"/><path d="M98 56c10-2 14-14 8-24-3-4-7-2-8 4-1-6-6-8-9-5-5 6-2 21 9 25Z"/><ellipse cx="64" cy="74" rx="21" ry="14"/></g>
+<path d="M56 78q8 5 16 0" fill="none" stroke="#7a1f14" stroke-width="2.200" stroke-linecap="round"/>
+<circle cx="57" cy="51" r="4" fill="#fff" stroke="#0e2a33" stroke-width="1.200"/><circle cx="71" cy="51" r="4" fill="#fff" stroke="#0e2a33" stroke-width="1.200"/>
+<circle cx="57.600" cy="51.400" r="1.800" fill="#0e2a33"/><circle cx="70.400" cy="51.400" r="1.800" fill="#0e2a33"/>
+</symbol></svg>
+<div id="banner" class="hidden" role="alert">Unprotected (open mode): anyone on this network can use this page. <a href="#pwsec">Set a password</a></div>
 <main>
-  <h1>ClawDot</h1>
-  <p class="sub">Your speaker's agent inbox. Nothing on this page leaves your network.</p>
+  <header>
+    <svg class="logo" aria-hidden="true"><use href="#mk"/></svg>
+    <div>
+      <h1>Claw<span>Dot</span></h1>
+      <p class="sub">Your speaker's agent inbox. Nothing on this page leaves your network.</p>
+    </div>
+  </header>
   <div id="msg" role="status"></div>
 
-  <section id="login">
-    <h2>Sign in</h2>
-    <form class="row" id="loginform">
-      <input id="tok" type="password" autocomplete="current-password" placeholder="Administrator token" aria-label="Administrator token">
-      <button>Sign in</button>
+  <section id="setup" class="hidden">
+    <h2>Set up ClawDot</h2>
+    <p class="mut">Webhook tokens for agents are separate and always required. Until you finish, anyone on your private network who opens this page could do it instead, so do it now.</p>
+    <form id="pwform" class="panel">
+      <h3>Protect with an admin password</h3>
+      <div class="row"><input id="pw1" type="password" autocomplete="new-password" placeholder="Password (8 or more characters)" aria-label="New password" maxlength="128"></div>
+      <div class="row"><input id="pw2" type="password" autocomplete="new-password" placeholder="Repeat the password" aria-label="Repeat the password" maxlength="128"></div>
+      <div class="row"><button>Set password</button></div>
     </form>
-    <p class="mut">The token was printed once when the device first started. It is kept only for this browser tab.</p>
+    <form id="openform" class="panel quiet">
+      <h3>Or leave it open on this network</h3>
+      <p class="warn">Anyone on this network can use this page and read your inbox.</p>
+      <div class="row"><button class="danger" id="openbtn">Leave open</button></div>
+    </form>
+  </section>
+
+  <section id="login" class="hidden">
+    <h2>Sign in</h2>
+    <form class="panel" id="loginform">
+      <div class="row"><input id="pw" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password"><button>Sign in</button></div>
+    </form>
+    <p class="mut" id="legacynote">Forgot it? On the device, run <code>clawdot --reset-admin</code> and open this page again.</p>
   </section>
 
   <div id="app" class="hidden">
@@ -78,6 +130,15 @@
       <h2>Inbox</h2>
       <ul id="events"></ul>
     </section>
+
+    <section id="pwsec">
+      <h2 id="pwtitle">Admin password</h2>
+      <p class="mut hidden" id="legacywarn">You are signed in with the old administrator token. Set a password to replace it.</p>
+      <form class="row" id="newpwform">
+        <input id="newpw" type="password" autocomplete="new-password" placeholder="New password (8 or more characters)" aria-label="New password" maxlength="128">
+        <button>Save password</button>
+      </form>
+    </section>
   </div>
 </main>
 <script>
@@ -85,7 +146,8 @@
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
   var token = "";
-  try { token = sessionStorage.getItem("clawdot-admin") || ""; } catch (e) { token = ""; }
+  try { token = sessionStorage.getItem("clawdot-session") || ""; } catch (e) { token = ""; }
+  function keep(t) { token = t || ""; try { if (token) sessionStorage.setItem("clawdot-session", token); else sessionStorage.removeItem("clawdot-session"); } catch (e) {} }
 
   function say(m) { $("msg").textContent = m || ""; }
   function el(tag, text, cls) { var e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
@@ -93,7 +155,7 @@
   async function api(method, path, body) {
     var r = await fetch(path, {
       method: method,
-      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      headers: token ? { "Authorization": "Bearer " + token, "Content-Type": "application/json" } : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
     var data = {};
@@ -102,9 +164,9 @@
     return data;
   }
 
-  function show(signedIn) {
-    $("login").classList.toggle("hidden", signedIn);
-    $("app").classList.toggle("hidden", !signedIn);
+  function show(view) {
+    ["setup", "login", "app"].forEach(function (v) { $(v).classList.toggle("hidden", v !== view); });
+    document.body.className = view;
   }
 
   function ago(ts, now) {
@@ -178,23 +240,61 @@
   function secret(t) { $("secrettext").textContent = t; $("secret").classList.remove("hidden"); }
 
   async function load() {
-    say("");
-    try { render(await api("GET", "/api/overview")); show(true); renderStatus(await api("GET", "/api/status")); }
-    catch (x) {
-      show(false);
-      if (x.status === 401) { token = ""; try { sessionStorage.removeItem("clawdot-admin"); } catch (e) {} say("That token was not accepted."); }
+    var st;
+    try { st = await api("GET", "/api/auth"); } catch (x) { say(x.message); return; }
+    var open = st.mode === "open";
+    $("banner").classList.toggle("hidden", !open);
+    $("openbtn").disabled = !st.open_allowed || !st.peer_private;
+    $("out").classList.toggle("hidden", open);
+    $("pwtitle").textContent = open ? "Set an admin password" : "Change admin password";
+    $("legacywarn").classList.toggle("hidden", !st.legacy);
+    if (st.mode === "setup") { show("setup"); if (!st.peer_private) say("Setup can only be finished from a device on your own network."); return; }
+    if (st.mode === "password" && !token) { show("login"); return; }
+    try {
+      render(await api("GET", "/api/overview")); show("app"); say("");
+      renderStatus(await api("GET", "/api/status"));
+    } catch (x) {
+      if (x.status === 401) { keep(""); show("login"); say("Please sign in."); }
       else if (x.status === 429) say("Too many attempts. Wait a few seconds.");
       else say(x.message);
     }
   }
 
-  $("loginform").onsubmit = function (ev) {
+  async function finishSetup(body) {
+    try {
+      var r = await api("POST", "/api/setup", body);
+      keep(r.token || ""); say(""); await load();
+    } catch (x) { say(x.message); }
+  }
+
+  $("pwform").onsubmit = function (ev) {
     ev.preventDefault();
-    token = $("tok").value.trim(); $("tok").value = "";
-    try { sessionStorage.setItem("clawdot-admin", token); } catch (e) {}
-    load();
+    var p = $("pw1").value;
+    if (p !== $("pw2").value) { say("The two passwords differ."); return; }
+    if (p.length < 8) { say("Use at least 8 characters."); return; }
+    $("pw1").value = ""; $("pw2").value = "";
+    finishSetup({ mode: "password", password: p });
   };
-  $("out").onclick = function () { token = ""; try { sessionStorage.removeItem("clawdot-admin"); } catch (e) {} $("secret").classList.add("hidden"); show(false); };
+  $("openform").onsubmit = function (ev) {
+    ev.preventDefault();
+    finishSetup({ mode: "open" });
+  };
+  $("loginform").onsubmit = async function (ev) {
+    ev.preventDefault();
+    var p = $("pw").value; $("pw").value = "";
+    try { var r = await api("POST", "/api/login", { password: p }); keep(r.token); say(""); await load(); }
+    catch (x) { say(x.status === 401 ? "That password was not accepted." : x.status === 429 ? "Too many attempts. Wait a few seconds." : x.message); }
+  };
+  $("out").onclick = async function () {
+    try { await api("POST", "/api/logout"); } catch (x) {}
+    keep(""); $("secret").classList.add("hidden"); await load();
+  };
+  $("newpwform").onsubmit = async function (ev) {
+    ev.preventDefault();
+    var p = $("newpw").value; $("newpw").value = "";
+    try { var r = await api("POST", "/api/admin/password", { password: p }); keep(r.token); await load(); say("Password saved."); }
+    catch (x) { say(x.message); }
+  };
   $("newform").onsubmit = async function (ev) {
     ev.preventDefault();
     try {
@@ -211,8 +311,8 @@
     } catch (x) { say(x.message); }
   };
 
-  if (token) load();
-  setInterval(function () { if (token && !$("app").classList.contains("hidden")) load(); }, 10000);
+  load();
+  setInterval(function () { if (!$("app").classList.contains("hidden")) load(); }, 10000);
 })();
 </script>
 </body>

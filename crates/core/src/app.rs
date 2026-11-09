@@ -2,6 +2,7 @@
 //! front end needs. The HTTP server and the voice session are thin layers over this, so the logic is
 //! testable without sockets or audio.
 
+use crate::admin::{Admin, AdminError, Mode as AdminMode};
 use crate::inbox::adapter::Adapter;
 use crate::inbox::endpoint::{self, Endpoint, Endpoints};
 use crate::inbox::event::{Event, EventState};
@@ -10,6 +11,7 @@ use crate::inbox::reply::{self, Reply, ReplyKind, ReplyQueue};
 use crate::sched::{Clock, Ts};
 use crate::store::{JsonStore, StoreError};
 use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Notify;
 
@@ -85,6 +87,8 @@ pub struct Stores {
     pub inbox: JsonStore,
     /// Replies awaiting bridges.
     pub replies: JsonStore,
+    /// The web UI administrator setting (password hash or open mode).
+    pub admin: JsonStore,
 }
 
 impl Stores {
@@ -95,6 +99,7 @@ impl Stores {
             endpoints: JsonStore::new(dir.join("endpoints.json"), endpoint::SCHEMA),
             inbox: JsonStore::new(dir.join("inbox.json"), crate::inbox::queue::SCHEMA),
             replies: JsonStore::new(dir.join("replies.json"), reply::SCHEMA),
+            admin: JsonStore::new(dir.join("admin.json"), crate::admin::SCHEMA),
         }
     }
 }
@@ -194,7 +199,7 @@ pub struct Core {
     stores: Option<Stores>,
     inner: Mutex<Inner>,
     notify: Notify,
-    admin_hash: Mutex<Option<String>>,
+    admin: Mutex<crate::admin::Admin>,
     status: Mutex<serde_json::Value>,
     speech: Mutex<std::collections::VecDeque<String>>,
 }
@@ -243,7 +248,8 @@ impl Core {
             limits.max_pending_replies,
             limits.reply_ttl_secs,
         )?;
-        Ok(Self::build(
+        let admin = crate::admin::Admin::open(stores.admin.clone())?;
+        let mut core = Self::build(
             clock,
             adapters,
             limits,
@@ -251,7 +257,9 @@ impl Core {
             endpoints,
             inbox,
             replies,
-        ))
+        );
+        core.admin = Mutex::new(admin);
+        Ok(core)
     }
 
     fn build(
@@ -280,7 +288,7 @@ impl Core {
                 },
             }),
             notify: Notify::new(),
-            admin_hash: Mutex::new(None),
+            admin: Mutex::new(crate::admin::Admin::new()),
             status: Mutex::new(serde_json::Value::Null),
             speech: Mutex::new(std::collections::VecDeque::new()),
         }
@@ -502,42 +510,128 @@ impl Core {
         self.authenticate(&mut g, name, token, now).map(|_| ())
     }
 
-    // ----- web UI administration -----
+    // ----- web UI administration (REQ-CFG-018..024) -----
 
-    /// Set the web UI administrator token by its hash. Until this is called the UI API refuses everyone.
-    pub fn set_admin_token_hash(&self, hash: &str) {
-        *self
-            .admin_hash
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(hash.to_owned());
+    fn admin_lock(&self) -> MutexGuard<'_, Admin> {
+        self.admin.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether `token` is the administrator token. Failures share the authentication rate limit.
-    ///
-    /// # Errors
-    /// [`HookError::Unauthorized`] or [`HookError::RateLimited`].
-    pub fn check_admin(&self, token: &str) -> Result<(), HookError> {
-        let stored = self
-            .admin_hash
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if stored.is_some_and(|h| endpoint::verify_token(token, &h)) {
-            return Ok(());
-        }
+    /// Spend one attempt from the shared authentication rate limit. False when the budget is used up.
+    fn spend_attempt(&self) -> bool {
         let now = self.clock.now();
         let mut g = self.lock();
-        let ok = take(
+        take(
             &mut g.auth_failures,
             now,
             self.limits.auth_fail_burst,
             self.limits.auth_fail_per_sec,
-        );
-        Err(if ok {
-            HookError::Unauthorized
-        } else {
-            HookError::RateLimited
+        )
+    }
+
+    /// Tell the administrator logic where the core listens (decides whether open mode is allowed).
+    pub fn set_listen_ip(&self, ip: IpAddr) {
+        self.admin_lock().set_listen_ip(ip);
+    }
+
+    /// The administrator state the page needs to decide what to show.
+    #[must_use]
+    pub fn admin_state(&self) -> serde_json::Value {
+        let a = self.admin_lock();
+        serde_json::json!({
+            "mode": a.mode().label(),
+            "legacy": a.legacy(),
+            "open_allowed": a.open_allowed(),
         })
+    }
+
+    /// Which mode the administrator setting is in.
+    #[must_use]
+    pub fn admin_mode(&self) -> AdminMode {
+        self.admin_lock().mode()
+    }
+
+    /// Whether a request may use the administrator API. Wrong sessions share the authentication rate limit.
+    ///
+    /// # Errors
+    /// [`AdminError::SetupRequired`], [`AdminError::NotPrivate`], [`AdminError::Unauthorized`], or
+    /// [`AdminError::RateLimited`].
+    pub fn check_admin(&self, bearer: Option<&str>, peer: IpAddr) -> Result<(), AdminError> {
+        let now = self.clock.now();
+        let r = self.admin_lock().authorize(bearer, peer, now);
+        match r {
+            Err(AdminError::Unauthorized) if !self.spend_attempt() => Err(AdminError::RateLimited),
+            r => r,
+        }
+    }
+
+    /// Whether setup may proceed from `peer`. Every call spends an attempt, so setup attempts share the
+    /// authentication rate limit (call this before doing any expensive hashing).
+    ///
+    /// # Errors
+    /// See [`AdminError`].
+    pub fn admin_check_setup(&self, peer: IpAddr) -> Result<(), AdminError> {
+        if !self.spend_attempt() {
+            return Err(AdminError::RateLimited);
+        }
+        self.admin_lock().check_setup(peer)
+    }
+
+    /// Finish setup in open mode.
+    ///
+    /// # Errors
+    /// See [`AdminError`].
+    pub fn admin_setup_open(&self, peer: IpAddr) -> Result<(), AdminError> {
+        self.admin_lock().setup_open(peer)
+    }
+
+    /// Finish setup with a password hash (from [`crate::admin::hash_password`]); returns a session token.
+    ///
+    /// # Errors
+    /// See [`AdminError`].
+    pub fn admin_setup_password(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
+        let now = self.clock.now();
+        self.admin_lock().setup_password(peer, hash, now)
+    }
+
+    /// Start a sign-in: spends an attempt and returns the stored hash to verify (do that off the async
+    /// thread, it is deliberately slow).
+    ///
+    /// # Errors
+    /// [`AdminError::RateLimited`]; [`AdminError::SetupRequired`] or [`AdminError::Unauthorized`] when there
+    /// is no password to check.
+    pub fn admin_login_begin(&self) -> Result<String, AdminError> {
+        if !self.spend_attempt() {
+            return Err(AdminError::RateLimited);
+        }
+        let a = self.admin_lock();
+        match a.mode() {
+            AdminMode::Setup => Err(AdminError::SetupRequired),
+            _ => a.password_hash().ok_or(AdminError::Unauthorized),
+        }
+    }
+
+    /// Open a session after the password checked out.
+    ///
+    /// # Errors
+    /// If the OS cannot supply random bytes.
+    pub fn admin_login_finish(&self) -> Result<String, AdminError> {
+        let now = self.clock.now();
+        self.admin_lock().new_session(now)
+    }
+
+    /// End the session `bearer`.
+    pub fn admin_logout(&self, bearer: &str) {
+        self.admin_lock().end_session(bearer);
+    }
+
+    /// Replace the administrator password (the caller has already passed [`Core::check_admin`] and hashed the
+    /// new password). Ends every session and returns a new one.
+    ///
+    /// # Errors
+    /// Storage and randomness failures.
+    pub fn admin_set_password(&self, hash: String) -> Result<String, AdminError> {
+        let now = self.clock.now();
+        self.admin_lock().set_password(hash, now)
     }
 
     // ----- status and test speech for the web UI -----

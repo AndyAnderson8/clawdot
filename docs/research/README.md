@@ -17,6 +17,7 @@ Short, dated notes that capture what we learned from external sources and what i
 | [R-04](04-echo-dot-gen2.md) | Echo Dot Gen 2 specs and unlock status | ADR-0003, spec 0002 |
 | [R-05](05-wyoming-and-local-intents.md) | Wyoming protocol, hassil, local intents | ADR-0005, spec 0003 |
 | [R-06](06-naming.md) | Name collision check | Public release |
+| [R-07](07-echo-dot-gen2-hardware.md) | Echo Dot Gen 2 hands-on hardware findings (buttons, LED ring, audio, Wi-Fi, clock, services) | ADR-0012, spec 0001 §4.10, board support |
 
 An earlier survey of two reference repositories and the wider landscape (make-a-smart-speaker, chatgpt-openai-smart-speaker, Home Assistant, OpenVoiceOS, Willow, Pipecat, LiveKit) was done in conversation; its conclusions are the eight "ideas to add" reflected below.
 

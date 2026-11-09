@@ -31,7 +31,7 @@ Open an issue labelled `type:feature` + `scope:proposal` → write or amend a sp
 | **Custom "ClawDot" wake word training** | Voice | A quality and licence workstream of its own. v1.0 ships an existing, licence-clean pretrained word. | Wake-word eval harness exists |
 | **ESP32-S3 satellite** | Hardware | Protocol is designed for it; needs a firmware port. | Protocol is Accepted and conformance suite passes |
 | **Wyoming bridge** | Interop | Lets stock Wyoming satellites connect. | ADR-0008 accepted |
-| **Board support layer and Echo Dot Gen 2 target** | Hardware | A `Board` trait (LEDs, buttons, mic-mute, Wi-Fi, clock) with a null and desktop implementation, a `dot2` build profile and per-device TOML. One repo, not a fork. Needs an ADR. | Hardware findings on the Dot's LED, input and Wi-Fi interfaces |
+| **Board support layer and Echo Dot Gen 2 target** | Hardware | A `Board` trait (LEDs, buttons, mic-mute, Wi-Fi, clock) with a null and desktop implementation, a `dot2` build profile and per-device JSON. One repo, not a fork. Findings are in [R-07](research/07-echo-dot-gen2-hardware.md); the design is [ADR-0012](adr/0012-board-support-layer.md) (Proposed) and spec 0001 §4.10. Unachievable or unproven today: electrical mute proof, hardware AEC, autostart, safe audio takeover. | ADR-0012 accepted, and the R-07 unknowns for buttons, audio takeover and autostart are resolved on the device |
 | **Multi-user admin accounts** | Setup | Not planned: one household, one owner, one admin password; agents use scoped webhook tokens. | A real multi-owner use case appears |
 | **First-run Wi-Fi provisioning** (captive portal / BLE) | Setup | OS-level and per-platform. Makes the device an appliance. | v1.0 shipped; target platform chosen |
 | **Home Assistant: dedicated HACS integration** | Integration | v1.0 covers HA with recipes only (HA → ClawDot via an inbox endpoint; ClawDot → HA via an HTTP tool or MCP). A HACS custom integration (separate repo, runs inside HA) would expose timers, a speak service, and sensors. | v1.0 recipes are stable and there is demand |
@@ -46,7 +46,7 @@ Open an issue labelled `type:feature` + `scope:proposal` → write or amend a sp
 | **Multi-language** | Voice | English-first for v1.0 (wake word, grammar, prompts). | Wake-word and fast-path grammar localisation plan exists |
 | **Multi-room / announcements between satellites** | Audio | Out of scope. | Not planned |
 | **Display satellites / status screens** | Hardware | Capability model already allows a display. | Real use case |
-| **Echo Dot Gen 2 firmware port** | Hardware | Opportunistic only; no known unlock ([R-04](research/04-echo-dot-gen2.md)). The hardware *budget* is already normative. | Someone gains boot access |
+| **Echo Dot Gen 2 firmware port** | Hardware | Opportunistic only; no known unlock for retail units ([R-04](research/04-echo-dot-gen2.md)). An adb-root unit already runs ClawDot as an ordinary process ([R-07](research/07-echo-dot-gen2-hardware.md)), which the board layer builds on. The hardware *budget* is already normative. | Someone gains boot access |
 | **Speaker/voice identification** | Assistant | Privacy-heavy, resource-heavy. | Not planned |
 
 ## Adding an idea
