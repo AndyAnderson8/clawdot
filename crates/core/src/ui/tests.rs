@@ -90,6 +90,35 @@ async fn call(p: &Portal, method: &str, path: &str, auth: &str, body: &str) -> (
     (status, serde_json::from_str(body).unwrap_or(Value::Null))
 }
 
+// REQ-CFG-025, REQ-CFG-026
+#[test]
+fn the_page_uses_plain_names_and_no_radio() {
+    let page = PAGE.to_lowercase();
+    for word in [
+        "inbox",
+        "scheduled",
+        "radio",
+        "music",
+        "station",
+        "endpoints",
+    ] {
+        assert!(!page.contains(word), "the page still says `{word}`");
+    }
+    for tab in [
+        "Home",
+        "Reminders",
+        "Agents",
+        "Tools",
+        "Connections",
+        "Skills",
+        "Webhooks",
+        "Settings",
+    ] {
+        assert!(PAGE.contains(&format!("\"{tab}\"")), "missing tab {tab}");
+    }
+    assert!(PAGE.contains(r#"role="tablist""#) && PAGE.contains(r#"id="foot""#));
+}
+
 // REQ-CFG-027
 #[tokio::test]
 async fn the_portal_manages_timers_alarms_and_reminders() {

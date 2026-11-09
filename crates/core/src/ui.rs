@@ -7,7 +7,9 @@
 //! * `POST /api/login`                         `{"password":..}`; returns a session token
 //! * `POST /api/logout`                        ends the session
 //! * `POST /api/admin/password`                `{"password":..}`; sets a new password
-//! * `GET  /api/overview`                      endpoints and recent inbox events
+//! * `GET  /api/overview`                      endpoints and recent agent events
+//! * `GET  /api/schedule`, `POST /api/schedule`, `PUT|DELETE /api/schedule/{id}`   timers, alarms, reminders
+//! * `GET  /api/tools`, `/api/settings`, `/api/about`   what the Tools, Connections, Settings tabs show
 //! * `GET  /api/status`                        what the assistant is doing (model, satellites, tools, usage, schedule)
 //! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
 //! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
