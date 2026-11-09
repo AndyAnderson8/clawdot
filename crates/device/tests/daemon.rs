@@ -428,3 +428,44 @@ fn req_dev_004_the_leds_follow_the_core_and_the_precedence_holds() {
     dev.set_mute(false);
     assert_eq!(dev.status().led, LedState::Speaking);
 }
+
+#[test]
+fn req_dev_029_the_real_engine_hears_its_word_from_the_open_microphone_and_wakes_the_core() {
+    use clawdot_device::wake::WordId;
+    use clawdot_device::wake_mww::{MwwEngine, MwwSink, load_word};
+    let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../wake/tests/golden");
+    let word = load_word(
+        WordId(1),
+        &golden.join("models/okay_nabu.tflite"),
+        "Apache-2.0",
+    )
+    .unwrap();
+    let pcm: Vec<i16> = std::fs::read(golden.join("phrase_a.s16"))
+        .unwrap()
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let (port, core) = fake_core(|_s, next, _hello| {
+        loop {
+            if matches!(next(), Message::Wake(_)) {
+                return;
+            }
+        }
+    });
+    let rec = Rec::default();
+    let mut parts = desktop_parts(&rec, "");
+    parts.input = Box::new(WavIn::new(pcm, 500));
+    let mut dev = DaemonDevice::new(
+        parts,
+        DaemonConfig {
+            wake: Some(Box::new(MwwSink::new(MwwEngine::new(vec![word]).unwrap()))),
+            ..DaemonConfig::default()
+        },
+    );
+    let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    // The scripted core returns on the first wake; the daemon then sees the connection close and returns.
+    let r = clawdot_satellite::run(sock, &mut dev, &cfg());
+    core.join().unwrap();
+    assert!(r.is_ok() || dev.inner().wakes() >= 1, "{r:?}");
+    assert_eq!(dev.inner().wakes(), 1, "one utterance, one wake");
+}
