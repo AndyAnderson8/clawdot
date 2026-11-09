@@ -1,0 +1,19 @@
+# Settings for clawdot_bridges.ntfy. No secrets here: the ClawDot endpoint token is CLAWDOT_TOKEN, and a
+# protected ntfy server uses NTFY_TOKEN (or NTFY_USER and NTFY_PASSWORD), all in the environment.
+
+server = "https://ntfy.sh"            # your own server is better: topic names on ntfy.sh are public secrets
+topics = ["my-home-alerts"]           # required; nothing else is forwarded
+clawdot_url = "http://clawdot.local:3335"
+source = "ntfy"                       # spoken as "From ntfy: ..."; fixed here, never taken from a message
+
+min_priority = 2                      # ntfy priorities are 1 (min) to 5 (max); drop 1
+urgent_from = 5                       # 5 and up asks ClawDot for "urgent" ...
+max_priority = "normal"               # ... but never more than this ("low", "normal" or "urgent")
+
+include_keywords = []                 # empty means every message passes; otherwise one must appear
+exclude_keywords = ["test", "debug"]
+
+per_minute = 6                        # sustained rate to the speaker
+burst = 3                             # messages allowed at once
+ttl_secs = 900                        # ClawDot drops it if not spoken within 15 minutes
+max_chars = 300

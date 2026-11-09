@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.29 |
+| **Version** | 0.30 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -134,6 +134,10 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-INB-025 | The response MUST say what happened without echoing the text: `202` with `{"queued":true,"id":N}` for a new message, `{"queued":true,"id":N,"coalesced":true}` when merged, and `{"queued":false,"filtered":"muted"}` (or `below_priority`, `ignored_kind`) when the endpoint's filter dropped it. A `text` that is empty or over 2,000 characters, or a bad field, MUST be a `400` that names the field. | Must | A7 | T |
 | REQ-INB-026 | The command `clawdot say "text" [--source NAME] [--title T] [--priority P] [--reply] [--ttl SECS] [--url URL] [--token-env VAR]` MUST post to `/api/announce` and exit non-zero with a one-line reason on failure. The token MUST be read from the environment variable named by `--token-env` (default `CLAWDOT_TOKEN`) and never from a flag, and the URL defaults to `CLAWDOT_URL` or `http://127.0.0.1:3335`. | Must | A7 | T |
 | REQ-INB-027 | The project MUST ship copy-paste announce snippets (curl, PowerShell, a Home Assistant `rest_command`, and `clawdot say`) that keep the token in an environment variable or secrets file, in `docs/guides/announce.md`. | Should | A7 | I |
+| REQ-INB-028 | Chat and push services MUST reach the speaker through **bridges**: small programs that run off the device in `bridges/`, subscribe to a service (ntfy, Discord) and post to `/api/announce` (REQ-INB-021) with an endpoint token. They add nothing to the core binary or its dependencies, and they never speak to the speaker by any other path. | Must | A7 | I |
+| REQ-INB-029 | A bridge MUST forward nothing by default: it speaks only the topics or channels (and, where set, the people) its settings list, and applies keyword include and exclude rules to the cleaned text. It MUST rate-limit (a sustained rate and a small burst, with drops counted, never queued), drop repeats within a window, set a time to live, and never ask for more urgency than its settings allow. | Must | A7 | T |
+| REQ-INB-030 | A bridge MUST NOT forward raw untrusted markup. Before posting it MUST remove HTML, Markdown, links, mentions, custom emoji, code blocks, control and direction-changing characters, and bound the length; names of people and channels get the same treatment. The announcement's own source name is fixed by the settings, never taken from the message. | Must | A7 | T |
+| REQ-INB-031 | Bridge secrets (the ClawDot endpoint token and the service's token or password) MUST come only from environment variables; a settings file that holds a key that looks like a secret is refused, and no log line or error message contains a secret. Bridge tests MUST run with no network beyond the loopback address, and their dependencies MUST be pinned. | Must | A7 | T |
 
 ### 4.4 Timers, alarms, reminders (`TMR`)
 
@@ -364,3 +368,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.27 | 2026-11-09 | One-way announce API and `clawdot say` (INB-021..027): speak a message through the inbox so quiet hours, priority, source naming, untrusted-text fencing and the audit log all apply |
 | 0.28 | 2026-11-09 | Stopwatch (TMR-010..014): start, lap, stop, read and reset by voice and tool, saved across restarts, with the clock rules stated honestly |
 | 0.29 | 2026-11-09 | Recipes for the default toolset (EXT-007..010): declarative, tiered, testable against fakes, credentials by environment variable name, third-party terms cited and dated |
+| 0.30 | 2026-11-09 | Off-device bridges for ntfy and Discord (INB-028..031): default-deny filters, rate limits, no raw markup, secrets only in the environment |

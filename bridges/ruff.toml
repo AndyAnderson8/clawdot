@@ -1,0 +1,33 @@
+# Lint and format settings for the Python sidecars in bridges/ and examples/recipes/ (REQ-INB-031).
+# Run from the repository root:  ruff check --config bridges/ruff.toml bridges examples && ruff format --check --config bridges/ruff.toml bridges examples
+# Matches .editorconfig: 4 spaces, LF, final newline. Rust has its own gates (cargo fmt, clippy).
+
+line-length = 120
+target-version = "py311"
+indent-width = 4
+
+[lint]
+select = [
+  "E", "W",   # pycodestyle
+  "F",        # pyflakes
+  "I",        # import order
+  "B",        # bugbear
+  "UP",       # modern syntax
+  "S",        # security checks: no eval, no shell, no unchecked URL schemes
+  "N",        # naming
+  "A",        # shadowed builtins
+  "SIM",
+]
+ignore = [
+  "S101",     # asserts are how tests check things (also excluded below)
+  "S104",     # the fake servers in tests bind the loopback address only
+]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["S", "B018"]
+"**/test_*.py" = ["S", "B018"]
+"**/fake_server.py" = ["S"]
+
+[format]
+quote-style = "double"
+line-ending = "lf"

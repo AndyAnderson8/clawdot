@@ -237,7 +237,7 @@ Local intelligence (old M3)
 
 Announce and integrations
 - A **one-way announce/say API and CLI** (speak this text, no reply expected), the simplest integration for scripts and automations. It reuses the inbox's untrusted-text handling (A1). *Built* (`feature/announce-api`, REQ-INB-021..027): `POST /api/announce`, `clawdot say`, [guide](guides/announce.md)
-- **Off-device bridges as sidecars**: Discord and ntfy, kept out of the core binary so the default build stays in budget
+- **Off-device bridges as sidecars**: Discord and ntfy, kept out of the core binary so the default build stays in budget. *Built* (`feature/bridges`, REQ-INB-028..031, [bridges/](../bridges/README.md))
 - Recipes: the real-server recipes (Spotify control, Home Assistant, web search, coding agent) moved to A5b. **Spotify control** controls a Connect device (audio plays there, not on ClawDot's speaker unless the B6 receiver runs); the Hermes recipe is verified against its docs at this point
 - **Internet radio** and ducking, media-source interface, MCP client (Streamable HTTP), declarative HTTP tools with confirmation. *Status: partly built.* Radio by voice with ducking, the media-source model, the MCP client and HTTP tools exist (`crates/core/src/{media,mcp,httptools}.rs`; [media](architecture/media.md), [mcp](architecture/mcp.md), [http-tools](architecture/http-tools.md)), tested only against fake servers and players. The Spotify, Home Assistant and Hermes recipes are untested
 - **Willow and Home Assistant / Wyoming satellites as optional front ends**: they interoperate through the satellite protocol and the bridge; we do not fork them (see Beyond v1.0)

@@ -1,0 +1,2 @@
+# Developer tools for the bridges (not needed to run them), pinned. The tests use only the standard library.
+ruff==0.12.0
