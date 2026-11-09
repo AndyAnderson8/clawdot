@@ -14,6 +14,7 @@ pub mod admin;
 pub mod app;
 pub mod assistant;
 pub mod audit;
+pub mod cancel;
 pub mod config;
 #[cfg(feature = "esphome-satellite")]
 pub mod esphome;
@@ -28,6 +29,7 @@ pub mod limit;
 pub mod llm;
 pub mod mcp;
 pub mod media;
+pub mod notes;
 pub mod satellite;
 pub mod sched;
 pub mod session;
