@@ -95,6 +95,8 @@ Everything in this phase runs on a desktop. Nothing here may depend on a particu
 
 **Exit:** a microphone-to-file and file-to-speaker round trip on a PC through the trait, with a written SPIKE-006 PC finding. (Not yet claimed anywhere: no audio has run.)
 
+*Status: built, not yet run on real audio.* The traits (`AudioIn`, `AudioOut`), the command backend (arecord, aplay, sox, ffmpeg, ffplay from `PATH`), the WAV backend and push-to-talk are in `crates/satellite` (REQ-VOI-013..018), tested with scripted child processes. The manual smoke test is [guides/pc-voice-loop.md](guides/pc-voice-loop.md). Still open: the first real run, and the SPIKE-006 PC measurements (latency, underruns over 10 minutes, RSS delta). The `tinycap`/`tinyplay` presets for the Dot are not written.
+
 ## A3. Wake word
 **Goal:** hands-free start, reusing an existing model.
 
@@ -104,6 +106,8 @@ Everything in this phase runs on a desktop. Nothing here may depend on a particu
 
 **Exit:** a written SPIKE-002 PC finding; wake or hotkey starts a turn on a PC.
 
+*Status:* push-to-talk exists on the desktop satellite (`--ptt`, Enter to talk). The seam for a wake word is `front::Trigger` (REQ-VOI-017): a detector that implements `poll` and reads frames from the same `AudioIn` replaces `LineTrigger`. What remains is everything else in A3: the engine evaluation, a detector, keeping the microphone open between turns (today it opens at the press and closes after the utterance), and the SPIKE-002 finding.
+
 ## A4. End-to-end voice turn on a PC (old M1 exit)
 REQ-VOI-001..004, 006..010, 012, REQ-AST-001..003, 006, 007, 009, REQ-CFG-007, REQ-NFR-001/003/005/007, REQ-SEC-001..003, 006, 007
 
@@ -112,7 +116,7 @@ REQ-VOI-001..004, 006..010, 012, REQ-AST-001..003, 006, 007, 009, REQ-CFG-007, R
 
 **Exit:** AC-1 and AC-10 pass on a PC.
 
-*Status: partly built.* Done and tested against fakes: in-process and remote (TCP) transport, voice dialog state machine, energy-based endpointing, STT/TTS clients, streaming LLM client, half-duplex, JSON config file and the reference satellite (`crates/core/src/{voice,vad,speech,satellite,transport,config}.rs`, `crates/satellite`, [voice-pipeline](architecture/voice-pipeline.md)). The satellite frame JSON Schemas (`schemas/satellite`, TASK-004) and the conformance harness that checks the reference satellite against a fake core (TASK-005) are done. Not done: real microphone and speaker I/O (A2), wake-word detection (A3), a real STT/TTS provider run, and the ratchet. AC-1 and AC-10 are not demonstrated anywhere.
+*Status: partly built.* Done and tested against fakes: in-process and remote (TCP) transport, voice dialog state machine, energy-based endpointing, STT/TTS clients, streaming LLM client, half-duplex, JSON config file and the reference satellite (`crates/core/src/{voice,vad,speech,satellite,transport,config}.rs`, `crates/satellite`, [voice-pipeline](architecture/voice-pipeline.md)). The satellite frame JSON Schemas (`schemas/satellite`, TASK-004) and the conformance harness that checks the reference satellite against a fake core (TASK-005) are done. Real microphone and speaker I/O now exists through the desktop satellite (A2 status) but has not run on real audio. Not done: wake-word detection (A3), a real STT/TTS provider run, and the ratchet. AC-1 and AC-10 are not demonstrated anywhere.
 
 ## A5. Agent loop by voice with Claude Code (old M2 exit)
 REQ-INB-001..018, 020, REQ-SEC-004, REQ-EXT-004, 006
