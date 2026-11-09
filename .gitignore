@@ -24,3 +24,6 @@ Thumbs.db
 .claude/settings.local.json
 .claude/*.local.*
 .run/
+
+# Stray build directories from older scripts/cargo.sh runs in linked worktrees
+/-agent-*
