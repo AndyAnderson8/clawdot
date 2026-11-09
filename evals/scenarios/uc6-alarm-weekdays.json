@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "uc6-alarm-weekdays",
+  "use_case": "UC6",
+  "description": "A repeating alarm on weekdays.",
+  "tags": ["alarms", "builtin"],
+  "builtin_tools": ["set_alarm"],
+  "turns": [
+    {
+      "say": "wake me at 7 on weekdays",
+      "model": [
+        {"calls": [{"name": "set_alarm", "args": {"hour": 7, "minute": 0, "days": ["weekdays"]}}]},
+        {"text": "Alarm set for seven on weekdays."}
+      ],
+      "expect": {
+        "calls": [{"tool": "set_alarm", "args": {"hour": 7, "minute": 0, "days": ["weekdays"]}}],
+        "speech_contains": ["weekdays"]
+      }
+    }
+  ]
+}

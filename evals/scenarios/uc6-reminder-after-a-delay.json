@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "uc6-reminder-after-a-delay",
+  "use_case": "UC6",
+  "description": "A reminder after a delay.",
+  "tags": ["reminders", "builtin"],
+  "builtin_tools": ["set_reminder"],
+  "turns": [
+    {
+      "say": "in twenty minutes remind me to move the laundry",
+      "model": [
+        {"calls": [{"name": "set_reminder", "args": {"text": "move the laundry", "seconds": 1200}}]},
+        {"text": "I will remind you in twenty minutes."}
+      ],
+      "expect": {
+        "calls": [{"tool": "set_reminder", "args": {"text": {"$icontains": "laundry"}, "seconds": 1200}}]
+      }
+    }
+  ]
+}

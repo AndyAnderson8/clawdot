@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "uc6-labelled-timer",
+  "use_case": "UC6",
+  "description": "A timer with a name and a length given in minutes and seconds.",
+  "tags": ["timers", "builtin"],
+  "builtin_tools": ["set_timer"],
+  "turns": [
+    {
+      "say": "pasta timer for eight minutes thirty seconds",
+      "model": [
+        {"calls": [{"name": "set_timer", "args": {"seconds": 510, "label": "pasta"}}]},
+        {"text": "Pasta timer set for eight and a half minutes."}
+      ],
+      "expect": {
+        "calls": [{"tool": "set_timer", "args": {"seconds": 510, "label": {"$icontains": "pasta"}}}]
+      }
+    }
+  ]
+}

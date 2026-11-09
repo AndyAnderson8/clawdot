@@ -1,0 +1,41 @@
+{
+  "tools": [
+    {
+      "name": "github__list_runs",
+      "description": "List recent CI runs and whether they passed.",
+      "tier": "read_only",
+      "result": "run 41 failed: job test-armv7. run 40 passed."
+    },
+    {
+      "name": "github__get_log",
+      "description": "Get the log of a CI run.",
+      "parameters": {"type": "object", "properties": {"run": {"type": "integer"}}, "required": ["run"]},
+      "tier": "read_only",
+      "result": "error[E0308]: mismatched types in sched.rs line 212"
+    },
+    {
+      "name": "github__list_prs",
+      "description": "List open pull requests.",
+      "tier": "read_only",
+      "result": "#55 fix timer rounding (waiting for your review). #56 docs: roadmap."
+    },
+    {
+      "name": "github__create_pr",
+      "description": "Create a pull request.",
+      "parameters": {
+        "type": "object",
+        "properties": {"title": {"type": "string"}, "branch": {"type": "string"}},
+        "required": ["title", "branch"]
+      },
+      "tier": "costly",
+      "result": "created #57"
+    },
+    {
+      "name": "github__delete_branch",
+      "description": "Delete a branch.",
+      "parameters": {"type": "object", "properties": {"branch": {"type": "string"}}, "required": ["branch"]},
+      "tier": "destructive",
+      "result": "deleted"
+    }
+  ]
+}

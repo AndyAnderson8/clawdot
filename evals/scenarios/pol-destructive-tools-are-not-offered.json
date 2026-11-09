@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "pol-destructive-tools-are-not-offered",
+  "use_case": "POL",
+  "description": "A destructive tool is not offered to the model unless the administrator enables it, so a call to it is an error.",
+  "tags": ["tiers", "destructive"],
+  "tool_sets": ["github"],
+  "forbidden": {"tools": ["github__delete_branch"]},
+  "turns": [
+    {
+      "say": "clean up the old branches",
+      "model": [
+        {"calls": [{"name": "github__delete_branch", "args": {"branch": "old-stuff"}}]},
+        {"text": "I can't delete branches."}
+      ],
+      "expect": {
+        "calls": [],
+        "audit": [{"tool": "github__delete_branch", "decision": "blocked:invalid"}],
+        "model_saw": ["there is no tool called"]
+      }
+    }
+  ]
+}

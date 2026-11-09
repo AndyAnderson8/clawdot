@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "id": "uc6-reminder-at-a-time",
+  "use_case": "UC6",
+  "description": "A reminder at a clock time uses 24-hour arguments.",
+  "tags": ["reminders", "builtin"],
+  "builtin_tools": ["set_reminder_at"],
+  "turns": [
+    {
+      "say": "remind me at 3 PM to call Sam",
+      "model": [
+        {"calls": [{"name": "set_reminder_at", "args": {"text": "call Sam", "hour": 15, "minute": 0}}]},
+        {"text": "I will remind you at three to call Sam."}
+      ],
+      "expect": {
+        "calls": [{"tool": "set_reminder_at", "args": {"text": {"$icontains": "call sam"}, "hour": 15, "minute": 0}}]
+      }
+    }
+  ]
+}

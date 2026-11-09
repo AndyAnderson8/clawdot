@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "id": "uc1-instruct-needs-exact-confirmation",
+  "use_case": "UC1",
+  "description": "Sending new instructions to the agent is read back word for word and runs only after a later yes.",
+  "tags": ["inbox", "confirmation", "t2"],
+  "tool_sets": ["inbox"],
+  "turns": [
+    {
+      "say": "tell it to keep going and also add docs",
+      "model": [
+        {"calls": [{"name": "inbox_reply", "args": {"kind": "instruct", "text": "Keep going, and also add docs."}}]}
+      ],
+      "expect": {
+        "ends": "held",
+        "calls": [],
+        "held": {
+          "tool": "inbox_reply",
+          "args": {"kind": "instruct", "text": "Keep going, and also add docs."},
+          "speech_contains": ["Keep going, and also add docs.", "Yes or no?"]
+        },
+        "audit": [{"tool": "inbox_reply", "decision": "held"}]
+      }
+    },
+    {
+      "say": "yes",
+      "model": [{"text": "Sent. I told Claude Code to keep going and add docs."}],
+      "expect": {
+        "ends": "answered",
+        "calls": [{"tool": "inbox_reply", "args": {"kind": "instruct", "text": "Keep going, and also add docs."}}],
+        "no_held": true,
+        "audit": [{"tool": "inbox_reply", "decision": "approved"}]
+      }
+    }
+  ]
+}

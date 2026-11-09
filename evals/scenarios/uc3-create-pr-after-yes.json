@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "id": "uc3-create-pr-after-yes",
+  "use_case": "UC3",
+  "description": "Creating a pull request is visible to others: it is read back and runs only after the user's yes.",
+  "tags": ["github", "confirmation", "t2"],
+  "tool_sets": ["github"],
+  "turns": [
+    {
+      "say": "create a pull request titled Fix sched types from branch fix-sched",
+      "model": [
+        {"calls": [{"name": "github__create_pr", "args": {"title": "Fix sched types", "branch": "fix-sched"}}]}
+      ],
+      "expect": {
+        "ends": "held",
+        "calls": [],
+        "held": {
+          "tool": "github__create_pr",
+          "args": {"title": "Fix sched types", "branch": "fix-sched"},
+          "speech_contains": ["Fix sched types", "fix-sched", "Yes or no?"]
+        }
+      }
+    },
+    {
+      "say": "yes please",
+      "model": [{"text": "Done. Pull request 57 is open."}],
+      "expect": {
+        "calls": [{"tool": "github__create_pr", "args": {"title": "Fix sched types", "branch": "fix-sched"}}],
+        "no_held": true,
+        "speech_contains": ["57"],
+        "audit": [
+          {"tool": "github__create_pr", "decision": "approved"}
+        ]
+      }
+    }
+  ]
+}

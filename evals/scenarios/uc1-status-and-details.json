@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "uc1-status-and-details",
+  "use_case": "UC1",
+  "description": "A Claude Code job finished: the user asks what happened, then for details.",
+  "tags": ["inbox", "read"],
+  "tool_sets": ["inbox"],
+  "turns": [
+    {
+      "say": "what are my agents doing",
+      "model": [
+        {"calls": [{"name": "inbox_status"}]},
+        {"text": "Claude Code finished in clawdot. It added the timer tool and the tests pass."}
+      ],
+      "expect": {
+        "ends": "answered",
+        "calls": [{"tool": "inbox_status"}],
+        "speech_contains": ["timer tool"],
+        "max_sentences": 2,
+        "audit": [{"tool": "inbox_status", "decision": "ran"}]
+      }
+    },
+    {
+      "say": "give me the details",
+      "model": [
+        {"calls": [{"name": "inbox_details"}]},
+        {"text": "It added the timer tool in the scheduler with twelve tests. The docs still need updating."}
+      ],
+      "expect": {"calls": [{"tool": "inbox_details"}], "speech_contains": ["docs"], "max_sentences": 2}
+    }
+  ]
+}

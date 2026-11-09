@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "uc7-play-names-the-device",
+  "use_case": "UC7",
+  "description": "Playing music names the target device in both the call and the reply.",
+  "tags": ["music", "reversible"],
+  "tool_sets": ["media"],
+  "turns": [
+    {
+      "say": "play some jazz on the kitchen speaker",
+      "model": [
+        {"calls": [{"name": "spotify__play", "args": {"query": "jazz", "device": "Kitchen"}}]},
+        {"text": "Playing jazz on the kitchen speaker."}
+      ],
+      "expect": {
+        "calls": [{"tool": "spotify__play", "args": {"query": {"$icontains": "jazz"}, "device": {"$icontains": "kitchen"}}}],
+        "speech_contains": ["kitchen"],
+        "no_held": true
+      }
+    }
+  ]
+}

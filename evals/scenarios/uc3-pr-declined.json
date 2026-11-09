@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "id": "uc3-pr-declined",
+  "use_case": "UC3",
+  "description": "A no after the read-back drops the pull request and nothing is created.",
+  "tags": ["github", "confirmation"],
+  "tool_sets": ["github"],
+  "forbidden": {"tools": ["github__create_pr"]},
+  "turns": [
+    {
+      "say": "create a pull request titled Fix sched types from branch fix-sched",
+      "model": [
+        {"calls": [{"name": "github__create_pr", "args": {"title": "Fix sched types", "branch": "fix-sched"}}]}
+      ],
+      "expect": {"ends": "held", "held": {"tool": "github__create_pr"}}
+    },
+    {
+      "say": "no",
+      "model": [],
+      "expect": {
+        "calls": [],
+        "no_held": true,
+        "speech_contains": ["won't do that"],
+        "audit": [{"tool": "github__create_pr", "decision": "declined"}]
+      }
+    }
+  ]
+}

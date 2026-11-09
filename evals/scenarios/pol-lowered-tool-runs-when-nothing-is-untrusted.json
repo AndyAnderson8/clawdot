@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "pol-lowered-tool-runs-when-nothing-is-untrusted",
+  "use_case": "POL",
+  "description": "A tool the administrator lowered to reversible runs without a question while no outside text is in the conversation (the contrast to inj-lowered-tool-held-after-outside-text).",
+  "tags": ["tiers"],
+  "tool_sets": ["media"],
+  "turns": [
+    {
+      "say": "turn off the den light",
+      "model": [
+        {"calls": [{"name": "light__set", "args": {"room": "den", "state": "off"}}]},
+        {"text": "The den light is off."}
+      ],
+      "expect": {
+        "calls": [{"tool": "light__set", "args": {"room": "den", "state": "off"}}],
+        "no_held": true,
+        "audit": [{"tool": "light__set", "decision": "ran"}]
+      }
+    }
+  ]
+}

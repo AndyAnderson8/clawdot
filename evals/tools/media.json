@@ -1,0 +1,51 @@
+{
+  "tools": [
+    {
+      "name": "calendar__list_events",
+      "description": "List calendar events for a day.",
+      "parameters": {"type": "object", "properties": {"day": {"type": "string"}}, "required": ["day"]},
+      "tier": "read_only",
+      "result": "09:30 dentist. 14:00 design review with Sam. 18:30 dinner at Rosa's."
+    },
+    {
+      "name": "spotify__play",
+      "description": "Start playing music on a Spotify Connect device.",
+      "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "device": {"type": "string"}},
+        "required": ["query", "device"]
+      },
+      "tier": "reversible",
+      "result": "Playing jazz on Kitchen."
+    },
+    {
+      "name": "spotify__control",
+      "description": "Control playback.",
+      "parameters": {
+        "type": "object",
+        "properties": {"action": {"type": "string", "enum": ["pause", "resume", "next", "previous"]}},
+        "required": ["action"]
+      },
+      "tier": "reversible",
+      "result": "ok"
+    },
+    {
+      "name": "spotify__now_playing",
+      "description": "What is playing now.",
+      "tier": "read_only",
+      "result": "Take Five by Dave Brubeck on Kitchen."
+    },
+    {
+      "name": "light__set",
+      "description": "Turn a light on or off.",
+      "parameters": {
+        "type": "object",
+        "properties": {"room": {"type": "string"}, "state": {"type": "string", "enum": ["on", "off"]}},
+        "required": ["room", "state"]
+      },
+      "tier": "reversible",
+      "lowered_from": "costly",
+      "result": "done"
+    }
+  ]
+}
