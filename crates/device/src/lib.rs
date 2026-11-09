@@ -5,5 +5,9 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod board_file;
+pub mod led;
+pub mod quiet;
+pub mod tone;
+pub mod wake;
 
 pub use board_file::{BoardError, BoardFile};
