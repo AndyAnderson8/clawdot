@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.12 |
+| **Version** | 0.13 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -160,6 +160,13 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-022 | `clawdot --reset-admin` MUST remove the administrator setting (and any legacy `admin-token.hash`) from the data directory and exit, leaving endpoints, inbox, and other state untouched, so that setup shows again at the next start. It is run on the device with the server stopped. `--rotate-admin-token` no longer exists. | Must | M4 | T |
 | REQ-CFG-023 | An installation that has an `admin-token.hash` from an earlier version MUST keep working: on the first start the old token becomes the password-mode credential (entered in the password field), and the core converts the file without printing anything. The UI MUST let the signed-in administrator replace it with a real password (REQ-CFG-024). | Must | M4 | T |
 | REQ-CFG-024 | A signed-in administrator (or any private-address user in open mode) MUST be able to set a new administrator password in the UI; this moves an open installation to password mode and ends every other session. | Must | M4 | T |
+| REQ-CFG-025 | The UI MUST be a tabbed portal with a persistent header (logo, device name, a status indicator) and a footer showing the running version with a link to the release notes. The selected tab MUST be kept in the URL fragment so a tab can be bookmarked, and the tabs MUST be operable by keyboard. | Must | M4 | I |
+| REQ-CFG-026 | The portal's tabs and copy MUST use plain names a new user understands: Home, Reminders, Agents, Tools, Connections, Skills, Webhooks, Settings. The word "inbox" MUST NOT appear in the UI, "scheduled" MUST NOT be used as a heading, and music or radio MUST NOT appear in the portal. | Must | M4 | I |
+| REQ-CFG-027 | The Reminders tab MUST list every timer, alarm, and reminder with human-readable times in the device time zone, and let an administrator add, edit, and cancel them, through authenticated JSON endpoints (`/api/schedule`) handled by the same scheduler the voice commands use. | Must | M4 | T |
+| REQ-CFG-028 | The Webhooks tab MUST create, list, rotate, and delete endpoints, show the endpoint URL with a copy action, and show ready-to-paste snippets (curl, Claude Code hooks, GitHub Actions) with the token filled in only when it has just been created or rotated. | Must | M4 | D |
+| REQ-CFG-029 | The Tools and Connections tabs MUST list what the backend knows: every tool the assistant can call (built in, HTTP, MCP) with its source and whether it asks for confirmation, and every configured MCP server with its connection status and discovered tools. | Must | M4 | T |
+| REQ-CFG-030 | The Settings tab MUST show the settings the device is running with (time zone, language model, persona, voice, listen address, public URL, usage limits), pre-fill a time zone hint from the browser (never from IP geolocation), never show a secret, and say plainly that a setting is changed in the configuration file and applied by restarting, until editing from the page exists. | Must | M4 | I |
+| REQ-CFG-031 | Any portal control whose backend does not exist yet MUST NOT be shown as a working control. It MUST show an honest "coming soon" state that says what it will do. | Must | M4 | I |
 
 ### 4.7 Non-functional (`NFR`)
 
@@ -272,3 +279,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.10 | 2026-11-08 | The console-printed setup code is removed because the device has no visible console; CFG-021 now accepts first-visitor setup from private addresses as a documented residual risk (T15); CFG-015 amended |
 | 0.11 | 2026-11-08 | Default listen port changed from 8765 to 3335 at the maintainer's request (CFG-014 amended) |
 | 0.12 | 2026-11-08 | Board support layer (section 4.10, BRD-001..016, ADR-0012): one `Board` interface for buttons, LED ring, mute, Wi-Fi, clock trust and audio devices; null, desktop and Echo Dot Gen 2 boards chosen by Cargo feature and the `board` setting; per-device JSON; honest mute and clock reporting; AC-13. Evidence in R-07 |
+| 0.13 | 2026-11-09 | Tabbed web portal with plain names (CFG-025..031): header and version footer, Reminders management, Webhooks snippets, read-only Tools and Connections, Settings overview, honest coming-soon states |
