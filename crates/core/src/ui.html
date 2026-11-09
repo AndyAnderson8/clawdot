@@ -41,18 +41,16 @@
 
   <section id="setup" class="hidden">
     <h2>Set up ClawDot</h2>
-    <p class="mut">Choose how to protect this page. Webhook tokens for agents are separate and always required.</p>
+    <p class="mut">Choose how to protect this page. Webhook tokens for agents are separate and always required. Until you finish, anyone on your private network who opens this page could do it instead, so do it now.</p>
     <form id="pwform">
       <h3>Protect with an admin password <span class="mut">(recommended)</span></h3>
       <div class="row"><input id="pw1" type="password" autocomplete="new-password" placeholder="Password (8 or more characters)" aria-label="New password" maxlength="128"></div>
       <div class="row"><input id="pw2" type="password" autocomplete="new-password" placeholder="Repeat the password" aria-label="Repeat the password" maxlength="128"></div>
-      <div class="row codebox hidden"><input id="code1" inputmode="numeric" autocomplete="off" placeholder="Setup code from the console" aria-label="Setup code" maxlength="9"></div>
       <div class="row"><button>Set password</button></div>
     </form>
     <form id="openform">
       <h3>Leave open on this network</h3>
       <p class="warn">Unprotected: anyone on this network can use this page and read your inbox.</p>
-      <div class="row codebox hidden"><input id="code2" inputmode="numeric" autocomplete="off" placeholder="Setup code from the console" aria-label="Setup code" maxlength="9"></div>
       <div class="row"><button class="danger" id="openbtn">Leave unprotected</button></div>
     </form>
   </section>
@@ -214,7 +212,6 @@
     try { st = await api("GET", "/api/auth"); } catch (x) { say(x.message); return; }
     var open = st.mode === "open";
     $("banner").classList.toggle("hidden", !open);
-    Array.prototype.forEach.call(document.querySelectorAll(".codebox"), function (b) { b.classList.toggle("hidden", !st.code_needed); });
     $("openbtn").disabled = !st.open_allowed || !st.peer_private;
     $("out").classList.toggle("hidden", open);
     $("pwtitle").textContent = open ? "Set an admin password" : "Change admin password";
@@ -237,7 +234,6 @@
       keep(r.token || ""); say(""); await load();
     } catch (x) { say(x.message); }
   }
-  function code(id) { var v = $(id).value.trim(); return v ? v : undefined; }
 
   $("pwform").onsubmit = function (ev) {
     ev.preventDefault();
@@ -245,11 +241,11 @@
     if (p !== $("pw2").value) { say("The two passwords differ."); return; }
     if (p.length < 8) { say("Use at least 8 characters."); return; }
     $("pw1").value = ""; $("pw2").value = "";
-    finishSetup({ mode: "password", password: p, code: code("code1") });
+    finishSetup({ mode: "password", password: p });
   };
   $("openform").onsubmit = function (ev) {
     ev.preventDefault();
-    finishSetup({ mode: "open", code: code("code2") });
+    finishSetup({ mode: "open" });
   };
   $("loginform").onsubmit = async function (ev) {
     ev.preventDefault();

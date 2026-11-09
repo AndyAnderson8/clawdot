@@ -247,19 +247,16 @@ fn reset_admin(dir: &std::path::Path) -> ExitCode {
     }
 }
 
-/// Tell the person at the console how the web UI is protected, and print the one-time setup code when setup is
-/// pending on a listen address other hosts can reach (REQ-CFG-018, REQ-CFG-021).
-fn announce_admin(core: &Core, public: &str) -> Result<(), String> {
+/// Tell the person at the console where the web UI is and how it is protected. No secret is printed: the
+/// device may have no visible console (REQ-CFG-018, REQ-CFG-021).
+fn announce_admin(core: &Core, public: &str) {
     use clawdot_core::admin::Mode;
     match core.admin_mode() {
         Mode::Setup => {
-            println!("\nWeb UI: {public}/  (open it to finish first-run setup)");
-            if let Some(code) = core.make_setup_code().map_err(|e| e.to_string())? {
-                println!(
-                    "Setup code (asked for once, on the setup page): {code}\n\
-                     Setup is open to anyone on a private network until it is done."
-                );
-            }
+            println!(
+                "\nWeb UI: {public}/  (open it to finish first-run setup)\n\
+                 Until setup is done, the first person on a private network to open it can set the password."
+            );
         }
         Mode::Password => println!("\nWeb UI: {public}/"),
         Mode::Open => println!(
@@ -267,7 +264,6 @@ fn announce_admin(core: &Core, public: &str) -> Result<(), String> {
              Set a password in the page, or run `clawdot --reset-admin` and start again."
         ),
     }
-    Ok(())
 }
 
 /// True if a console line asks to leave (REQ-CFG-017).
@@ -871,10 +867,7 @@ async fn main() -> ExitCode {
     }
 
     core.set_listen_ip(args.listen.ip());
-    if let Err(e) = announce_admin(&core, &public) {
-        eprintln!("clawdot: web UI administrator setup: {e}");
-        return ExitCode::from(1);
-    }
+    announce_admin(&core, &public);
     println!(
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         args.listen,
