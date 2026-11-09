@@ -185,6 +185,9 @@ function seed(mode: string): Json {
       },
     ],
     audit: auditSeed(t),
+    notesOn: true,
+    notes: [{ id: 1, text: "my NAS is <b>Andy-NAS</b>", ts: t - 3600 }],
+    nextNote: 2,
     skills: [{ name: "Good night", instructions: "Turn off the lights.", tools: ["set_light"], enabled: true }],
     problems: [],
   };
@@ -310,6 +313,34 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         st["password"] = body.password;
         st["session"] = "sess-pw";
         return send(200, { mode: "password", token: st["session"] });
+      }
+
+      if (seg[0] === "notes") {
+        const notes = st["notes"] as Json[];
+        const list = () => ({
+          enabled: st["notesOn"],
+          notes,
+          limits: { max_notes: 50, max_note_chars: 200, max_total_bytes: 8192 },
+        });
+        if (m === "GET") return send(200, list());
+        if (m === "POST") {
+          if (!st["notesOn"]) return err(409, "Notes are turned off. Turn them on in Settings, under Agent settings.");
+          if (/sk-/.test(body.text)) return err(400, "That looks like a password or a key, so it is not saved.");
+          if (notes.some((n) => n["text"].toLowerCase() === body.text.toLowerCase()))
+            return err(409, "That note is already saved.");
+          notes.push({ id: st["nextNote"]++, text: body.text, ts: now() });
+          return send(200, list());
+        }
+        if (m === "DELETE" && seg[1]) {
+          if (!notes.some((n) => String(n["id"]) === seg[1])) return err(404, "no such note");
+          st["notes"] = notes.filter((n) => String(n["id"]) !== seg[1]);
+          return send(200, { forgotten: 1 });
+        }
+        if (m === "DELETE") {
+          const n = notes.length;
+          st["notes"] = [];
+          return send(200, { forgotten: n });
+        }
       }
 
       if (m === "GET" && path === "/api/audit") {

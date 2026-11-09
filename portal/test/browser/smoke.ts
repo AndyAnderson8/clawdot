@@ -165,12 +165,12 @@ await step("header, status, tabs, titles, keyboard", async () => {
   await eq(`T.text('#devname')`, "Kitchen Dot", "device name from settings");
   await eq(
     `T.all('#tabs a').map((a) => a.textContent)`,
-    ["Home", "Reminders", "Agents", "Activity", "Tools", "Connections", "Skills", "Webhooks", "Settings"],
+    ["Home", "Reminders", "Notes", "Agents", "Activity", "Tools", "Connections", "Skills", "Webhooks", "Settings"],
     "tab names (REQ-CFG-026)",
   );
   await eq(`T.q('#tabs').getAttribute('role')`, "tablist", "tablist role");
   await eq(`T.all('#tabs a[aria-selected="true"]').map((a) => a.id)`, ["tab-home"], "home selected first");
-  await eq(`T.all('#tabs a').map((a) => a.tabIndex)`, [0, -1, -1, -1, -1, -1, -1, -1, -1], "roving tab index");
+  await eq(`T.all('#tabs a').map((a) => a.tabIndex)`, [0, -1, -1, -1, -1, -1, -1, -1, -1, -1], "roving tab index");
   await eq(`T.q('#panel').getAttribute('aria-labelledby')`, "tab-home", "panel labelled by its tab");
   await b.until(`document.title === "Home - ClawDot"`, "the Home title");
   // arrow keys move through the tabs, wrapping, and focus follows
@@ -263,6 +263,41 @@ await step("Agents: text from agents is shown as text", async () => {
   await eq(`T.rows()[0].includes('<script>alert(2)</script> all green')`, true, "text shown literally");
   await eq(`T.all('#panel img, #panel script').length`, 0, "no elements were created from it");
   await eq(`T.text('.badge')`, "Waiting to be read out", "state wording");
+});
+
+await step("Notes: add, refuse, forget one, forget all after a confirmation, off state", async () => {
+  await open("open", "#/notes");
+  await b.until(`T.rows("#notelist > li").length === 1`, "one note");
+  await shot("notes");
+  await eq(`T.rows("#notelist > li")[0].includes("my NAS is <b>Andy-NAS</b>")`, true, "note shown literally");
+  await eq(`T.all("#panel #notelist b").length`, 0, "no markup from a note");
+  await T(`set("#note-text", "the spare key is under the pot")`);
+  await T(`submit("#noteform")`);
+  await b.until(`T.rows("#notelist > li").length === 2`, "added");
+  assert.deepEqual(mock.log.filter((l) => l.method === "POST" && l.path === "/api/notes").pop()!.body, {
+    text: "the spare key is under the pot",
+  });
+  await eq(`T.q("#note-text").value`, "", "box cleared");
+  await T(`set("#note-text", "the key is sk-abc")`);
+  await T(`submit("#noteform")`);
+  await b.until(`T.text("#noteform .errtext").includes("password or a key")`, "a refusal is shown in the form");
+  await eq(`T.rows("#notelist > li").length`, 2, "nothing was added");
+  // forgetting asks first: declining does nothing
+  await b.ev(`window.confirm = () => false`);
+  await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
+  await eq(`T.rows("#notelist > li").length`, 2, "declined confirmation keeps the note");
+  await b.ev(`window.confirm = () => true`);
+  await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
+  await b.until(`T.rows("#notelist > li").length === 1`, "one forgotten");
+  assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/notes/1"));
+  await T(`click("#forgetall")`);
+  await b.until(`!!T.q("#noteempty")`, "all forgotten");
+  assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/notes"));
+  mock.state["notesOn"] = false;
+  await b.ev(`location.hash = "#/home"`);
+  await tab("notes", "Notes");
+  await b.until(`!!T.q("#notesoff")`, "the off notice");
+  await eq(`T.q("#note-text").disabled`, true, "adding is disabled while notes are off");
 });
 
 await step("Activity: plain outcomes, filters, paging, text only, read-only", async () => {

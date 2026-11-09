@@ -40,7 +40,7 @@ Commit the regenerated `ui.html` together with the source change; `check-build` 
 src/
   main.tsx        entry: mounts <App/>, starts the store, refreshes every 10 seconds
   App.tsx         the shell: sign-in and setup screens, the header band, the tab list (TABS)
-  tabs/*.tsx      one component per tab: Home, Reminders, Agents, Activity, Tools, Connections, Skills, Webhooks, Settings
+  tabs/*.tsx      one component per tab: Home, Reminders, Notes, Agents, Activity, Tools, Connections, Skills, Webhooks, Settings
   parts.tsx       small pieces several tabs share (Field, CopyButton, badges, go())
   store.ts        what the page knows (one small store) and the actions that change it
   api.ts          the only code that talks to the device (fetch to this origin, bearer token)
