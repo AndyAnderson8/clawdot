@@ -23,6 +23,9 @@ To apply when the GitHub repository is created. They make the server enforce the
 - Require status check **`gate`** for the pushed commit. `scripts/land.sh` pushes a candidate ref first so the exact SHA already has a passing `gate` when it is pushed to `dev`.
 - Do not require "up to date before merging" (the landing script guarantees the branch contains `dev`).
 
+### Integration branches
+`integration/*` branches are local by design ([git-workflow.md section 5a](git-workflow.md#5a-batching-a-milestone-integration-branches)); no ruleset is needed because they never reach a protected branch except through `scripts/land.sh integration/<name>`, which pushes the exact merge to a candidate ref, waits for `gate`, and only then pushes `dev`. If someone pushes one, CI runs on it (`integration/**` is in the workflow triggers) and the `pre-push` hook refuses force-pushes.
+
 ### Release tags
 - Target: `refs/tags/v*`. Block deletion and updates (tags are immutable).
 
