@@ -67,7 +67,7 @@ REQ-TMR-001..008, REQ-AST-004, 010..013, REQ-NFR-008, 009, 111
 
 ## M4: Web UI
 REQ-CFG-001..006, 008, 009, 012, 013, REQ-INB-019, REQ-NFR-006
-- Embedded static UI; auth; provider keys, voice and persona; endpoint management; history; test speak; health
+- Embedded static UI; **first-run setup**: choose a single admin password (hashed, light parameters) or deliberately leave the UI open on a private network, with an "unprotected" banner and a `--reset-admin` CLI recovery; webhook tokens stay required either way; no multi-user accounts; provider keys, voice and persona; endpoint management; history; test speak; health
 - **Connect an agent** flow (generates per-harness snippets, token, bridge command); mDNS (`clawdot.local`); headless Wi-Fi docs for Pi
 
 **Exit:** a new user can set up from the UI alone.
@@ -91,15 +91,17 @@ Release early and often: tag `v0.x` releases as M2, M3, M4 land, so the differen
 
 | # | Item | Why it's next | Designed-for in v1.0 by |
 |---|---|---|---|
-| 1 | **Agent connect kits** (Claude Code plugin bundling the hook and a skill; Codex, Gemini CLI, opencode adapters) in a separate `clawdot-agent-kit` repo | One-step setup is the adoption hook | Harness-agnostic webhook/SSE; pluggable bridge adapters (INB-020); the Connect-an-agent flow |
-| 2 | **ClawDot MCP server** (`announce`, `ask_user`) so agents like Hermes can speak and ask you | Two-way agent interaction | Event `kind` and reply types (INB-003/017) |
-| 3 | **Multiple assistant profiles** (e.g. Hermes vs a plain model, each with its own voice) chosen by voice routing, not extra wake words | Matches the "talk to Hermes / Claude / OpenAI" use case | Persona and voice config (AST-013); provider abstraction |
-| 4 | **Installable packs** with a permission-review UI, plus an optional curated index | Community-driven integrations | Adapters already use the pack data format (EXT-002/004) |
-| 5 | **Wi-Fi provisioner** (captive portal; BLE for ESP32) | Makes it an appliance | Portal is network-independent; mDNS |
-| 6 | **Home Assistant HACS integration** and **Wyoming bridge** | HA community reach | Generic webhook, HTTP tools, Wyoming-compatible framing (ADR-0008) |
-| 7 | **`/display` page** and semantic display events for screen speakers | Screens, kiosks | Display capability and `clawdot.display.*` reserved (SAT-016) |
-| 8 | **Spotify** (control of a Connect device first; own-speaker receiver only if viable), podcasts and audiobooks (resume positions) | Music breadth | Media-source interface (MUS-003/005) |
-| 9 | ESP32-S3 satellite; routines (e.g. morning briefing); long-term memory | Platform and feature breadth | Protocol; scheduler; bounded stores |
+| 1 | **Board support layer** (`crates/board`: a small `Board` trait for LED ring, buttons, mic-mute, Wi-Fi status/join and clock checks; `NullBoard` and desktop boards; per-device TOML for button and LED mappings) | Keeps the core device-agnostic while allowing real hardware features; one repo, no forks | Satellite protocol capabilities; config layering; optional Cargo features keep the default build in budget |
+| 2 | **Echo Dot Gen 2 target** (`dot2` build profile and `scripts/build-dot2.sh`, a board implementation, a shipped `boards/echo-dot2.toml`, headless Wi-Fi and clock setup docs) | The primary device deserves a first-class build, not just a budget check | Board layer; SPIKE-006; hardware findings on `/sys/class/leds`, input devices and Wi-Fi tooling |
+| 3 | **Agent connect kits** (Claude Code plugin bundling the hook and a skill; Codex, Gemini CLI, opencode adapters) in a separate `clawdot-agent-kit` repo | One-step setup is the adoption hook | Harness-agnostic webhook/SSE; pluggable bridge adapters (INB-020); the Connect-an-agent flow |
+| 4 | **ClawDot MCP server** (`announce`, `ask_user`) so agents like Hermes can speak and ask you | Two-way agent interaction | Event `kind` and reply types (INB-003/017) |
+| 5 | **Multiple assistant profiles** (e.g. Hermes vs a plain model, each with its own voice) chosen by voice routing, not extra wake words | Matches the "talk to Hermes / Claude / OpenAI" use case | Persona and voice config (AST-013); provider abstraction |
+| 6 | **Installable packs** with a permission-review UI, plus an optional curated index | Community-driven integrations | Adapters already use the pack data format (EXT-002/004) |
+| 7 | **Wi-Fi provisioner** (captive portal; BLE for ESP32) | Makes it an appliance | Portal is network-independent; mDNS |
+| 8 | **Home Assistant HACS integration** and **Wyoming bridge** | HA community reach | Generic webhook, HTTP tools, Wyoming-compatible framing (ADR-0008) |
+| 9 | **`/display` page** and semantic display events for screen speakers | Screens, kiosks | Display capability and `clawdot.display.*` reserved (SAT-016) |
+| 10 | **Spotify** (control of a Connect device first; own-speaker receiver only if viable), podcasts and audiobooks (resume positions) | Music breadth | Media-source interface (MUS-003/005) |
+| 11 | ESP32-S3 satellite; routines (e.g. morning briefing); long-term memory | Platform and feature breadth | Protocol; scheduler; bounded stores |
 
 Hardware notes: the Echo Dot Gen 2 **hardware baseline** is normative from M1 onward (every CI run checks the default configuration against its resource envelope, spec 0002). The Dot **firmware port** is opportunistic only: no known unlock ([R-04](research/04-echo-dot-gen2.md)).
 ## v1.0 criteria
