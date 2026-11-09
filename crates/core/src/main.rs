@@ -1349,7 +1349,7 @@ async fn main() -> ExitCode {
                 let ctl = TurnCtl {
                     cancel: ask.cancel.clone(),
                     speak: ask.progress.clone(),
-                    clock: Some(clock.clone()),
+                    clock: None,
                 };
                 let r = brain.respond(&ask.text, &ctl).await;
                 let _ = ask.reply.send(Answer { say: r.say, effects: r.effects, expects_reply: r.expects_reply });

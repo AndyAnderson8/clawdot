@@ -679,7 +679,7 @@ pub struct TurnCtl {
     pub cancel: CancelToken,
     /// Where plan and progress phrases go as they arise (REQ-AST-020).
     pub speak: Option<UnboundedSender<String>>,
-    /// The clock the deadline and phrase spacing use; the system clock when unset.
+    /// The clock the deadline and phrase spacing use; a monotonic clock when unset.
     pub clock: Option<Arc<dyn Clock + Send + Sync>>,
 }
 
@@ -694,14 +694,19 @@ impl std::fmt::Debug for TurnCtl {
 }
 
 impl TurnCtl {
+    /// Seconds on the turn's clock: the one given, or a monotonic clock, so that setting the wall clock (a
+    /// device with no battery clock gets its time late, REQ-TMR-009) cannot end a turn early or stretch it.
     fn now(&self) -> Ts {
         match &self.clock {
             Some(c) => c.now(),
-            None => std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|d| i64::try_from(d.as_secs()).ok())
-                .unwrap_or(0),
+            None => {
+                static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                let secs = START
+                    .get_or_init(std::time::Instant::now)
+                    .elapsed()
+                    .as_secs();
+                i64::try_from(secs).unwrap_or(i64::MAX)
+            }
         }
     }
 }
@@ -2130,7 +2135,8 @@ async fn execute<H: ToolHost>(
             );
             Executed {
                 text: format!(
-                    "Error: the tool did not answer within {secs} seconds. It may or may not have done anything."
+                    "Error: the tool did not answer within {secs} second{}. It may or may not have done anything.",
+                    if secs == 1 { "" } else { "s" }
                 ),
                 kind: Kind::TimedOut,
                 sent: false,
