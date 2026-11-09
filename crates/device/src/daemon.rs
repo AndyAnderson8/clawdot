@@ -12,7 +12,7 @@ use crate::quiet::{QuietPolicy, minute_of_day_now};
 use crate::tone::{self, Tone};
 use clawdot_protocol::message::{Capabilities, Indicator};
 use clawdot_satellite::audio::{AudioError, AudioIn, AudioOut};
-use clawdot_satellite::front::{AudioDevice, DeviceConfig, Press, Trigger};
+use clawdot_satellite::front::{AudioDevice, DeviceConfig, Press, Trigger, WakeSink};
 use clawdot_satellite::hw::OutputCaps;
 use clawdot_satellite::{Config, Device, Report, backoff, is_refusal, run};
 use std::net::TcpStream;
@@ -123,6 +123,10 @@ pub struct DaemonConfig {
     pub max_turns: Option<usize>,
     /// Print one line per state to standard error.
     pub verbose: bool,
+    /// Keep the microphone open between turns (REQ-DEV-025). Implied by `wake`.
+    pub always_on: bool,
+    /// A wake word detector fed from the open microphone (REQ-DEV-029). Push-to-talk works with or without it.
+    pub wake: Option<Box<dyn WakeSink>>,
 }
 
 impl std::fmt::Debug for DaemonConfig {
@@ -190,16 +194,21 @@ impl DaemonDevice {
         let (tx, rx) = sync_channel(8);
         let present = parts.declared.has(Capability::Leds);
         let offset = cfg.utc_offset_min;
-        let inner = AudioDevice::new(
+        let always_on = cfg.always_on || cfg.wake.is_some();
+        let mut inner = AudioDevice::new(
             parts.input,
             GainOut::new(parts.output),
             ChannelTrigger(rx),
             DeviceConfig {
                 max_turns: cfg.max_turns,
                 verbose: cfg.verbose,
+                always_on,
                 ..DeviceConfig::default()
             },
         );
+        if let Some(w) = cfg.wake {
+            inner = inner.with_wake_boxed(w);
+        }
         let gestures = GestureDetector::new(
             parts.gesture_ms.0,
             parts.gesture_ms.1,
@@ -470,8 +479,9 @@ impl Device for DaemonDevice {
 
     fn playback_idle(&mut self) -> bool {
         let idle = self.inner.playback_idle();
-        if idle {
-            self.playing = false;
+        if idle && std::mem::replace(&mut self.playing, false) {
+            // The core says nothing more when the follow-up window is off; if it does, its state replaces this.
+            self.leds.turn(LedState::Idle);
         }
         idle
     }

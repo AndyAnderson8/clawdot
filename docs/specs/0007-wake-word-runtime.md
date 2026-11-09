@@ -16,7 +16,7 @@ The wake-word engine behind the `WakeEngine` seam of spec 0006 is a small purpos
 
 **In scope:** the `clawdot-wake` crate (model reader, frontend, interpreter, detection rule), its adapter to the `WakeEngine` trait in `clawdot-device` behind a cargo feature, and the validation against the reference.
 
-**Out of scope:** training a model or a custom word; always-on microphone capture in the daemon (spec 0006 section 7, a later step); echo cancellation; any model format other than the TFLite flat buffer; measurements on a real device (B3).
+**Out of scope:** training a model or a custom word; always-on microphone capture in the daemon (REQ-DEV-025..030 of spec 0006); echo cancellation; any model format other than the TFLite flat buffer; measurements on a real device (B3).
 
 ## 3. Definitions
 

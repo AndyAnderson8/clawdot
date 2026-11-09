@@ -74,9 +74,27 @@ Extrapolation to a 1.2 GHz Cortex-A53, with the assumptions that R-11 section 7 
 
 ## What is not done
 
-- Always-on capture in the daemon: the audio front end opens the microphone only after a trigger, so nothing feeds the engine yet (spec 0006 section 7).
+- Always-on capture on a device: built for the PC (REQ-DEV-025..030, below); on the Echo Dot it waits for B3.
 - Training a custom word and its licence-clean dataset (R-11 section 4).
 - The real-voice, real-room evaluation set (R-03): the synthetic clips prove arithmetic, not accuracy.
 - The residual frontend differences in loud and near-silent passages.
 - Running the armv7 build; device RSS, CPU and thermal figures.
 - `no allocation while processing` is by construction (fixed arrays, no `Vec` on the run path); it is not measured, because the crate forbids the `unsafe` a counting allocator needs.
+
+## Always-on capture (PC)
+
+The front end that feeds the engine is `AudioDevice` in `crates/satellite/src/front.rs`, with `DeviceConfig::always_on`. The satellite crate links no engine: it knows only the small `WakeSink` trait (20 ms frames in, the phrase out, `reset`); `clawdot-device` implements it with `MwwSink` (feature `mww`) and the daemon hands it over through `DaemonConfig::wake`. Requirements: REQ-DEV-025..030 in [spec 0006](../specs/0006-device-layer-contract.md); the user-facing steps are in [pc-voice-loop.md](../guides/pc-voice-loop.md).
+
+| Situation | What the front end does |
+|---|---|
+| First pass of the loop | Opens the microphone once and keeps it open |
+| Idle | Reads up to 8 frames per pass and feeds each to the sink; nothing is kept |
+| Wake heard or key pressed | Sends `wake`; keeps the frames that follow (at most 100, 2 s; the oldest drop) until the core sends `stream-start`, then sends them first |
+| Core never asks (3 s) | Drops the queue and goes back to listening; the microphone stays open |
+| Core listening | Does not feed the sink; the core's endpointer decides where speech ends |
+| Core stops asking | Resets the sink, empties the queue, ignores the word for 500 ms |
+| Reply playing | Reads and discards frames; the sink is not fed; reset when it ends, then 500 ms hold-off |
+| Mute | Releases the microphone, empties the queue, resets the sink; unmute resets it again and reopens the device |
+| Capture stalls, ends or fails | Problem recorded, device released, reopened after 1 s doubling to 10 s; a missing program is reported once |
+
+The sink's refractory period and per-word sensitivity are the engine's (`MwwEngine`); `clawdot-device` sets them from `--wake-refractory-ms` and `--wake-sensitivity`.

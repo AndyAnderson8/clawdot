@@ -1,9 +1,10 @@
 //! `clawdot-device`: run the device daemon, or check a board file.
 
 use clawdot_device::board::{self, EMBEDDED};
-use clawdot_device::caps::Declared;
+use clawdot_device::caps::{Build, Declared};
 use clawdot_device::daemon::{DaemonConfig, DaemonDevice, real_sleep, run_forever};
 use clawdot_device::quiet::{QuietHours, QuietPolicy};
+use clawdot_satellite::front::WakeSink;
 use clawdot_satellite::{Config, DEAD_AFTER};
 use std::net::TcpStream;
 use std::process::ExitCode;
@@ -27,6 +28,18 @@ OPTIONS:
         --quiet-volume N      volume ceiling in quiet hours, percent (default 20)
         --utc-offset-min N    local time as minutes from UTC, for --quiet (default 0)
     --turns N                 leave after N replies (development)
+
+PC VOICE LOOP (spec 0006 REQ-DEV-025..030):
+    --mic-device NAME         microphone name for the board's capture program (ffmpeg on Windows needs one)
+    --speaker-device NAME     speaker name for the board's playback program
+    --always-on               keep the microphone open between turns (implied by --wake-model)
+    --wake-model FILE.tflite  listen for this wake word (repeat for several); FILE.json must sit beside it.
+                              Needs a build with `--features mww`.
+    --wake-licence TEXT       recorded licence of the models (default Apache-2.0: only the official
+                              microWakeWord models; give the real licence for any other model)
+    --wake-sensitivity [WORD=]0..1   0 strict, 0.5 as published, 1 loose; WORD is the model's file name without
+                              extension; without WORD it applies to every word (repeat)
+    --wake-refractory-ms N    ignore a word for N ms after it fired (default 2000)
 ";
 
 #[derive(Default)]
@@ -40,6 +53,13 @@ struct Opts {
     quiet_volume: Option<u8>,
     utc_offset_min: i32,
     turns: Option<usize>,
+    mic_device: Option<String>,
+    speaker_device: Option<String>,
+    always_on: bool,
+    wake_models: Vec<String>,
+    wake_licence: Option<String>,
+    wake_sensitivity: Vec<String>,
+    wake_refractory_ms: Option<u64>,
 }
 
 fn parse(args: impl Iterator<Item = String>) -> Result<Option<Opts>, String> {
@@ -73,15 +93,118 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Opts>, String> {
                         .map_err(|_| "--turns needs a whole number".to_owned())?,
                 );
             }
+            "--mic-device" => o.mic_device = Some(val("--mic-device")?),
+            "--speaker-device" => o.speaker_device = Some(val("--speaker-device")?),
+            "--always-on" => o.always_on = true,
+            "--wake-model" => o.wake_models.push(val("--wake-model")?),
+            "--wake-licence" => o.wake_licence = Some(val("--wake-licence")?),
+            "--wake-sensitivity" => o.wake_sensitivity.push(val("--wake-sensitivity")?),
+            "--wake-refractory-ms" => {
+                o.wake_refractory_ms = Some(
+                    val("--wake-refractory-ms")?
+                        .parse()
+                        .map_err(|_| "--wake-refractory-ms needs a whole number".to_owned())?,
+                );
+            }
             other => return Err(format!("unknown option `{other}`")),
         }
     }
     Ok(Some(o))
 }
 
+#[cfg(feature = "mww")]
+fn wake_sink(o: &Opts) -> Result<Option<Box<dyn WakeSink>>, String> {
+    use clawdot_device::wake::{WakeEngine, WordId};
+    use clawdot_device::wake_mww::{MwwEngine, MwwSink, load_word};
+    use std::path::Path;
+
+    if o.wake_models.is_empty() {
+        return Ok(None);
+    }
+    let licence = o.wake_licence.as_deref().unwrap_or("Apache-2.0");
+    let mut words = Vec::new();
+    let mut stems = Vec::new();
+    for (i, m) in o.wake_models.iter().enumerate() {
+        let path = Path::new(m);
+        let id = WordId(u16::try_from(i + 1).map_err(|_| "too many wake word models".to_owned())?);
+        words.push(load_word(id, path, licence)?);
+        stems.push(
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_lowercase(),
+        );
+    }
+    let mut engine = MwwEngine::new(words).map_err(|e| format!("wake engine: {e}"))?;
+    if let Some(ms) = o.wake_refractory_ms {
+        engine = engine.with_refractory(ms.saturating_mul(16));
+    }
+    for s in &o.wake_sensitivity {
+        let (word, value) = s
+            .split_once('=')
+            .map_or((None, s.as_str()), |(w, v)| (Some(w), v));
+        let v: f32 = value
+            .parse()
+            .ok()
+            .filter(|v| (0.0..=1.0).contains(v))
+            .ok_or_else(|| format!("--wake-sensitivity {s}: needs a number from 0 to 1"))?;
+        let targets: Vec<usize> = match word {
+            None => (0..stems.len()).collect(),
+            Some(w) => vec![
+                stems
+                    .iter()
+                    .position(|x| *x == w.to_lowercase())
+                    .ok_or_else(|| format!("--wake-sensitivity {s}: no model is named `{w}`"))?,
+            ],
+        };
+        for i in targets {
+            engine.set_sensitivity(WordId(u16::try_from(i + 1).unwrap_or(u16::MAX)), v);
+        }
+    }
+    for w in engine.words() {
+        let hash: String = w.model_sha256.iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!(
+            "wake word: \"{}\" (model sha256 {}, licence {})",
+            w.phrase,
+            &hash[..16],
+            w.licence
+        );
+    }
+    eprintln!(
+        "wake engine: {} KB of working memory",
+        engine.memory_bytes() / 1024
+    );
+    Ok(Some(Box::new(MwwSink::new(engine))))
+}
+
+#[cfg(not(feature = "mww"))]
+fn wake_sink(o: &Opts) -> Result<Option<Box<dyn WakeSink>>, String> {
+    if o.wake_models.is_empty() {
+        Ok(None)
+    } else {
+        Err("--wake-model: this build has no wake engine; build with `--features mww`".into())
+    }
+}
+
 fn go(o: &Opts) -> Result<(), String> {
     let name = o.board.as_deref().ok_or("--board is needed")?;
-    let board = board::load(name)?;
+    let wake = if o.check { None } else { wake_sink(o)? };
+    let build = Build {
+        wake_engine: wake.is_some(),
+        ..Build::CURRENT
+    };
+    let board = board::load_tuned(
+        name,
+        |f| {
+            if let Some(d) = &o.mic_device {
+                f.audio.capture.device = Some(d.clone());
+            }
+            if let Some(d) = &o.speaker_device {
+                f.audio.playback.device = Some(d.clone());
+            }
+        },
+        build,
+    )?;
     let declared: Declared = board.declared();
     if o.check {
         println!("board: {}", board.name());
@@ -113,6 +236,8 @@ fn go(o: &Opts) -> Result<(), String> {
             utc_offset_min: o.utc_offset_min,
             max_turns: o.turns,
             verbose: true,
+            always_on: o.always_on,
+            wake,
         },
     );
     let cfg = Config {

@@ -320,20 +320,35 @@ pub const EMBEDDED: [(&str, &str); 3] = [
 /// # Errors
 /// The name is unknown, the file cannot be read, or the board file is invalid (the text names the key).
 pub fn load(name_or_path: &str) -> Result<Box<dyn Board>, String> {
+    load_tuned(name_or_path, |_| {}, Build::CURRENT)
+}
+
+/// Like [`load`], but lets the caller adjust the board file before it is used (a microphone name given on the
+/// command line) and say what this build implements (a wake engine was loaded).
+///
+/// # Errors
+/// As [`load`].
+pub fn load_tuned(
+    name_or_path: &str,
+    tune: impl FnOnce(&mut BoardFile),
+    build: Build,
+) -> Result<Box<dyn Board>, String> {
     if name_or_path == "none" {
         return Ok(Box::new(NullBoard));
     }
     if let Some((_, json)) = EMBEDDED.iter().find(|(n, _)| *n == name_or_path) {
-        let file =
+        let mut file =
             BoardFile::parse(json).map_err(|e| format!("embedded board `{name_or_path}`: {e}"))?;
-        return Ok(Box::new(ConfiguredBoard::new(file)));
+        tune(&mut file);
+        return Ok(Box::new(ConfiguredBoard::with_build(file, build)));
     }
     if name_or_path.contains('/') || name_or_path.contains('\\') || name_or_path.ends_with(".json")
     {
         let json = std::fs::read_to_string(name_or_path)
             .map_err(|e| format!("cannot read board file {name_or_path}: {e}"))?;
-        let file = BoardFile::parse(&json).map_err(|e| format!("{name_or_path}: {e}"))?;
-        return Ok(Box::new(ConfiguredBoard::new(file)));
+        let mut file = BoardFile::parse(&json).map_err(|e| format!("{name_or_path}: {e}"))?;
+        tune(&mut file);
+        return Ok(Box::new(ConfiguredBoard::with_build(file, build)));
     }
     Err(format!(
         "unknown board `{name_or_path}`; known boards are none, {}; or give the path of a board file ending in .json",
