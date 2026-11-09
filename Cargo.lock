@@ -81,6 +81,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawdot-device"
+version = "0.0.0"
+dependencies = [
+ "clawdot-protocol",
+ "clawdot-satellite",
+ "serde_json",
+]
+
+[[package]]
 name = "clawdot-e2e"
 version = "0.0.0"
 dependencies = [

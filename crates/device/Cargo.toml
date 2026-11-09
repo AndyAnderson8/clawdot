@@ -1,0 +1,21 @@
+[package]
+name = "clawdot-device"
+description = "ClawDot portable device daemon: board files, capability model, LED states, buttons, tones, quiet hours and the wake-engine seam over the satellite protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "clawdot_device"
+path = "src/lib.rs"
+
+[dependencies]
+clawdot-protocol = { path = "../protocol" }
+clawdot-satellite = { path = "../satellite" }
+serde_json = "1"
