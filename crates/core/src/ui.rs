@@ -24,6 +24,7 @@
 
 use crate::admin::{self, AdminError};
 use crate::app::{Core, Fail, Op, SchedOp};
+use crate::extensions::{self, ExtOp};
 use crate::http::{BODY_TIMEOUT, read_body};
 use crate::inbox::endpoint::EndpointError;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
@@ -52,6 +53,9 @@ const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'un
                    base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 /// API bodies are tiny; refuse anything larger.
 const MAX_BODY: usize = 4096;
+/// A tool description with its parameters, and a skills file.
+const MAX_TOOL_BODY: usize = 16 * 1024;
+const MAX_SKILL_BODY: usize = 64 * 1024;
 /// Events shown in the overview, newest first.
 const MAX_EVENTS: usize = 50;
 /// Longest event text sent to the page.
@@ -238,6 +242,13 @@ pub async fn handle(
             | ["schedule"]
             | ["schedule", _]
             | ["tools"]
+            | ["tools", _]
+            | ["tools", _, "enabled"]
+            | ["connections"]
+            | ["connections", _]
+            | ["connections", _, "enabled"]
+            | ["skills"]
+            | ["skills", _]
             | ["settings"]
             | ["about"]
     );
@@ -265,7 +276,41 @@ pub async fn handle(
             Err(e) => endpoint_error(&e),
         },
         (&Method::POST, ["admin", "password"]) => change_password(core, body).await,
-        (&Method::GET, ["tools"]) => json_reply(StatusCode::OK, &core.ui_tools()),
+        (&Method::GET, ["tools"] | ["skills"]) => json_reply(StatusCode::OK, &core.ui_tools()),
+        (&Method::POST, ["tools"]) => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
+            Ok(v) => ext(core, ExtOp::ToolAdd(v)).await,
+            Err((s, m)) => error(s, m),
+        },
+        (&Method::DELETE, ["tools", name]) => {
+            ext(core, ExtOp::ToolDelete((*name).to_owned())).await
+        }
+        (&Method::POST, ["tools", name, "enabled"]) => match enabled_flag(body).await {
+            Ok(on) => ext(core, ExtOp::ToolEnable((*name).to_owned(), on)).await,
+            Err((s, m)) => error(s, m),
+        },
+        (&Method::POST, ["connections", "test"]) => match read_json::<Value>(body).await {
+            Ok(v) => match extensions::test_connection(&v, |n| std::env::var(n).ok()).await {
+                Ok(r) => json_reply(StatusCode::OK, &r),
+                Err(f) => fail_reply(&f),
+            },
+            Err((s, m)) => error(s, m),
+        },
+        (&Method::POST, ["connections"]) => match read_json::<Value>(body).await {
+            Ok(v) => ext(core, ExtOp::McpAdd(v)).await,
+            Err((s, m)) => error(s, m),
+        },
+        (&Method::DELETE, ["connections", name]) => {
+            ext(core, ExtOp::McpDelete((*name).to_owned())).await
+        }
+        (&Method::POST, ["connections", name, "enabled"]) => match enabled_flag(body).await {
+            Ok(on) => ext(core, ExtOp::McpEnable((*name).to_owned(), on)).await,
+            Err((s, m)) => error(s, m),
+        },
+        (&Method::POST, ["skills", action]) => skill_action(core, action, body).await,
+        (&Method::POST, ["skills"]) => match read_json_limit::<Value>(body, MAX_SKILL_BODY).await {
+            Ok(v) => ext(core, ExtOp::SkillAdd(v)).await,
+            Err((s, m)) => error(s, m),
+        },
         (&Method::GET, ["settings"]) => json_reply(StatusCode::OK, &core.ui_settings()),
         (&Method::GET, ["about"]) => json_reply(
             StatusCode::OK,
@@ -310,10 +355,58 @@ async fn schedule(core: &Core, op: SchedOp) -> Resp {
     }
 }
 
+/// Run a change to tools, connections, or skills in the main loop; the answer is the new listing.
+async fn ext(core: &Core, op: ExtOp) -> Resp {
+    match core.portal_call(Op::Ext(op)).await {
+        Ok(v) => json_reply(StatusCode::OK, &v),
+        Err(f) => fail_reply(&f),
+    }
+}
+
+/// `{"enabled": true|false}`.
+async fn enabled_flag(body: Incoming) -> Result<bool, (StatusCode, &'static str)> {
+    match read_json::<Value>(body).await {
+        Ok(v) => v["enabled"].as_bool().ok_or((
+            StatusCode::BAD_REQUEST,
+            "expected {\"enabled\": true or false}",
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Skills are addressed in the body, not the path, because their names are free text.
+async fn skill_action(core: &Core, action: &str, body: Incoming) -> Resp {
+    let v = match read_json_limit::<Value>(body, MAX_SKILL_BODY).await {
+        Ok(v) => v,
+        Err((s, m)) => return error(s, m),
+    };
+    let name = v["name"].as_str().unwrap_or("").to_owned();
+    match action {
+        "import" => ext(core, ExtOp::SkillImport(v)).await,
+        "edit" => ext(core, ExtOp::SkillEdit(name, v["skill"].clone())).await,
+        "delete" => ext(core, ExtOp::SkillDelete(name)).await,
+        "enabled" => match v["enabled"].as_bool() {
+            Some(on) => ext(core, ExtOp::SkillEnable(name, on)).await,
+            None => error(
+                StatusCode::BAD_REQUEST,
+                "expected {\"name\":..,\"enabled\": true or false}",
+            ),
+        },
+        _ => error(StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
 async fn read_json<T: serde::de::DeserializeOwned>(
     body: Incoming,
 ) -> Result<T, (StatusCode, &'static str)> {
-    let Some(bytes) = read_body(body, MAX_BODY, BODY_TIMEOUT).await else {
+    read_json_limit(body, MAX_BODY).await
+}
+
+async fn read_json_limit<T: serde::de::DeserializeOwned>(
+    body: Incoming,
+    max: usize,
+) -> Result<T, (StatusCode, &'static str)> {
+    let Some(bytes) = read_body(body, max, BODY_TIMEOUT).await else {
         return Err((StatusCode::PAYLOAD_TOO_LARGE, "body too large or too slow"));
     };
     serde_json::from_slice(&bytes).map_err(|_| (StatusCode::BAD_REQUEST, "bad request body"))

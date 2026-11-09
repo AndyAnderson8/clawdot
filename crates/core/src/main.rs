@@ -9,6 +9,7 @@ use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, Effect, describe_fired};
 use clawdot_core::config::{Config, SatelliteConfig, SpeechConfig};
+use clawdot_core::extensions::{ExtOp, Extensions, WithPolicy};
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
 use clawdot_core::inbox::event::Event;
@@ -345,26 +346,6 @@ fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
     }
 }
 
-/// What the Tools and Connections tabs show (REQ-CFG-029). Holds no secrets. Radio and music tools are left out
-/// of the portal (REQ-CFG-026).
-fn tools_json(brain: &Brain) -> serde_json::Value {
-    let mut list = Vec::new();
-    for t in ToolHost::tool_specs(&brain.assistant) {
-        if matches!(t.name.as_str(), "play_music" | "music_control") {
-            continue;
-        }
-        list.push(serde_json::json!({ "name": t.name, "description": t.description, "source": "builtin", "confirm": false }));
-    }
-    for t in brain.http_tools.specs() {
-        let confirm = brain.http_tools.needs_confirmation(&t.name);
-        list.push(serde_json::json!({ "name": t.name, "description": t.description, "source": "http", "confirm": confirm }));
-    }
-    for t in brain.mcp.tools() {
-        list.push(serde_json::json!({ "name": t.exposed, "description": t.description, "source": "mcp", "confirm": t.confirm }));
-    }
-    serde_json::json!({ "tools": list, "mcp": brain.mcp.report() })
-}
-
 /// A name for the device: the host name, or "ClawDot".
 fn device_name() -> String {
     let from_env = ["HOSTNAME", "COMPUTERNAME"]
@@ -452,6 +433,12 @@ struct Brain {
     http_tools: HttpTools,
     mcp: McpClient,
     clock: Arc<dyn Clock + Send + Sync>,
+    /// Tools, connections, and skills managed from the portal.
+    ext: Extensions,
+    /// Names of the built-in tools.
+    builtin: Vec<String>,
+    /// The system prompt without skills.
+    persona: String,
 }
 
 /// What to say and which effects the satellite should carry out.
@@ -461,6 +448,29 @@ struct Reply {
 }
 
 impl Brain {
+    /// What the Tools, Connections, and Skills tabs show (REQ-CFG-029, 036). Holds no secrets.
+    fn listing(&self) -> serde_json::Value {
+        self.ext.listing(
+            &ToolHost::tool_specs(&self.assistant),
+            &self.http_tools,
+            &self.mcp,
+        )
+    }
+
+    /// Carry out a change from the portal and refresh what the page shows.
+    async fn ext_apply(&mut self, op: ExtOp) -> Result<serde_json::Value, clawdot_core::app::Fail> {
+        self.ext
+            .apply(
+                op,
+                &mut self.http_tools,
+                &mut self.mcp,
+                &self.builtin,
+                |v| std::env::var(v).ok(),
+            )
+            .await?;
+        Ok(self.listing())
+    }
+
     /// A snapshot for the web UI. Contains no secrets and no agent text.
     fn status_json(
         &self,
@@ -508,15 +518,27 @@ impl Brain {
             };
         };
         let (day, now) = (self.assistant.local_day(), self.clock.now());
-        let r = run_turn(
-            &l.backend,
-            &mut WithMcp {
+        let mut host = WithPolicy {
+            inner: &mut WithMcp {
                 inner: &mut WithHttp {
                     inner: &mut self.assistant,
                     http: &self.http_tools,
                 },
                 mcp: &self.mcp,
             },
+            ext: &self.ext,
+            mcp: &self.mcp,
+        };
+        // The enabled skills ride along in the system prompt, after the persona (REQ-CFG-036).
+        let available: Vec<String> = host.tool_specs().into_iter().map(|t| t.name).collect();
+        self.conversation.set_system(format!(
+            "{}{}",
+            self.persona,
+            self.ext.skills_prompt(&available)
+        ));
+        let r = run_turn(
+            &l.backend,
+            &mut host,
             &mut self.conversation,
             &l.cfg,
             &mut self.usage,
@@ -796,7 +818,7 @@ async fn main() -> ExitCode {
         },
         None => DEFAULT_PERSONA.to_owned(),
     };
-    let conversation = Conversation::new(persona, 20, 24_000, 600);
+    let conversation = Conversation::new(persona.clone(), 20, 24_000, 600);
 
     let sched_store = JsonStore::new(
         args.data_dir.join("timers.json"),
@@ -823,9 +845,25 @@ async fn main() -> ExitCode {
         .into_iter()
         .map(|t| t.name)
         .collect();
-    let http_tools = match HttpTools::new(std::mem::take(&mut args.tools), &builtin, |v| {
-        std::env::var(v).ok()
-    }) {
+    // What the portal saved (tools, connections, skills) loads after what the configuration file defines.
+    let mut ext = match Extensions::open(&args.data_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("clawdot: cannot load the portal's saved tools and skills: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut tool_defs = std::mem::take(&mut args.tools);
+    let mut server_defs = std::mem::take(&mut args.mcp);
+    ext.set_config(
+        tool_defs.iter().map(|t| t.name.clone()),
+        server_defs.iter().map(|s| s.name.clone()),
+    );
+    let mut taken = builtin.clone();
+    taken.extend(tool_defs.iter().map(|t| t.name.clone()));
+    tool_defs.extend(ext.startup_tools(&taken, |v| std::env::var(v).ok()));
+    server_defs.extend(ext.startup_servers(|v| std::env::var(v).ok()));
+    let http_tools = match HttpTools::new(tool_defs, &builtin, |v| std::env::var(v).ok()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("clawdot: {e}");
@@ -835,11 +873,7 @@ async fn main() -> ExitCode {
 
     let mut reserved = builtin.clone();
     reserved.extend(http_tools.specs().into_iter().map(|t| t.name));
-    let mcp = match McpClient::connect(std::mem::take(&mut args.mcp), &reserved, |v| {
-        std::env::var(v).ok()
-    })
-    .await
-    {
+    let mcp = match McpClient::connect(server_defs, &reserved, |v| std::env::var(v).ok()).await {
         Ok((client, warnings)) => {
             for w in warnings {
                 eprintln!("clawdot: {w}");
@@ -861,14 +895,12 @@ async fn main() -> ExitCode {
         http_tools,
         mcp,
         clock: clock.clone(),
+        ext,
+        builtin: builtin.clone(),
+        persona,
     };
 
-    let tool_counts = serde_json::json!({
-        "builtin": builtin.len(),
-        "http": brain.http_tools.specs().len(),
-        "mcp": brain.mcp.tools().len(),
-    });
-    core.set_ui_tools(tools_json(&brain));
+    core.set_ui_tools(brain.listing());
     core.set_ui_settings(settings_json(&args, &public, brain.llm.is_some()));
     if let Some(input) = args.voice_in.clone() {
         return match voice_once(&mut brain, &args.speech, &input, args.voice_out.as_deref()).await {
@@ -989,6 +1021,13 @@ async fn main() -> ExitCode {
             Some(job) = portal_rx.recv() => {
                 let answer = match job.op {
                     Op::Sched(op) => brain.assistant.admin_sched(op),
+                    Op::Ext(op) => {
+                        let r = brain.ext_apply(op).await;
+                        if let Ok(listing) = &r {
+                            core.set_ui_tools(listing.clone());
+                        }
+                        r
+                    }
                 };
                 let _ = job.reply.send(answer);
             }
@@ -1011,6 +1050,7 @@ async fn main() -> ExitCode {
                 let _ = ask.reply.send(Answer { say: r.say, effects: r.effects });
             }
             _ = tick.tick() => {
+                let tool_counts = serde_json::json!({ "builtin": builtin.len(), "http": brain.http_tools.specs().len(), "mcp": brain.mcp.tools().len() });
                 core.set_ui_status(brain.status_json(announcer.connected(), &station_names, &tool_counts));
                 // Spoken text is echoed only to an interactive console: in server mode stdout goes to a
                 // journal or container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
