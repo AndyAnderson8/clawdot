@@ -18,5 +18,7 @@ fi
 win_root=$(cygpath -m "$PWD")
 args=""
 for a in "$@"; do args+=" $(printf '%q' "$a")"; done
-cmd=". \"\$HOME/.clawdot-env.sh\" && export CARGO_TARGET_DIR=\"\$CARGO_TARGET_DIR$target_suffix\" && cd \"\$(wslpath -a '$win_root')\" && cargo$args"
+target_export=""
+if [ -n "$target_suffix" ]; then target_export="export CARGO_TARGET_DIR=\$CARGO_TARGET_DIR$target_suffix && "; fi
+cmd=". \"\$HOME/.clawdot-env.sh\" && ${target_export}cd \"\$(wslpath -a '$win_root')\" && cargo$args"
 MSYS_NO_PATHCONV=1 exec wsl.exe -d "${CLAWDOT_WSL_DISTRO:-Ubuntu}" -- bash -lc "$cmd"
