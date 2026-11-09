@@ -27,11 +27,25 @@ export interface AgentEvent {
   state: EventState | string;
   received_at: number;
 }
-export interface Endpoint { name: string; adapter: string; enabled: boolean; created_at: number }
-export interface Overview { now: number; endpoints: Endpoint[]; events: AgentEvent[] }
+export interface Endpoint {
+  name: string;
+  adapter: string;
+  enabled: boolean;
+  created_at: number;
+}
+export interface Overview {
+  now: number;
+  endpoints: Endpoint[];
+  events: AgentEvent[];
+}
 
 export type ScheduleKind = "timer" | "alarm" | "reminder";
-export interface Repeat { hour: number; minute: number; days: number[]; every_day: boolean }
+export interface Repeat {
+  hour: number;
+  minute: number;
+  days: number[];
+  every_day: boolean;
+}
 export interface ScheduleItem {
   id: number;
   kind: ScheduleKind;
@@ -40,7 +54,11 @@ export interface ScheduleItem {
   seconds_left: number;
   repeat?: Repeat | null;
 }
-export interface ScheduleList { now: number; clock_valid: boolean; items: ScheduleItem[] }
+export interface ScheduleList {
+  now: number;
+  clock_valid: boolean;
+  items: ScheduleItem[];
+}
 
 export interface Tool {
   name: string;
@@ -63,9 +81,23 @@ export interface McpServer {
   token_env?: string;
   tools: Tool[];
 }
-export interface Skill { name: string; instructions: string; tools?: string[]; enabled: boolean }
-export interface Problem { kind: string; name: string; reason: string }
-export interface Extensions { tools?: Tool[]; mcp?: McpServer[]; skills?: Skill[]; problems?: Problem[] }
+export interface Skill {
+  name: string;
+  instructions: string;
+  tools?: string[];
+  enabled: boolean;
+}
+export interface Problem {
+  kind: string;
+  name: string;
+  reason: string;
+}
+export interface Extensions {
+  tools?: Tool[];
+  mcp?: McpServer[];
+  skills?: Skill[];
+  problems?: Problem[];
+}
 
 export interface SettingField {
   value: string | number | null;
@@ -83,5 +115,10 @@ export interface Settings {
   note?: string;
 }
 
-export interface WebhookToken { name: string; token: string }
-export interface ConnectionTest { tools: { name: string }[] }
+export interface WebhookToken {
+  name: string;
+  token: string;
+}
+export interface ConnectionTest {
+  tools: { name: string }[];
+}

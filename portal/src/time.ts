@@ -4,8 +4,11 @@ import type { Repeat } from "./types.ts";
 export const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 function formatter(locale: string | undefined, zone: string, o: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
-  try { return new Intl.DateTimeFormat(locale, { timeZone: zone, ...o }); }
-  catch { return new Intl.DateTimeFormat(locale, o); } // an unknown zone name falls back to the browser's
+  try {
+    return new Intl.DateTimeFormat(locale, { timeZone: zone, ...o });
+  } catch {
+    return new Intl.DateTimeFormat(locale, o);
+  } // an unknown zone name falls back to the browser's
 }
 
 export function fmt(ts: number, zone: string, o: Intl.DateTimeFormatOptions): string {
@@ -15,9 +18,18 @@ export function fmt(ts: number, zone: string, o: Intl.DateTimeFormatOptions): st
 /** `{ date: "2026-11-09", time: "07:30" }` in the zone. */
 export function parts(ts: number, zone: string): { date: string; time: string } {
   const m: Record<string, string> = {};
-  formatter("en-CA", zone, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+  formatter("en-CA", zone, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  })
     .formatToParts(new Date(ts * 1000))
-    .forEach((p) => { m[p.type] = p.value; });
+    .forEach((p) => {
+      m[p.type] = p.value;
+    });
   return { date: `${m["year"]}-${m["month"]}-${m["day"]}`, time: `${m["hour"]}:${m["minute"]}` };
 }
 
@@ -41,7 +53,12 @@ export function whenText(ts: number, now: number, zone: string): string {
   const a = parts(ts, zone);
   const b = parts(now, zone);
   const tom = parts(now + 86400, zone);
-  const day = a.date === b.date ? "Today" : a.date === tom.date ? "Tomorrow" : fmt(ts, zone, { weekday: "short", month: "short", day: "numeric" });
+  const day =
+    a.date === b.date
+      ? "Today"
+      : a.date === tom.date
+        ? "Tomorrow"
+        : fmt(ts, zone, { weekday: "short", month: "short", day: "numeric" });
   return day + " at " + fmt(ts, zone, { hour: "numeric", minute: "2-digit" });
 }
 

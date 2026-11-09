@@ -96,7 +96,7 @@ jobs:
   # TODO(TASK-003): cross-armv7 build and the resource-budget gate join here as required jobs.
 
   portal:
-    name: portal (npm ci, types, tests, built page is current, browser)
+    name: portal (npm ci, lint, format, types, tests, built page is current, browser)
     needs: detect
     if: needs.detect.outputs.portal == 'true'
     runs-on: ubuntu-latest
@@ -109,9 +109,17 @@ jobs:
         with:
           node-version-file: portal/.nvmrc
           cache: npm
-          cache-dependency-path: portal/package-lock.json
-      - name: Install (lock file only, no install scripts)
-        run: npm ci --ignore-scripts --no-audit --no-fund
+          cache-dependency-path: |
+            portal/package-lock.json
+            portal/lint/package-lock.json
+      - name: Install (lock files only, no install scripts)
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund --prefix lint
+      - name: Lint (ESLint, type-aware)
+        run: npm run lint
+      - name: Formatting (Prettier)
+        run: npm run format:check
       - name: Type-check
         run: npm run typecheck
       - name: Unit tests

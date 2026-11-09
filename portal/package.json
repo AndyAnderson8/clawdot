@@ -5,7 +5,9 @@
   "description": "Source of the ClawDot web portal. Built to crates/core/src/ui.html (committed); see docs/adr/0016-portal-typescript-stack.md.",
   "license": "Apache-2.0",
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "build": "node build.mjs",
     "check-build": "node build.mjs --check",
@@ -14,7 +16,11 @@
     "test:browser": "node test/browser/smoke.ts",
     "licenses": "node scripts/licenses.mjs",
     "audit": "npm audit --omit=dev --audit-level=high",
-    "check": "npm run typecheck && npm test && npm run check-build"
+    "lint": "node lint/node_modules/eslint/bin/eslint.js --config lint/eslint.config.mjs --max-warnings 0 .",
+    "lint:fix": "node lint/node_modules/eslint/bin/eslint.js --config lint/eslint.config.mjs --max-warnings 0 --fix .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm test && npm run check-build"
   },
   "dependencies": {
     "preact": "11.2.0"
@@ -22,6 +28,7 @@
   "devDependencies": {
     "@types/node": "24.10.1",
     "esbuild": "0.28.2",
+    "prettier": "3.9.10",
     "typescript": "7.0.2"
   }
 }
