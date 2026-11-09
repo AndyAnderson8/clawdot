@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "rcp-spotify-play-names-the-device",
+  "use_case": "UC7",
+  "description": "The Spotify recipe shape: list the devices, search, play on one named device. Playback control is reversible, runs without asking, and the reply says where the sound comes from.",
+  "tags": ["recipe", "spotify", "music"],
+  "tool_sets": ["recipes"],
+  "turns": [
+    {
+      "say": "play some Dave Brubeck in the kitchen",
+      "model": [
+        {"calls": [{"name": "spotify_devices"}]},
+        {"calls": [{"name": "spotify_search", "args": {"q": "Dave Brubeck Time Out", "type": "album"}}]},
+        {"calls": [{"name": "spotify_play", "args": {"device_id": "kitchen-id", "uri": "spotify:album:2Cdp0f"}}]},
+        {"text": "Playing Time Out by the Dave Brubeck Quartet on the Kitchen speaker."}
+      ],
+      "expect": {
+        "ends": "answered",
+        "calls": [
+          {"tool": "spotify_devices"},
+          {"tool": "spotify_search"},
+          {"tool": "spotify_play", "args": {"device_id": "kitchen-id", "uri": {"$prefix": "spotify:album:"}}}
+        ],
+        "speech_contains": ["Kitchen"],
+        "max_sentences": 2
+      }
+    }
+  ]
+}
