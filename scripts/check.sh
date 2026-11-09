@@ -71,6 +71,35 @@ if [ "$fast" -eq 0 ] && [ -f scripts/test-policy.sh ] && policy_relevant; then
   run scripts/test-policy.sh
 fi
 
+# The portal (TypeScript, ADR-0016) is checked only when its sources or the generated page changed (always in
+# CI), so Rust-only work never needs Node. The generated crates/core/src/ui.html must match the sources.
+portal_re='^(portal/|crates/core/src/ui\.html$)'
+portal_relevant() {
+  [ -n "${CI:-}" ] && [ "$fast" -eq 0 ] && return 0
+  if [ "$fast" -eq 1 ]; then changed_matches "$portal_re"; return; fi
+  { git diff --name-only dev...HEAD; git diff --name-only HEAD; git diff --cached --name-only; } 2>/dev/null | grep -qE "$portal_re"
+}
+if [ -d portal ] && portal_relevant; then
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "FAILED: the portal changed but Node and npm are not installed (see portal/package.json engines)" >&2
+    fail=1
+  else
+    step "portal: install, type-check, unit tests, built page is current"
+    [ -d portal/node_modules ] || run npm --prefix portal ci --ignore-scripts --no-audit --no-fund
+    run npm --prefix portal run --silent typecheck
+    run npm --prefix portal test --silent
+    run npm --prefix portal run --silent check-build
+    if [ "$fast" -eq 0 ]; then
+      step "portal: licences, audit, browser smoke test"
+      run npm --prefix portal run --silent licenses
+      run npm --prefix portal run --silent audit
+      run npm --prefix portal run --silent test:browser
+    fi
+  fi
+else
+  skipped+=("portal checks")
+fi
+
 if [ "$fast" -eq 0 ] || changed_matches '\.md$'; then
   step "documentation: links and requirement IDs"
   run scripts/check-docs.sh

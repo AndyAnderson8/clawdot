@@ -89,3 +89,20 @@ CSP result for all five: no `eval`, no `new Function`, no inline event-handler a
 ## How to reproduce
 
 The prototypes lived in a scratch directory and are not committed. Each is about 70 lines of UI code over a shared 72-line `common.ts`; the build is one `esbuild.build({ bundle, minify, format: "iife", target: "es2022" })` call (Preact: `jsx: "automatic", jsxImportSource: "preact"`; Svelte and Solid: an `onLoad` plugin calling `svelte/compiler` or Babel). Sizes are `zlib.gzipSync(level 9)` and `brotliCompressSync(quality 11)` of the minified script, and of the whole inlined page. The real implementation (`portal/`) ships the browser smoke harness, so the method is reproducible there.
+
+## Amendment: measured result of the full port (2026-11-09)
+
+The whole portal (setup, sign-in, banner, and all eight tabs) was ported to `portal/`. Measured on the built page, which `build.rs` still gzips at build time:
+
+| | Before (hand-written) | After (TypeScript, Preact) | Change |
+|---|---|---|---|
+| Page, raw | 70,557 B | 70,423 B | -134 B |
+| Page, gzip (what is sent on the wire) | 20,446 B | 24,241 B | **+3,795 B (+18.6%)** |
+| Page, brotli (not served) | 17,645 B | 21,385 B | +3,740 B |
+| Script, minified, raw / gzip | 55,750 B (not minified) / 16,005 B | 60,027 B / 20,815 B | Preact and hooks are 13.3 KB of it |
+| Style, raw / gzip | about 10 KB / 2.6 KB | 8,708 B / 2,633 B | minified |
+| Source | 950 lines in one file | about 1,700 lines in 25 files (incl. CSS and shell) | typed, one file per tab |
+
+The overhead is lower than the prototype's +5.3 KB because minification now shrinks the application code that used to ship as written. Build takes about 0.1 s of esbuild time; type-check about 2 s; 27 unit tests run in 0.25 s; the 15-scenario browser smoke test takes about 20 s. Installed npm packages: 7 in total (`preact`, `esbuild` with its platform binary, `typescript` with its platform binary, `@types/node` with `undici-types`), all MIT or Apache-2.0, and `npm audit` reports none.
+
+Findings worth keeping: the browser test found a real race in the first version (a fast answer from the device could arrive between rendering and the effect that subscribes to the store, leaving a blank page); the store now catches up when it subscribes. The left arrow on the first tab did not wrap in the old page; it does now.

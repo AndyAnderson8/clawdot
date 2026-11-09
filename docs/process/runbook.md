@@ -144,3 +144,16 @@ Contributors open PRs against `dev` from forks. In the GitHub UI check that `gat
 - Create tags by hand, or run `release.sh publish`/`tag` as an agent.
 - Add AI attribution to commits, PRs, or docs.
 - Merge or push to `dev`/`main` by any route other than `scripts/land.sh` and `scripts/release.sh`.
+
+## 11. Changing the web portal
+
+The portal is TypeScript and Preact in `portal/`; the page that ships is the generated, committed `crates/core/src/ui.html` ([ADR-0016](../adr/0016-portal-typescript-stack.md)). Rust-only work never needs Node.
+
+```
+cd portal && npm ci --ignore-scripts      # once (Node 24, see .nvmrc)
+npm run build                             # regenerates crates/core/src/ui.html; commit it with the source change
+npm run check                             # type-check, unit tests, and "the committed page is current"
+npm run test:browser                      # headless Chrome against a mock device (CHROME=/path if not found)
+```
+
+`scripts/check.sh` runs the portal steps only when `portal/` or `ui.html` changed, and CI always runs them. If CI says the page is out of date, run `npm run build` and commit the result. Never edit `ui.html` by hand.
