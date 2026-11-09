@@ -208,6 +208,7 @@ pub struct Core {
     tools: Mutex<serde_json::Value>,
     settings: Mutex<Option<crate::settings::SettingsState>>,
     jobs: Mutex<Option<tokio::sync::mpsc::Sender<portal::Job>>>,
+    audit: std::sync::OnceLock<Arc<crate::audit::AuditLog>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -300,6 +301,7 @@ impl Core {
             tools: Mutex::new(serde_json::Value::Null),
             settings: Mutex::new(None),
             jobs: Mutex::new(None),
+            audit: std::sync::OnceLock::new(),
         }
     }
 

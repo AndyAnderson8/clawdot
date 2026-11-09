@@ -32,6 +32,12 @@ pub struct LimitsConfig {
     pub max_requests_per_day: Option<u32>,
     /// Spend per local day in US dollars; must not be negative.
     pub daily_spend_usd: Option<f64>,
+    /// Actions (calls that are not read-only) per local day; 0 stops all actions (default 100, REQ-SEC-015).
+    pub max_actions_per_day: Option<u32>,
+    /// Costly and destructive calls per local day (default 20, REQ-SEC-015).
+    pub max_costly_per_day: Option<u32>,
+    /// Describe actions instead of running them (default off, REQ-SEC-016).
+    pub dry_run: Option<bool>,
 }
 
 /// Speech-to-text and text-to-speech provider (OpenAI-compatible).
@@ -269,6 +275,25 @@ mod tests {
         assert_eq!(c.listen_addr().unwrap().unwrap().port(), 8080);
         assert_eq!(c.endpoints.len(), 2);
         assert_eq!(c.limits.max_requests_per_day, Some(200));
+    }
+
+    // REQ-SEC-015, REQ-SEC-016
+    #[test]
+    fn action_caps_and_dry_run_are_configurable() {
+        let c = Config::parse(
+            r#"{"limits": {"max_actions_per_day": 30, "max_costly_per_day": 5, "dry_run": true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                c.limits.max_actions_per_day,
+                c.limits.max_costly_per_day,
+                c.limits.dry_run
+            ),
+            (Some(30), Some(5), Some(true))
+        );
+        assert!(Config::parse(r#"{"limits": {"dry_run": "yes"}}"#).is_err());
+        assert!(Config::parse(r#"{"limits": {"max_actions_per_day": -1}}"#).is_err());
     }
 
     // REQ-ESP-002

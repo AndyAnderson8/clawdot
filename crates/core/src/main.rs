@@ -8,6 +8,7 @@
 use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, Effect, describe_fired};
+use clawdot_core::audit::{ActionPolicy, AuditConfig, AuditLog};
 use clawdot_core::config::{Config, SatelliteConfig, SpeechConfig};
 #[cfg(feature = "esphome-satellite")]
 use clawdot_core::esphome_cfg::EsphomeConfig;
@@ -70,6 +71,7 @@ LANGUAGE MODEL (optional; without it only the local fast path and fallback summa
     --persona-file FILE        Replace the default system prompt
     --max-requests-per-day N   Language model requests per local day (default: 500)
     --daily-spend-usd X        Stop calling the model after this much spend per day
+    --dry-run                  Describe actions instead of running them (read-only tools still run)
 
     -h, --help                 Show this help
 ";
@@ -117,6 +119,8 @@ struct Args {
     voice_out: Option<PathBuf>,
     max_requests: u32,
     daily_spend: Option<f64>,
+    /// Daily action caps and the dry-run switch (REQ-SEC-015, REQ-SEC-016); from the file and flags only.
+    actions: ActionPolicy,
 }
 
 fn parse() -> Result<Args, String> {
@@ -154,6 +158,7 @@ fn parse() -> Result<Args, String> {
         voice_out: None,
         max_requests: UsageLimits::default().max_requests_per_day,
         daily_spend: None,
+        actions: ActionPolicy::default(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if let Some(i) = argv.iter().position(|x| x == "--config") {
@@ -239,6 +244,7 @@ fn parse() -> Result<Args, String> {
                     .map_err(|e| format!("bad number: {e}"))?;
                 a.flag_layer.insert("max_requests_per_day".into(), n.into());
             }
+            "--dry-run" => a.actions.dry_run = true,
             "--daily-spend-usd" => {
                 let x: f64 = value("--daily-spend-usd")?
                     .parse()
@@ -290,6 +296,15 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     );
     put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
     put("voice", c.speech.voice.clone().map(Into::into));
+    let d = ActionPolicy::default();
+    a.actions = ActionPolicy {
+        dry_run: c.limits.dry_run.unwrap_or(d.dry_run),
+        max_actions_per_day: c
+            .limits
+            .max_actions_per_day
+            .unwrap_or(d.max_actions_per_day),
+        max_costly_per_day: c.limits.max_costly_per_day.unwrap_or(d.max_costly_per_day),
+    };
     Ok(())
 }
 
@@ -990,7 +1005,29 @@ async fn main() -> ExitCode {
         }
     };
     let persona = args.persona.clone();
-    let conversation = Conversation::new(persona.clone(), 20, 24_000, 600);
+    let mut conversation = Conversation::new(persona.clone(), 20, 24_000, 600);
+    // Every action is recorded in the data directory and held to the daily caps (REQ-SEC-014..016).
+    let audit = match AuditLog::open(
+        &args.data_dir,
+        AuditConfig {
+            policy: args.actions,
+            ..AuditConfig::default()
+        },
+    ) {
+        Ok(a) => Arc::new(a),
+        Err(e) => {
+            eprintln!(
+                "clawdot: cannot open the audit log in {}: {e}",
+                args.data_dir.display()
+            );
+            return ExitCode::from(1);
+        }
+    };
+    conversation.set_audit(Arc::clone(&audit));
+    core.set_audit(audit);
+    if args.actions.dry_run {
+        eprintln!("clawdot: dry-run mode: actions are described and recorded, not run");
+    }
 
     let sched_store = JsonStore::new(
         args.data_dir.join("timers.json"),

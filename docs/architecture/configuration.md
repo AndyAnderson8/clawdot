@@ -37,6 +37,9 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `llm.key_env` | Name of the environment variable holding the key | `OPENROUTER_API_KEY` |
 | `limits.max_requests_per_day` | Model requests per local day, at least 1 | 500 |
 | `limits.daily_spend_usd` | Stop calling the model after this much spend | none |
+| `limits.max_actions_per_day` | Calls that are not read-only allowed per local day; 0 stops all actions (REQ-SEC-015) | 100 |
+| `limits.max_costly_per_day` | Costly and destructive calls allowed per local day (REQ-SEC-015) | 20 |
+| `limits.dry_run` | Describe actions instead of running them; also `--dry-run` (REQ-SEC-016) | off |
 | `tools` | Declarative HTTP tools the model may call; see [http-tools.md](http-tools.md) | none |
 | `mcp` | MCP servers whose tools the model may call; see [mcp.md](mcp.md) | none |
 | `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |
