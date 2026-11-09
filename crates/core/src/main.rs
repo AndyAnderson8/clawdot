@@ -894,6 +894,7 @@ async fn main() -> ExitCode {
         persona,
     };
 
+    core.set_ui_tools(brain.listing());
     core.set_ui_settings(settings_json(&args, &public, brain.llm.is_some()));
     if let Some(input) = args.voice_in.clone() {
         return match voice_once(&mut brain, &args.speech, &input, args.voice_out.as_deref()).await {

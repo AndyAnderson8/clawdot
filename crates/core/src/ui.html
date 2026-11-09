@@ -70,6 +70,11 @@
   .soon { border: 1px dashed var(--edge); border-radius: var(--r-m); padding: var(--s4); margin: var(--s4) 0; }
   .soon h3 { margin-top: 0; }
   .soon p:last-child { margin-bottom: 0; }
+  label.inline { display: inline; margin: 0; font-weight: 400; font-size: var(--t-m); }
+  input[type="checkbox"] { min-height: 0; width: 1.4rem; height: 1.4rem; accent-color: var(--acc); }
+  textarea { width: 100%; max-width: 32rem; min-height: 5rem; resize: vertical; }
+  input[type="file"] { max-width: 100%; border: 0; padding: var(--s1) 0; }
+  .pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--s1) 0; }
 
   form.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m); padding: var(--s4); margin: var(--s3) 0 var(--s4); }
   form.panel h3 { margin-top: 0; }
@@ -193,11 +198,10 @@
       else if (v === true) e.setAttribute(k, "");
       else if (v !== false && v != null) e.setAttribute(k, v);
     });
-    for (var i = 2; i < arguments.length; i++) {
-      var c = arguments[i];
-      if (c == null || c === false) continue;
+    [].concat.apply([], Array.prototype.slice.call(arguments, 2)).forEach(function (c) {
+      if (c == null || c === false) return;
       e.append(c.nodeType ? c : document.createTextNode(String(c)));
-    }
+    });
     return e;
   }
   function say(m, bad) {
@@ -458,73 +462,252 @@
     };
   }
 
+  // ----- Tools, Connections, and Skills share one listing from the device -----
+  var EXT = null;
+  async function getExt() { EXT = await api("GET", "/api/tools"); }
+  // Send a change; the device answers with the new listing, which is drawn straight away.
+  async function change(method, path, body, redraw, okText) {
+    try { EXT = await api(method, path, body); if (okText) say(okText); redraw(); return true; }
+    catch (x) { fail(x); return false; }
+  }
+  function onOff(path, on, redraw, what) {
+    var b = h("button", { class: "plain", type: "button", text: on ? "Turn off" : "Turn on" });
+    b.onclick = function () { change("POST", path, { enabled: !on }, redraw, what + (on ? " turned off." : " turned on.")); };
+    return b;
+  }
+  function problems(kind) {
+    var list = (EXT.problems || []).filter(function (x) { return x.kind === kind; });
+    if (!list.length) return null;
+    var box = h("div", { class: "soon" }, h("h3", { text: "Saved, but not running" }));
+    list.forEach(function (x) { box.append(h("p", { text: x.name + ": " + x.reason + ". Fix that and restart ClawDot." })); });
+    return box;
+  }
+  function confirmBadge(c) { return h("span", { class: "badge" + (c ? " good" : ""), text: c ? "Asks you first" : "Runs right away" }); }
+  function field(id, label, input, hint) {
+    input.id = id;
+    return h("div", {}, h("label", { for: id, text: label }), input, hint ? h("p", { class: "mut", text: hint }) : null);
+  }
+
   // ----- Tools -----
-  var SOURCE = { builtin: "Built in", http: "Web tool", mcp: "From a connection" };
   function tools(p) {
     var box = h("div");
-    p.append(h("h2", { text: "Tools" }), h("p", { text: "Everything the assistant can do besides talk. Tools that change things in the outside world ask you out loud first." }), box);
-    return async function () {
-      var d; try { d = await api("GET", "/api/tools"); } catch (x) { fail(x); return; }
-      var old = $("builtin-tools"), wasOpen = old && old.open;
+    function toolRow(t, redraw) {
+      var li = h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: t.name }), h("span", {}, t.enabled ? null : h("span", { class: "badge bad", text: "Off" }), " ", confirmBadge(t.confirm))),
+        h("div", { class: "mut", text: t.description }));
+      if (t.source === "http") li.append(h("div", { class: "mut", text: t.origin === "config" ? "From your configuration file." : "Added here." }));
+      if (t.source === "mcp") li.append(h("div", { class: "mut", text: "From the connection " + t.server + "." }));
+      var acts = h("div", { class: "acts" }, onOff("/api/tools/" + t.name + "/enabled", t.enabled, redraw, t.name));
+      if (t.deletable) {
+        var del = h("button", { class: "danger", type: "button", text: "Delete" });
+        del.onclick = function () { if (confirm("Delete the tool " + t.name + "? The assistant will stop being able to use it.")) change("DELETE", "/api/tools/" + t.name, undefined, redraw, "Deleted."); };
+        acts.append(del);
+      } else if (t.source === "http") acts.append(h("span", { class: "mut", text: "To remove it, delete it from the configuration file." }));
+      li.append(acts);
+      return li;
+    }
+    function draw() {
+      if (!EXT) return;
       box.replaceChildren();
-      ["http", "mcp", "builtin"].forEach(function (src) {
-        var mine = (d.tools || []).filter(function (t) { return t.source === src; });
-        var heading = SOURCE[src] + " (" + mine.length + ")";
-        if (src !== "builtin") box.append(h("h3", { text: heading }));
-        if (!mine.length) {
-          box.append(src === "http" ? h("p", { class: "mut", text: "No web tools yet. A web tool lets the assistant call a web address, for example to switch on a light." }) : src === "mcp" ? h("p", { class: "mut", text: "None yet. Tools from outside servers appear here once you add a connection." }) : null);
-          return;
-        }
-        var ul = h("ul", { class: "rows" });
-        mine.forEach(function (t) {
-          ul.append(h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: t.name }), h("span", { class: "badge" + (t.confirm ? " good" : ""), text: t.confirm ? "Asks you first" : "Runs right away" })), h("div", { class: "mut", text: t.description })));
-        });
-        if (src === "builtin") box.append(h("details", { id: "builtin-tools", open: !!wasOpen }, h("summary", { text: heading + ": what the assistant can already do" }), ul));
-        else box.append(ul);
+      var pr = problems("tool"); if (pr) box.append(pr);
+      var by = function (s) { return (EXT.tools || []).filter(function (t) { return t.source === s; }); };
+      var web = by("http"), conn = by("mcp"), own = by("builtin");
+      box.append(h("h3", { text: "Web tools (" + web.length + ")" }));
+      if (!web.length) box.append(h("p", { class: "mut", text: "No web tools yet. A web tool lets the assistant call a web address, for example to switch on a light. Add one below." }));
+      else { var u = h("ul", { class: "rows" }); web.forEach(function (t) { u.append(toolRow(t, draw)); }); box.append(u); }
+      box.append(h("h3", { text: "From connections (" + conn.length + ")" }));
+      if (!conn.length) box.append(h("p", { class: "mut", text: "None yet. Tools from outside servers appear here once you add a connection." }));
+      else { var c = h("ul", { class: "rows" }); conn.forEach(function (t) { c.append(toolRow(t, draw)); }); box.append(c); }
+      var bl = h("ul", { class: "rows" }); own.forEach(function (t) { bl.append(toolRow(t, draw)); });
+      var was = $("builtin-tools"); // keep it open across redraws
+      box.append(h("details", { id: "builtin-tools", open: !!(was && was.open) }, h("summary", { text: "Built in (" + own.length + "): what the assistant can already do" }), bl));
+    }
+    // Add a web tool
+    var name = h("input", { type: "text", maxlength: "40", autocapitalize: "none", autocomplete: "off", placeholder: "set_light" });
+    var desc = h("input", { type: "text", maxlength: "300", placeholder: "Turn a room's light on or off" });
+    var method = h("select", {}, ["GET", "POST", "PUT", "DELETE"].map(function (m) { return h("option", { value: m, text: m }); }));
+    method.value = "POST";
+    var url = h("input", { type: "text", inputmode: "url", autocapitalize: "none", autocomplete: "off", placeholder: "https://home.local/api/light/{room}" });
+    var tokenVar = h("input", { type: "text", maxlength: "64", autocapitalize: "none", autocomplete: "off", placeholder: "HA_TOKEN" });
+    var asks = h("input", { type: "checkbox", id: "tool-asks" }); asks.checked = true;
+    var params = h("div");
+    function addParam() {
+      var pn = h("input", { type: "text", maxlength: "40", placeholder: "room", "aria-label": "Value name", autocapitalize: "none" });
+      var pt = h("select", { "aria-label": "Type" }, ["string", "integer", "number", "boolean"].map(function (m) { return h("option", { value: m, text: m }); }));
+      var pr = h("input", { type: "checkbox", "aria-label": "Required" }); pr.checked = true;
+      var pd = h("input", { type: "text", maxlength: "200", placeholder: "What it means (optional)", "aria-label": "Description" });
+      var rm = h("button", { class: "plain", type: "button", text: "Remove" });
+      var row = h("div", { class: "row" }, pn, pt, h("label", { class: "inline" }, pr, " Required"), pd, rm);
+      rm.onclick = function () { row.remove(); };
+      row._get = function () { return { name: pn.value.trim(), def: { type: pt.value, required: pr.checked, description: pd.value.trim() } }; };
+      params.append(row);
+    }
+    var more = h("button", { class: "plain", type: "button", text: "Add a value the assistant fills in" }); more.onclick = addParam;
+    var form = h("form", { class: "panel" }, h("h3", { text: "Add a web tool" }),
+      h("p", { class: "mut", text: "The assistant can call one fixed web address. It can only fill in the values you list, and it cannot change the address or the token." }),
+      field("tool-name", "Name", name, "Lowercase letters, digits, and underscores."),
+      field("tool-desc", "What it does", desc, "The assistant reads this to decide when to use it."),
+      field("tool-method", "Method", method),
+      field("tool-url", "Web address", url, "Put a value's name in braces where it goes, for example {room}. Values in the address must be listed below as required."),
+      field("tool-token", "Token variable (optional)", tokenVar, "The name of an environment variable on the device that holds the token. Type the name only, never the token itself."),
+      h("div", { class: "row" }, asks, h("label", { for: "tool-asks", class: "inline", text: "Ask me out loud before it runs (recommended)" })),
+      h("h3", { text: "Values the assistant fills in" }), params, more,
+      h("div", { class: "row" }, h("button", { text: "Add tool" })));
+    form.onsubmit = async function (ev) {
+      ev.preventDefault();
+      var def = { name: name.value.trim(), description: desc.value.trim(), method: method.value, url: url.value.trim(), confirm: asks.checked, params: {} };
+      if (tokenVar.value.trim()) def.auth_env = tokenVar.value.trim();
+      var bad = "";
+      Array.prototype.forEach.call(params.children, function (r) {
+        var g = r._get(); if (!g.name) { bad = "Give each value a name, or remove it."; return; }
+        if (!g.def.description) delete g.def.description; def.params[g.name] = g.def;
       });
-      box.append(h("div", { class: "soon" }, h("h3", { text: "Add, turn off, or remove tools: coming soon" }),
-        h("p", { text: "You will be able to paste a web address, say what it does, and have the assistant use it, and turn any tool off or delete it, right here." }),
-        h("p", { class: "mut", text: "Until then, web tools are added in the configuration file (the “tools” list) and apply after a restart." })));
+      if (bad) { say(bad, true); return; }
+      if (await change("POST", "/api/tools", def, draw, "Added. The assistant can use it now.")) { form.reset(); params.replaceChildren(); asks.checked = true; method.value = "POST"; }
     };
+    p.append(h("h2", { text: "Tools" }), h("p", { text: "Everything the assistant can do besides talk. Turn any tool off or on. Tools that change things in the outside world ask you out loud first." }), box, form);
+    return async function () { try { await getExt(); draw(); } catch (x) { fail(x); } };
   }
 
   // ----- Connections -----
   function connections(p) {
     var box = h("div");
-    p.append(h("h2", { text: "Connections" }), h("p", { text: "A connection links ClawDot to an outside tool server using MCP (the Model Context Protocol), such as Home Assistant or a calendar. Its tools then show up under Tools." }), box);
-    return async function () {
-      var d; try { d = await api("GET", "/api/tools"); } catch (x) { fail(x); return; }
+    function draw() {
+      if (!EXT) return;
       box.replaceChildren();
-      var servers = d.mcp || [];
-      if (!servers.length) box.append(h("p", { text: "No connections yet." }));
-      else {
-        var ul = h("ul", { class: "rows" });
-        servers.forEach(function (s) {
-          var li = h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: s.name }), h("span", { class: "badge " + (s.connected ? "good" : "bad"), text: s.connected ? "Connected" : "Cannot connect" })), h("div", { class: "mut", text: s.url }));
-          if (!s.connected) li.append(h("p", { text: "It did not answer: " + (s.error || "unknown reason") + ". Check the address, that the server is running, and that the token variable is set, then restart ClawDot." }));
-          if (s.token_env) li.append(h("div", { class: "mut", text: "Token comes from the environment variable " + s.token_env + "." }));
-          if (s.tools.length) {
-            var inner = h("ul", { class: "rows" });
-            s.tools.forEach(function (t) { inner.append(h("li", {}, h("strong", { text: t.name }), " ", h("span", { class: "badge", text: t.confirm ? "Asks you first" : "Runs right away" }), h("div", { class: "mut", text: t.description }))); });
-            li.append(h("details", {}, h("summary", { text: s.tools.length + (s.tools.length === 1 ? " tool" : " tools") }), inner));
-          } else if (s.connected) li.append(h("p", { class: "mut", text: "Connected, but it offers no tools." }));
-          ul.append(li);
-        });
-        box.append(ul);
-      }
-      box.append(h("div", { class: "soon" }, h("h3", { text: "Add a connection: coming soon" }),
-        h("p", { text: "You will be able to enter a server address, name the environment variable that holds its token, test the connection, and choose which of its tools are on." }),
-        h("p", { class: "mut", text: "Until then, connections are added in the configuration file (the “mcp” list) and apply after a restart." })));
+      var pr = problems("connection"); if (pr) box.append(pr);
+      var servers = EXT.mcp || [];
+      if (!servers.length) box.append(h("p", { text: "No connections yet. Add one below." }));
+      var ul = h("ul", { class: "rows" });
+      servers.forEach(function (s) {
+        var li = h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: s.name }), h("span", {}, s.enabled ? null : h("span", { class: "badge bad", text: "Off" }), " ", h("span", { class: "badge " + (s.connected ? "good" : "bad"), text: s.connected ? "Connected" : "Cannot connect" }))),
+          h("div", { class: "mut", text: s.url + (s.origin === "config" ? " (from your configuration file)" : "") }));
+        if (!s.connected) li.append(h("p", { text: "It did not answer: " + (s.error || "unknown reason") + ". Check the address, that the server is running, and that the token variable is set, then restart ClawDot." }));
+        if (s.token_env) li.append(h("div", { class: "mut", text: "Token comes from the environment variable " + s.token_env + "." }));
+        if (s.tools.length) {
+          var inner = h("ul", { class: "rows" });
+          s.tools.forEach(function (t) {
+            inner.append(h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: t.name }), h("span", {}, t.enabled ? null : h("span", { class: "badge bad", text: "Off" }), " ", confirmBadge(t.confirm))), h("div", { class: "mut", text: t.description }),
+              h("div", { class: "acts" }, onOff("/api/tools/" + t.name + "/enabled", t.enabled, draw, t.name))));
+          });
+          var was = $("tools-" + s.name);
+          li.append(h("details", { id: "tools-" + s.name, open: !!(was && was.open) }, h("summary", { text: s.tools.length + (s.tools.length === 1 ? " tool" : " tools") }), inner));
+        } else if (s.connected) li.append(h("p", { class: "mut", text: "Connected, but it offers no tools." }));
+        var acts = h("div", { class: "acts" }, onOff("/api/connections/" + s.name + "/enabled", s.enabled, draw, s.name));
+        if (s.deletable) {
+          var del = h("button", { class: "danger", type: "button", text: "Remove" });
+          del.onclick = function () { if (confirm("Remove the connection " + s.name + "? Its tools will disappear.")) change("DELETE", "/api/connections/" + s.name, undefined, draw, "Removed."); };
+          acts.append(del);
+        } else acts.append(h("span", { class: "mut", text: "To remove it, delete it from the configuration file." }));
+        li.append(acts); ul.append(li);
+      });
+      if (servers.length) box.append(ul);
+    }
+    var name = h("input", { type: "text", maxlength: "24", autocapitalize: "none", autocomplete: "off", placeholder: "home" });
+    var url = h("input", { type: "text", inputmode: "url", autocapitalize: "none", autocomplete: "off", placeholder: "http://homeassistant.local:8123/mcp" });
+    var tokenVar = h("input", { type: "text", maxlength: "64", autocapitalize: "none", autocomplete: "off", placeholder: "HA_TOKEN" });
+    var asks = h("input", { type: "checkbox", id: "conn-asks" }); asks.checked = true;
+    var result = h("p", { role: "status" });
+    function def() {
+      var d = { name: name.value.trim(), url: url.value.trim(), confirm: asks.checked };
+      if (tokenVar.value.trim()) d.auth_env = tokenVar.value.trim();
+      return d;
+    }
+    var test = h("button", { class: "plain", type: "button", text: "Test connection" });
+    test.onclick = async function () {
+      result.textContent = "Connecting...";
+      try {
+        var r = await api("POST", "/api/connections/test", def());
+        result.textContent = "Connected. It offers " + r.tools.length + (r.tools.length === 1 ? " tool" : " tools") + (r.tools.length ? ": " + r.tools.map(function (t) { return t.name; }).join(", ") : "") + ".";
+      } catch (x) { result.textContent = ""; fail(x); }
     };
+    var form = h("form", { class: "panel" }, h("h3", { text: "Add a connection" }),
+      h("p", { class: "mut", text: "The server must speak MCP over HTTP. It is tested before it is saved." }),
+      field("conn-name", "Name", name, "Lowercase letters, digits, - and _. Its tools start with this name."),
+      field("conn-url", "Server address", url),
+      field("conn-token", "Token variable (optional)", tokenVar, "The name of an environment variable on the device that holds the token. Type the name only, never the token itself."),
+      h("div", { class: "row" }, asks, h("label", { for: "conn-asks", class: "inline", text: "Ask me out loud before its tools run (recommended)" })),
+      h("div", { class: "row" }, h("button", { text: "Add connection" }), test), result);
+    form.onsubmit = async function (ev) {
+      ev.preventDefault(); result.textContent = "Connecting...";
+      var ok = await change("POST", "/api/connections", def(), draw, "Connected and added.");
+      result.textContent = ""; if (ok) { form.reset(); asks.checked = true; }
+    };
+    p.append(h("h2", { text: "Connections" }), h("p", { text: "A connection links ClawDot to an outside tool server using MCP (the Model Context Protocol), such as Home Assistant or a calendar. Its tools then show up under Tools, where you can turn each one off." }), box, form);
+    return async function () { try { await getExt(); draw(); } catch (x) { fail(x); } };
   }
 
   // ----- Skills -----
   function skills(p) {
-    p.append(h("h2", { text: "Skills" }),
-      h("div", { class: "soon" }, h("h3", { text: "Coming soon" }),
-        h("p", { text: "A skill is a named set of instructions for the assistant, for example “When I say good night, turn off the lights and set the alarm”. You will write one, choose which tools it may use, and switch it on or off." }),
-        h("p", { class: "mut", text: "Nothing to manage yet." })));
-    return async function () {};
+    var box = h("div"), editing = "";
+    var name = h("input", { type: "text", maxlength: "40", placeholder: "Good night" });
+    var text = h("textarea", { maxlength: "2000", rows: "5", placeholder: "When I say good night, turn off the lights and set an alarm for 7:00 on weekdays." });
+    var toolsIn = h("input", { type: "text", placeholder: "set_light, set_alarm", autocapitalize: "none", autocomplete: "off" });
+    var count = h("p", { class: "mut" });
+    var save = h("button", { text: "Add skill" }), stop = h("button", { class: "plain hidden", type: "button", text: "Stop editing" });
+    var title = h("h3", { text: "Add a skill" });
+    var form = h("form", { class: "panel" }, title, h("p", { class: "mut", text: "Write what the assistant should do, in your own words. It reads every skill that is turned on." }),
+      field("skill-name", "Name", name), field("skill-text", "Instructions", text), count,
+      field("skill-tools", "Tools it uses (optional)", toolsIn, "Exact tool names, separated by commas. This only tells the assistant which tools to reach for; a tool that is off stays off."),
+      h("div", { class: "row" }, save, stop));
+    text.oninput = function () { count.textContent = text.value.length + " of 2000 characters"; };
+    function reset() { editing = ""; form.reset(); title.textContent = "Add a skill"; save.textContent = "Add skill"; stop.classList.add("hidden"); text.oninput(); }
+    stop.onclick = reset;
+    function body(enabled) {
+      return { name: name.value.trim(), instructions: text.value, tools: toolsIn.value.split(/[\s,]+/).filter(Boolean), enabled: enabled };
+    }
+    form.onsubmit = async function (ev) {
+      ev.preventDefault();
+      var ok = editing
+        ? await change("POST", "/api/skills/edit", { name: editing, skill: body(((EXT.skills || []).filter(function (k) { return k.name === editing; })[0] || {}).enabled) }, draw, "Saved.")
+        : await change("POST", "/api/skills", body(true), draw, "Added. The assistant uses it from now on.");
+      if (ok) reset();
+    };
+    function draw() {
+      if (!EXT) return;
+      box.replaceChildren();
+      var list = EXT.skills || [];
+      if (!list.length) box.append(h("p", { text: "No skills yet. Add one below, or import a file." }));
+      var ul = h("ul", { class: "rows" });
+      list.forEach(function (k) {
+        var edit = h("button", { class: "plain", type: "button", text: "Edit" });
+        edit.onclick = function () {
+          editing = k.name; name.value = k.name; text.value = k.instructions; toolsIn.value = (k.tools || []).join(", ");
+          title.textContent = "Change this skill"; save.textContent = "Save changes"; stop.classList.remove("hidden"); text.oninput();
+          form.scrollIntoView({ block: "center" }); name.focus();
+        };
+        var del = h("button", { class: "danger", type: "button", text: "Delete" });
+        del.onclick = function () { if (confirm("Delete the skill " + k.name + "?")) change("POST", "/api/skills/delete", { name: k.name }, draw, "Deleted."); };
+        var sw = h("button", { class: "plain", type: "button", text: k.enabled ? "Turn off" : "Turn on" });
+        sw.onclick = function () { change("POST", "/api/skills/enabled", { name: k.name, enabled: !k.enabled }, draw, k.enabled ? "Turned off." : "Turned on."); };
+        var li = h("li", {}, h("div", { class: "rowhead" }, h("strong", { text: k.name }), h("span", { class: "badge" + (k.enabled ? " good" : ""), text: k.enabled ? "On" : "Off" })),
+          h("div", { class: "pre", text: k.instructions }));
+        if ((k.tools || []).length) li.append(h("div", { class: "mut", text: "Tools: " + k.tools.join(", ") }));
+        li.append(h("div", { class: "acts" }, sw, edit, del)); ul.append(li);
+      });
+      if (list.length) box.append(ul);
+    }
+    // Export and import: plain JSON the user can read before trusting it.
+    var out = h("textarea", { readonly: true, rows: "6", class: "hidden", "aria-label": "Exported skills" });
+    var exp = h("button", { class: "plain", type: "button", text: "Export" });
+    exp.onclick = function () {
+      out.value = JSON.stringify({ format: "clawdot-skills", version: 1, skills: EXT.skills || [] }, null, 2);
+      out.classList.remove("hidden"); out.select();
+    };
+    var copyOut = copyBtn("", "Copy export"); copyOut.onclick = function () { copy(out.value, copyOut); };
+    var inp = h("textarea", { rows: "5", placeholder: "Paste an exported skills file here", "aria-label": "Skills file to import" });
+    var pick = h("input", { type: "file", accept: "application/json,.json", "aria-label": "Choose a skills file" });
+    pick.onchange = function () { var f = pick.files[0]; if (!f || f.size > 70000) { say("Choose a skills file under 64 KB.", true); return; } var r = new FileReader(); r.onload = function () { inp.value = String(r.result); }; r.readAsText(f); };
+    var imp = h("button", { type: "button", text: "Import as turned off" });
+    imp.onclick = async function () {
+      var v; try { v = JSON.parse(inp.value); } catch (e) { say("That is not a skills file. Paste the text that Export gave you.", true); return; }
+      if (await change("POST", "/api/skills/import", v, draw, "Imported. Read each skill, then turn on the ones you trust.")) inp.value = "";
+    };
+    p.append(h("h2", { text: "Skills" }), h("p", { text: "A skill is a set of instructions you write for the assistant, for example “When I say good night, turn off the lights”. Turn skills on and off, or share them as files." }), box, form,
+      h("h3", { text: "Share skills" }),
+      h("div", { class: "row" }, exp, copyOut), out,
+      h("p", { class: "mut", text: "Imported skills start turned off, because they are text from somewhere else. Read them before you turn them on." }), inp, h("div", { class: "row" }, pick, imp));
+    text.oninput();
+    return async function () { try { await getExt(); draw(); } catch (x) { fail(x); } };
   }
 
   // ----- Webhooks -----
