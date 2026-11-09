@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.7 |
+| **Version** | 0.8 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006 |
 
@@ -148,6 +148,10 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-011 | The core SHOULD serve a read-only `/display` page (state, transcript, now-playing, timers, inbox cards) so a satellite with a screen can show it in a browser without new protocol work. | Should | v1.x | D |
 | REQ-CFG-012 | Documentation MUST cover headless network setup for the supported Raspberry Pi path (pre-seeded Wi-Fi). An on-device provisioning portal is post-1.0. | Must | M4 | I |
 | REQ-CFG-013 | The build MUST include the project changelog; the UI "About" page SHOULD show the running version, build information, and the release notes for that version. | Should | M4 | T |
+| REQ-CFG-014 | The default listen address MUST be `127.0.0.1:8765`: loopback only (REQ-CFG-005) and a port that does not collide with services on the reference device (Amazon's `oobed` holds 8080 on an Echo Dot). If the address cannot be bound, the error MUST name the address and tell the user to choose another with `--listen` or the `listen` setting. | Must | M4 | T |
+| REQ-CFG-015 | The core MUST bind its listening address before it creates or prints an administrator token, so a server that never started never reveals a token. `--create-endpoint` and `--rotate-endpoint` are management commands: they print the token once and exit without starting the server (endpoints listed in the configuration file are still created at every start). | Must | M4 | T |
+| REQ-CFG-016 | Printed integration snippets MUST use `--public-url` when given, otherwise a URL derived from the listen address. An unspecified listen host (`0.0.0.0`, `[::]`) is not reachable as written, so the default name `clawdot.local` (REQ-CFG-009) is used with the listen port, and the core says the address was assumed. | Must | M4 | T |
+| REQ-CFG-017 | The text console (the stand-in for a satellite until audio ships) MUST end the program on `quit` or `exit` as well as on end of input. | Should | M1 | T |
 
 ### 4.7 Non-functional (`NFR`)
 
@@ -231,3 +235,4 @@ See [ADR-0010](../adr/0010-extension-model.md) and [extensibility](../architectu
 | 0.5 | 2026-11-07 | v1.0 trim: pack installation (EXT-002/003), `/display` page (CFG-011) deferred to v1.x; added TTS voice to persona config (AST-013), "Connect an agent" flow (INB-019), pluggable harness adapters in the bridge (INB-020); open questions 10-11 (multi-profile routing, harness verification) |
 | 0.6 | 2026-11-07 | Changelog shipped in the build and shown on the About page (CFG-013), following the git-flow release process (ADR-0011) |
 | 0.7 | 2026-11-08 | Hardware test on an Echo Dot with no network time: unsynchronised-clock behaviour defined (TMR-009) |
+| 0.8 | 2026-11-08 | Hardware test findings: default listen port, bind-before-token ordering, endpoint management commands exit, snippet URLs derived from the listen address, console `quit` (CFG-014..017) |

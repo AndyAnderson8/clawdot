@@ -6,8 +6,8 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 ```json
 {
   "data_dir": "/var/lib/clawdot",
-  "listen": "0.0.0.0:8080",
-  "public_url": "http://dot.local:8080",
+  "listen": "0.0.0.0:8765",
+  "public_url": "http://dot.local:8765",
   "zone": "America/Chicago",
   "persona_file": "/etc/clawdot/persona.txt",
   "endpoints": ["claude-code", "ci:generic"],
@@ -25,8 +25,8 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | Key | Meaning | Default |
 |---|---|---|
 | `data_dir` | Where state is kept | `./clawdot-data` |
-| `listen` | HTTP address; bind to the LAN only (REQ-CFG-005) | `127.0.0.1:8080` |
-| `public_url` | URL printed in integration snippets | none |
+| `listen` | HTTP address; bind to the LAN only (REQ-CFG-005) | `127.0.0.1:8765` |
+| `public_url` | URL printed in integration snippets | derived from `listen` (`0.0.0.0` and `[::]` become `clawdot.local`) |
 | `zone` | IANA time zone | UTC |
 | `persona_file` | Replaces the default system prompt | built-in persona |
 | `endpoints` | Inbox endpoints to create at startup (`NAME` or `NAME:ADAPTER`) | none |
@@ -56,8 +56,13 @@ phone. It shows endpoints and the recent inbox, and creates, rotates, and delete
 - **Sign-in** uses an administrator token printed once on first start (`--rotate-admin-token` issues a new one).
   Only its hash is stored, in `admin-token.hash` in the data directory (REQ-CFG-006). The token lives in the
   browser tab's session storage only.
-- **Binding.** The default listen address is `127.0.0.1:8080`. Change `listen` to the LAN address deliberately;
+- **Binding.** The default listen address is `127.0.0.1:8765` (not 8080, which Amazon's `oobed` service holds on an Echo Dot; REQ-CFG-014). Change `listen` to the LAN address deliberately;
   there is no TLS, so use a trusted network or a VPN (REQ-CFG-005).
+- **Start-up order.** The listening address is bound first; only then is the administrator token created and
+  printed (REQ-CFG-015). `--create-endpoint` and `--rotate-endpoint` print their token and exit without starting
+  the server; run them with the server stopped, then start it. Snippets use `--public-url`, or a URL derived from
+  `listen` (REQ-CFG-016).
+- **Console.** Type `quit` or `exit`, or press Ctrl-D, to stop (REQ-CFG-017).
 - **Throttling.** Wrong administrator tokens share the authentication rate limit.
 - **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
 - **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), radio stations, and the schedule. It contains no secrets and no agent text.
