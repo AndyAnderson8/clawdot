@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "id": "pol-dry-run-describes-instead-of-acting",
+  "use_case": "POL",
+  "description": "Dry-run mode: reads run, everything else is described and recorded as a dry run, and nothing is asked.",
+  "tags": ["dry-run"],
+  "setup": {"dry_run": true},
+  "tool_sets": ["github"],
+  "builtin_tools": ["current_time", "set_timer"],
+  "forbidden": {"tools": ["set_timer", "github__create_pr"]},
+  "turns": [
+    {
+      "say": "set a five minute timer and open a pull request for fix-sched",
+      "model": [
+        {"calls": [
+          {"name": "current_time"},
+          {"name": "set_timer", "args": {"seconds": 300}},
+          {"name": "github__create_pr", "args": {"title": "Fix sched", "branch": "fix-sched"}}
+        ]},
+        {"text": "This is a dry run: I would set a timer and open a pull request."}
+      ],
+      "expect": {
+        "calls": [{"tool": "current_time"}],
+        "no_held": true,
+        "audit": [
+          {"tool": "current_time", "decision": "ran"},
+          {"tool": "set_timer", "decision": "blocked:dry-run"},
+          {"tool": "github__create_pr", "decision": "blocked:dry-run"}
+        ],
+        "model_saw": ["Dry run: nothing was done"]
+      }
+    }
+  ]
+}

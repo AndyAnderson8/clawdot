@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "id": "pol-daily-cap-stops-actions",
+  "use_case": "POL",
+  "description": "After the daily cap of actions the next one does not run, is recorded as blocked, and the model is told plainly.",
+  "tags": ["caps"],
+  "setup": {"max_actions_per_day": 2},
+  "builtin_tools": ["set_timer"],
+  "turns": [
+    {
+      "say": "timer for one minute",
+      "model": [{"calls": [{"name": "set_timer", "args": {"seconds": 60}}]}, {"text": "Done."}],
+      "expect": {"calls": [{"tool": "set_timer"}]}
+    },
+    {
+      "say": "timer for two minutes",
+      "model": [{"calls": [{"name": "set_timer", "args": {"seconds": 120}}]}, {"text": "Done."}],
+      "expect": {"calls": [{"tool": "set_timer"}]}
+    },
+    {
+      "say": "timer for three minutes",
+      "model": [
+        {"calls": [{"name": "set_timer", "args": {"seconds": 180}}]},
+        {"text": "I can't set another timer today because the daily limit is used up."}
+      ],
+      "expect": {
+        "calls": [],
+        "audit": [{"tool": "set_timer", "decision": "blocked:cap"}],
+        "model_saw": ["limit of 2 actions a day"],
+        "speech_contains": ["limit"]
+      }
+    }
+  ]
+}

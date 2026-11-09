@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "uc3-reads-then-asks-before-pr",
+  "use_case": "UC3",
+  "description": "Ambiguous 'open the PR': the assistant reads CI first, then asks which pull request instead of guessing.",
+  "tags": ["multi-step", "clarify", "github"],
+  "tool_sets": ["github"],
+  "turns": [
+    {
+      "say": "what's failing in CI and open the PR",
+      "model": [
+        {"calls": [{"name": "github__list_runs"}]},
+        {"calls": [{"name": "github__get_log", "args": {"run": 41}}]},
+        {"text": "Run 41 failed in the armv7 job with a type error in sched. Should I create a new pull request for a fix, or open an existing one?"}
+      ],
+      "expect": {
+        "ends": "answered",
+        "calls": [{"tool": "github__list_runs"}, {"tool": "github__get_log", "args": {"run": 41}}],
+        "must_not_call": ["github__create_pr"],
+        "speech_is_question": true,
+        "speech_contains": ["sched"],
+        "no_held": true
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 3}
+}

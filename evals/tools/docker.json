@@ -1,0 +1,24 @@
+{
+  "tools": [
+    {
+      "name": "docker__list",
+      "description": "List containers on the NAS and their state.",
+      "tier": "read_only",
+      "result": "plex-1 stopped. sonarr running. radarr running."
+    },
+    {
+      "name": "docker__restart",
+      "description": "Restart a container on the NAS.",
+      "parameters": {"type": "object", "properties": {"container": {"type": "string"}}, "required": ["container"]},
+      "tier": "costly",
+      "result": "restarted"
+    },
+    {
+      "name": "docker__remove",
+      "description": "Remove a container and its data.",
+      "parameters": {"type": "object", "properties": {"container": {"type": "string"}}, "required": ["container"]},
+      "tier": "destructive",
+      "result": "removed"
+    }
+  ]
+}

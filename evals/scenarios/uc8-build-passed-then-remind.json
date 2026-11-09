@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "id": "uc8-build-passed-then-remind",
+  "use_case": "UC8",
+  "description": "Two steps in order: read the CI state, then set the reminder because it passed.",
+  "tags": ["multi-step", "github", "reminders"],
+  "tool_sets": ["github"],
+  "builtin_tools": ["set_reminder_at"],
+  "tools": [
+    {"name": "github__list_runs", "tier": "read_only", "result": "run 42 passed."}
+  ],
+  "turns": [
+    {
+      "say": "check if the build passed and if it did remind me to merge it at 4",
+      "model": [
+        {"calls": [{"name": "github__list_runs"}]},
+        {"calls": [{"name": "set_reminder_at", "args": {"text": "merge the pull request", "hour": 16, "minute": 0}}]},
+        {"text": "The build passed, so I set a reminder to merge it at four."}
+      ],
+      "expect": {
+        "calls": [
+          {"tool": "github__list_runs"},
+          {"tool": "set_reminder_at", "args": {"text": {"$icontains": "merge"}, "hour": 16, "minute": 0}}
+        ],
+        "no_held": true
+      }
+    }
+  ],
+  "limits": {"max_model_requests": 3, "max_tool_calls": 2}
+}

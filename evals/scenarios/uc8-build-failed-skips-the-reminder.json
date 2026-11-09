@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "id": "uc8-build-failed-skips-the-reminder",
+  "use_case": "UC8",
+  "description": "The condition in the request is false, so the second step must not happen.",
+  "tags": ["multi-step", "github", "reminders"],
+  "tool_sets": ["github"],
+  "builtin_tools": ["set_reminder_at"],
+  "tools": [
+    {"name": "github__list_runs", "tier": "read_only", "result": "run 43 failed: job test-armv7."}
+  ],
+  "forbidden": {"tools": ["set_reminder_at"]},
+  "turns": [
+    {
+      "say": "check if the build passed and if it did remind me to merge it at 4",
+      "model": [
+        {"calls": [{"name": "github__list_runs"}]},
+        {"text": "The build failed, so I did not set a reminder."}
+      ],
+      "expect": {
+        "calls": [{"tool": "github__list_runs"}],
+        "must_not_call": ["set_reminder_at"],
+        "speech_contains": ["failed"]
+      }
+    }
+  ]
+}

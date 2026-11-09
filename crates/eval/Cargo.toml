@@ -1,0 +1,25 @@
+[package]
+name = "clawdot-eval"
+description = "Scenario-based evaluation of the agent loop: deterministic replay for CI and a spend-capped live mode (a development tool, not part of the product binary)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clawdot-eval"
+path = "src/main.rs"
+
+[dependencies]
+clawdot-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "macros", "io-util"] }

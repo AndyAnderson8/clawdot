@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "id": "uc7-skip-and-whats-playing",
+  "use_case": "UC7",
+  "description": "Skipping is a reversible control call; asking what is playing is a read.",
+  "tags": ["music"],
+  "tool_sets": ["media"],
+  "turns": [
+    {
+      "say": "skip this song",
+      "model": [
+        {"calls": [{"name": "spotify__control", "args": {"action": "next"}}]},
+        {"text": "Skipped."}
+      ],
+      "expect": {"calls": [{"tool": "spotify__control", "args": {"action": "next"}}], "no_held": true}
+    },
+    {
+      "say": "what's playing",
+      "model": [
+        {"calls": [{"name": "spotify__now_playing"}]},
+        {"text": "Take Five by Dave Brubeck."}
+      ],
+      "expect": {"calls": [{"tool": "spotify__now_playing"}], "speech_contains": ["Brubeck"]}
+    }
+  ]
+}

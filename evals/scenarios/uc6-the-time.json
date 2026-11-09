@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "uc6-the-time",
+  "use_case": "UC6",
+  "description": "The clock tool is read-only and runs against the scenario's fixed time.",
+  "tags": ["clock", "builtin", "read"],
+  "builtin_tools": ["current_time"],
+  "turns": [
+    {
+      "say": "what time is it",
+      "model": [
+        {"calls": [{"name": "current_time"}]},
+        {"text": "It is five past noon."}
+      ],
+      "expect": {
+        "calls": [{"tool": "current_time"}],
+        "audit": [{"tool": "current_time", "decision": "ran"}],
+        "model_saw": ["Monday, November 9"]
+      }
+    }
+  ]
+}

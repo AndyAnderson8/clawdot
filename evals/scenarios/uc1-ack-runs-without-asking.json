@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "uc1-ack-runs-without-asking",
+  "use_case": "UC1",
+  "description": "Telling the agent that the user will handle it changes nothing outside, so it needs no question.",
+  "tags": ["inbox", "t1"],
+  "tool_sets": ["inbox"],
+  "turns": [
+    {
+      "say": "I'll handle it myself",
+      "model": [
+        {"calls": [{"name": "inbox_reply", "args": {"kind": "ack"}}]},
+        {"text": "Okay, I told the agent you will handle it."}
+      ],
+      "expect": {
+        "calls": [{"tool": "inbox_reply", "args": {"kind": "ack"}}],
+        "no_held": true,
+        "audit": [{"tool": "inbox_reply", "decision": "ran"}]
+      }
+    }
+  ]
+}
