@@ -66,6 +66,8 @@ git merge dev                     # make the branch contain dev (resolve conflic
 scripts/land.sh feature/timer-tool
 ```
 
+**Commit time is fast; landing is thorough.** The `pre-commit` hook enforces branch rules and then runs `scripts/check.sh --fast`, which looks only at the staged files: `shellcheck` for changed shell scripts, the docs link and requirement-ID check when Markdown changed, and `cargo fmt --check` plus `cargo clippy` (scoped to the affected packages, or the whole workspace for a root manifest or lockfile change) when Rust files changed. A docs-only commit skips every Rust step. The commit-message and identity rules are enforced by the `commit-msg` hook as before. Tests, `cargo-deny`, the policy tests, and the history scan do not run at commit time; the hook prints one line naming what was skipped. The **full gate** (`scripts/check.sh`) runs in `scripts/land.sh` and in CI, which are where work enters `dev` and `main`.
+
 `scripts/land.sh <branch>`:
 1. Requires a clean working tree and that the branch **contains `dev`**, so the merge commit's tree is exactly what was tested.
 2. Runs **every gate** on the branch tip (`scripts/check.sh`): formatting, lint and type-check, unit/integration tests, documentation checks, commit-message and identity checks, shell checks, and dependency policy.
