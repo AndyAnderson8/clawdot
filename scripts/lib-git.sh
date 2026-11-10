@@ -92,7 +92,28 @@ wait_for_branch_free() {
   done
 }
 
-# publish <branch>: make a locally integrated branch public ONLY after CI passed on the exact commit.
+# gate_mode: the landing gate mode for dev, read from scripts/gate-mode as committed on LOCAL dev (so a branch cannot
+# weaken the gate for itself; changing the mode is an ordinary change that lands under the mode in force).
+# Prints "full" (default, also when the file is missing) or "stabilization"; returns 1 on any other value.
+# See docs/process/git-workflow.md section 5 and ADR-0018. Only dev landings use it: main and releases are always full.
+gate_mode() {
+  local v
+  v=$(git show refs/heads/dev:scripts/gate-mode 2>/dev/null | sed 's/#.*//' | tr -d '[:space:]') || v=""
+  case "$v" in
+    "" | full) echo full ;;
+    stabilization) echo stabilization ;;
+    *) echo "error: scripts/gate-mode must be 'full' or 'stabilization' (found '$v')" >&2; return 1 ;;
+  esac
+}
+
+# gate_skip_notice: the one line printed whenever the full gate was skipped by mode.
+gate_skip_notice() {
+  echo "land: FULL GATE SKIPPED BY MODE 'stabilization' (scripts/gate-mode): fast local check only, no CI candidate ref, no CI wait. Switch to 'full' before the first release."
+}
+
+# publish <branch> [direct]: make a locally integrated branch public ONLY after CI passed on the exact commit.
+# With "direct" (stabilization mode, dev only, chosen by land.sh) the merge is pushed straight to the branch and verified,
+# with no candidate ref and no CI wait.
 # The commit is first pushed to a candidate ref (ci/<branch>/<sha>) that triggers CI. When the
 # required `gate` check is green, the same commit is pushed to the protected branch, which the
 # server accepts because that SHA already has passing checks. Success is claimed only after a fetch
@@ -101,8 +122,23 @@ wait_for_branch_free() {
 # 2 when CI passed but the push or its verification failed (the candidate ref is then kept).
 # With no remote configured (early development) this is a local-only no-op.
 publish() {
-  local br="$1" sha cand id
+  local br="$1" mode="${2:-ci}" sha cand id
   has_remote || { echo "land: no remote configured; integrated locally only (CI gate applies once a remote exists)"; return 0; }
+  if [ "$mode" = direct ]; then
+    # The server may still refuse the push (a ruleset requiring `gate` on dev); that is exit 4 like any rejected push.
+    sha=$(git rev-parse "$br")
+    if ! CLAWDOT_LANDING=1 git push origin "$br"; then
+      echo "land: the push of $br to origin was rejected (a ruleset requiring the gate check on dev must be relaxed while the mode is 'stabilization')." >&2
+      return 2
+    fi
+    if ! git fetch --quiet origin || ! git merge-base --is-ancestor "$sha" "origin/$br"; then
+      echo "land: the push of $br reported success, but origin/$br does not contain $sha." >&2
+      return 2
+    fi
+    echo "land: verified: origin/$br contains ${sha:0:10}"
+    gate_skip_notice
+    return 0
+  fi
   command -v gh >/dev/null 2>&1 || { echo "land: the gh CLI is required to verify CI before publishing $br" >&2; return 1; }
   sha=$(git rev-parse "$br")
   cand="ci/$br/${sha:0:10}"
@@ -139,13 +175,13 @@ sync_ff() {
   fi
 }
 
-# merge_into <target> <source> <message>: create a MERGE COMMIT on <target> (never a fast-forward),
+# merge_into <target> <source> <message> [ci|direct]: create a MERGE COMMIT on <target> (never a fast-forward),
 # then publish it. Returns 0 on success, otherwise one of the EX_* codes after printing what happened:
 #  - CI failed / not published: <target> is reset to where it was (verified; else exact manual steps).
 #  - published but the push was rejected or unverified: the merge stays in local <target> and is NOT
 #    reset automatically; the message says how to recover.
 merge_into() {
-  local target="$1" source="$2" msg="$3" prev merge rc=0
+  local target="$1" source="$2" msg="$3" pmode="${4:-ci}" prev merge rc=0
   if ! git checkout -q "$target"; then
     echo "error: cannot switch to $target (is another worktree holding it?)" >&2
     return "$EX_HELD"
@@ -157,7 +193,7 @@ merge_into() {
     die "nothing to merge: $target already contains $source"
   fi
   merge=$(git rev-parse "$target")
-  publish "$target" || rc=$?
+  publish "$target" "$pmode" || rc=$?
   case "$rc" in
     0) return 0 ;;
     2)

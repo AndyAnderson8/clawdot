@@ -45,6 +45,7 @@ case "$cmd" in
     [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
     command -v git-cliff >/dev/null 2>&1 || die "git-cliff is required to generate the changelog"
     sync_ff dev
+    [ "$(gate_mode)" = full ] || die "scripts/gate-mode is 'stabilization'; switch it to 'full' (ADR-0018) before preparing a release"
     [ -n "$ver" ] || ver=$(git cliff --bumped-version | sed 's/^v//')
     [[ "$ver" =~ $semver_re ]] || die "'$ver' is not a SemVer version"
     git switch -c "release/$ver"
@@ -62,6 +63,7 @@ case "$cmd" in
     if has_remote; then git fetch --quiet --tags origin; fi
     sync_ff main
     sync_ff dev
+    [ "$(gate_mode)" = full ] || die "scripts/gate-mode is 'stabilization'; switch it to 'full' (ADR-0018) before publishing a release"
     ! git rev-parse -q --verify "refs/tags/v$ver" >/dev/null || die "tag v$ver already exists"
     git show dev:CHANGELOG.md | grep -q "^## \[$ver\]" ||
       die "dev's CHANGELOG.md has no entry for $ver. Run 'scripts/release.sh prepare $ver' and land the release branch into dev first."

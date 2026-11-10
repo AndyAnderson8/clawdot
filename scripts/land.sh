@@ -19,6 +19,10 @@
 #   another worktree; 4 merge exists only locally (push rejected or unverified; nothing deleted, recovery printed);
 #   5 CI or publishing failed (target restored, or exact recovery printed); 6 the integration branch moved underneath
 #   the local merge (nothing changed; merge it into your branch and land again).
+# Gate mode (scripts/gate-mode, read from committed dev; ADR-0018): `full` runs the full gate and CI as above.
+#   `stabilization` runs only the fast local check (check.sh --fast --tests) and the commit-message scan, merges, pushes
+#   dev directly (no candidate ref, no CI wait) and prints a "FULL GATE SKIPPED BY MODE" line. It applies to landing
+#   into dev only; hotfixes into main and releases always run the full gate and CI. Exit codes are unchanged.
 # Releases are NOT landed here: use scripts/release.sh (prepare, then publish).
 #
 # The merge commit's tree equals the tested branch tip because the branch must already contain its
@@ -57,9 +61,16 @@ if [ "$tiny" -eq 1 ]; then
   read -r lines files < <(diff_stats HEAD~1 HEAD)
   [ "$lines" -le "$TINY_MAX_LINES" ] && [ "$files" -le "$TINY_MAX_FILES" ] ||
     die "that commit is not tiny ($lines lines, $files files; max $TINY_MAX_LINES/$TINY_MAX_FILES). Move it to a branch."
-  scripts/check.sh
+  mode=$(gate_mode) || exit 1
+  if [ "$mode" = stabilization ]; then
+    gate_skip_notice
+    CHECK_BASE=HEAD~1 scripts/check.sh --fast --tests || exit 1
+    scripts/check-commit-msg.sh --range HEAD~1..HEAD || exit 1
+  else
+    scripts/check.sh
+  fi
   rc=0
-  publish dev || rc=$?
+  if [ "$mode" = stabilization ]; then publish dev direct || rc=$?; else publish dev || rc=$?; fi
   case "$rc" in
     0) ;;
     2)
@@ -127,6 +138,7 @@ case "$target" in
     valid_branch_name "$source_branch" || die "'$source_branch' is not a valid working branch name"
     wait_for_branch_free dev "$wait_secs" || exit "$EX_HELD"
     sync_ff dev
+    mode=$(gate_mode) || exit 1
     if ! git merge-base --is-ancestor dev "$source_branch"; then
       if is_integration "$source_branch"; then
         die "$source_branch does not contain dev. Update it first (no checkout needed):  scripts/land.sh --update $source_branch"
@@ -139,7 +151,13 @@ case "$target" in
     else
       git checkout -q "$source_branch"
     fi
-    scripts/check.sh
+    if [ "$mode" = stabilization ]; then
+      gate_skip_notice
+      CHECK_BASE=dev scripts/check.sh --fast --tests || die "the fast local check failed"
+      scripts/check-commit-msg.sh --range "dev..$source_branch" || die "the commit message check failed"
+    else
+      scripts/check.sh
+    fi
     # The full gate can take a long time. Re-check, right before merging, that dev is still free and that this
     # branch still contains it (another landing may have happened meanwhile).
     git checkout -q --detach
@@ -149,7 +167,10 @@ case "$target" in
     if ! git merge-base --is-ancestor dev "$source_branch"; then
       die "dev moved while the checks ran, so $source_branch no longer contains it. Merge dev into the branch (integration branches: scripts/land.sh --update $source_branch) and land again"
     fi
-    merge_into dev "$source_branch" "Merge $source_branch into dev" || exit $?
+    [ "$(gate_mode)" = "$mode" ] || die "scripts/gate-mode changed on dev while the checks ran; land again so the right gate applies"
+    pmode=ci
+    [ "$mode" = stabilization ] && pmode=direct
+    merge_into dev "$source_branch" "Merge $source_branch into dev" "$pmode" || exit $?
     git branch -d "$source_branch" || echo "land: merged, but could not delete $source_branch here (checked out elsewhere?); delete it with: git branch -D $source_branch"
     if has_remote; then git push --quiet origin --delete "$source_branch" 2>/dev/null || true; fi
     echo "land: $source_branch -> dev done"
