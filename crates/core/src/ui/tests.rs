@@ -371,7 +371,7 @@ async fn settings_are_saved_validated_and_need_the_administrator() {
     let setup = r#"{"mode":"password","password":"correct horse"}"#;
     let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
     let session = format!("Bearer {}", v["token"].as_str().unwrap());
-    let change = r#"{"zone":"America/Phoenix","max_requests_per_day":20}"#;
+    let change = r#"{"zone":"Europe/Berlin","max_requests_per_day":20}"#;
     // Not signed in, or signed in with a wrong token: refused, and nothing changes.
     for auth in ["", "Bearer wrong"] {
         let s = call(&p, "PUT", "/api/settings", auth, change).await.0;
@@ -380,7 +380,7 @@ async fn settings_are_saved_validated_and_need_the_administrator() {
     let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
     assert_eq!(v["fields"]["zone"]["value"], "UTC");
     // A bad value says what is wrong, and the good half is not applied.
-    let bad = r#"{"zone":"America/Phoenix","listen":"everywhere"}"#;
+    let bad = r#"{"zone":"Europe/Berlin","listen":"everywhere"}"#;
     let (s, v) = call(&p, "PUT", "/api/settings", &session, bad).await;
     assert_eq!(s, 400);
     assert!(
@@ -392,7 +392,7 @@ async fn settings_are_saved_validated_and_need_the_administrator() {
     // A good change is saved; the answer is the new listing, with what needs a restart.
     let (s, v) = call(&p, "PUT", "/api/settings", &session, change).await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["fields"]["zone"]["value"], "America/Phoenix");
+    assert_eq!(v["fields"]["zone"]["value"], "Europe/Berlin");
     assert_eq!(v["fields"]["zone"]["source"], "saved");
     assert_eq!(v["restart_needed"], json!([]));
     let (s, v) = call(
@@ -571,13 +571,13 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     assert_eq!(call(&p, "GET", "/api/notes", &session, "").await.0, 503);
     let store = Arc::new(NoteStore::in_memory(true));
     p.core.set_notes(Arc::clone(&store));
-    store.add("my NAS is called Andy-NAS", 10).unwrap();
+    store.add("my printer is called Pixel", 10).unwrap();
     let second = store.add("the spare key is under the pot", 11).unwrap();
     let (s, v) = call(&p, "GET", "/api/notes", &session, "").await;
     assert_eq!(s, 200);
     assert_eq!(v["enabled"], true);
     assert_eq!(v["notes"].as_array().unwrap().len(), 2);
-    assert_eq!(v["notes"][0]["text"], "my NAS is called Andy-NAS");
+    assert_eq!(v["notes"][0]["text"], "my printer is called Pixel");
     assert_eq!(v["limits"]["max_notes"], 50);
     // forget one by id, then a missing one, then all
     let path = format!("/api/notes/{}", second.id);
@@ -619,7 +619,7 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
         "POST",
         "/api/notes",
         &session,
-        &add("my NAS is Andy-NAS"),
+        &add("my printer is Pixel"),
     )
     .await;
     assert_eq!(s, 409);
@@ -632,15 +632,15 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
         "POST",
         "/api/notes",
         &session,
-        &add("  my NAS is   Andy-NAS "),
+        &add("  my printer is   Pixel "),
     )
     .await;
     assert_eq!(s, 200);
-    assert_eq!(v["notes"][0]["text"], "my NAS is Andy-NAS");
+    assert_eq!(v["notes"][0]["text"], "my printer is Pixel");
     assert_eq!(v["notes"][0]["ts"], 1_794_225_600);
     // the same refusals as the spoken path, each with a plain reason and no write
     for (body, status, needle) in [
-        (add("my NAS is andy-nas"), 409, "already saved"),
+        (add("my printer is pixel"), 409, "already saved"),
         (add("   "), 400, "Write what"),
         (add(&"a".repeat(201)), 400, "too long"),
         (

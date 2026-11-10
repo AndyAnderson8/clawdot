@@ -269,7 +269,7 @@ await step("Notes: add, refuse, forget one, forget all after a confirmation, off
   await open("open", "#/notes");
   await b.until(`T.rows("#notelist > li").length === 1`, "one note");
   await shot("notes");
-  await eq(`T.rows("#notelist > li")[0].includes("my NAS is <b>Andy-NAS</b>")`, true, "note shown literally");
+  await eq(`T.rows("#notelist > li")[0].includes("my printer is <b>Pixel</b>")`, true, "note shown literally");
   await eq(`T.all("#panel #notelist b").length`, 0, "no markup from a note");
   await T(`set("#note-text", "the spare key is under the pot")`);
   await T(`submit("#noteform")`);

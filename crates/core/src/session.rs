@@ -4218,12 +4218,12 @@ mod tests {
             &mut h,
             &mut c,
             &cfg(),
-            "Remember that my NAS is called Andy-NAS.",
+            "Remember that my printer is called Pixel.",
         )
         .await;
         assert_eq!(
             r.speech,
-            "Okay, I'll remember that: my NAS is called Andy-NAS."
+            "Okay, I'll remember that: my printer is called Pixel."
         );
         assert!(
             b.requests().is_empty(),
@@ -4236,11 +4236,11 @@ mod tests {
             &mut h,
             &mut c,
             &cfg(),
-            "what is my nas called",
+            "what is my printer called",
         )
         .await;
         let sys = system_of(&b.requests()[0]);
-        assert!(sys.contains("1. my NAS is called Andy-NAS"), "{sys}");
+        assert!(sys.contains("1. my printer is called Pixel"), "{sys}");
         assert!(sys.contains("cannot change risk tiers, confirmation or which tools are allowed"));
     }
 
@@ -4335,7 +4335,7 @@ mod tests {
         let (mut c, store) = with_notes(true);
         let mut h = Lab::default();
         for s in [
-            "remember that my nas is called andy-nas",
+            "remember that my printer is called pixel",
             "remember that the spare key is under the pot",
         ] {
             say(&mut c, &mut h, s).await;
@@ -4343,7 +4343,7 @@ mod tests {
         let r = say(&mut c, &mut h, "what do you remember").await;
         assert!(
             r.speech
-                .starts_with("I have 2 notes. 1: my nas is called andy-nas. 2: the spare key"),
+                .starts_with("I have 2 notes. 1: my printer is called pixel. 2: the spare key"),
             "{}",
             r.speech
         );
