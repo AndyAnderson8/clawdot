@@ -4,9 +4,11 @@ import { api, keep } from "./api.ts";
 import { Activity } from "./tabs/Activity.tsx";
 import { Dashboard } from "./tabs/Dashboard.tsx";
 import { Reminders } from "./tabs/Reminders.tsx";
+import { Bluetooth } from "./tabs/Bluetooth.tsx";
+import { Features } from "./tabs/Features.tsx";
 import { SettingsPage } from "./tabs/SettingsPage.tsx";
-import { Forgot, RecoveryNotice, showCode } from "./recovery.tsx";
-import { fail, say, start, sv, useApp } from "./store.ts";
+import { Forgot } from "./forgot.tsx";
+import { fail, say, start, useApp } from "./store.ts";
 
 /** What a view is given: the part of the address after the destination (`#/settings/assistant` gives "assistant"). */
 interface ViewProps {
@@ -17,18 +19,21 @@ interface Tab {
   label: string;
   view: ComponentType<ViewProps>;
 }
-/** The four destinations, Dashboard first. Everything that is configuration lives under Settings. */
+/** The destinations, Home first. Settings is for things you set once; Features is for things you switch on and off. */
 export const TABS: [Tab, ...Tab[]] = [
-  { id: "dashboard", label: "Dashboard", view: Dashboard },
-  { id: "reminders", label: "Reminders", view: Reminders },
-  { id: "activity", label: "Activity", view: Activity },
+  { id: "dashboard", label: "Home", view: Dashboard },
+  { id: "clock", label: "Clock", view: Reminders },
+  { id: "bluetooth", label: "Bluetooth", view: Bluetooth },
+  { id: "features", label: "Features", view: Features },
   { id: "settings", label: "Settings", view: SettingsPage },
 ];
+/** Reachable from Home (Recent, the chart) but not in the menu. */
+const HIDDEN: Tab[] = [{ id: "activity", label: "Activity", view: Activity }];
 
 /** The destination and sub-page named in the address fragment (`#/settings/assistant`), or the first. */
 export function routeFromHash(hash: string): { tab: Tab; sub: string } {
   const [name = "", sub = ""] = hash.replace(/^#\/?/, "").split("/");
-  return { tab: TABS.find((t) => t.id === name) ?? TABS[0], sub };
+  return { tab: [...TABS, ...HIDDEN].find((t) => t.id === name) ?? TABS[0], sub };
 }
 
 const Logo = () => (
@@ -37,17 +42,42 @@ const Logo = () => (
   </svg>
 );
 
-function Bar(props: { tab: Tab }) {
+const ICONS: Record<string, string> = {
+  dashboard: "M3 11.5 12 4l9 7.500V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z",
+  clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 5v4.500l3 2",
+  bluetooth: "m7 7 10 10-5 5V2l5 5L7 17",
+  features:
+    "M12 3v4m0 10v4M3 12h4m10 0h4M5.600 5.600l2.800 2.800m7.200 7.200 2.800 2.800m0-12.800-2.800 2.800m-7.200 7.200-2.800 2.800",
+  settings:
+    "M4 7h9m4 0h3M4 17h3m4 0h9M15 4.500a2.500 2.500 0 1 0 0 5 2.500 2.500 0 0 0 0-5ZM9 14.500a2.500 2.500 0 1 0 0 5 2.500 2.500 0 0 0 0-5Z",
+};
+
+/** The name, with the light ring of the speaker standing in for the o. Read out as plain "ClawDot". */
+function Wordmark() {
   return (
-    <div class="bar" id="band">
-      <div class="brand">
-        <Logo />
-        <h1 id="devname">{String(sv("device_name") || "ClawDot")}</h1>
-      </div>
+    <span class="wordmark" aria-hidden="true">
+      ClawD
+      <span class="ring" />t
+    </span>
+  );
+}
+
+function Rail(props: { tab: Tab }) {
+  return (
+    <div class="rail" id="band">
+      <a class="brand" href="#/" id="home" aria-label="ClawDot, go to Home">
+        <span class="chip">
+          <Logo />
+        </span>
+        <Wordmark />
+      </a>
       <nav class="nav" id="tabs" aria-label="Sections">
         {TABS.map((t) => (
           <a key={t.id} href={"#/" + t.id} id={"tab-" + t.id} aria-current={t.id === props.tab.id ? "page" : undefined}>
-            {t.label}
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+              <path d={ICONS[t.id] ?? ""} />
+            </svg>
+            <span>{t.label}</span>
           </a>
         ))}
       </nav>
@@ -61,9 +91,8 @@ function Setup() {
   const [pw2, setPw2] = useState("");
   const finish = async (body: { mode: string; password?: string }) => {
     try {
-      const r = await api<{ token?: string; recovery_code?: string }>("POST", "/api/setup", body);
+      const r = await api<{ token?: string }>("POST", "/api/setup", body);
       keep(r.token);
-      showCode(r.recovery_code);
       say("");
       await start();
     } catch (x) {
@@ -210,66 +239,70 @@ export function App(): JSX.Element {
 
   const Active = tab.view;
   return (
-    <>
-      <div id="top">
-        {s.mode === "open" ? (
-          <div id="banner" role="alert">
-            Unprotected (open mode): anyone on this network can use this page.{" "}
-            <a
-              href="#/settings/security"
-              id="setpw"
-              onClick={() => setTimeout(() => document.getElementById("newpw")?.focus(), 50)}
-            >
-              Set a password
-            </a>
-          </div>
-        ) : null}
-        {inApp ? <Bar tab={tab} /> : null}
-      </div>
-      <main>
-        {s.recoveryCode ? <RecoveryNotice /> : null}
-        {!s.recoveryCode && (s.view === "setup" || s.view === "login") ? (
-          <div id="hero">
-            <Logo />
-            <div>
-              <h1>ClawDot</h1>
-              <p class="sub">A voice assistant that runs on your own speaker.</p>
+    <div class={"shell" + (inApp ? " in" : "")}>
+      {inApp ? <Rail tab={tab} /> : null}
+      <div class="stage">
+        <div id="top">
+          {s.mode === "open" ? (
+            <div id="banner" role="alert">
+              Unprotected (open mode): anyone on this network can use this page.{" "}
+              <a
+                href="#/settings/security"
+                id="setpw"
+                onClick={() => setTimeout(() => document.getElementById("newpw")?.focus(), 50)}
+              >
+                Set a password
+              </a>
             </div>
-          </div>
-        ) : null}
-        {!s.recoveryCode && s.view === "setup" ? <Setup /> : null}
-        {!s.recoveryCode && s.view === "login" ? <Login /> : null}
-        {inApp && !s.recoveryCode ? (
-          <div id="app">
-            <div id="panel" tabIndex={-1}>
-              <Active key={tab.id} sub={sub} />
-            </div>
-          </div>
-        ) : null}
-        <footer id="foot">
-          <span id="ver">{"ClawDot " + s.version}</span>{" "}
-          {s.mode ? (
-            <a
-              href="#/settings/about"
-              id="newlink"
-              onClick={() =>
-                setTimeout(() => {
-                  const d = document.getElementById("about") as HTMLDetailsElement | null;
-                  if (d) {
-                    d.open = true;
-                    d.scrollIntoView();
-                  }
-                }, 50)
-              }
-            >
-              What is new in this version
-            </a>
           ) : null}
-        </footer>
-      </main>
+        </div>
+        <main>
+          {s.view === "setup" || s.view === "login" ? (
+            <div id="hero">
+              <Logo />
+              <div>
+                <h1>ClawDot</h1>
+                <p class="sub">A voice assistant that runs on your own speaker.</p>
+              </div>
+            </div>
+          ) : null}
+          {s.view === "setup" ? <Setup /> : null}
+          {s.view === "login" ? <Login /> : null}
+          {inApp ? (
+            <div id="app">
+              <div id="panel" tabIndex={-1}>
+                <Active key={tab.id} sub={sub} />
+              </div>
+            </div>
+          ) : null}
+          <footer id="foot">
+            <span class="fmark">
+              <i aria-hidden="true" />
+              <span id="ver">{"ClawDot " + s.version}</span>
+            </span>
+            {s.mode ? (
+              <a
+                href="#/settings/about"
+                id="newlink"
+                onClick={() =>
+                  setTimeout(() => {
+                    const d = document.getElementById("about") as HTMLDetailsElement | null;
+                    if (d) {
+                      d.open = true;
+                      d.scrollIntoView();
+                    }
+                  }, 50)
+                }
+              >
+                What is new in this version
+              </a>
+            ) : null}
+          </footer>
+        </main>
+      </div>
       <div id="msg" class={"toast" + (s.toast.bad ? " err" : "")} role="status">
         {s.toast.text || null}
       </div>
-    </>
+    </div>
   );
 }

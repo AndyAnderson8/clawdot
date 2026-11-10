@@ -11,14 +11,24 @@ import { About } from "./About.tsx";
 import { Connections } from "./Connections.tsx";
 import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
-import { RecoverySettings, showCode } from "../recovery.tsx";
+import { PROVIDERS, providerFor } from "../providers.ts";
+import { Field } from "../parts.tsx";
 import { Skills } from "./Skills.tsx";
+import { TestSpeaker } from "./TestSpeaker.tsx";
 import { Tools } from "./Tools.tsx";
 import { Webhooks } from "./Webhooks.tsx";
 
 type Spec = SettingSpec[];
 const MODEL: Spec = [
-  { key: "llm_url", kind: "text", hint: "Starts with https://, for example https://openrouter.ai/api/v1." },
+  {
+    key: "llm_url",
+    kind: "text",
+    hint: "Starts with https:// (or http:// for a model on your own network).",
+    hideWhen: (v) => {
+      const p = providerFor(v["llm_url"] ?? "");
+      return !p || (p.id !== "custom" && p.id !== "local");
+    },
+  },
   { key: "llm_model", kind: "text" },
   { key: "llm_fallback_model", kind: "text", hint: "Tried if the model fails." },
   { key: "summary_model", kind: "text", hint: "A cheaper model for spoken summaries." },
@@ -52,8 +62,6 @@ const LIMITS: Spec = [
     max: 120,
     hint: "A tool that has not answered by then counts as failed. 1 to 120.",
   },
-  { key: "plan_speech", kind: "bool", hint: "Before a request with several steps, it says what it is about to do." },
-  { key: "progress_speech", kind: "bool", hint: "Short phrases such as “Checking the lights” while a tool runs." },
 ];
 
 function ThemeChoice(): JSX.Element {
@@ -68,9 +76,12 @@ function ThemeChoice(): JSX.Element {
     ["system", "Match system"],
   ];
   return (
-    <fieldset id="themeform">
-      <legend>Theme</legend>
-      <div class="choices">
+    <fieldset id="themeform" class="srow">
+      <div class="slabel">
+        <legend>Theme</legend>
+        <p class="mut">Light unless you choose otherwise. This is remembered by this browser only.</p>
+      </div>
+      <div class="choices sctl">
         {options.map(([v, text]) => (
           <label key={v}>
             <input type="radio" name="theme" value={v} checked={pref === v} onChange={() => choose(v)} />
@@ -78,7 +89,6 @@ function ThemeChoice(): JSX.Element {
           </label>
         ))}
       </div>
-      <p class="mut">Light unless you choose otherwise. This is remembered by this browser only.</p>
     </fieldset>
   );
 }
@@ -95,14 +105,18 @@ function General(props: { s: SettingsData }): JSX.Element {
           { key: "zone", kind: "zone", hint: "Reminders and alarms use this time." },
         ]}
       />
-      <h3>Language</h3>
-      <dl class="kv">
-        <dt>Speech language</dt>
-        <dd>{vi.language || "Automatic"}</dd>
-      </dl>
-      <p class="mut">The speech language is set in the configuration file.</p>
-      <h3>Appearance</h3>
-      <ThemeChoice />
+      <section class="card">
+        <h3>Language</h3>
+        <dl class="kv">
+          <dt>Speech language</dt>
+          <dd>{vi.language || "Automatic"}</dd>
+        </dl>
+        <p class="mut">The speech language is set in the configuration file.</p>
+      </section>
+      <section class="card sgroup">
+        <h3>Appearance</h3>
+        <ThemeChoice />
+      </section>
     </>
   );
 }
@@ -117,6 +131,45 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
       <Group
         title="Language model"
         settings={s}
+        extra={({ vals, setVals }) => {
+          const cur = providerFor(vals["llm_url"] ?? "");
+          return (
+            <div class="srow">
+              <div class="slabel">
+                <label for="provider">Who answers</label>
+                <p class="mut">{cur?.note ?? "Pick a service. You can change it at any time."}</p>
+              </div>
+              <div class="sctl">
+                <select
+                  id="provider"
+                  required
+                  value={cur?.id ?? ""}
+                  onChange={(e) => {
+                    const p = PROVIDERS.find((x) => x.id === e.currentTarget.value);
+                    if (!p) return;
+                    setVals({
+                      ...vals,
+                      llm_url: p.id === "custom" ? "https://" : p.url,
+                      llm_model: p.model || vals["llm_model"] || "",
+                      llm_key_env: p.keyEnv || vals["llm_key_env"] || "",
+                    });
+                  }}
+                >
+                  {cur ? null : (
+                    <option value="" disabled>
+                      Choose a service
+                    </option>
+                  )}
+                  {PROVIDERS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          );
+        }}
         intro="Without one, the speaker understands only simple commands like timers. Leave a box empty to go back to the configuration file or the default."
         specs={[...MODEL, { key: "llm_key_env", kind: "text", hint: keyHint }]}
       />
@@ -137,6 +190,7 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
           },
         ]}
       />
+      <TestSpeaker />
       <Group
         title="How far it may go"
         settings={s}
@@ -167,30 +221,21 @@ function Inputs(props: { s: SettingsData }): JSX.Element {
 function Extensions(): JSX.Element {
   return (
     <>
-      <div id="part-tools">
+      <div id="part-tools" class="stack">
         <Tools />
       </div>
-      <div id="part-connections">
+      <div id="part-connections" class="stack">
         <Connections />
       </div>
-      <div id="part-skills">
+      <div id="part-skills" class="stack">
         <Skills />
       </div>
     </>
   );
 }
 
-function NotesSection(props: { s: SettingsData }): JSX.Element {
-  return (
-    <>
-      <Notes />
-      <Group
-        title="Keeping notes"
-        settings={props.s}
-        specs={[{ key: "notes", kind: "bool", hint: "Lets you say “remember that ...”. They are listed above." }]}
-      />
-    </>
-  );
+function MemorySection(): JSX.Element {
+  return <Notes />;
 }
 
 function Safety(props: { s: SettingsData }): JSX.Element {
@@ -224,11 +269,6 @@ function Safety(props: { s: SettingsData }): JSX.Element {
             max: 100000,
             hint: "The ones that ask you out loud first, which are part of the number above.",
           },
-          {
-            key: "dry_run",
-            kind: "bool",
-            hint: "On: it only says what it would do and nothing changes. Good for trying out a new tool.",
-          },
         ]}
       />
       <Group
@@ -256,9 +296,8 @@ function Security(): JSX.Element {
     const password = pw;
     setPw("");
     try {
-      const r = await api<{ token: string; recovery_code?: string }>("POST", "/api/admin/password", { password });
+      const r = await api<{ token: string }>("POST", "/api/admin/password", { password });
       keep(r.token);
-      showCode(r.recovery_code);
       say("Password saved.");
       await start();
     } catch (x) {
@@ -284,27 +323,35 @@ function Security(): JSX.Element {
             You are signed in with the old administrator token. Set a password to replace it.
           </p>
         ) : null}
-        <label for="newpw">New password</label>
-        <div class="row">
+        <Field id="newpw" label="New password" hint="At least 8 characters.">
           <input
             id="newpw"
             type="password"
             autoComplete="new-password"
-            placeholder="8 or more characters"
+            placeholder="New password"
             maxLength={128}
             value={pw}
             onInput={(e) => setPw(e.currentTarget.value)}
           />
+        </Field>
+        <div class="row">
           <button>Save password</button>
         </div>
       </form>
-      <RecoverySettings />
-      <h3>This browser</h3>
-      <div class="row">
-        <button class="plain" type="button" onClick={signOut}>
-          Sign out
-        </button>
-      </div>
+      <section class="card sgroup">
+        <h3>This browser</h3>
+        <div class="srow">
+          <div class="slabel">
+            <label>Sign out</label>
+            <p class="mut">You will need the password to come back.</p>
+          </div>
+          <div class="sctl">
+            <button class="plain" type="button" onClick={signOut}>
+              Sign out
+            </button>
+          </div>
+        </div>
+      </section>
     </>
   );
 }
@@ -322,7 +369,7 @@ function AboutSection(props: { s: SettingsData }): JSX.Element {
     <>
       <About />
       <Group
-        title="Board"
+        title="Hardware"
         settings={s}
         specs={[
           {
@@ -332,16 +379,18 @@ function AboutSection(props: { s: SettingsData }): JSX.Element {
           },
         ]}
       />
-      <h3>From the configuration file</h3>
-      <dl class="kv">
-        {rows.map(([k, v]) => (
-          <Fragment key={k}>
-            <dt>{k}</dt>
-            <dd>{v}</dd>
-          </Fragment>
-        ))}
-      </dl>
-      <p class="mut">These are set in the configuration file only.</p>
+      <section class="card">
+        <h3>From the configuration file</h3>
+        <p class="mut">These are set in the configuration file only.</p>
+        <dl class="kv">
+          {rows.map(([k, v]) => (
+            <Fragment key={k}>
+              <dt>{k}</dt>
+              <dd>{v}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      </section>
     </>
   );
 }
@@ -355,58 +404,45 @@ export const SECTIONS: [Section, ...Section[]] = [
   { id: "general", label: "General", view: General },
   { id: "assistant", label: "Assistant", view: Assistant },
   { id: "inputs", label: "Inputs", view: Inputs },
-  { id: "tools", label: "Tools and connections", view: Extensions },
-  { id: "notes", label: "Notes", view: NotesSection },
+  { id: "tools", label: "Tools", view: Extensions },
+  { id: "memory", label: "Memory", view: MemorySection },
   { id: "safety", label: "Safety", view: Safety },
   { id: "security", label: "Security", view: Security },
-  { id: "about", label: "About and diagnostics", view: AboutSection },
+  { id: "about", label: "About", view: AboutSection },
 ];
 
-/** Everything that can be configured, in sections. A phone shows the list, then one section at a time. */
+/** Everything you set once, in sections along the top. */
 export function SettingsPage(props: { sub: string }): JSX.Element {
   const s = useApp();
-  const known = SECTIONS.find((x) => x.id === props.sub);
-  const active = known ?? SECTIONS[0];
+  const active = SECTIONS.find((x) => x.id === props.sub) ?? SECTIONS[0];
   const need = s.settings?.restart_needed ?? [];
   const View = active.view;
-  const sub = known ? "yes" : "no";
   return (
-    <>
-      <h2 class="stitle" data-sub={sub}>
-        Settings
-      </h2>
-      <div class="settings" data-sub={sub}>
-        <nav aria-label="Settings sections" class="sections">
-          <ul class="index">
-            {SECTIONS.map((x) => (
-              <li key={x.id}>
-                <a href={"#/settings/" + x.id} aria-current={x.id === active.id ? "page" : undefined}>
-                  {x.label}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-        <section class="pane" id="pane" aria-labelledby="sechead">
-          <a class="back" href="#/settings">
-            &lsaquo; Settings
+    <div class="page">
+      <header class="pagehead">
+        <h2>Settings</h2>
+        <p>Things you set once. Switches for what the assistant does are under Features.</p>
+      </header>
+      <nav aria-label="Settings sections" class="tabs">
+        {SECTIONS.map((x) => (
+          <a key={x.id} href={"#/settings/" + x.id} aria-current={x.id === active.id ? "page" : undefined}>
+            {x.label}
           </a>
-          <h3 class="sechead" id="sechead">
-            {active.label}
-          </h3>
-          {need.length ? (
-            <div class="soon" role="status">
-              <h4>Restart needed</h4>
-              <p>These saved values are not running yet: {restartText(need)}.</p>
-              <p>
-                ClawDot cannot restart itself safely from this page. Restart it on the device: for example run sudo
-                systemctl restart clawdot if it runs as a service, or stop the program and start it again.
-              </p>
-            </div>
-          ) : null}
-          {s.settings ? <View key={s.settingsRev} s={s.settings} /> : <p class="empty">Loading the settings.</p>}
-        </section>
-      </div>
-    </>
+        ))}
+      </nav>
+      <section class="pane stack" id="pane" aria-label={active.label}>
+        {need.length ? (
+          <div class="soon" role="status">
+            <h4>Restart needed</h4>
+            <p>These saved values are not running yet: {restartText(need)}.</p>
+            <p>
+              ClawDot cannot restart itself safely from this page. Restart it on the device: for example run sudo
+              systemctl restart clawdot if it runs as a service, or stop the program and start it again.
+            </p>
+          </div>
+        ) : null}
+        {s.settings ? <View key={s.settingsRev} s={s.settings} /> : <p class="empty">Loading the settings.</p>}
+      </section>
+    </div>
   );
 }

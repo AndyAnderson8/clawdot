@@ -1,168 +1,94 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
-import {
-  attention,
-  isRefusal,
-  lastHeard,
-  recentItems,
-  refusal,
-  speakBlock,
-  speakerView,
-  type SpeakBlock,
-} from "../dashboard.ts";
-import { reminderBody } from "../forms.ts";
-import { fail, load, say, useApp, usePolled, zone } from "../store.ts";
-import { ago, fmt, whenText } from "../time.ts";
-import type { AuditPage, AuditRecord, ScheduleItem, ScheduleList } from "../types.ts";
-import { NAMES, whenLine } from "./Reminders.tsx";
+import { attention, dailyCounts, lastHeard, recentItems, speakerView, type Day } from "../dashboard.ts";
+import { fail, sv, useApp, usePolled, zone } from "../store.ts";
+import { ago, whenText } from "../time.ts";
+import type { AuditPage, AuditRecord } from "../types.ts";
+import { Look, LOOKS, lookPref, setLookPref, type LookId } from "./looks.tsx";
 
-function Ring(props: { state: string }): JSX.Element {
+/** One number with a plain label. */
+function Stat(props: { label: string; value: string; note?: string; id?: string }): JSX.Element {
   return (
-    <svg class="ring" data-state={props.state} viewBox="0 0 52 32" aria-hidden="true">
-      <ellipse cx="26" cy="16" rx="22" ry="10" fill="none" stroke="currentColor" stroke-width="4" />
-    </svg>
+    <div class="stat" id={props.id}>
+      <div class="statlabel">{props.label}</div>
+      <div class="statvalue num">{props.value}</div>
+      {props.note ? <div class="statnote">{props.note}</div> : null}
+    </div>
   );
 }
 
-/** Say a phrase out loud, or say plainly why it cannot be done and where to fix that. */
-function SayIt(): JSX.Element {
-  const s = useApp();
-  const [text, setText] = useState("");
-  const [refused, setRefused] = useState<SpeakBlock | null>(null);
-  const known = speakBlock(s.status);
-  const block = known ?? refused;
-
-  const speak = async (ev: Event) => {
-    ev.preventDefault();
-    setRefused(null);
-    try {
-      await api("POST", "/api/speak", { text });
-      setText("");
-      say("Sent. Listen for the speaker.");
-      void load();
-    } catch (x) {
-      if (x instanceof ApiError && isRefusal(x.reason)) setRefused(refusal(x.reason));
-      else fail(x);
-    }
-  };
+/** Bars for the last two weeks. The assistant's actions are what the activity log records, so that is what is counted. */
+function UsageChart(props: { days: Day[] | null }): JSX.Element {
+  const days = props.days;
+  const max = Math.max(1, ...(days ?? []).map((d) => d.count));
+  const total = (days ?? []).reduce((n, d) => n + d.count, 0);
   return (
-    <form id="sayform" class="d-say" onSubmit={speak}>
-      <h3>Say something</h3>
-      <p class="mut">Type a sentence and the speaker says it out loud.</p>
-      <label for="speaktext" class="sr">
-        What the speaker should say
-      </label>
-      <div class="row">
-        <input
-          id="speaktext"
-          type="text"
-          placeholder="Hello, is anyone home?"
-          maxLength={200}
-          disabled={!!known}
-          value={text}
-          onInput={(e) => setText(e.currentTarget.value)}
-        />
-        <button id="saybtn" disabled={!!known}>
-          Say it
-        </button>
+    <section class="card" id="usage" aria-labelledby="usage-h">
+      <div class="head">
+        <h3 id="usage-h">Activity, last 14 days</h3>
+        <a href="#/activity">All activity</a>
       </div>
-      {block ? (
-        <p class="errtext" id="sayblock" role="status">
-          {block.text}{" "}
-          {block.to ? (
-            <a href={block.to} id="sayfix">
-              {block.label}
-            </a>
-          ) : null}
-        </p>
-      ) : null}
-      <div class="row">
-        <button class="plain" type="button" disabled>
-          Talk now
-        </button>
-        <button class="plain" type="button" disabled>
-          Mute
-        </button>
-      </div>
-      <p class="mut">
-        The page cannot start listening or mute the speaker yet. Say the wake word, or use the speaker's mute button.
-      </p>
-    </form>
+      {days ? (
+        <>
+          <div
+            class="bars"
+            role="img"
+            aria-label={`${total} actions over the last 14 days. Most in one day: ${Math.max(...days.map((d) => d.count))}.`}
+          >
+            {days.map((d) => (
+              <div
+                key={d.date}
+                class={"cbar" + (d.today ? " today" : "") + (d.count ? "" : " none")}
+                title={`${d.date}: ${d.count}`}
+              >
+                <div
+                  class="fill"
+                  style={{ height: Math.max(d.count ? 6 : 2, Math.round((d.count / max) * 100)) + "%" }}
+                />
+                <div class="axis">{d.today ? "Today" : d.label.slice(0, 2)}</div>
+              </div>
+            ))}
+          </div>
+          <p class="mut chartnote">
+            {total
+              ? `${total} actions in two weeks.`
+              : "Nothing yet. Each thing the assistant does adds to this chart."}
+          </p>
+        </>
+      ) : (
+        <p class="empty">Loading.</p>
+      )}
+    </section>
   );
 }
 
-/** A timer in two clicks; alarms and reminders with a day or a date are on the Reminders page. */
-function QuickAdd(props: { onAdded: (l: ScheduleList) => void }): JSX.Element {
-  const [amount, setAmount] = useState("10");
-  const [unit, setUnit] = useState("60");
-  const [label, setLabel] = useState("");
-  const add = async (ev: Event) => {
-    ev.preventDefault();
-    const body = reminderBody({ kind: "timer", label, amount, unit, time: "", days: [], date: "", time2: "" });
-    if (typeof body === "string") {
-      say(body, true);
-      return;
-    }
-    try {
-      props.onAdded(await api<ScheduleList>("POST", "/api/schedule", body));
-      say("Added.");
-      setLabel("");
-    } catch (x) {
-      fail(x);
-    }
-  };
+function LookPicker(props: { value: LookId; onPick: (id: LookId) => void }): JSX.Element {
   return (
-    <form id="quickadd" onSubmit={add}>
-      <label for="qamount">Add a timer</label>
-      <div class="row">
-        <input
-          id="qamount"
-          type="number"
-          min="1"
-          max="10080"
-          value={amount}
-          onInput={(e) => setAmount(e.currentTarget.value)}
-        />
-        <select id="qunit" aria-label="Unit" value={unit} onChange={(e) => setUnit(e.currentTarget.value)}>
-          <option value="60">minutes</option>
-          <option value="3600">hours</option>
-        </select>
-        <input
-          id="qlabel"
-          type="text"
-          maxLength={100}
-          placeholder="Name (optional)"
-          aria-label="Name"
-          value={label}
-          onInput={(e) => setLabel(e.currentTarget.value)}
-        />
-        <button>Add timer</button>
+    <details class="looks">
+      <summary>Change look</summary>
+      <div class="lookgrid" role="group" aria-label="What your device looks like">
+        {LOOKS.map((l) => (
+          <label key={l.id} class={"lookopt" + (l.id === props.value ? " on" : "")}>
+            <input type="radio" name="look" checked={l.id === props.value} onChange={() => props.onPick(l.id)} />
+            <Look id={l.id} />
+            <span>{l.name}</span>
+          </label>
+        ))}
       </div>
-      <p class="mut">
-        For an alarm or a reminder, use <a href="#/reminders">Reminders</a>.
-      </p>
-    </form>
+    </details>
   );
 }
 
 export function Dashboard(): JSX.Element {
   const s = useApp();
   const st = s.status;
-  const [sched, setSched] = useState<ScheduleList | null>(null);
-  const [unavailable, setUnavailable] = useState(false);
   const [records, setRecords] = useState<AuditRecord[] | null>(null);
+  const [look, setLook] = useState<LookId>(lookPref());
 
   usePolled(async () => {
     try {
-      setSched(await api<ScheduleList>("GET", "/api/schedule"));
-      setUnavailable(false);
-    } catch (x) {
-      if (x instanceof ApiError && x.status === 503) setUnavailable(true);
-      else fail(x);
-    }
-    try {
-      setRecords((await api<AuditPage>("GET", "/api/audit?limit=20")).records);
+      setRecords((await api<AuditPage>("GET", "/api/audit?limit=200")).records);
     } catch (x) {
       // No activity log on this device is a normal state, not a failure.
       if (x instanceof ApiError && x.status === 503) setRecords([]);
@@ -175,92 +101,84 @@ export function Dashboard(): JSX.Element {
   const heard = records ? lastHeard(records) : null;
   const detail = view.detail || (heard ? `Last heard ${ago(heard, now)}.` : records ? "Nothing heard yet." : "");
   const todo = attention(st, s.mode);
-  const next = (sched?.items ?? []).slice(0, 5);
   const recent = recentItems(records ?? [], s.overview?.events ?? []);
   const u = st?.usage;
   const model = st?.llm?.model;
-
-  const cancel = async (i: ScheduleItem) => {
-    if (!confirm("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?")) return;
-    try {
-      setSched(await api<ScheduleList>("DELETE", "/api/schedule/" + i.id));
-      say("Cancelled.");
-    } catch (x) {
-      fail(x);
-    }
-  };
+  const name = String(sv("device_name") || "ClawDot");
+  const online = view.ring !== "off";
 
   return (
-    <div class="dash">
-      <div class="col">
-        <section class="status d-status" id="statusblock">
-          <Ring state={view.ring} />
-          <div role="status">
-            <h2 id="statusline">{view.headline}</h2>
-            {detail ? <p id="statusdetail">{detail}</p> : null}
-          </div>
-        </section>
-
-        <section class="sect d-attention" id="attention">
-          <h3>Needs attention</h3>
-          {st?.llm ? (
-            todo.length ? (
-              <ul class="rows">
-                {todo.map((a) => (
-                  <li key={a.id}>
-                    <div class="fix">
-                      <div>
-                        <strong>{a.title}</strong>
-                        <div class="mut">{a.why}</div>
-                      </div>
-                      {a.to ? <a href={a.to}>{a.label}</a> : null}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p class="empty">
-                <span class="dot ok" aria-hidden="true" />
-                Nothing needs attention.
-              </p>
-            )
+    <div class="home">
+      <section class="card device d-status" id="statusblock">
+        <div class="devart">
+          <Look id={look} state={view.ring} />
+        </div>
+        <div class="devtext" role="status">
+          <h2 id="devname">{name}</h2>
+          <p class="devline">
+            <span class={"sdot" + (online ? " live" : "")} aria-hidden="true" />
+            <span id="statusline">{view.headline}</span>
+          </p>
+          {detail ? (
+            <p class="mut" id="statusdetail">
+              {detail}
+            </p>
           ) : null}
-        </section>
+          {model ? <p class="mut">Thinks with {model}</p> : null}
+          <LookPicker
+            value={look}
+            onPick={(id) => {
+              setLook(id);
+              setLookPref(id);
+            }}
+          />
+        </div>
+      </section>
 
-        <section class="sect d-next" id="nextup">
-          <div class="head">
-            <h3>Next up</h3>
-            <a href="#/reminders">All reminders</a>
-          </div>
-          {unavailable ? (
-            <p class="empty">Timers and reminders are not running on this device.</p>
-          ) : (
-            <>
-              <ul class="rows">
-                {sched && !next.length ? (
-                  <li class="empty">Nothing is set. Add a timer below, or ask the speaker.</li>
-                ) : null}
-                {next.map((i) => (
-                  <li key={i.id}>
-                    <div class="rowhead">
-                      <strong>{i.label || NAMES[i.kind]}</strong>
-                      <span class="badge">{NAMES[i.kind]}</span>
-                    </div>
-                    <div class="when">{whenLine(i, sched?.now ?? now)}</div>
-                    <div class="acts">
-                      <button class="danger" type="button" onClick={() => cancel(i)}>
-                        Cancel
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-              <QuickAdd onAdded={setSched} />
-            </>
-          )}
+      {st?.llm && todo.length ? (
+        <section class="alert d-attention" id="attention" aria-labelledby="attn-h">
+          <h3 id="attn-h">
+            {todo.length === 1 ? "One thing needs your attention" : `${todo.length} things need your attention`}
+          </h3>
+          <ul class="rows">
+            {todo.map((a) => (
+              <li key={a.id}>
+                <div class="fix">
+                  <div>
+                    <strong>{a.title}</strong>
+                    <div>{a.why}</div>
+                  </div>
+                  {a.to ? (
+                    <a class="btn" href={a.to}>
+                      {a.label}
+                    </a>
+                  ) : null}
+                </div>
+              </li>
+            ))}
+          </ul>
         </section>
+      ) : null}
 
-        <section class="sect d-recent" id="recent">
+      <div class="stats">
+        <Stat
+          id="stat-requests"
+          label="Model requests today"
+          value={u ? String(u.requests_today) : "-"}
+          note={u ? `of ${u.max_requests_per_day} allowed` : ""}
+        />
+        <Stat
+          id="stat-spend"
+          label="Spent today"
+          value={u ? "$" + u.spend_today.toFixed(2) : "-"}
+          note="language model"
+        />
+        <Stat id="stat-heard" label="Last heard" value={heard ? ago(heard, now) : "Never"} note="a person talking" />
+      </div>
+
+      <div class="cols">
+        <UsageChart days={records ? dailyCounts(records, now, zone()) : null} />
+        <section class="card d-recent" id="recent">
           <div class="head">
             <h3>Recent</h3>
             <a href="#/activity">All activity</a>
@@ -282,37 +200,6 @@ export function Dashboard(): JSX.Element {
               </li>
             ))}
           </ul>
-        </section>
-      </div>
-
-      <div class="side">
-        <SayIt />
-        <section class="sect d-today">
-          <h3>Today</h3>
-          {u ? (
-            <dl class="tiny">
-              <dt>Model requests</dt>
-              <dd>
-                {u.requests_today} of {u.max_requests_per_day}
-              </dd>
-              {u.spend_today > 0 ? (
-                <>
-                  <dt>Spent</dt>
-                  <dd>${u.spend_today.toFixed(3)}</dd>
-                </>
-              ) : null}
-              {model ? (
-                <>
-                  <dt>Model</dt>
-                  <dd>{model}</dd>
-                </>
-              ) : null}
-              <dt>Time now</dt>
-              <dd>{fmt(now, zone(), { hour: "numeric", minute: "2-digit" })}</dd>
-            </dl>
-          ) : (
-            <p class="empty">Checking.</p>
-          )}
         </section>
       </div>
     </div>

@@ -226,7 +226,7 @@ function AddTool() {
           Ask me out loud before it runs (recommended)
         </label>
       </div>
-      <h3>Values the assistant fills in</h3>
+      <h4 class="sub">Values the assistant fills in</h4>
       <div>
         {params.map((p) => (
           <div class="row" key={p.id}>
@@ -294,58 +294,69 @@ export function Tools(): JSX.Element {
   const own = by("builtin");
   return (
     <>
-      <h3 class="part">Tools</h3>
-      <p>
-        Everything the assistant can do besides talk. Turn any tool off or on. Tools that change things in the outside
-        world ask you out loud first.
-      </p>
-      <details id="tier-help">
-        <summary>What do “Asks you first” and the other levels mean?</summary>
-        <p>
-          Every tool has a level. “Asks you out loud first” tools are read back to you and run only when you say yes.
-          “Can be undone” and “Only reads” tools run right away. Web tools and connections start at “Asks you out loud
-          first”, and you can relax one only for a tool you trust. A built-in tool can only be made stricter. Nothing
-          can be made destructive here.
+      <section class="card">
+        <h3>
+          Tools<span class="count">{(ext?.tools ?? []).length}</span>
+        </h3>
+        <p class="mut">
+          Everything the assistant can do besides talk. Turn any tool off or on. Tools that change things in the outside
+          world ask you out loud first.
         </p>
-      </details>
-      <div>
-        {ext ? (
-          <>
-            <Problems ext={ext} kind="tool" />
-            <h3>Web tools ({web.length})</h3>
-            {web.length ? (
-              <ul class="rows">
-                {web.map((t) => (
-                  <ToolRow key={t.name} t={t} />
-                ))}
-              </ul>
-            ) : (
-              <p class="mut">
-                No web tools yet. A web tool lets the assistant call a web address, for example to switch on a light.
-                Add one below.
-              </p>
-            )}
-            <h3>From connections ({conn.length})</h3>
-            {conn.length ? (
-              <ul class="rows">
-                {conn.map((t) => (
-                  <ToolRow key={t.name} t={t} />
-                ))}
-              </ul>
-            ) : (
-              <p class="mut">None yet. Tools from outside servers appear here once you add a connection.</p>
-            )}
-            <details id="builtin-tools">
-              <summary>Built in ({own.length}): what the assistant can already do</summary>
-              <ul class="rows">
-                {own.map((t) => (
-                  <ToolRow key={t.name} t={t} />
-                ))}
-              </ul>
-            </details>
-          </>
-        ) : null}
-      </div>
+        <details id="tier-help" class="help">
+          <summary>What do “Asks you first” and the other levels mean?</summary>
+          <p>
+            Every tool has a level. “Asks you out loud first” tools are read back to you and run only when you say yes.
+            “Can be undone” and “Only reads” tools run right away. Web tools and connections start at “Asks you out loud
+            first”, and you can relax one only for a tool you trust. A built-in tool can only be made stricter. Nothing
+            can be made destructive here.
+          </p>
+        </details>
+        <div>
+          {ext ? (
+            <>
+              <Problems ext={ext} kind="tool" />
+              <h4 class="sub">
+                Web tools<span class="count">{web.length}</span>
+              </h4>
+              {web.length ? (
+                <ul class="rows">
+                  {web.map((t) => (
+                    <ToolRow key={t.name} t={t} />
+                  ))}
+                </ul>
+              ) : (
+                <p class="mut">
+                  No web tools yet. A web tool lets the assistant call a web address, for example to switch on a light.
+                  Add one below.
+                </p>
+              )}
+              <h4 class="sub">
+                From connections<span class="count">{conn.length}</span>
+              </h4>
+              {conn.length ? (
+                <ul class="rows">
+                  {conn.map((t) => (
+                    <ToolRow key={t.name} t={t} />
+                  ))}
+                </ul>
+              ) : (
+                <p class="mut">None yet. Tools from outside servers appear here once you add a connection.</p>
+              )}
+              <details id="builtin-tools">
+                <summary>
+                  Built in<span class="count">{own.length}</span>
+                  <span class="mut">what the assistant can already do</span>
+                </summary>
+                <ul class="rows">
+                  {own.map((t) => (
+                    <ToolRow key={t.name} t={t} />
+                  ))}
+                </ul>
+              </details>
+            </>
+          ) : null}
+        </div>
+      </section>
       <AddTool />
     </>
   );

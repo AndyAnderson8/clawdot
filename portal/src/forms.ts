@@ -156,6 +156,8 @@ export interface SettingSpec {
   kind: SettingKind;
   hint?: string;
   off?: boolean;
+  /** Hide the control (its value is still kept and saved) while this returns true for the form's current values. */
+  hideWhen?: (vals: Record<string, string>) => boolean;
   /** For a whole number: the range the device accepts (shown to the browser as min and max). */
   min?: number;
   max?: number;

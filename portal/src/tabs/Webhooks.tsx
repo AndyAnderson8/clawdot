@@ -1,4 +1,5 @@
 import type { JSX } from "preact";
+import { Field } from "../parts.tsx";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
@@ -104,51 +105,58 @@ export function Webhooks(): JSX.Element {
 
   return (
     <>
-      <p>
+      <p class="lead">
         Events from anything that can send a web request: a build server, a home automation hub, a script. Each input is
         a web address with its own token, which works like a password for that address. The speaker reads events out
         when it is idle.
       </p>
-      <ul class="rows">
-        {ov && !ov.endpoints.length ? (
-          <li class="mut">
-            No inputs yet. Create one below, then paste its address and token into whatever should send events.
-          </li>
-        ) : null}
-        {ov?.endpoints.map((e) => (
-          <Hook
-            key={e.name}
-            e={e}
-            open={open[e.name] ?? !!s.fresh[e.name]}
-            setOpen={(v) => setOpen((o) => ({ ...o, [e.name]: v }))}
-          />
-        ))}
-      </ul>
+      <section class="card" id="inputlist">
+        <h3>
+          Your inputs<span class="count">{ov?.endpoints.length ?? 0}</span>
+        </h3>
+        <ul class="rows">
+          {ov && !ov.endpoints.length ? (
+            <li class="empty">
+              No inputs yet. Create one below, then paste its address and token into whatever should send events.
+            </li>
+          ) : null}
+          {ov?.endpoints.map((e) => (
+            <Hook
+              key={e.name}
+              e={e}
+              open={open[e.name] ?? !!s.fresh[e.name]}
+              setOpen={(v) => setOpen((o) => ({ ...o, [e.name]: v }))}
+            />
+          ))}
+        </ul>
+      </section>
       <form class="panel" onSubmit={create}>
         <h3>Create an input</h3>
         <p class="mut">
           Give each sender its own input so you can cut one off without touching the rest. Use letters, numbers, - and
           _.
         </p>
-        <label for="wname">Name</label>
-        <input
-          id="wname"
-          type="text"
-          maxLength={32}
-          placeholder="For example: build-server"
-          autoComplete="off"
-          autoCapitalize="none"
-          value={name}
-          onInput={(e) => setName(e.currentTarget.value)}
-        />
-        <label for="wadapter">What format does it send?</label>
-        <select id="wadapter" value={adapter} onChange={(e) => setAdapter(e.currentTarget.value)}>
-          {ADAPTERS.map(([v, text]) => (
-            <option key={v} value={v}>
-              {text}
-            </option>
-          ))}
-        </select>
+        <Field id="wname" label="Name">
+          <input
+            id="wname"
+            type="text"
+            maxLength={32}
+            placeholder="For example: build-server"
+            autoComplete="off"
+            autoCapitalize="none"
+            value={name}
+            onInput={(e) => setName(e.currentTarget.value)}
+          />
+        </Field>
+        <Field id="wadapter" label="What format does it send?">
+          <select id="wadapter" value={adapter} onChange={(e) => setAdapter(e.currentTarget.value)}>
+            {ADAPTERS.map(([v, text]) => (
+              <option key={v} value={v}>
+                {text}
+              </option>
+            ))}
+          </select>
+        </Field>
         <div class="row">
           <button>Create input</button>
         </div>

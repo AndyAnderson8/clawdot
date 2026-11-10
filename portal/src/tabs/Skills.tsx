@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { skillBody } from "../forms.ts";
-import { CopyButton, Field } from "../parts.tsx";
+import { Field, saveFile } from "../parts.tsx";
 import { change, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { Skill } from "../types.ts";
 
@@ -16,19 +16,14 @@ export function Skills(): JSX.Element {
   const [text, setText] = useState("");
   const [tools, setTools] = useState("");
   const [focusTick, setFocusTick] = useState(0);
-  const [exported, setExported] = useState("");
   const [importText, setImportText] = useState("");
   const formRef = useRef<HTMLFormElement>(null);
-  const exportRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (!focusTick) return;
     formRef.current?.scrollIntoView({ block: "center" });
     document.getElementById("skill-name")?.focus();
   }, [focusTick]);
-  useEffect(() => {
-    if (exported) exportRef.current?.select();
-  }, [exported]);
 
   const reset = () => {
     setEditing("");
@@ -80,7 +75,7 @@ export function Skills(): JSX.Element {
     try {
       v = JSON.parse(importText);
     } catch {
-      say("That is not a skills file. Paste the text that Export gave you.", true);
+      say("That is not a skills file. Paste the contents of a skills file.", true);
       return;
     }
     if (await change("POST", "/api/skills/import", v, "Imported. Read each skill, then turn on the ones you trust."))
@@ -89,57 +84,61 @@ export function Skills(): JSX.Element {
 
   return (
     <>
-      <h3 class="part">Skills</h3>
-      <p>
-        A skill is a set of instructions you write for the assistant, for example “When I say good night, turn off the
-        lights”. Turn skills on and off, or share them as files.
-      </p>
-      <div>
-        {ext && !skills.length ? <p>No skills yet. Add one below, or import a file.</p> : null}
-        {skills.length ? (
-          <ul class="rows">
-            {skills.map((k) => (
-              <li key={k.name}>
-                <div class="rowhead">
-                  <strong>{k.name}</strong>
-                  <span class={"badge" + (k.enabled ? " good" : "")}>{k.enabled ? "On" : "Off"}</span>
-                </div>
-                <div class="pre">{k.instructions}</div>
-                {(k.tools ?? []).length ? <div class="mut">Tools: {(k.tools ?? []).join(", ")}</div> : null}
-                <div class="acts">
-                  <button
-                    class="plain"
-                    type="button"
-                    onClick={() =>
-                      change(
-                        "POST",
-                        "/api/skills/enabled",
-                        { name: k.name, enabled: !k.enabled },
-                        k.enabled ? "Turned off." : "Turned on.",
-                      )
-                    }
-                  >
-                    {k.enabled ? "Turn off" : "Turn on"}
-                  </button>
-                  <button class="plain" type="button" onClick={() => startEdit(k)}>
-                    Edit
-                  </button>
-                  <button
-                    class="danger"
-                    type="button"
-                    onClick={() => {
-                      if (confirm("Delete the skill " + k.name + "?"))
-                        void change("POST", "/api/skills/delete", { name: k.name }, "Deleted.");
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
+      <section class="card">
+        <h3>
+          Skills<span class="count">{skills.length}</span>
+        </h3>
+        <p class="mut">
+          A skill is a set of instructions you write for the assistant, for example “When I say good night, turn off the
+          lights”. Turn skills on and off, or share them as files.
+        </p>
+        <div>
+          {ext && !skills.length ? <p class="empty">No skills yet. Add one below, or import a file.</p> : null}
+          {skills.length ? (
+            <ul class="rows">
+              {skills.map((k) => (
+                <li key={k.name}>
+                  <div class="rowhead">
+                    <strong>{k.name}</strong>
+                    <span class={"badge" + (k.enabled ? " good" : "")}>{k.enabled ? "On" : "Off"}</span>
+                  </div>
+                  <div class="pre">{k.instructions}</div>
+                  {(k.tools ?? []).length ? <div class="mut">Tools: {(k.tools ?? []).join(", ")}</div> : null}
+                  <div class="acts">
+                    <button
+                      class="plain"
+                      type="button"
+                      onClick={() =>
+                        change(
+                          "POST",
+                          "/api/skills/enabled",
+                          { name: k.name, enabled: !k.enabled },
+                          k.enabled ? "Turned off." : "Turned on.",
+                        )
+                      }
+                    >
+                      {k.enabled ? "Turn off" : "Turn on"}
+                    </button>
+                    <button class="plain" type="button" onClick={() => startEdit(k)}>
+                      Edit
+                    </button>
+                    <button
+                      class="danger"
+                      type="button"
+                      onClick={() => {
+                        if (confirm("Delete the skill " + k.name + "?"))
+                          void change("POST", "/api/skills/delete", { name: k.name }, "Deleted.");
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      </section>
       <form class="panel" ref={formRef} onSubmit={submit}>
         <h3>{editing ? "Change this skill" : "Add a skill"}</h3>
         <p class="mut">
@@ -190,41 +189,60 @@ export function Skills(): JSX.Element {
           ) : null}
         </div>
       </form>
-      <h3>Share skills</h3>
-      <div class="row">
-        <button
-          class="plain"
-          type="button"
-          onClick={() => setExported(JSON.stringify({ format: "clawdot-skills", version: 1, skills }, null, 2))}
-        >
-          Export
-        </button>
-        <CopyButton text={() => exported} label="Copy export" />
-      </div>
-      <textarea
-        ref={exportRef}
-        readOnly
-        rows={6}
-        class={exported ? "" : "hidden"}
-        aria-label="Exported skills"
-        value={exported}
-      />
-      <p class="mut">
-        Imported skills start turned off, because they are text from somewhere else. Read them before you turn them on.
-      </p>
-      <textarea
-        rows={5}
-        placeholder="Paste an exported skills file here"
-        aria-label="Skills file to import"
-        value={importText}
-        onInput={(e) => setImportText(e.currentTarget.value)}
-      />
-      <div class="row">
-        <input type="file" accept="application/json,.json" aria-label="Choose a skills file" onChange={pick} />
-        <button type="button" onClick={doImport}>
-          Import as turned off
-        </button>
-      </div>
+      <section class="card share">
+        <h3>Share skills</h3>
+        <p class="mut">
+          Move your skills to another ClawDot, or keep a backup, as a small file. Nothing leaves this page until you
+          choose.
+        </p>
+        <div class="srow">
+          <div class="slabel">
+            <label>Save your skills</label>
+            <p class="mut">Downloads a file with all {skills.length} of your skills.</p>
+          </div>
+          <div class="sctl">
+            <button
+              class="plain"
+              type="button"
+              disabled={!skills.length}
+              onClick={() =>
+                saveFile(
+                  "clawdot-skills.json",
+                  JSON.stringify({ format: "clawdot-skills", version: 1, skills }, null, 2),
+                )
+              }
+            >
+              Download skills file
+            </button>
+          </div>
+        </div>
+        <div class="srow">
+          <div class="slabel">
+            <label>Add skills from a file</label>
+            <p class="mut">
+              Imported skills start turned off, because they are text from somewhere else. Read each one before you turn
+              it on.
+            </p>
+          </div>
+          <div class="sctl">
+            <input type="file" accept="application/json,.json" aria-label="Choose a skills file" onChange={pick} />
+            <details class="help">
+              <summary>Paste the text instead</summary>
+              <textarea
+                rows={5}
+                placeholder="Paste the contents of a skills file"
+                aria-label="Skills file text"
+                value={importText}
+                onInput={(e) => setImportText(e.currentTarget.value)}
+              />
+            </details>
+            {importText ? <p class="mut">A skills file is ready to add.</p> : null}
+            <button type="button" disabled={!importText} onClick={doImport}>
+              Add as turned off
+            </button>
+          </div>
+        </div>
+      </section>
     </>
   );
 }

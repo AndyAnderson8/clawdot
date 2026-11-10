@@ -177,27 +177,31 @@ export function Connections(): JSX.Element {
   const servers = ext?.mcp ?? [];
   return (
     <>
-      <h3 class="part">Connections</h3>
-      <p>
-        A connection links ClawDot to an outside tool server using MCP (the Model Context Protocol), such as Home
-        Assistant or a calendar. Its tools then show up under Tools, where you can turn each one off.
-      </p>
-      <div>
-        {ext ? (
-          <>
-            <Problems ext={ext} kind="connection" />
-            {!servers.length ? (
-              <p>No connections yet. Add one below.</p>
-            ) : (
-              <ul class="rows">
-                {servers.map((s) => (
-                  <Server key={s.name} s={s} />
-                ))}
-              </ul>
-            )}
-          </>
-        ) : null}
-      </div>
+      <section class="card">
+        <h3>
+          Connections<span class="count">{servers.length}</span>
+        </h3>
+        <p class="mut">
+          A connection links ClawDot to an outside tool server using MCP (the Model Context Protocol), such as Home
+          Assistant or a calendar. Its tools then show up under Tools, where you can turn each one off.
+        </p>
+        <div>
+          {ext ? (
+            <>
+              <Problems ext={ext} kind="connection" />
+              {!servers.length ? (
+                <p class="empty">No connections yet. Add one below.</p>
+              ) : (
+                <ul class="rows">
+                  {servers.map((s) => (
+                    <Server key={s.name} s={s} />
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : null}
+        </div>
+      </section>
       <AddConnection />
     </>
   );

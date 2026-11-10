@@ -29,6 +29,8 @@ export function Group(props: {
   intro?: string;
   specs: SettingSpec[];
   settings: SettingsData;
+  /** Extra controls shown above the rows, given the form's values and a way to change them. */
+  extra?: (f: { vals: Record<string, string>; setVals: (v: Record<string, string>) => void }) => JSX.Element;
 }): JSX.Element {
   const { title, intro, specs, settings } = props;
   const current: Record<string, string> = {};
@@ -80,13 +82,38 @@ export function Group(props: {
     }
   };
 
+  const saved = specs.filter((sp) => settings.fields[sp.key]?.saved);
+  const reset = async () => {
+    if (!confirm("Put " + title.toLowerCase() + " back to the defaults? Values saved here are removed.")) return;
+    try {
+      const next = await api<SettingsData>(
+        "PUT",
+        "/api/settings",
+        Object.fromEntries(saved.map((sp) => [sp.key, null])),
+      );
+      const merged = Object.assign({}, get().settings, next);
+      set({ settings: merged, settingsRev: get().settingsRev + 1 });
+      say("Back to the defaults.");
+    } catch (x) {
+      fail(x);
+    }
+  };
+
   return (
-    <form class="panel" onSubmit={submit}>
-      <h3>{title}</h3>
+    <form class="panel card sgroup" onSubmit={submit}>
+      <div class="head">
+        <h3>{title}</h3>
+        {saved.length ? (
+          <button class="plain small" type="button" onClick={reset}>
+            Reset to defaults
+          </button>
+        ) : null}
+      </div>
       {intro ? <p class="mut">{intro}</p> : null}
+      {props.extra ? props.extra({ vals, setVals }) : null}
       {specs.map((sp) => {
         const f = settings.fields[sp.key];
-        if (!f) return null;
+        if (!f || sp.hideWhen?.(vals)) return null;
         const id = "f-" + sp.key;
         const v = vals[sp.key] ?? "";
         const input = (e: Event) => setVals({ ...vals, [sp.key]: (e.currentTarget as HTMLInputElement).value });
@@ -138,26 +165,47 @@ export function Group(props: {
             />
           );
         } else {
-          ctl = <input id={id} type="text" value={v} autoComplete="off" disabled={sp.off} onInput={input} />;
+          ctl = (
+            <input
+              id={id}
+              type="text"
+              value={v}
+              autoComplete="off"
+              disabled={sp.off}
+              placeholder={sp.off ? "Not available yet" : undefined}
+              onInput={input}
+            />
+          );
         }
         return (
-          <div key={sp.key}>
-            <label for={id}>{labelOf(sp.key)}</label>
-            {ctl}
-            <p class="mut">
-              {FROM[f.source] ?? f.source}. {f.live ? "Applies right away." : "Needs a restart to apply."}
-              {hints[sp.key] ? " " + hints[sp.key] : ""}
-              {f.ignored
-                ? " A command-line flag is set, so a value saved here has no effect until the flag is removed."
-                : ""}
-            </p>
+          <div class="srow" key={sp.key}>
+            <div class="slabel">
+              <label for={id}>{labelOf(sp.key)}</label>
+              {hints[sp.key] ? <p class="mut">{hints[sp.key]}</p> : null}
+              {f.source !== "default" || !f.live || f.ignored ? (
+                <p class="meta">
+                  {[
+                    f.source !== "default" ? (FROM[f.source] ?? f.source) : "",
+                    f.live ? "" : "Needs a restart",
+                    f.ignored
+                      ? "A command-line flag is set, so a value saved here has no effect until the flag is removed"
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(". ") + "."}
+                </p>
+              ) : null}
+            </div>
+            <div class="sctl">{ctl}</div>
           </div>
         );
       })}
       <p class="errtext" role="alert" ref={errRef}>
         {err}
       </p>
-      <button>{"Save " + title.toLowerCase()}</button>
+      <div class="row">
+        <button>{"Save " + title.toLowerCase()}</button>
+      </div>
     </form>
   );
 }

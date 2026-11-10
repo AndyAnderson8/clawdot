@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Browser, findChrome, sleep } from "./chrome.ts";
-import { PASSWORD, RECOVERY, startMock, type Mock } from "./mock-api.ts";
+import { PASSWORD, startMock, type Mock } from "./mock-api.ts";
 import { STRESS } from "./stress.ts";
 
 const chrome = findChrome();
@@ -47,6 +47,7 @@ const HELPERS = `(() => {
         const r = el.getBoundingClientRect();
         if (r.width === 0 || el.closest('.sr') || getComputedStyle(el).position === 'fixed') continue;
         for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+          if (p.classList.contains('tabs')) break; // a strip meant to scroll sideways
           const cs = getComputedStyle(p);
           if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
           const pr = p.getBoundingClientRect();
@@ -132,8 +133,8 @@ async function open(mode: "setup" | "password" | "open", hash = "", extra: Recor
 const T = (expr: string) => b.ev(`T.${expr}`);
 const eq = async (expr: string, want: unknown, what: string) => assert.deepEqual(await b.ev(expr), want, what);
 const section = async (id: string, label: string) => {
-  await b.ev(`location.hash = '#/settings/${id}'`);
-  await b.until(`T.text('#sechead') === ${JSON.stringify(label)}`, `the ${label} section`);
+  await b.ev(`location.hash = "#/settings/${id}"`);
+  await b.until(`T.text('.tabs a[aria-current="page"]') === ${JSON.stringify(label)}`, `the ${label} section`);
 };
 const viewport = (width: number) =>
   b.send("Emulation.setDeviceMetricsOverride", { width, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -149,37 +150,11 @@ await step("sign-in: the help never tells you to run a command, and says what to
   const help = (await T(`text('#forgothelp')`)) as string;
   assert.equal(
     help,
-    "Forgot it? Use your recovery code. No code? Hold the action button for 10 seconds, or see the guide.",
+    "Hold the action button on the speaker for 10 seconds. A box to set a new password then appears here for a few minutes. Full steps are in the guide.",
   );
+  await eq(`T.q('#forgot').tagName`, "DETAILS", "the help is a folded box you can see is clickable");
   await eq(`document.body.innerText.includes('reset-admin')`, false, "no command in the page");
-});
-
-await step("forgot password: a wrong code is refused, the right one sets a password and shows a new code", async () => {
-  await open("password");
-  await b.until(`!!T.q('#forgot')`, "the forgot button");
-  await eq(`T.q('#recoverform') === null`, true, "the form starts closed");
-  await T(`click('#forgot')`);
-  await eq(`T.q('#forgot').getAttribute('aria-expanded')`, "true", "expanded state is announced");
-  await T(`set('#rcin', 'AAAAA-AAAAA-AAAAA-AAAAA')`);
-  await T(`set('#rcpw', 'brand new pass')`);
-  await T(`submit('#recoverform')`);
-  await b.until(
-    `T.text('#msg') === 'That recovery code was not accepted. Check it and try again.'`,
-    "refusal shown as the device wrote it",
-  );
-  await eq(`T.q('#msg').className`, "toast err", "error styling");
-  await eq(`!!T.q('#login')`, true, "still on the sign-in page");
-  // Typed in lower case without dashes, as a person might.
-  await T(`set('#rcin', ${JSON.stringify(RECOVERY.replaceAll("-", "").toLowerCase())})`);
-  await T(`set('#rcpw', 'brand new pass')`);
-  await T(`submit('#recoverform')`);
-  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "a new code is shown");
-  await eq(`T.text('#rcode') !== ${JSON.stringify(RECOVERY)}`, true, "it is a new code");
-  await T(`click('#rsaved')`);
-  await T(`click('#rcont')`);
-  await b.until(`!!T.q('#band')`, "signed in");
-  const call = mock.log.find((l) => l.path === "/api/recover" && l.auth === "")!;
-  assert.ok(call, "the call was made without a session");
+  await eq(`document.body.innerText.toLowerCase().includes('recovery code')`, false, "no recovery code anywhere");
 });
 
 await step("reset window: the sign-in page offers a new password only while the device says it is open", async () => {
@@ -192,33 +167,14 @@ await step("reset window: the sign-in page offers a new password only while the 
   await b.until(`!!T.q('#windowform')`, "open window: the form shows");
   await T(`set('#wpw', 'window password')`);
   await T(`submit('#windowform')`);
-  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "a new code after the reset");
-  await T(`click('#rsaved')`);
-  await T(`click('#rcont')`);
-  await b.until(`!!T.q('#band')`, "signed in");
-});
-
-await step("a signed-in administrator can make a recovery code in Settings", async () => {
-  await open("open");
-  await b.until(`!!T.q('#band')`, "portal in open mode");
-  await section("security", "Security");
-  await eq(`T.q('#recsec') === null`, true, "open mode has nothing to recover");
-  await T(`set('#newpw', 'a fresh password')`);
-  await T(`submit('#pwsec')`);
-  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "the first code after setting a password");
-  await T(`click('#rsaved')`);
-  await T(`click('#rcont')`);
-  await section("security", "Security");
-  await b.until(`!!T.q('#recsec')`, "the recovery section");
-  await T(`click('#recmake')`);
-  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "a replacement code");
-  await eq(`T.text('#rcode')`, "WXYZ2-34567-89ABC-DEFGH", "shown once");
+  await b.until(`!!T.q('#band')`, "signed in after the reset");
+  await eq(`document.body.innerText.toLowerCase().includes('recovery code')`, false, "no code is shown after a reset");
 });
 
 await step("setup: mismatched and short passwords are refused, a good one signs in", async () => {
   await open("setup");
   await b.until(`T.text('#setup h2') === 'Set up ClawDot'`, "setup screen");
-  await eq(`!!T.q('#hero') && !T.q('#band')`, true, "hero shown, header hidden");
+  await eq(`!!T.q('#hero') && !T.q('#band')`, true, "hero shown, sidebar hidden");
   await shot("setup");
   await T(`set('#pw1', 'longenough1')`);
   await T(`set('#pw2', 'different12')`);
@@ -231,15 +187,8 @@ await step("setup: mismatched and short passwords are refused, a good one signs 
   await T(`set('#pw1', 'longenough1')`);
   await T(`set('#pw2', 'longenough1')`);
   await T(`submit('#pwform')`);
-  // The recovery code is shown once, and the person must say they saved it.
-  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "the recovery code notice");
-  await eq(`T.text('#rcode')`, RECOVERY, "the code is shown");
-  await shot("recovery-code");
-  await eq(`T.q('#rcont').disabled`, true, "continue waits for the box");
-  await T(`click('#rsaved')`);
-  await T(`click('#rcont')`);
   await b.until(`!!T.q('#band') && !!T.q('#statusline')`, "the portal after setup");
-  await eq(`document.body.innerText.includes(${JSON.stringify(RECOVERY)})`, false, "the code is not shown again");
+  await eq(`document.body.innerText.toLowerCase().includes('recovery')`, false, "no recovery step is asked for");
   const call = mock.log.find((l) => l.path === "/api/setup")!;
   assert.deepEqual(call.body, { mode: "password", password: "longenough1" });
   await eq(`T.q('#pw1') === null`, true, "setup form gone");
@@ -291,105 +240,113 @@ await step("an expired session sends you back to sign in", async () => {
   await T(`submit('#loginform')`);
   await b.until(`!!T.q('#band')`, "portal");
   mock.state["session"] = "other"; // the device forgot us
-  await b.ev(`location.hash = '#/reminders'`); // the tab's first fetch is refused
+  await b.ev(`location.hash = '#/clock'`); // the tab's first fetch is refused
   await b.until(`!!T.q('#login')`, "sign-in screen after a 401");
   await eq(`T.text('#msg')`, "Please sign in again.", "explanation");
 });
 
 // ---------------------------------------------------------------- the shell
-await step("shell: four destinations, titles, current page, unknown address", async () => {
+await step("shell: five destinations, titles, current page, home link, unknown address", async () => {
   await open("open");
   await b.until(`!!T.q('#band') && !!T.q('#statusline')`, "the dashboard");
-  await eq(`T.text('#devname')`, "Kitchen Dot", "device name from settings");
+  await eq(`T.text('#devname')`, "Kitchen Dot", "the speaker's name is on Home");
+  await eq(`T.q('#home').getAttribute('aria-label')`, "ClawDot, go to Home", "the logo is the way home");
   await eq(
     `T.all('#tabs a').map((a) => a.textContent)`,
-    ["Dashboard", "Reminders", "Activity", "Settings"],
-    "four destinations, Dashboard first (REQ-CFG-026)",
+    ["Home", "Clock", "Bluetooth", "Features", "Settings"],
+    "five destinations, Home first",
   );
-  await eq(`T.all('#tabs a[aria-current="page"]').map((a) => a.id)`, ["tab-dashboard"], "dashboard is current first");
-  await b.until(`document.title === "Dashboard - ClawDot"`, "the Dashboard title");
+  await eq(`T.all('#tabs a[aria-current="page"]').map((a) => a.id)`, ["tab-dashboard"], "home is current first");
+  await b.until(`document.title === "Home - ClawDot"`, "the Home title");
   await T(`click('#tab-settings')`);
   await b.until(
     `document.title === "Settings - ClawDot" && T.q('#tab-settings').getAttribute('aria-current') === 'page'`,
     "settings",
   );
   await eq(`document.activeElement.id`, "panel", "focus moves to the page content after a move");
+  await T(`click('#home')`);
+  await b.until(
+    `!!T.q('#statusline') && T.q('#tab-dashboard').getAttribute('aria-current') === 'page'`,
+    "the logo goes home",
+  );
   await b.ev(`location.hash = '#/nonsense'`);
-  await b.until(`!!T.q('#statusline')`, "an unknown address falls back to the Dashboard");
+  await b.until(`!!T.q('#statusline')`, "an unknown address falls back to Home");
   await eq(`T.text('#ver')`, "ClawDot 0.1.0-test", "footer version");
   await T(`click('#newlink')`);
   await b.until(`T.q('#about')?.open === true`, "the release notes open from the footer link");
   await eq(`T.all('#panel [role="tab"], #panel [role="listbox"], [role="combobox"]').length`, 0, "no custom widgets");
 });
 
-await step("Dashboard: live state, attention with fix links, next up, recent, quick add, test speak", async () => {
+await step(
+  "Home: the device, what needs attention, the numbers, the chart, recent; nothing to manage here",
+  async () => {
+    await open("open");
+    await b.until(
+      `T.text('#statusline') === 'Ready.' && T.all('#attention li').length === 1 && (T.text('#statusdetail') ?? '').startsWith('Last heard')`,
+      "home",
+    );
+    await shot("home");
+    await shot("home-wide", { width: 1100 });
+    await eq(`T.q('#statusblock .sdot').className.includes('live')`, true, "the dot shows the speaker is up");
+    await eq(`T.text('#devname')`, "Kitchen Dot", "the speaker's name is the heading");
+    await eq(
+      `T.text('#statusdetail').startsWith('Last heard')`,
+      true,
+      "last heard comes from the voice turns in the log",
+    );
+    await eq(`T.text('#attention h3')`, "One thing needs your attention", "the band says how many");
+    await eq(`T.text('#attention li strong')`, "No password", "open mode needs attention");
+    await eq(`T.q('#attention li a').getAttribute('href')`, "#/settings/security", "with a fix link");
+    await eq(`T.text('#stat-requests .statvalue')`, "3", "requests today");
+    await eq(`T.text('#stat-heard .statvalue').endsWith('ago')`, true, "last heard as a number");
+    await eq(`T.all('#usage .cbar').length`, 14, "the chart shows fourteen days");
+    await b.until(`T.rows('#recent ul.rows > li').length === 6`, "six recent happenings, newest first");
+    await eq(`T.all('#recent .badge').length`, 6, "each with an outcome");
+    await eq(`T.all('#panel img, #panel script').length`, 0, "no markup from event text");
+    // Timers, alarms and the test phrase are not on Home: they have their own places.
+    await eq(
+      `T.q('#nextup') === null && T.q('#quickadd') === null && T.q('#sayform') === null`,
+      true,
+      "no reminders or test box",
+    );
+    await T(`click('#attention li a')`);
+    await b.until(
+      `T.text('.tabs a[aria-current="page"]') === 'Security'`,
+      "the fix link goes to the right settings section",
+    );
+  },
+);
+
+await step("Home: the look of the device is a choice kept in this browser", async () => {
   await open("open");
-  await b.until(
-    `T.text('#statusline') === 'Ready.' && T.all('#attention li').length === 1 && (T.text('#statusdetail') ?? '').startsWith('Last heard')`,
-    "dashboard",
-  );
-  await shot("dashboard");
-  await shot("dashboard-wide", { width: 1100 });
-  await eq(`T.q('#statusblock .ring').getAttribute('data-state')`, "idle", "the ring shows the state");
-  await eq(
-    `T.text('#statusdetail').startsWith('Last heard')`,
-    true,
-    "last heard comes from the voice turns in the log",
-  );
-  await eq(`T.text('#attention li strong')`, "No password", "open mode needs attention");
-  await eq(`T.q('#attention li a').getAttribute('href')`, "#/settings/security", "with a fix link");
-  await b.until(`T.rows('#nextup ul.rows > li').length === 2`, "two upcoming items");
-  await eq(
-    `T.rows('#nextup ul.rows > li')[0].includes('Rings in 10 min')`,
-    true,
-    "next up reads like the Reminders list",
-  );
-  await b.until(`T.rows('#recent ul.rows > li').length === 6`, "six recent happenings, newest first");
-  await eq(`T.all('#recent .badge').length`, 6, "each with an outcome");
-  await eq(`T.all('#panel img, #panel script').length`, 0, "no markup from event text");
-  // quick add: a timer in one form
-  await T(`set('#qamount', '15')`);
-  await T(`set('#qlabel', 'tea')`);
-  await T(`submit('#quickadd')`);
-  await b.until(`T.rows('#nextup ul.rows > li').length === 3`, "timer added");
-  assert.deepEqual(mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").pop()!.body, {
-    kind: "timer",
-    label: "tea",
-    seconds: 900,
-  });
-  await T(`clickText('#nextup ul.rows > li:nth-child(3)', 'Cancel')`);
-  await b.until(`T.rows('#nextup ul.rows > li').length === 2`, "cancelled from the dashboard");
-  // test speak
+  await b.until(`!!T.q('#statusblock')`, "home");
+  await T(`click('details.looks summary')`);
+  await eq(`T.all('.lookopt').length`, 3, "three looks to choose from");
+  await T(`click('.lookopt:nth-child(3) input')`);
+  await eq(`T.q('.lookopt:nth-child(3)').className.includes('on')`, true, "the choice is marked");
+  await eq(`localStorage.getItem('clawdot-look')`, "computer", "and remembered by this browser");
+});
+
+await step("Test the speaker (Settings, Assistant): sends the phrase, and says why it cannot, with a fix", async () => {
+  await open("open");
+  await b.until(`!!T.q('#band')`, "portal");
+  await section("assistant", "Assistant");
+  await b.until(`!!T.q('#sayform')`, "the test box");
   await T(`set('#speaktext', 'Hello')`);
   await T(`submit('#sayform')`);
   await b.until(`T.text('#msg') === 'Sent. Listen for the speaker.'`, "toast");
   assert.deepEqual(mock.log.find((l) => l.path === "/api/speak")!.body, { text: "Hello" });
   await eq(`T.q('#speaktext').value`, "", "box cleared");
-  await eq(
-    `T.all('#sayform button[disabled]').length`,
-    2,
-    "talk and mute are shown disabled, with the reason beside them",
-  );
-  await T(`click('#attention li a')`);
-  await b.until(`T.text('#sechead') === 'Security'`, "the fix link goes to the right settings section");
-});
-
-await step("Dashboard: says why the speaker cannot talk, and where to fix it (REQ-CFG-070)", async () => {
   // The device says so in its status: the box is disabled before anything is tried.
-  await open("open", "", {
+  await open("open", "#/settings/assistant", {
     statusExtra: { speaker: { connected: false }, voice: { configured: false }, muted: false },
   });
-  await b.until(`T.text('#statusline') === 'No speaker is connected.'`, "no speaker");
+  await b.until(`!!T.q('#sayform')`, "the test box");
   await eq(`T.q('#speaktext').disabled && T.q('#saybtn').disabled`, true, "test speak is disabled");
   await eq(`T.text('#sayblock').includes('No voice is set up')`, true, "with the reason");
   await eq(`T.q('#sayfix').getAttribute('href')`, "#/settings/assistant", "and the fix link");
-  await eq(
-    `T.all('#attention li strong').map((x) => x.textContent)`,
-    ["No speaker connected", "No voice set up", "No password"],
-    "each problem is listed",
-  );
   // The device did not say, but refuses the phrase: the reason it gives is shown with its fix.
-  await open("open", "", {
+  await open("open", "#/settings/assistant", {
     speakRefusal: { status: 409, reason: "no_speaker", message: "No speaker is connected. Start it." },
   });
   await b.until(`!!T.q('#speaktext') && !T.q('#speaktext').disabled`, "enabled when the status is silent");
@@ -397,6 +354,21 @@ await step("Dashboard: says why the speaker cannot talk, and where to fix it (RE
   await T(`submit('#sayform')`);
   await b.until(`!!T.q('#sayblock')`, "the refusal is shown");
   await eq(`T.q('#sayfix').getAttribute('href')`, "#/settings/about", "with its fix link");
+});
+
+await step("Home: says why the speaker is not connected, and lists what to fix (REQ-CFG-070)", async () => {
+  await open("open", "", {
+    statusExtra: { speaker: { connected: false }, voice: { configured: false }, muted: false },
+  });
+  await b.until(`T.text('#statusline') === 'Waiting for a speaker'`, "no speaker");
+  await eq(`T.q('#statusblock .sdot').className.includes('live')`, false, "the dot is not lit");
+  await eq(`T.text('#statusdetail').includes('On a Dot this connects by itself')`, true, "says what it means");
+  await eq(
+    `T.all('#attention li strong').map((x) => x.textContent)`,
+    ["No speaker connected", "No voice set up", "No password"],
+    "each problem is listed",
+  );
+  await eq(`T.text('#attention h3')`, "3 things need your attention", "the band counts them");
   await open("open", "", { statusExtra: { muted: true, quiet_hours: { set: true, active: true } } });
   await b.until(`T.text('#statusline') === 'Muted.'`, "muted");
   await eq(
@@ -406,14 +378,15 @@ await step("Dashboard: says why the speaker cannot talk, and where to fix it (RE
   );
 });
 
-await step("Reminders: list, edit, cancel, add timer and alarm, validation", async () => {
-  await open("open", "#/reminders");
+await step("Clock: list, edit, cancel, add timer and alarm, validation", async () => {
+  await open("open", "#/clock");
   await b.until(`T.rows().length === 2`, "two rows");
-  await shot("reminders");
+  await shot("clock");
   await eq(`T.rows()[1].includes('<b>work</b>')`, true, "label shown as text");
   await eq(`T.q('#panel strong b') === null`, true, "no markup from the label");
   await eq(`T.rows()[1].includes('Weekdays at')`, true, "repeat text");
   await eq(`T.rows()[0].startsWith('pasta') && T.rows()[0].includes('Rings in 10 min')`, true, "timer text");
+  await eq(`T.text('#clocklist h3').startsWith('Coming up')`, true, "the list has a title and a count");
   await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Edit')`);
   await eq(`T.q('#rlabel').value`, "pasta", "edit loads the label");
   await eq(`T.text('#panel form h3')`, "Change this timer", "edit title");
@@ -424,7 +397,7 @@ await step("Reminders: list, edit, cancel, add timer and alarm, validation", asy
   const put = mock.log.find((l) => l.method === "PUT")!;
   assert.equal(put.path, "/api/schedule/1");
   assert.deepEqual(put.body, { kind: "timer", label: "tea", seconds: 1200 });
-  await eq(`T.text('#panel form h3')`, "Add a timer, alarm, or reminder", "form left edit mode");
+  await eq(`T.text('#panel form h3')`, "Add a timer, alarm or reminder", "form left edit mode");
   await T(`clickText('#panel ul.rows > li:nth-child(2)', 'Cancel')`);
   await b.until(`T.rows().length === 1`, "cancelled");
   assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/schedule/2"));
@@ -441,7 +414,19 @@ await step("Reminders: list, edit, cancel, add timer and alarm, validation", asy
   await T(`set('#rdate', '')`);
   await T(`submit('#panel form.panel')`);
   await eq(`T.text('#msg')`, "Pick a date and a time for the reminder.", "validation message");
-  await eq(`T.text('#panel p.mut:not(.row)')?.length > 0`, true, "zone note present");
+  await eq(`(T.text('#clocklist p.mut') ?? '').length > 0`, true, "zone note present");
+});
+
+await step("Bluetooth: says plainly that it is not available yet, and offers nothing that would not work", async () => {
+  await open("open", "#/bluetooth");
+  await b.until(`!!T.q('#btcard')`, "the page");
+  await eq(`T.text('#btcard h3')`, "Paired devices", "the list has a title");
+  await eq(`T.text('#btcard .blank h3')`, "Bluetooth is not available on this device yet", "says so");
+  await eq(`T.q('#btcard button').disabled`, true, "pairing is shown disabled");
+  assert.ok(
+    mock.log.every((l) => !l.path.includes("bluetooth")),
+    "no made-up request",
+  );
 });
 
 await step("Activity: events from inputs are shown as text", async () => {
@@ -462,12 +447,34 @@ await step("Activity: events from inputs are shown as text", async () => {
   await eq(`T.text('#eventlist .mut').includes('input')`, true, "says inputs, not agents");
 });
 
-await step("Notes: add, refuse, forget one, forget all after a confirmation, off state", async () => {
-  await open("open", "#/settings/notes");
-  await b.until(`T.rows("#notelist > li").length === 1`, "one note");
-  await shot("settings-notes");
-  await eq(`T.rows("#notelist > li")[0].includes("my printer is <b>Pixel</b>")`, true, "note shown literally");
-  await eq(`T.all("#panel #notelist b").length`, 0, "no markup from a note");
+await step("Features: switches turn abilities on and off right away", async () => {
+  await open("open", "#/features");
+  await b.until(`T.all('.features .feature').length === 4`, "four features");
+  await shot("features");
+  await eq(
+    `T.all('.feature h3').map((h) => h.textContent)`,
+    ["Remember things", "Say the plan first", "Say what it is doing", "Practice mode"],
+    "in plain words",
+  );
+  await eq(
+    `T.all('.feature input.switch').every((i) => i.getAttribute('aria-describedby'))`,
+    true,
+    "each switch has its explanation",
+  );
+  const before = await b.ev<boolean>(`T.q('#feat-notes').checked`);
+  await T(`click('#feat-notes')`);
+  await b.until(`T.q('#feat-notes').checked === ${!before}`, "the switch moved");
+  const put = mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!;
+  assert.deepEqual(put.body, { notes: !before });
+  await eq(`T.q('#card-notes .more').getAttribute('href')`, "#/settings/memory", "memory is managed in Settings");
+});
+
+await step("Memory (Settings): add, refuse, forget one, forget all after a confirmation, off state", async () => {
+  await open("open", "#/settings/memory");
+  await b.until(`T.rows("#notelist > li").length === 1`, "one memory");
+  await shot("settings-memory");
+  await eq(`T.rows("#notelist > li")[0].includes("my printer is <b>Pixel</b>")`, true, "shown literally");
+  await eq(`T.all("#panel #notelist b").length`, 0, "no markup from a memory");
   await T(`set("#note-text", "the spare key is under the pot")`);
   await T(`submit("#noteform")`);
   await b.until(`T.rows("#notelist > li").length === 2`, "added");
@@ -482,7 +489,7 @@ await step("Notes: add, refuse, forget one, forget all after a confirmation, off
   // forgetting asks first: declining does nothing
   await b.ev(`window.confirm = () => false`);
   await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
-  await eq(`T.rows("#notelist > li").length`, 2, "declined confirmation keeps the note");
+  await eq(`T.rows("#notelist > li").length`, 2, "declined confirmation keeps the memory");
   await b.ev(`window.confirm = () => true`);
   await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
   await b.until(`T.rows("#notelist > li").length === 1`, "one forgotten");
@@ -492,9 +499,10 @@ await step("Notes: add, refuse, forget one, forget all after a confirmation, off
   assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/notes"));
   mock.state["notesOn"] = false;
   await b.ev(`location.hash = "#/dashboard"`);
-  await section("notes", "Notes");
+  await section("memory", "Memory");
   await b.until(`!!T.q("#notesoff")`, "the off notice");
-  await eq(`T.q("#note-text").disabled`, true, "adding is disabled while notes are off");
+  await eq(`T.q("#notesoff a").getAttribute("href")`, "#/features", "it says where to turn it on");
+  await eq(`T.q("#note-text").disabled`, true, "adding is disabled while memory is off");
 });
 
 await step("Activity: plain outcomes, filters, paging, text only, read-only", async () => {
@@ -578,9 +586,12 @@ await step("Activity: older records load a page at a time", async () => {
   await b.until(`T.rows("#auditlist > li").length === 40 && T.q("#auditmore") === null`, "all 40, no more button");
 });
 
+const webCount = (n: number) =>
+  `(T.all('h4.sub').find((h) => h.textContent.startsWith('Web tools'))?.querySelector('.count')?.textContent ?? '') === '${n}'`;
+
 await step("Tools: turn off, add a web tool, delete", async () => {
   await open("open", "#/settings/tools");
-  await b.until(`T.all('h3').some((h) => h.textContent === 'Web tools (1)')`, "web tools heading");
+  await b.until(webCount(1), "web tools heading with its count");
   await shot("settings-tools");
   await eq(`T.q('#tier-set_light').value`, "costly", "a web tool starts at the careful level");
   await eq(
@@ -618,7 +629,7 @@ await step("Tools: turn off, add a web tool, delete", async () => {
   await T(`clickText('#part-tools form.panel', 'Add a value the assistant fills in')`);
   await T(`set('#part-tools form .row input[aria-label="Value name"]', 'room')`);
   await T(`submit('#part-tools form.panel')`);
-  await b.until(`T.all('h3').some((h) => h.textContent === 'Web tools (2)')`, "tool added");
+  await b.until(webCount(2), "tool added");
   const post = mock.log.find((l) => l.method === "POST" && l.path === "/api/tools")!;
   assert.deepEqual(post.body, {
     name: "lamp",
@@ -631,12 +642,13 @@ await step("Tools: turn off, add a web tool, delete", async () => {
   await eq(`T.q('#builtin-tools').open`, true, "built-in section stays open across redraws");
   await eq(`T.q('#tool-name').value`, "", "form cleared");
   await T(`clickText('#part-tools ul.rows > li:nth-child(2)', 'Delete')`);
-  await b.until(`T.all('h3').some((h) => h.textContent === 'Web tools (1)')`, "deleted");
+  await b.until(webCount(1), "deleted");
 });
 
 await step("Connections: test, add, turn off, remove", async () => {
+  const servers = "#part-connections section.card > div > ul.rows > li";
   await open("open", "#/settings/tools");
-  await b.until(`T.rows('#part-connections > div > ul.rows > li').length === 1`, "one server");
+  await b.until(`T.rows('${servers}').length === 1`, "one server");
 
   await eq(`T.text('#part-connections .badge.good')`, "Connected", "status badge");
   await T(`set('#conn-name', 'cal')`);
@@ -647,19 +659,19 @@ await step("Connections: test, add, turn off, remove", async () => {
     "test result",
   );
   await T(`submit('#part-connections form.panel')`);
-  await b.until(`T.rows('#part-connections > div > ul.rows > li').length === 2`, "added");
+  await b.until(`T.rows('${servers}').length === 2`, "added");
   assert.deepEqual(mock.log.find((l) => l.method === "POST" && l.path === "/api/connections")!.body, {
     name: "cal",
     url: "https://cal.local/mcp",
     confirm: true,
   });
-  await T(`clickText('#part-connections > div > ul.rows > li:nth-child(2)', 'Turn off')`);
+  await T(`clickText('${servers}:nth-child(2)', 'Turn off')`);
   await b.until(`T.all('#part-connections .badge.bad').length === 1`, "Off badge");
-  await T(`clickText('#part-connections > div > ul.rows > li:nth-child(2)', 'Remove')`);
-  await b.until(`T.rows('#part-connections > div > ul.rows > li').length === 1`, "removed");
+  await T(`clickText('${servers}:nth-child(2)', 'Remove')`);
+  await b.until(`T.rows('${servers}').length === 1`, "removed");
 });
 
-await step("Skills: add, edit, turn off, export, import, delete", async () => {
+await step("Skills: add, edit, turn off, download, add from text, delete", async () => {
   await open("open", "#/settings/tools");
   await b.until(`T.rows('#part-skills ul.rows > li').length === 1`, "one skill");
 
@@ -686,17 +698,29 @@ await step("Skills: add, edit, turn off, export, import, delete", async () => {
   await b.until(`T.rows('#part-skills ul.rows > li')[1].includes('and the news')`, "edit saved");
   await T(`clickText('#part-skills ul.rows > li:nth-child(2)', 'Turn off')`);
   await b.until(`T.all('#part-skills .badge').filter((x) => x.textContent === 'Off').length === 1`, "turned off");
-  await T(`clickText('#part-skills', 'Export')`);
-  await eq(`JSON.parse(T.q('textarea[aria-label="Exported skills"]').value).format`, "clawdot-skills", "export JSON");
-  await T(`set('textarea[aria-label="Skills file to import"]', 'not json')`);
-  await T(`clickText('#part-skills', 'Import as turned off')`);
-  await eq(`T.text('#msg')`, "That is not a skills file. Paste the text that Export gave you.", "bad import message");
+  // downloading: catch the file instead of saving it
+  await b.ev(`(() => {
+    window.__files = [];
+    URL.createObjectURL = (blob) => { window.__files.push(blob); return 'blob:test'; };
+    HTMLAnchorElement.prototype.click = function () { window.__names = (window.__names || []).concat(this.download); };
+  })()`);
+  await T(`clickText('#part-skills .share', 'Download skills file')`);
+  await b.until(`window.__files.length === 1`, "the skills offered as a file");
+  await eq(`window.__names[0]`, "clawdot-skills.json", "file name");
+  await eq(`(async () => JSON.parse(await window.__files[0].text()).format)()`, "clawdot-skills", "file content");
+  // adding from text: the button waits until there is something to add
+  await eq(`T.q('#part-skills .share details').open`, false, "pasting is folded away until wanted");
+  await T(`click('#part-skills .share details summary')`);
+  await eq(`T.all('#part-skills .share .sctl > button').at(-1).disabled`, true, "nothing to add yet");
+  await T(`set('textarea[aria-label="Skills file text"]', 'not json')`);
+  await T(`clickText('#part-skills .share', 'Add as turned off')`);
+  await eq(`T.text('#msg')`, "That is not a skills file. Paste the contents of a skills file.", "bad file message");
   await T(
-    `set('textarea[aria-label="Skills file to import"]', '{"format":"clawdot-skills","version":1,"skills":[{"name":"Imported","instructions":"x","tools":[]}]}')`,
+    `set('textarea[aria-label="Skills file text"]', '{"format":"clawdot-skills","version":1,"skills":[{"name":"Imported","instructions":"x","tools":[]}]}')`,
   );
-  await T(`clickText('#part-skills', 'Import as turned off')`);
-  await b.until(`T.rows('#part-skills ul.rows > li').length === 3`, "imported");
-  await eq(`T.q('textarea[aria-label="Skills file to import"]').value`, "", "import box cleared");
+  await T(`clickText('#part-skills .share', 'Add as turned off')`);
+  await b.until(`T.rows('#part-skills ul.rows > li').length === 3`, "added");
+  await eq(`T.q('textarea[aria-label="Skills file text"]').value`, "", "the box is cleared");
   await T(`clickText('#part-skills ul.rows > li:nth-child(3)', 'Delete')`);
   await b.until(`T.rows('#part-skills ul.rows > li').length === 2`, "deleted");
 });
@@ -730,7 +754,7 @@ await step("Inputs: create shows the token once, rotate, delete", async () => {
   await b.until(`T.rows().length === 1`, "deleted");
 });
 
-await step("Settings: save one group, errors stay in their form, restart notice, password", async () => {
+await step("Settings: save one group, errors stay in their form, provider presets, password", async () => {
   await open("open", "#/settings/general");
   await b.until(`!!T.q('#f-device_name')`, "settings forms");
   await shot("settings-general");
@@ -744,14 +768,35 @@ await step("Settings: save one group, errors stay in their form, restart notice,
   assert.ok(!mock.log.some((l) => l.method === "PUT" && l.path === "/api/settings"));
   await T(`set('#f-device_name', 'Den')`);
   await b.ev(`T.q('#f-device_name').form.requestSubmit()`);
-  await b.until(`T.text('#devname') === 'Den'`, "header follows the saved name");
+  await b.until(`T.text('#msg') === 'Saved.'`, "saved toast");
   assert.deepEqual(mock.log.find((l) => l.method === "PUT" && l.path === "/api/settings")!.body, {
     device_name: "Den",
   });
-  await eq(`T.text('#msg')`, "Saved.", "saved toast");
+  await b.ev(`location.hash = '#/'`);
+  await b.until(`T.text('#devname') === 'Den'`, "Home follows the saved name");
+  await eq(
+    `T.text('.wordmark').replace(/\\s/g, '')`,
+    "ClawDt",
+    "the brand stays ClawDot, drawn with the ring for the o",
+  );
   await section("assistant", "Assistant");
   await shot("settings-assistant");
   await eq(`T.q('#f-voice').disabled`, true, "voice disabled without a speech provider");
+  await eq(`T.q('#f-voice').getAttribute('placeholder')`, "Not available yet", "and it says why it is empty");
+  // a service is picked by name; the address is only asked for when it has to be
+  await eq(
+    `T.q('#provider').required && T.q('#provider').tagName === 'SELECT'`,
+    true,
+    "the service is a real dropdown",
+  );
+  await eq(`T.q('#provider').value`, "custom", "an address that is no known service shows as something else");
+  await eq(`!!T.q('#f-llm_url')`, true, "and the address stays editable");
+  await T(`set('#provider', 'openai')`);
+  await eq(`T.q('#f-llm_url') === null`, true, "a known service hides its address");
+  await eq(`T.q('#f-llm_model').value`, "gpt-4o-mini", "the preset fills in a model");
+  await eq(`T.q('#f-llm_key_env').value`, "OPENAI_API_KEY", "and the usual key variable");
+  await T(`set('#provider', 'custom')`);
+  await b.until(`!!T.q('#f-llm_url')`, "something else asks for the address");
   await T(`set('#f-llm_url', 'http://insecure.example.com')`);
   await b.ev(`T.q('#f-llm_url').form.requestSubmit()`);
   await b.until(
@@ -760,14 +805,12 @@ await step("Settings: save one group, errors stay in their form, restart notice,
   );
   await eq(`T.all('.errtext').filter((e) => e.textContent).length`, 1, "one error, in its own form");
   await section("security", "Security");
+  await eq(`document.body.innerText.toLowerCase().includes('recovery')`, false, "no recovery code in Settings");
   await T(`set('#newpw', 'brand new password')`);
   await T(`submit('#pwsec')`);
   await b.until(`T.q('#banner') === null`, "banner gone once a password is set");
   assert.deepEqual(mock.log.find((l) => l.path === "/api/admin/password")!.body, { password: "brand new password" });
-  await b.until(`!!T.q('#rsaved')`, "the first recovery code is offered");
-  await T(`click('#rsaved')`);
-  await T(`click('#rcont')`);
-  await section("about", "About and diagnostics");
+  await section("about", "About");
   await T(`click('#about summary')`);
   await b.until(`T.text('#notes')?.includes('First release')`, "release notes loaded");
 });
@@ -778,22 +821,22 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
   await eq(`document.documentElement.dataset.theme`, "light", "light by default");
   // The system prefers dark, and the page stays light.
   await b.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
-  await eq(`getComputedStyle(document.body).backgroundColor`, "rgb(255, 255, 255)", "light on a dark system");
+  await eq(`getComputedStyle(document.body).backgroundColor`, "rgb(238, 243, 243)", "light on a dark system");
   await eq(
     `T.all('#themeform input[type=radio]').map((r) => r.value + ':' + r.checked)`,
     ["light:true", "dark:false", "system:false"],
     "radios",
   );
   await T(`click('#themeform input[value="system"]')`);
-  await eq(`getComputedStyle(document.body).backgroundColor`, "rgb(27, 27, 27)", "match system follows a dark system");
+  await eq(`getComputedStyle(document.body).backgroundColor`, "rgb(11, 26, 31)", "match system follows a dark system");
   await b.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
   await eq(
     `getComputedStyle(document.body).backgroundColor`,
-    "rgb(255, 255, 255)",
+    "rgb(238, 243, 243)",
     "match system follows a light system",
   );
   await T(`click('#themeform input[value="dark"]')`);
-  await eq(`getComputedStyle(document.body).backgroundColor`, "rgb(27, 27, 27)", "dark by explicit choice");
+  await eq(`getComputedStyle(document.body).backgroundColor`, "rgb(11, 26, 31)", "dark by explicit choice");
   await eq(`localStorage.getItem('clawdot-theme')`, "dark", "remembered by this browser");
   await shot("settings-general-dark", { dark: true });
   await b.goto(mock.url + "/#/settings/general");
@@ -802,37 +845,40 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
   await b.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
 });
 
-await step("Settings: sections, phone navigation, native controls, no horizontal scroll at 360 px", async () => {
+await step("Settings: sections in a tab strip, native dropdowns, no horizontal scroll at 360 px", async () => {
   await open("open", "#/settings");
-  await b.until(`T.all('.index a').length === 8`, "the section list");
+  await b.until(`T.all('.tabs a').length === 8`, "the section tabs");
   await eq(
-    `T.all('.index a').map((a) => a.textContent)`,
-    ["General", "Assistant", "Inputs", "Tools and connections", "Notes", "Safety", "Security", "About and diagnostics"],
+    `T.all('.tabs a').map((a) => a.textContent)`,
+    ["General", "Assistant", "Inputs", "Tools", "Memory", "Safety", "Security", "About"],
     "every kind of configuration has a named section",
   );
+  await eq(`T.all('.tabs a[aria-current="page"]').map((a) => a.textContent)`, ["General"], "the first is shown");
+  await T(`click('.tabs a[href="#/settings/safety"]')`);
+  await b.until(`T.text('.tabs a[aria-current="page"]') === 'Safety'`, "a section");
   await viewport(360);
-  const shown = (sel: string) => `getComputedStyle(T.q('${sel}')).display !== 'none'`;
-  await eq(shown(".sections"), true, "the phone shows the list first");
-  await eq(shown("#pane"), false, "and not a section");
-  await T(`click('.index a[href="#/settings/safety"]')`);
-  await b.until(`T.text('#sechead') === 'Safety'`, "a section");
-  await eq(shown(".sections"), false, "the section replaces the list on a phone");
-  await T(`click('.back')`);
-  await b.until(`location.hash === '#/settings'`, "back to the list");
-  const pages = ["#/dashboard", "#/reminders", "#/activity"];
-  for (const id of ["general", "assistant", "inputs", "tools", "notes", "safety", "security", "about"])
+  await eq(`document.documentElement.scrollWidth <= document.documentElement.clientWidth`, true, "no sideways scroll");
+  const pages = ["#/dashboard", "#/clock", "#/bluetooth", "#/features", "#/activity"];
+  for (const id of ["general", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
     pages.push("#/settings/" + id);
   for (const hash of pages) {
     await b.ev(`location.hash = '${hash}'`);
     await b.ev("T.settle()");
     await b.ev("new Promise((r) => setTimeout(r, 250))");
-    // Selects are the platform's own: real elements with the system appearance, no custom popups.
-    await eq(
-      `T.all('select').every((e) => getComputedStyle(e).appearance !== 'none')`,
-      true,
-      `native select appearance on ${hash}`,
-    );
+    // Selects are the platform's own list: real elements, and nothing built to imitate one.
+    await eq(`T.all('select').every((e) => e.tagName === 'SELECT')`, true, `real selects on ${hash}`);
     await eq(`T.all('[role=listbox], [role=combobox], [aria-haspopup]').length`, 0, `no custom dropdowns on ${hash}`);
+    // A dropdown with nothing chosen must look like one that can be opened, and a disabled field must look disabled.
+    await eq(
+      `T.all('select:not(:disabled)').every((e) => getComputedStyle(e).backgroundImage.includes('gradient'))`,
+      true,
+      `every dropdown has an arrow on ${hash}`,
+    );
+    await eq(
+      `T.all('input:disabled:not([type=checkbox]):not([type=radio]), textarea:disabled').every((e) => getComputedStyle(e).borderStyle === 'dashed')`,
+      true,
+      `disabled fields look disabled on ${hash}`,
+    );
   }
   await eq(
     `T.all('input[type=date], input[type=time], input[type=checkbox], input[type=radio], select').every((e) => e.tagName === 'SELECT' || e.tagName === 'INPUT')`,
@@ -842,9 +888,32 @@ await step("Settings: sections, phone navigation, native controls, no horizontal
   await viewport(1100);
 });
 
+await step("every page uses the same card pattern: titles, rows, one width for inputs and text areas", async () => {
+  const pages = ["#/clock", "#/bluetooth", "#/features", "#/activity"];
+  for (const id of ["general", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
+    pages.push("#/settings/" + id);
+  for (const hash of pages) {
+    await open("open", hash);
+    await b.until(`!!T.q('#panel .card, #panel form.panel')`, `cards on ${hash}`);
+    // Nothing sits loose on the page grey except the page title, a lead paragraph and the section tabs.
+    const loose = await b.ev<string[]>(`(() => {
+      const root = document.querySelector('#panel .page > .stack, #panel .page > .features, #panel .page > .pane, #panel .page');
+      return [...(root?.children ?? [])]
+        .filter((e) => !e.matches('.card, form.panel, .soon, .stack, .features, header.pagehead, nav.tabs, p.lead, .pane, details'))
+        .map((e) => e.tagName.toLowerCase() + (e.className ? '.' + e.className : ''));
+    })()`);
+    assert.deepEqual(loose, [], `loose blocks on ${hash}`);
+    // One look for every text control: inputs and text areas start at the same left edge and share a width.
+    const widths = await b.ev<number[]>(
+      `[...new Set(T.all('.sctl > input[type=text], .sctl > textarea, .sctl > select').map((e) => Math.round(e.getBoundingClientRect().width)))]`,
+    );
+    assert.ok(widths.length <= 1, `controls on ${hash} have different widths: ${widths.join(", ")}`);
+  }
+});
+
 await step("every page fits a 360 px and a 320 px phone with long content and a wide font", async () => {
-  const pages = ["#/dashboard", "#/reminders", "#/activity"];
-  for (const id of ["general", "assistant", "inputs", "tools", "notes", "safety", "security", "about"])
+  const pages = ["#/dashboard", "#/clock", "#/bluetooth", "#/features", "#/activity"];
+  for (const id of ["general", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
     pages.push("#/settings/" + id);
   const bad: string[] = [];
   for (const [content, fixture] of [
@@ -885,7 +954,7 @@ await step("every page fits a 360 px and a 320 px phone with long content and a 
   await viewport(1100);
 });
 
-await step("Settings: agent settings show their source, validate, and save booleans and times", async () => {
+await step("Settings: numbers show their source and range, save only what changed, reset to defaults", async () => {
   await open("open", "#/settings/assistant");
   await b.until(`!!T.q('#f-agent_max_rounds')`, "agent settings form");
   await eq(
@@ -894,43 +963,37 @@ await step("Settings: agent settings show their source, validate, and save boole
     "range is offered to the browser",
   );
   await eq(
-    `T.q('#f-agent_max_tool_calls').closest('div').textContent.includes('Configuration file. Applies right away.')`,
+    `T.q('#f-agent_max_tool_calls').closest('.srow').textContent.includes('Configuration file.')`,
     true,
-    "source and liveness shown",
+    "a value from the file says so",
   );
-  await eq(`T.q('#f-plan_speech').tagName`, "SELECT", "a toggle is a list of On and Off");
-  await eq(`T.q('#f-plan_speech').value`, "true", "current value");
+  await eq(
+    `T.q('#f-agent_max_rounds').closest('.srow').querySelector('.meta') === null`,
+    true,
+    "a plain default says nothing: no noise",
+  );
+  await eq(`T.q('#f-plan_speech') === null`, true, "on and off switches live under Features, not here");
   // out of range: the browser stops it before anything is sent
   await T(`set('#f-agent_max_rounds', '99')`);
   await b.ev(`T.q('#f-agent_max_rounds').form.requestSubmit()`);
   await eq(`T.q('#f-agent_max_rounds').validity.rangeOverflow`, true, "the range is enforced in the page");
   assert.ok(!mock.log.some((l) => l.method === "PUT" && l.path === "/api/settings"), "nothing was sent");
-  // a good change sends only what changed, with real booleans and numbers
+  // a good change sends only what changed, with real numbers
   await T(`set('#f-agent_max_rounds', '5')`);
-  await T(`set('#f-plan_speech', 'false')`);
   await b.ev(`T.q('#f-agent_max_rounds').form.requestSubmit()`);
   await b.until(`T.text('#msg') === 'Saved.'`, "saved");
   const put = mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!;
-  assert.deepEqual(put.body, { agent_max_rounds: 5, plan_speech: false });
-  await eq(`T.q('#f-agent_max_rounds').closest('div').textContent.includes('Saved here.')`, true, "source follows");
-  // a saved toggle can go back to its default
-  await eq(
-    `[...T.q('#f-plan_speech').options].map((o) => o.value)`,
-    ["true", "false", ""],
-    "default option once saved",
-  );
-  await T(`set('#f-plan_speech', '')`);
-  await b.ev(`T.q('#f-plan_speech').form.requestSubmit()`);
-  await b.until(`T.q('#f-plan_speech').value === 'true'`, "back to the default");
-  assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { plan_speech: null });
-  // safety: quiet hours and the dry-run flag
+  assert.deepEqual(put.body, { agent_max_rounds: 5 });
+  await eq(`T.q('#f-agent_max_rounds').closest('.srow').textContent.includes('Saved here.')`, true, "source follows");
+  // a saved value can go back to its default, for the whole group at once
+  await b.until(`T.all('.sgroup .head button').some((x) => x.textContent === 'Reset to defaults')`, "the reset button");
+  await b.ev(`T.q('#f-agent_max_rounds').form.querySelector('.head button').click()`);
+  await b.until(`T.q('#f-agent_max_rounds').value === '8'`, "back to the default");
+  assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { agent_max_rounds: null });
+  // safety: quiet hours
   await section("safety", "Safety");
   await eq(`T.q('#f-quiet_start').type`, "time", "quiet hours use a time box");
-  await eq(
-    `T.q('#f-dry_run').closest('div').textContent.includes('Command-line flag. Applies right away.')`,
-    true,
-    "a value set by a flag says so",
-  );
+  await eq(`T.q('#f-dry_run') === null`, true, "practice mode is a switch under Features");
   await T(`set('#f-quiet_start', '22:00')`);
   await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
   await b.until(
@@ -946,10 +1009,17 @@ await step("Settings: agent settings show their source, validate, and save boole
   });
 });
 
-await step("About: build info, diagnostics download, recent problems, settings export and import", async () => {
+await step("About: what it is, version, diagnostics, settings export and import, reset all", async () => {
   await open("open", "#/settings/about");
   await b.until(`!!T.q('#buildinfo')`, "build information");
   await shot("settings-about");
+  await eq(`T.text('#aboutver')`, "0.1.0-test", "the version has its own field");
+  await eq(
+    `document.body.innerText.includes('never contacts anything outside')`,
+    false,
+    "no claim about staying on the network: the language model is a service",
+  );
+  await eq(`T.text('#panel .card p').includes('voice assistant')`, true, "says what the project is");
   await eq(`T.text('#buildinfo')`, "A release build for linux on aarch64. Built with: tz, tls.", "build line");
   // downloads: catch the file instead of saving it
   await b.ev(`(() => {
@@ -1008,16 +1078,24 @@ await step("About: build info, diagnostics download, recent problems, settings e
     "from and to",
   );
   await T(`submit('#importform')`);
-  await b.until(`T.text('#devname') === 'Den'`, "imported and applied");
+  await b.until(`T.text('#msg') === 'Settings imported.'`, "imported and applied");
   assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
     device_name: "Den",
     dry_run: false,
     plan_speech: false,
   });
+  // reset everything that was saved
+  await T(`click('#resetall')`);
+  await b.until(`T.text('#msg') === 'All settings are back to their defaults.'`, "reset");
+  const reset = mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body as Record<
+    string,
+    unknown
+  >;
+  assert.ok("device_name" in reset && Object.values(reset).every((v) => v === null), "only nulls are sent");
 });
 
 await step("a 10-second refresh keeps what you typed", async () => {
-  await open("open", "#/reminders");
+  await open("open", "#/clock");
   await b.until(`T.rows().length === 2`, "rows");
   await T(`set('#rlabel', 'half typed')`);
   (mock.state["schedule"] as unknown[]).push({

@@ -987,11 +987,22 @@ mod tests {
             assert!(body.contains("<title>ClawDot</title>"));
             // No external assets (REQ-CFG-001).
             // (The W3C namespace names that SVG elements are created with are identifiers, not requests.)
+            // (Addresses are also named as plain text, such as the example service addresses in Settings; what matters is
+            // that the page loads nothing: no script, style, image or font from anywhere, and no CSS url().)
             let no_namespaces = body.replace("http://www.w3.org/", "");
-            assert!(
-                !no_namespaces.contains("http://") && !no_namespaces.contains("src=\"https://"),
-                "external reference in page"
-            );
+            for load in [
+                "src=\"http",
+                "src='http",
+                "href=\"http://",
+                "url(http",
+                "url(\"http",
+                "@import",
+            ] {
+                assert!(
+                    !no_namespaces.contains(load),
+                    "external reference in page: {load}"
+                );
+            }
             // The tokens are inlined: light by default, dark only by explicit choice or match-system, reduced motion handled.
             assert!(!body.contains("/*@theme*/"), "theme marker left in page");
             let squeezed = body.replace(": ", ":");
