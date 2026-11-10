@@ -2,7 +2,8 @@
 # Regression tests for the git-flow policy tooling: commit-message rules and the agent guard.
 # Runs in a scratch repository; touches nothing in the working tree. Part of scripts/check.sh.
 # Each scratch-repo block runs in its own subshell on purpose, so its PATH and variables stay local.
-# shellcheck disable=SC2030,SC2031
+# SC2016: the stub scripts written with printf '...' must keep their $ unexpanded.
+# shellcheck disable=SC2030,SC2031,SC2016
 set -u
 # When run from a git hook, git exports variables that would point scratch-repo commands at the real repository.
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
@@ -264,6 +265,116 @@ STUB
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else fail "commit-time check test failed at step code $rc (output: $(tail -3 "$fout" | tr '\n' ' '))"; fi
 rm -rf "$F" "$fout"
+
+# --- path-based step selection: check.sh --fast --tests runs only the steps for the paths that changed vs dev ----
+# (scratch repository; cargo, npm and the policy tests are recording stubs)
+S=$(mktemp -d)
+sout=$(mktemp)
+(
+  cd "$S" || exit 1
+  git init -q -b main
+  git config user.name T
+  git config user.email t@example.com
+  git config core.autocrlf false
+  mkdir -p scripts bin crates/a/src crates/b/src portal/src portal/node_modules portal/lint/node_modules
+  for f in check.sh check-docs.sh check-commit-msg.sh lib-git.sh; do cp "$root/scripts/$f" scripts/; done
+  cp "$root/.shellcheckrc" .shellcheckrc
+  printf '#!/usr/bin/env bash\necho "cargo $*" >>"${CALLS:?}"\n' >scripts/cargo.sh
+  printf '#!/usr/bin/env bash\necho "policy" >>"${CALLS:?}"\n' >scripts/test-policy.sh
+  printf '#!/usr/bin/env bash\necho "npm $* QUICK=${CLAWDOT_BROWSER_QUICK:-}" >>"${CALLS:?}"\n' >bin/npm
+  chmod +x scripts/*.sh bin/npm
+  printf '[workspace]\nmembers = ["crates/*"]\n' >Cargo.toml
+  printf '[package]\nname = "pkg-a"\nversion = "0.0.0"\n' >crates/a/Cargo.toml
+  printf '[package]\nname = "pkg-b"\nversion = "0.0.0"\n' >crates/b/Cargo.toml
+  echo '{}' >portal/package.json
+  echo "// a" >crates/a/src/lib.rs
+  echo "// b" >crates/b/src/lib.rs
+  echo "// p" >portal/src/p.ts
+  git add -A
+  git commit -q -m "chore: initialize repository"
+  git branch dev
+  export PATH="$S/bin:$PATH"
+  export CALLS="$S/calls.log"
+  unset CI
+  case_run() { # case_run <branch> <file> <content>: one commit on a fresh branch off dev, then the scoped check
+    git switch -q -c "$1" dev
+    mkdir -p "$(dirname "$2")"
+    printf '%s\n' "$3" >>"$2"
+    git add -A
+    git commit -q -m "chore: change $2"
+    : >"$CALLS"
+    scripts/check.sh --fast --tests >"$sout" 2>&1
+  }
+
+  # 1. docs only: no cargo, no npm, no policy tests; the docs step runs
+  case_run c1 docs/d.md "# d" || exit 61
+  [ ! -s "$CALLS" ] || exit 62
+  grep -q "documentation: links" "$sout" || exit 63
+
+  # 2. one crate: fmt, clippy and tests for that package only; no deny, no npm
+  case_run c2 crates/a/src/lib.rs "// more" || exit 64
+  grep -q "^cargo clippy -p pkg-a " "$CALLS" || exit 65
+  grep -q "^cargo test -p pkg-a " "$CALLS" || exit 66
+  ! grep -q "pkg-b\|--workspace\|deny\|^npm \|^policy" "$CALLS" || exit 67
+
+  # 3. portal: lint, types, unit tests, built-page check and the QUICK browser smoke; no licences/audit, no cargo
+  case_run c3 portal/src/p.ts "// more" || exit 68
+  grep -q "^npm .*lint " "$CALLS" || exit 69
+  grep -q "^npm .*typecheck " "$CALLS" || exit 70
+  grep -q "^npm .*check-build " "$CALLS" || exit 71
+  grep -q "^npm .*test:browser QUICK=1$" "$CALLS" || exit 72
+  ! grep -qE "licenses|audit|^cargo " "$CALLS" || exit 73
+
+  # 4. scripts: the policy tests run; no cargo, no npm
+  case_run c4 scripts/extra.sh '#!/usr/bin/env bash' || exit 74
+  grep -q "^policy" "$CALLS" || exit 75
+  ! grep -qE "^(cargo|npm) " "$CALLS" || exit 76
+
+  # 5. the full gate (CI=1) still runs everything, and the browser test is NOT in quick mode
+  git switch -q c3
+  : >"$CALLS"
+  CI=1 scripts/check.sh --full >"$sout" 2>&1 || exit 77
+  grep -q "^npm .*test:browser QUICK=$" "$CALLS" || exit 78
+  grep -q "^npm .*licenses" "$CALLS" || exit 79
+  grep -q "^cargo test --workspace " "$CALLS" || exit 80
+  grep -q "^policy" "$CALLS" || exit 81
+
+  # 6. bad flag combinations are refused
+  if scripts/check.sh --full --fast >/dev/null 2>&1; then exit 82; fi
+  if scripts/check.sh --tests >/dev/null 2>&1; then exit 83; fi
+  exit 0
+)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else fail "path-selection test failed at step code $rc (output: $(tail -3 "$sout" | tr '\n' ' '))"; fi
+rm -rf "$S" "$sout"
+
+# --- scripts/cargo.sh uses sccache only when installed, and never when disabled or already set ----
+W=$(mktemp -d)
+(
+  cd "$W" || exit 1
+  git init -q -b main
+  mkdir -p scripts bin nosc
+  cp "$root/scripts/cargo.sh" scripts/
+  printf '#!/usr/bin/env bash\necho "wrapper=${RUSTC_WRAPPER:-none} dir=${SCCACHE_DIR:-none} size=${SCCACHE_CACHE_SIZE:-none}"\n' >bin/cargo
+  printf '#!/usr/bin/env bash\nexit 0\n' >bin/sccache
+  chmod +x scripts/cargo.sh bin/cargo bin/sccache
+  export HOME="$W/home"
+  unset RUSTC_WRAPPER SCCACHE_DIR SCCACHE_CACHE_SIZE CLAWDOT_NO_SCCACHE
+  # PATH gets the stub dir for cargo; for the "no sccache" case sccache is shadowed by removing its stub.
+  out=$(PATH="$W/bin:$PATH" scripts/cargo.sh check) || exit 91
+  case "$out" in "wrapper=sccache dir=$W/home/.cache/clawdot-sccache size=10G") ;; *) exit 92 ;; esac
+  out=$(CLAWDOT_NO_SCCACHE=1 PATH="$W/bin:$PATH" scripts/cargo.sh check) || exit 93
+  case "$out" in "wrapper=none "*) ;; *) exit 94 ;; esac
+  out=$(RUSTC_WRAPPER=mine PATH="$W/bin:$PATH" scripts/cargo.sh check) || exit 95
+  case "$out" in "wrapper=mine "*) ;; *) exit 96 ;; esac
+  rm bin/sccache
+  out=$(PATH="$W/bin:$PATH" scripts/cargo.sh check) || exit 97
+  case "$out" in "wrapper=none "*) ;; *) exit 98 ;; esac
+  exit 0
+)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else fail "sccache wiring test failed at step code $rc"; fi
+rm -rf "$W"
 
 # --- optional steps: the full gate passes in a repository with no portal/, no bridges/ and no Rust ----
 # (The Python sidecar and portal steps must run only where their directories exist and say nothing elsewhere.)
