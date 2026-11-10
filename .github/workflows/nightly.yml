@@ -1,0 +1,37 @@
+name: nightly
+
+# The heavy checks that day-to-day landings skip (scripts/check.sh --fast --tests runs only a quick browser smoke):
+# the full portal browser run, including the 360/320 px wide-font stress sweep, on dev. This is not a required
+# check and does not touch the `gate` job in ci.yml.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portal-browser:
+    name: portal browser test, full (stress sweep included)
+    runs-on: ubuntu-latest
+    if: hashFiles('portal/package.json') != ''
+    defaults:
+      run:
+        working-directory: portal
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: portal/.nvmrc
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - name: Browser test (full, no CLAWDOT_BROWSER_QUICK)
+        run: npm run test:browser
+        env:
+          CI: "true"
+          CHROME: /usr/bin/google-chrome
