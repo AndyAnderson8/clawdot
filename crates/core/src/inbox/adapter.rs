@@ -363,7 +363,7 @@ mod tests {
     fn a_stop_hook_becomes_a_done_event_with_a_session_ref() {
         let payload = json!({
             "session_id": "abc-123",
-            "cwd": "C:\\Users\\drews\\Repos\\clawdot",
+            "cwd": "/home/user/project",
             "hook_event_name": "Stop",
             "permission_mode": "default",
             "last_assistant_message": "All 12 tests pass. I added the timer tool."
@@ -371,7 +371,7 @@ mod tests {
         let m = claude().map(&payload).unwrap();
         assert_eq!(m.kind, EventKind::Done);
         assert_eq!(m.source, "Claude Code");
-        assert_eq!(m.title, "clawdot finished");
+        assert_eq!(m.title, "project finished");
         assert_eq!(m.text, "All 12 tests pass. I added the timer tool.");
         assert_eq!(m.session_ref.as_deref(), Some("abc-123"));
         assert_eq!(m.priority, Priority::Normal);

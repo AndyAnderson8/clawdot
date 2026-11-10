@@ -61,7 +61,7 @@ export function Notes(): JSX.Element {
     <>
       <h2>Notes</h2>
       <p>
-        Short facts you asked the assistant to remember, like “my NAS is called Andy-NAS”. It sees them every time it
+        Short facts you asked the assistant to remember, like “my printer is called Pixel”. It sees them every time it
         answers. You can also say “remember that ...” to the speaker. Never put a password or a key in a note.
       </p>
       {missing ? (

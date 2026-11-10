@@ -1188,7 +1188,7 @@ fn saved_settings_layer_under_flags_and_apply_live() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("settings.json"),
-        r#"{"schema":1,"data":{"zone":"America/Phoenix","device_name":"Den"}}"#,
+        r#"{"schema":1,"data":{"zone":"Europe/Berlin","device_name":"Den"}}"#,
     )
     .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))

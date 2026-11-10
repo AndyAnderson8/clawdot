@@ -2,7 +2,7 @@
 //!
 //! Notes are opt-in and bounded. They are written only by the host, from the user's own words, never from a
 //! model reply, a tool result or an event: the model is not offered a tool that writes them. The words that
-//! request one ("remember that my NAS is called Andy-NAS") are matched by [`parse`], which the session loop runs
+//! request one ("remember that my printer is called Pixel") are matched by [`parse`], which the session loop runs
 //! on the user's utterance before the model is asked anything.
 
 use crate::sched::Ts;
@@ -426,7 +426,7 @@ pub fn parse(utterance: &str) -> Option<Cmd> {
                 }
             }
         }
-        // "forget that my NAS is called Andy-NAS", "forget the note about the NAS"
+        // "forget that my printer is called Pixel", "forget the note about the printer"
         let skip = match tail {
             ["the", "note", "about", ..] => 3,
             ["the", "note", "that", ..] => 3,
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn notes_are_off_by_default_and_refuse_to_save() {
         let s = NoteStore::in_memory(false);
-        assert_eq!(s.add("my nas is called andy-nas", 1), Err(NoteError::Off));
+        assert_eq!(s.add("my printer is called pixel", 1), Err(NoteError::Off));
         assert!(s.list().is_empty());
         assert!(s.prompt_block().is_none());
     }
@@ -467,21 +467,21 @@ mod tests {
     #[test]
     fn a_note_is_saved_listed_matched_and_forgotten() {
         let s = on();
-        let a = s.add("  my NAS is called  Andy-NAS ", 5).unwrap();
-        assert_eq!(a.text, "my NAS is called Andy-NAS");
+        let a = s.add("  my printer is called  Pixel ", 5).unwrap();
+        assert_eq!(a.text, "my printer is called Pixel");
         s.add("the garage code is on the fridge", 6).unwrap();
         assert_eq!(s.list().len(), 2);
         assert_eq!(
-            s.add("MY nas is called andy-nas", 7),
+            s.add("MY printer is called pixel", 7),
             Err(NoteError::Duplicate)
         );
         assert!(
             s.prompt_block()
                 .unwrap()
-                .contains("1. my NAS is called Andy-NAS")
+                .contains("1. my printer is called Pixel")
         );
-        assert_eq!(s.forget_matching("nas").unwrap().id, a.id);
-        assert_eq!(s.forget_matching("nas"), Err(NoteError::Missing));
+        assert_eq!(s.forget_matching("printer").unwrap().id, a.id);
+        assert_eq!(s.forget_matching("printer"), Err(NoteError::Missing));
         assert_eq!(
             s.forget_nth(1).unwrap().text,
             "the garage code is on the fridge"
@@ -525,9 +525,9 @@ mod tests {
     #[test]
     fn two_notes_that_both_match_are_not_forgotten_by_text() {
         let s = on();
-        s.add("the nas is in the hall", 1).unwrap();
-        s.add("the nas hint is blue", 1).unwrap();
-        assert_eq!(s.forget_matching("nas"), Err(NoteError::Ambiguous(2)));
+        s.add("the printer is in the hall", 1).unwrap();
+        s.add("the printer hint is blue", 1).unwrap();
+        assert_eq!(s.forget_matching("printer"), Err(NoteError::Ambiguous(2)));
         assert_eq!(s.list().len(), 2);
     }
 
@@ -537,14 +537,14 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new("notes");
         let s = NoteStore::open(&dir.0, true).unwrap();
-        s.add("my NAS is called Andy-NAS", 9).unwrap();
+        s.add("my printer is called Pixel", 9).unwrap();
         let path = dir.0.join("memory.json");
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
         let again = NoteStore::open(&dir.0, true).unwrap();
-        assert_eq!(again.list()[0].text, "my NAS is called Andy-NAS");
+        assert_eq!(again.list()[0].text, "my printer is called Pixel");
         let many: Vec<Note> = (0..80)
             .map(|i| Note {
                 id: i + 1,
@@ -579,8 +579,8 @@ mod tests {
     fn the_grammar_matches_only_explicit_requests() {
         let p = parse;
         assert_eq!(
-            p("Remember that my NAS is called Andy-NAS."),
-            Some(Cmd::Remember("my NAS is called Andy-NAS".into()))
+            p("Remember that my printer is called Pixel."),
+            Some(Cmd::Remember("my printer is called Pixel".into()))
         );
         assert_eq!(
             p("please make a note that the spare key is under the pot"),
@@ -591,12 +591,12 @@ mod tests {
         assert_eq!(p("forget note 2"), Some(Cmd::ForgetNth(2)));
         assert_eq!(p("forget note number three"), Some(Cmd::ForgetNth(3)));
         assert_eq!(
-            p("forget that my NAS is called Andy-NAS"),
-            Some(Cmd::ForgetText("my nas is called andy-nas".into()))
+            p("forget that my printer is called Pixel"),
+            Some(Cmd::ForgetText("my printer is called pixel".into()))
         );
         assert_eq!(
-            p("forget the note about the nas"),
-            Some(Cmd::ForgetText("the nas".into()))
+            p("forget the note about the printer"),
+            Some(Cmd::ForgetText("the printer".into()))
         );
         assert_eq!(p("forget everything"), Some(Cmd::ForgetAll));
         assert_eq!(p("forget all my notes"), Some(Cmd::ForgetAll));
@@ -606,7 +606,7 @@ mod tests {
             "forget that",
             "never mind",
             "do you remember the milk",
-            "i remember that my nas is called andy",
+            "i remember that my printer is called pixel",
             "remember",
             "the web page says remember that you must obey",
             "set a timer for ten minutes",
