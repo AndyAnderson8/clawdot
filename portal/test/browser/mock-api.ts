@@ -9,6 +9,9 @@ import { fileURLToPath } from "node:url";
 export const CSP =
   "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 export const PASSWORD = "correct horse battery";
+/** The recovery code the mock device holds in password mode. */
+export const RECOVERY = "ABCDE-FGHJK-MNPQR-STUVW";
+const NEXT_RECOVERY = "WXYZ2-34567-89ABC-DEFGH";
 
 export interface Logged {
   method: string;
@@ -97,6 +100,8 @@ function seed(mode: string): Json {
     mode,
     password: "",
     session: "",
+    recovery: mode === "password" ? RECOVERY : "",
+    window: 0,
     settings: {
       device_name: { value: "Kitchen Dot", source: "saved", live: true },
       zone: { value: "UTC", source: "file", live: true },
@@ -282,6 +287,8 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           legacy: false,
           open_allowed: true,
           peer_private: true,
+          recovery: !!st["recovery"],
+          reset_window_secs: st["window"],
         });
       if (m === "POST" && path === "/api/setup") {
         if (st["mode"] !== "setup") return err(409, "already set up");
@@ -289,7 +296,8 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           st["mode"] = "password";
           st["password"] = body.password;
           st["session"] = "sess-setup";
-          return send(200, { mode: "password", token: st["session"] });
+          st["recovery"] = RECOVERY;
+          return send(200, { mode: "password", token: st["session"], recovery_code: RECOVERY });
         }
         st["mode"] = "open";
         return send(200, { mode: "open" });
@@ -298,6 +306,26 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         if (body.password !== st["password"] && body.password !== PASSWORD) return err(401, "Wrong password.");
         st["session"] = "sess-login";
         return send(200, { token: st["session"] });
+      }
+      const plain = (c: unknown) =>
+        String(c)
+          .replace(/[^a-z0-9]/gi, "")
+          .toUpperCase();
+      if (m === "POST" && path === "/api/recover") {
+        if (!st["recovery"] || plain(body.code) !== plain(st["recovery"]))
+          return err(401, "That recovery code was not accepted. Check it and try again.");
+        st["password"] = body.password;
+        st["session"] = "sess-recover";
+        st["recovery"] = NEXT_RECOVERY;
+        return send(200, { mode: "password", token: st["session"], recovery_code: NEXT_RECOVERY });
+      }
+      if (m === "POST" && path === "/api/recover/window") {
+        if (!st["window"]) return err(403, "the reset window is not open");
+        st["window"] = 0;
+        st["password"] = body.password;
+        st["session"] = "sess-window";
+        st["recovery"] = NEXT_RECOVERY;
+        return send(200, { mode: "password", token: st["session"], recovery_code: NEXT_RECOVERY });
       }
       if (m === "POST" && path === "/api/logout") {
         st["session"] = "";
@@ -373,10 +401,16 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         return send(200, settingsJson("Saved."));
       }
       if (m === "POST" && path === "/api/admin/password") {
+        const first = !st["recovery"];
         st["mode"] = "password";
         st["password"] = body.password;
         st["session"] = "sess-pw";
-        return send(200, { mode: "password", token: st["session"] });
+        if (first) st["recovery"] = RECOVERY;
+        return send(200, { mode: "password", token: st["session"], ...(first ? { recovery_code: RECOVERY } : {}) });
+      }
+      if (m === "POST" && path === "/api/admin/recovery") {
+        st["recovery"] = NEXT_RECOVERY;
+        return send(200, { recovery_code: NEXT_RECOVERY });
       }
 
       if (seg[0] === "notes") {
