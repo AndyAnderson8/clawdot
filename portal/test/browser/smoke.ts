@@ -317,14 +317,35 @@ await step(
   },
 );
 
-await step("Home: the look of the device is a choice kept in this browser", async () => {
+await step("Home: the picture of the device is chosen in a dialog, with a photo of your own", async () => {
   await open("open");
   await b.until(`!!T.q('#statusblock')`, "home");
-  await T(`click('details.looks summary')`);
-  await eq(`T.all('.lookopt').length`, 3, "three looks to choose from");
-  await T(`click('.lookopt:nth-child(3) input')`);
-  await eq(`T.q('.lookopt:nth-child(3)').className.includes('on')`, true, "the choice is marked");
+  await eq(`T.q('#lookdialog').open`, false, "the choices are not in the way");
+  await T(`click('#changelook')`);
+  await b.until(`T.q('#lookdialog').open === true`, "the dialog opens");
+  await eq(`T.all('.lookopt').length`, 3, "three drawings to choose from");
+  await T(`click('.lookopt:nth-child(3)')`);
+  await eq(`T.q('.lookopt:nth-child(3)').getAttribute('aria-checked')`, "true", "the choice is marked");
   await eq(`localStorage.getItem('clawdot-look')`, "computer", "and remembered by this browser");
+  // a photo from this computer: made small, kept here, shown on Home
+  await b.ev(`(async () => {
+    const c = document.createElement('canvas'); c.width = 1200; c.height = 600;
+    const g = c.getContext('2d'); g.fillStyle = '#c33'; g.fillRect(0, 0, 1200, 600);
+    const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+    const dt = new DataTransfer(); dt.items.add(new File([blob], 'room.png', { type: 'image/png' }));
+    const input = document.getElementById('lookfile'); input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await b.until(`!!T.q('#statusblock img.lookphoto')`, "the photo is on Home");
+  const size = await b.ev<string>(
+    `(() => { const i = T.q('#statusblock img.lookphoto'); return i.naturalWidth + 'x' + i.naturalHeight; })()`,
+  );
+  assert.equal(size, "480x240", "it was made smaller");
+  await eq(`localStorage.getItem('clawdot-look')`, "photo", "and chosen");
+  await eq(`T.all('.lookopt').length`, 4, "it is one of the choices now");
+  await T(`click('#lookremove')`);
+  await b.until(`T.q('#statusblock img.lookphoto') === null`, "removed");
+  await eq(`localStorage.getItem('clawdot-look')`, "puck", "back to a drawing");
 });
 
 await step("Test the speaker (Settings, Voice): sends the phrase, and says why it cannot, with a fix", async () => {

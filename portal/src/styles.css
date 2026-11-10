@@ -1156,59 +1156,6 @@ ul.rows.tools > li.toolrow:last-child {
     opacity: 0.35;
   }
 }
-details.looks {
-  border: 0;
-  background: none;
-  margin: var(--spacing-2) 0 0;
-  font-size: var(--font-size-sm);
-}
-details.looks > summary {
-  display: inline-flex;
-  min-height: 2rem;
-  padding: 0;
-  gap: var(--spacing-2);
-  background: none;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-details.looks > :not(summary) {
-  margin-left: 0;
-  margin-right: 0;
-}
-.lookgrid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--spacing-3);
-  margin-top: var(--spacing-3);
-}
-.lookopt {
-  position: relative;
-  display: grid;
-  gap: var(--spacing-1);
-  justify-items: center;
-  width: 6.5rem;
-  padding: var(--spacing-2);
-  margin: 0;
-  border: 2px solid var(--color-card-border);
-  border-radius: var(--radius-inner);
-  background: var(--color-background-muted);
-  cursor: pointer;
-  font-size: var(--font-size-sm);
-  font-weight: 650;
-  text-align: center;
-}
-.lookopt.on {
-  border-color: var(--color-live);
-}
-.lookopt input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-.lookopt:focus-within {
-  outline: 3px solid var(--color-live);
-  outline-offset: 2px;
-}
 .alert {
   border: 1px solid var(--color-alert-line);
   border-left-width: 0.5rem;
@@ -1651,4 +1598,71 @@ dialog.dlg textarea {
 .blank .btn {
   white-space: normal;
   max-width: 100%;
+}
+
+/* ---- Choosing the picture of the device ---- */
+.lookgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: var(--spacing-3);
+  margin-top: var(--spacing-3);
+}
+button.lookopt {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: var(--spacing-2);
+  justify-items: stretch;
+  width: auto;
+  min-height: 0;
+  padding: var(--spacing-2);
+  border: 2px solid var(--color-card-border);
+  border-radius: var(--radius-inner);
+  background: var(--color-background-muted);
+  color: var(--color-text-primary);
+  font-weight: 650;
+  text-align: center;
+}
+button.lookopt.on {
+  border-color: var(--color-live);
+  box-shadow: 0 0 0 3px var(--color-live-muted);
+}
+.lookart {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: calc(var(--radius-inner) - 4px);
+}
+.lookart .look,
+.lookart .lookphoto {
+  max-height: 100%;
+}
+.lookname {
+  font-size: var(--font-size-sm);
+}
+img.lookphoto {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: calc(var(--radius-inner) - 4px);
+}
+.devart img.lookphoto {
+  aspect-ratio: 4 / 3;
+}
+.lookphotorow {
+  margin-bottom: var(--spacing-3);
+  margin-top: var(--spacing-3);
+}
+label.filebtn {
+  min-height: 2.5rem;
+  margin: 0;
+  padding: 0 var(--spacing-4);
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-inner);
+  background: var(--color-card);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
 }

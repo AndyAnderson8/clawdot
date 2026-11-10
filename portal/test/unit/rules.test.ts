@@ -108,7 +108,7 @@ test("the words REQ-CFG-026 forbids stay out of the sources", () => {
   none(/\binbox\b|\bscheduled\b/i, "plain names only");
   // Music and radio belong on the Media page (a stub) and nowhere else.
   const elsewhere = sources
-    .filter((s) => !s.f.endsWith("Media.tsx") && /(?<!type=")\bradio\b|\bmusic\b|\bstation/i.test(s.text))
+    .filter((s) => !s.f.endsWith("Media.tsx") && /(?<!(?:type|role)=")\bradio\b|\bmusic\b|\bstation/i.test(s.text))
     .map((s) => s.f);
   assert.deepEqual(elsewhere, [], "music or radio outside the Media page");
 });

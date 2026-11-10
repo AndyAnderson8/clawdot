@@ -6,13 +6,27 @@ export const LOOKS = [
   { id: "tower", name: "Tall speaker" },
   { id: "computer", name: "Computer" },
 ] as const;
-export type LookId = (typeof LOOKS)[number]["id"];
+/** A drawing, or the person's own photo. */
+export type LookId = (typeof LOOKS)[number]["id"] | "photo";
 
 const KEY = "clawdot-look";
+const PHOTO = "clawdot-look-photo";
+/** The longest side of a saved photo, in pixels. It is stored in this browser, so it is kept small. */
+export const PHOTO_SIDE = 480;
+
+export function photoPref(): string {
+  try {
+    const v = localStorage.getItem(PHOTO) ?? "";
+    return v.startsWith("data:image/") ? v : "";
+  } catch {
+    return "";
+  }
+}
 
 export function lookPref(): LookId {
   try {
     const v = localStorage.getItem(KEY);
+    if (v === "photo" && photoPref()) return "photo";
     return LOOKS.find((l) => l.id === v)?.id ?? "puck";
   } catch {
     return "puck";
@@ -27,8 +41,50 @@ export function setLookPref(id: LookId): void {
   }
 }
 
+/** Keeps a photo (as a small picture inside this browser) and chooses it. An empty string removes it. */
+export function setPhoto(dataUrl: string): void {
+  try {
+    if (dataUrl) {
+      localStorage.setItem(PHOTO, dataUrl);
+      localStorage.setItem(KEY, "photo");
+    } else {
+      localStorage.removeItem(PHOTO);
+      if (localStorage.getItem(KEY) === "photo") localStorage.setItem(KEY, "puck");
+    }
+  } catch {
+    /* private window or storage full: the choice lasts until the page is closed */
+  }
+}
+
+/** Reads a chosen image file and returns it scaled down to a small JPEG, or says why it cannot. */
+export function readPhoto(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith("image/")) return reject(new Error("That file is not a picture."));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("The picture could not be read."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("That picture could not be opened. Try a JPEG or PNG."));
+      img.onload = () => {
+        const k = Math.min(1, PHOTO_SIDE / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(img.width * k));
+        c.height = Math.max(1, Math.round(img.height * k));
+        const g = c.getContext("2d");
+        if (!g) return reject(new Error("The picture could not be prepared."));
+        g.drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", 0.85));
+      };
+      img.src = typeof reader.result === "string" ? reader.result : "";
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 /** A drawing of the device whose light shows what it is doing. `state` is the speaker state from the dashboard. */
 export function Look(props: { id: LookId; state?: string }): JSX.Element {
+  if (props.id === "photo")
+    return <img class="lookphoto" src={photoPref()} alt="" data-state={props.state ?? "idle"} />;
   return (
     <svg class="look" data-state={props.state ?? "idle"} viewBox="0 0 160 120" aria-hidden="true">
       {props.id === "puck" ? (
