@@ -11,6 +11,7 @@ import { Settings } from "./tabs/Settings.tsx";
 import { Skills } from "./tabs/Skills.tsx";
 import { Tools } from "./tabs/Tools.tsx";
 import { Webhooks } from "./tabs/Webhooks.tsx";
+import { Forgot, RecoveryNotice, showCode } from "./recovery.tsx";
 import { fail, say, start, sv, useApp } from "./store.ts";
 
 interface Tab {
@@ -109,8 +110,9 @@ function Setup() {
   const [pw2, setPw2] = useState("");
   const finish = async (body: { mode: string; password?: string }) => {
     try {
-      const r = await api<{ token?: string }>("POST", "/api/setup", body);
+      const r = await api<{ token?: string; recovery_code?: string }>("POST", "/api/setup", body);
       keep(r.token);
+      showCode(r.recovery_code);
       say("");
       await start();
     } catch (x) {
@@ -229,9 +231,7 @@ function Login() {
           <button>Sign in</button>
         </div>
       </form>
-      <p class="mut">
-        Forgot it? On the device, run <code>clawdot --reset-admin</code> and open this page again.
-      </p>
+      <Forgot />
     </section>
   );
 }
@@ -273,7 +273,8 @@ export function App(): JSX.Element {
         {inApp ? <Band tab={tab} /> : null}
       </div>
       <main>
-        {s.view === "setup" || s.view === "login" ? (
+        {s.recoveryCode ? <RecoveryNotice /> : null}
+        {!s.recoveryCode && (s.view === "setup" || s.view === "login") ? (
           <div id="hero">
             <Logo />
             <div>
@@ -284,9 +285,9 @@ export function App(): JSX.Element {
             </div>
           </div>
         ) : null}
-        {s.view === "setup" ? <Setup /> : null}
-        {s.view === "login" ? <Login /> : null}
-        {inApp ? (
+        {!s.recoveryCode && s.view === "setup" ? <Setup /> : null}
+        {!s.recoveryCode && s.view === "login" ? <Login /> : null}
+        {inApp && !s.recoveryCode ? (
           <div id="app">
             <div id="panel" role="tabpanel" tabIndex={-1} aria-labelledby={"tab-" + tab.id}>
               <Active key={tab.id} />

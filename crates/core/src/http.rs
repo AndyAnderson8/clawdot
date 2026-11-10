@@ -967,7 +967,7 @@ mod tests {
         let hash = crate::admin::hash_password("adm-secret").unwrap();
         let token = h
             .core
-            .admin_setup_password([127, 0, 0, 1].into(), hash)
+            .admin_setup_password([127, 0, 0, 1].into(), hash, None)
             .unwrap();
         bearer(&token)
     }
@@ -1547,7 +1547,7 @@ mod tests {
         let old = crate::inbox::endpoint::generate_token().unwrap();
         let hash = crate::inbox::endpoint::hash_token(&old);
         h.core
-            .admin_setup_password([127, 0, 0, 1].into(), hash)
+            .admin_setup_password([127, 0, 0, 1].into(), hash, None)
             .unwrap();
         let (_, _, body) = call(h.addr, "GET", "/api/auth", &[], "").await;
         let v = json_of(&body);

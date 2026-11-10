@@ -20,7 +20,12 @@ pub enum Gesture {
     LongPress,
     /// Pressed twice quickly.
     DoublePress,
+    /// Held for [`ADMIN_HOLD`] (REQ-DEV-031). Fixed, never mapped by a board file.
+    AdminHold,
 }
+
+/// How long the `action` button is held to ask for the administrator reset window (REQ-DEV-031).
+pub const ADMIN_HOLD: Duration = Duration::from_secs(10);
 
 impl Gesture {
     /// The gesture's name in a board file.
@@ -30,6 +35,7 @@ impl Gesture {
             Self::Press => "press",
             Self::LongPress => "long_press",
             Self::DoublePress => "double_press",
+            Self::AdminHold => "admin_hold",
         }
     }
 }
@@ -76,6 +82,8 @@ pub enum ButtonEvent {
     },
     /// The operator asked to leave (desktop board).
     Quit,
+    /// The operator typed `admin` in the console: the same request as holding the button (REQ-DEV-031).
+    AdminReset,
 }
 
 /// Where raw button events come from.
@@ -152,6 +160,10 @@ impl KeyButtons {
                         tx.push(ButtonEvent::Quit);
                         continue;
                     }
+                    "admin" => {
+                        tx.push(ButtonEvent::AdminReset);
+                        continue;
+                    }
                     "" if has_action => Some("action".to_owned()),
                     other => other
                         .chars()
@@ -208,6 +220,7 @@ impl ButtonSource for KeyButtons {
 struct State {
     down_at: Option<Instant>,
     long_fired: bool,
+    admin_fired: bool,
     /// A short press waiting to learn whether a second one follows.
     pending_press: Option<Instant>,
 }
@@ -217,6 +230,7 @@ struct State {
 pub struct GestureDetector {
     long: Duration,
     double: Duration,
+    admin_hold: Duration,
     /// Buttons that have a `double_press` mapping; only these delay a press to wait for a second one.
     double_buttons: Vec<String>,
     states: Vec<(String, State)>,
@@ -229,9 +243,17 @@ impl GestureDetector {
         Self {
             long: Duration::from_millis(u64::from(long_ms)),
             double: Duration::from_millis(u64::from(double_ms)),
+            admin_hold: ADMIN_HOLD,
             double_buttons,
             states: Vec::new(),
         }
+    }
+
+    /// Use another hold time for the administrator reset (tests).
+    #[must_use]
+    pub fn with_admin_hold(mut self, hold: Duration) -> Self {
+        self.admin_hold = hold;
+        self
     }
 
     fn state(&mut self, button: &str) -> &mut State {
@@ -253,6 +275,7 @@ impl GestureDetector {
             if s.down_at.is_none() {
                 s.down_at = Some(at);
                 s.long_fired = false;
+                s.admin_fired = false;
             }
             return None;
         }
@@ -283,6 +306,7 @@ impl GestureDetector {
     pub fn tick(&mut self, now: Instant) -> Vec<(String, Gesture)> {
         let long = self.long;
         let double = self.double;
+        let admin_hold = self.admin_hold;
         let mut out = Vec::new();
         for (button, s) in &mut self.states {
             if let Some(d) = s.down_at
@@ -292,6 +316,14 @@ impl GestureDetector {
                 s.long_fired = true;
                 s.pending_press = None;
                 out.push((button.clone(), Gesture::LongPress));
+            }
+            if let Some(d) = s.down_at
+                && !s.admin_fired
+                && button == "action"
+                && now.saturating_duration_since(d) >= admin_hold
+            {
+                s.admin_fired = true;
+                out.push((button.clone(), Gesture::AdminHold));
             }
             if let Some(p) = s.pending_press
                 && s.down_at.is_none()
@@ -358,6 +390,50 @@ mod tests {
 
     fn ms(base: Instant, n: u64) -> Instant {
         base + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn req_dev_031_holding_action_for_ten_seconds_asks_for_the_reset_once() {
+        let t = Instant::now();
+        let mut d = detector(&[]);
+        d.edge("action", true, t);
+        // The ordinary long press still fires at its own time and the hold adds the request after it.
+        assert_eq!(
+            d.tick(ms(t, 700)),
+            vec![("action".to_owned(), Gesture::LongPress)]
+        );
+        assert!(d.tick(ms(t, 9_999)).is_empty(), "not yet");
+        assert_eq!(
+            d.tick(ms(t, 10_000)),
+            vec![("action".to_owned(), Gesture::AdminHold)]
+        );
+        assert!(d.tick(ms(t, 12_000)).is_empty(), "once per hold");
+        assert_eq!(d.edge("action", false, ms(t, 13_000)), None);
+        // A second hold asks again.
+        d.edge("action", true, ms(t, 20_000));
+        assert_eq!(
+            d.tick(ms(t, 30_000)).last(),
+            Some(&("action".to_owned(), Gesture::AdminHold))
+        );
+    }
+
+    #[test]
+    fn req_dev_031_only_the_action_button_and_only_ten_seconds_count() {
+        let t = Instant::now();
+        let mut d = detector(&[]);
+        d.edge("mute", true, t);
+        assert!(
+            d.tick(ms(t, 60_000))
+                .iter()
+                .all(|(_, g)| *g != Gesture::AdminHold),
+            "a held mute button never asks"
+        );
+        d.edge("action", true, ms(t, 61_000));
+        d.edge("action", false, ms(t, 69_000));
+        assert!(
+            d.tick(ms(t, 80_000)).is_empty(),
+            "released at eight seconds"
+        );
     }
 
     #[test]
@@ -486,7 +562,7 @@ mod tests {
     #[test]
     fn desktop_keys_press_buttons_and_enter_is_the_action_button() {
         let keys = vec![('t', "action".to_owned()), ('s', "stop".to_owned())];
-        let mut k = KeyButtons::new(Cursor::new(b"s\n\nx\nq\n".to_vec()), keys);
+        let mut k = KeyButtons::new(Cursor::new(b"s\n\nx\nadmin\nq\n".to_vec()), keys);
         let mut got = Vec::new();
         let end = Instant::now() + Duration::from_secs(5);
         while Instant::now() < end {
@@ -495,6 +571,7 @@ mod tests {
                     got.push("quit".to_owned());
                     break;
                 }
+                Some(ButtonEvent::AdminReset) => got.push("admin".to_owned()),
                 Some(ButtonEvent::Edge { button, down, .. }) => {
                     got.push(format!("{button}:{down}"))
                 }
@@ -508,6 +585,7 @@ mod tests {
                 "stop:false",
                 "action:true",
                 "action:false",
+                "admin",
                 "quit"
             ]
         );

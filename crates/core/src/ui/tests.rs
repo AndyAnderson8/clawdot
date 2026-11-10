@@ -143,6 +143,19 @@ fn the_page_uses_plain_names_and_no_radio() {
     assert!(PAGE.contains("tablist") && PAGE.contains("\"foot\""));
 }
 
+// REQ-CFG-071: the portal never tells anyone to run a command, and the help text is the agreed one
+#[test]
+fn the_sign_in_help_names_the_code_the_button_and_the_guide_not_a_command() {
+    assert!(
+        !PAGE.contains("reset-admin"),
+        "the page tells people to run a command"
+    );
+    assert!(PAGE.contains(
+        "Forgot it? Use your recovery code. No code? Hold the action button for 10 seconds, or see"
+    ));
+    assert!(PAGE.contains("Forgot your password?"));
+}
+
 // REQ-CFG-027
 #[tokio::test]
 async fn the_portal_manages_timers_alarms_and_reminders() {
@@ -754,4 +767,305 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
     let (_, a) = call(&p, "GET", "/api/about", &session, "").await;
     assert_eq!(a["build"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(a["build"]["features"].is_array());
+}
+
+// ----- forgotten password: recovery code and local reset window (REQ-CFG-067..069, 071..073) -----
+
+fn token_of(v: &Value) -> String {
+    format!("Bearer {}", v["token"].as_str().unwrap())
+}
+
+/// Set a password through the API; returns (session, recovery code).
+async fn set_up_with_password(p: &Portal) -> (String, String) {
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (s, v) = call(p, "POST", "/api/setup", "", setup).await;
+    assert_eq!(s, 200);
+    (
+        token_of(&v),
+        v["recovery_code"].as_str().unwrap().to_owned(),
+    )
+}
+
+fn recover_body(code: &str, password: &str) -> String {
+    format!(r#"{{"code":"{code}","password":"{password}"}}"#)
+}
+
+fn login_body(password: &str) -> String {
+    format!(r#"{{"password":"{password}"}}"#)
+}
+
+// REQ-CFG-067, REQ-CFG-068
+#[tokio::test]
+async fn setup_shows_a_recovery_code_once_and_it_resets_the_password_once() {
+    let p = start(false).await;
+    let (session, code) = set_up_with_password(&p).await;
+    assert_eq!(code.len(), 23, "four groups of five: {code}");
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert_eq!(auth["recovery"], true);
+    assert_eq!(auth["reset_window_secs"], 0);
+    assert!(!auth.to_string().contains(&code), "never shown again");
+    let (_, diag) = call(&p, "GET", "/api/diagnostics", &session, "").await;
+    assert!(!diag.to_string().contains(&code.replace('-', "")));
+
+    // A wrong code and a malformed one get the same answer.
+    let (s, wrong) = call(
+        &p,
+        "POST",
+        "/api/recover",
+        "",
+        &recover_body("AAAAA-AAAAA-AAAAA-AAAAA", "new password 1"),
+    )
+    .await;
+    let (s2, short) = call(
+        &p,
+        "POST",
+        "/api/recover",
+        "",
+        &recover_body("x", "new password 1"),
+    )
+    .await;
+    assert_eq!((s, s2), (401, 401));
+    assert_eq!(wrong, short, "nothing tells the two apart");
+    // A weak new password is refused before the code is even looked at.
+    let (s, _) = call(
+        &p,
+        "POST",
+        "/api/recover",
+        "",
+        &recover_body(&code, "short"),
+    )
+    .await;
+    assert_eq!(s, 400);
+
+    // The right code, typed in lower case without dashes.
+    let typed = code.replace('-', "").to_lowercase();
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/recover",
+        "",
+        &recover_body(&typed, "new password 1"),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let fresh = token_of(&v);
+    let new_code = v["recovery_code"].as_str().unwrap().to_owned();
+    assert_ne!(new_code, code, "a new code is issued");
+    // Every older session ended; the new one works; the old password is gone; the new one signs in.
+    assert_eq!(call(&p, "GET", "/api/about", &session, "").await.0, 401);
+    assert_eq!(call(&p, "GET", "/api/about", &fresh, "").await.0, 200);
+    assert_eq!(
+        call(&p, "POST", "/api/login", "", &login_body("correct horse"))
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        call(&p, "POST", "/api/login", "", &login_body("new password 1"))
+            .await
+            .0,
+        200
+    );
+    // Replay: the used code does nothing, and does not reveal that it was once valid.
+    let (s, again) = call(
+        &p,
+        "POST",
+        "/api/recover",
+        "",
+        &recover_body(&code, "attacker pw 99"),
+    )
+    .await;
+    assert_eq!(s, 401);
+    assert_eq!(again, wrong);
+    assert_eq!(
+        call(&p, "POST", "/api/login", "", &login_body("attacker pw 99"))
+            .await
+            .0,
+        401
+    );
+    // The new code works, once.
+    assert_eq!(
+        call(
+            &p,
+            "POST",
+            "/api/recover",
+            "",
+            &recover_body(&new_code, "new password 2")
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            &p,
+            "POST",
+            "/api/recover",
+            "",
+            &recover_body(&new_code, "new password 3")
+        )
+        .await
+        .0,
+        401
+    );
+    // The problem log names the events, never a code.
+    let log = crate::diag::recent(200)
+        .iter()
+        .map(|l| format!("{l:?}"))
+        .collect::<String>();
+    for c in [&code, &new_code] {
+        assert!(!log.contains(&c.replace('-', "")), "no code in the log");
+    }
+}
+
+// REQ-CFG-068: guessing is bounded by the shared attempt limit, before any hashing
+#[tokio::test]
+async fn guessing_recovery_codes_runs_into_the_rate_limit() {
+    let p = start(false).await;
+    let (_, code) = set_up_with_password(&p).await;
+    let guess = recover_body("AAAAA-AAAAA-AAAAA-AAAAA", "new password 1");
+    let mut statuses = Vec::new();
+    for _ in 0..40 {
+        statuses.push(call(&p, "POST", "/api/recover", "", &guess).await.0);
+    }
+    assert!(statuses.contains(&429), "{statuses:?}");
+    assert!(statuses.iter().all(|s| *s == 401 || *s == 429));
+    // With the attempts used up, even the right code is refused, so a flood cannot be followed by a hit.
+    let right = recover_body(&code, "new password 1");
+    assert_eq!(call(&p, "POST", "/api/recover", "", &right).await.0, 429);
+}
+
+// REQ-CFG-073
+#[tokio::test]
+async fn an_install_without_a_code_can_make_one_and_changing_the_password_keeps_it() {
+    let p = start(false).await;
+    // As an older version left it: a password, no recovery code.
+    let hash = crate::admin::hash_password("old password").unwrap();
+    let session = format!(
+        "Bearer {}",
+        p.core
+            .admin_setup_password([127, 0, 0, 1].into(), hash, None)
+            .unwrap()
+    );
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert_eq!(auth["recovery"], false);
+    let probe = recover_body("AAAAA-AAAAA-AAAAA-AAAAA", "new password 1");
+    assert_eq!(call(&p, "POST", "/api/recover", "", &probe).await.0, 401);
+    // It must be signed in.
+    assert_eq!(call(&p, "POST", "/api/admin/recovery", "", "").await.0, 401);
+    let (s, v) = call(&p, "POST", "/api/admin/recovery", &session, "").await;
+    assert_eq!(s, 200);
+    let code = v["recovery_code"].as_str().unwrap().to_owned();
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert_eq!(auth["recovery"], true);
+    // A new password keeps the code and does not show one.
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/admin/password",
+        &session,
+        &login_body("changed password"),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(v.get("recovery_code").is_none());
+    let body = recover_body(&code, "after reset 1");
+    assert_eq!(call(&p, "POST", "/api/recover", "", &body).await.0, 200);
+    // Making a new code retires the old one.
+    let (_, v) = call(&p, "POST", "/api/login", "", &login_body("after reset 1")).await;
+    let s2 = token_of(&v);
+    let (_, v) = call(&p, "POST", "/api/admin/recovery", &s2, "").await;
+    assert_ne!(v["recovery_code"].as_str().unwrap(), code);
+    let old = recover_body(&code, "after reset 2");
+    assert_eq!(call(&p, "POST", "/api/recover", "", &old).await.0, 401);
+}
+
+// REQ-CFG-073: an installation moved from open mode to a password gets its first code then
+#[tokio::test]
+async fn setting_a_password_in_open_mode_issues_the_first_code() {
+    let p = start(false).await;
+    let (s, _) = call(&p, "POST", "/api/setup", "", r#"{"mode":"open"}"#).await;
+    assert_eq!(s, 200);
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/admin/password",
+        "",
+        &login_body("first password"),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["recovery_code"].as_str().unwrap().len(), 23);
+}
+
+// REQ-CFG-072
+#[tokio::test]
+async fn open_mode_has_nothing_to_recover() {
+    let p = start(false).await;
+    let (s, _) = call(&p, "POST", "/api/setup", "", r#"{"mode":"open"}"#).await;
+    assert_eq!(s, 200);
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert_eq!(auth["recovery"], false);
+    let body = recover_body("AAAAA-AAAAA-AAAAA-AAAAA", "new password 1");
+    assert_eq!(call(&p, "POST", "/api/recover", "", &body).await.0, 409);
+    assert_eq!(
+        call(
+            &p,
+            "POST",
+            "/api/recover/window",
+            "",
+            &login_body("new password 1")
+        )
+        .await
+        .0,
+        409
+    );
+    assert_eq!(call(&p, "POST", "/api/admin/recovery", "", "").await.0, 409);
+    assert!(p.core.admin_open_reset_window().is_err());
+    // Still open, still no password.
+    assert_eq!(call(&p, "GET", "/api/auth", "", "").await.1["mode"], "open");
+}
+
+// REQ-CFG-069
+#[tokio::test]
+async fn the_local_reset_window_sets_a_password_once_without_a_code() {
+    let p = start(false).await;
+    let (session, code) = set_up_with_password(&p).await;
+    let body = login_body("window password");
+    // Closed: refused.
+    assert_eq!(
+        call(&p, "POST", "/api/recover/window", "", &body).await.0,
+        403
+    );
+    // The device asks (the satellite path calls this); the page learns the window is open.
+    assert_eq!(p.core.admin_open_reset_window().unwrap(), 300);
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert_eq!(auth["reset_window_secs"], 300);
+    // A weak password does not use the window up.
+    assert_eq!(
+        call(&p, "POST", "/api/recover/window", "", &login_body("short"))
+            .await
+            .0,
+        400
+    );
+    let (s, v) = call(&p, "POST", "/api/recover/window", "", &body).await;
+    assert_eq!(s, 200, "{v}");
+    let new_code = v["recovery_code"].as_str().unwrap().to_owned();
+    assert_ne!(new_code, code, "a new code replaces the old one");
+    assert_eq!(call(&p, "GET", "/api/about", &session, "").await.0, 401);
+    assert_eq!(
+        call(&p, "GET", "/api/about", &token_of(&v), "").await.0,
+        200
+    );
+    // One use: the window is shut, and the old code no longer works either.
+    assert_eq!(
+        call(&p, "POST", "/api/recover/window", "", &body).await.0,
+        403
+    );
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert_eq!(auth["reset_window_secs"], 0);
+    let old = recover_body(&code, "after reset 1");
+    assert_eq!(call(&p, "POST", "/api/recover", "", &old).await.0, 401);
+    // A second request for a window right away is held off by the cooldown.
+    assert!(p.core.admin_open_reset_window().is_err());
 }

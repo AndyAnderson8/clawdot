@@ -5,6 +5,7 @@ import { api, ApiError, keep } from "../api.ts";
 import { currentText, FROM, labelOf, restartText, settingsPatch, type SettingSpec } from "../forms.ts";
 import { fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
 import { zoneName } from "../time.ts";
+import { RecoverySettings, showCode } from "../recovery.tsx";
 import { About } from "./About.tsx";
 import type { Settings as SettingsData } from "../types.ts";
 
@@ -361,8 +362,9 @@ export function Settings(): JSX.Element {
     const password = pw;
     setPw("");
     try {
-      const r = await api<{ token: string }>("POST", "/api/admin/password", { password });
+      const r = await api<{ token: string; recovery_code?: string }>("POST", "/api/admin/password", { password });
       keep(r.token);
+      showCode(r.recovery_code);
       say("Password saved.");
       await start();
     } catch (x) {
@@ -404,6 +406,7 @@ export function Settings(): JSX.Element {
           <button>Save password</button>
         </div>
       </form>
+      <RecoverySettings />
       <About />
       <div class="row">
         <button class="plain" type="button" onClick={signOut}>

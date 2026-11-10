@@ -8,6 +8,10 @@ export interface AuthState {
   legacy?: boolean;
   open_allowed?: boolean;
   peer_private?: boolean;
+  /** A recovery code exists. */
+  recovery?: boolean;
+  /** Seconds the local reset window has left (0 when closed). */
+  reset_window_secs?: number;
 }
 
 export interface Status {

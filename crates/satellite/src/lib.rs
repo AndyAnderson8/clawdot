@@ -81,6 +81,14 @@ pub trait Device {
     fn poll_mute_change(&mut self) -> Option<bool> {
         None
     }
+    /// The owner held the action button long enough to ask for the administrator reset window (REQ-DEV-031).
+    /// Polled on every pass; return true once per request and the satellite sends `clawdot.admin-reset`.
+    fn poll_admin_reset(&mut self) -> bool {
+        false
+    }
+    /// The core answered an administrator reset request: it is open for `open_secs` seconds, or refused when
+    /// that is 0 (REQ-SAT-020). A device shows this with a tone or light.
+    fn admin_reset_window(&mut self, _open_secs: u32, _reason: Option<&str>) {}
 }
 
 /// Connection settings.
@@ -238,6 +246,9 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
             muted = m;
             send(&mut sock, &Message::MuteChanged { muted: m })?;
         }
+        if device.poll_admin_reset() {
+            send(&mut sock, &Message::AdminReset)?;
+        }
         if device.poll_wake() {
             send(
                 &mut sock,
@@ -293,6 +304,9 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
                 device.set_mute(m);
             }
             Message::StopPlayback => device.stop_playback(),
+            Message::AdminResetWindow { open_secs, reason } => {
+                device.admin_reset_window(open_secs, reason.as_deref());
+            }
             Message::PlayUrl { url, title } if device.supports_streams() => {
                 device.play_url(&url, &title)
             }
