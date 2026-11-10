@@ -313,6 +313,8 @@ pub async fn handle(
             | ["update"]
             | ["update", "check"]
             | ["update", "apply"]
+            | ["models"]
+            | ["voices"]
     );
     if !known {
         return Some(error(StatusCode::NOT_FOUND, "not found"));
@@ -393,6 +395,8 @@ pub async fn handle(
             Ok(id) => notes_forget(core, Some(id)),
             Err(_) => error(StatusCode::NOT_FOUND, "no such note"),
         },
+        (&Method::GET, ["models"]) => models(core).await,
+        (&Method::GET, ["voices"]) => voices().await,
         (&Method::GET, ["update"]) => update_status(),
         (&Method::POST, ["update", "check"]) => update_check().await,
         (&Method::POST, ["update", "apply"]) => update_apply(body).await,
@@ -418,6 +422,62 @@ pub async fn handle(
         },
         _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     })
+}
+
+/// `GET /api/models`: the models the language-model service offers, asked of the service with the saved address and key
+/// (REQ-CFG-081). A service with no list, or a wrong key, is said in plain words and the page falls back to typing.
+async fn models(core: &Core) -> Resp {
+    let s = core.ui_settings();
+    let value = |k: &str| s["fields"][k]["value"].as_str().unwrap_or("").to_owned();
+    let url = value("llm_url");
+    if url.is_empty() {
+        return error(
+            StatusCode::CONFLICT,
+            "Choose who answers and save first, then the list of models can be asked for.",
+        );
+    }
+    let var = value("llm_key_env");
+    let key = if var.is_empty() {
+        String::new()
+    } else {
+        std::env::var(&var).unwrap_or_default()
+    };
+    match crate::speech::list_models(&url, &key).await {
+        Ok(models) => json_reply(StatusCode::OK, &json!({ "models": models })),
+        Err(e) => error(
+            StatusCode::BAD_GATEWAY,
+            &format!("Could not get the list of models: {e}."),
+        ),
+    }
+}
+
+/// The voices of OpenAI's speech service, which has a fixed set and no list to ask for.
+const OPENAI_VOICES: [&str; 11] = [
+    "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
+];
+
+/// `GET /api/voices`: the voices the speech server offers (REQ-CFG-081): its own list when it has one, OpenAI's fixed
+/// set for OpenAI, otherwise a plain statement that the voice has to be typed.
+async fn voices() -> Resp {
+    let Some((url, key)) = crate::speech::source() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No speech provider is set up, so there are no voices to choose from.",
+        );
+    };
+    match crate::speech::list_voices(&url, &key).await {
+        Ok(v) => json_reply(StatusCode::OK, &json!({ "voices": v, "source": "server" })),
+        Err(_) if url.contains("api.openai.com") => json_reply(
+            StatusCode::OK,
+            &json!({ "voices": OPENAI_VOICES, "source": "builtin" }),
+        ),
+        Err(e) => error(
+            StatusCode::BAD_GATEWAY,
+            &format!(
+                "The speech server does not list its voices ({e}). Type the voice name instead."
+            ),
+        ),
+    }
 }
 
 /// `GET /api/update`: whether a newer version exists, when it was last looked for, and whether it can be installed

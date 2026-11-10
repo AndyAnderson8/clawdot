@@ -311,6 +311,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     );
     put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
     put("voice", c.speech.voice.clone().map(Into::into));
+    put("speech_language", c.speech.language.clone().map(Into::into));
     a.agent = c.agent.clone();
     // The agent and limit settings join the layers so the portal can show and change them (REQ-CFG-062).
     // A value above its ceiling is shown at the ceiling it will be held to.
@@ -431,6 +432,8 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
     if let Some(v) = text("voice") {
         args.speech.voice = Some(v);
     }
+    // The language is empty when detected, which is not the same as unset in the configuration file.
+    args.speech.language = text("speech_language").filter(|l| !l.is_empty());
     let live = state.live_values();
     args.agent = agent_from(&live, args.agent.summarize_over_chars);
     args.actions = policy_from(&live);
@@ -727,6 +730,9 @@ fn apply_live(
             llm.cfg = with_agent(llm.cfg.clone(), &brain.agent);
         }
     }
+    if changed("voice") || changed("speech_language") {
+        apply_speech(live);
+    }
     #[cfg(feature = "tls")]
     if changed("update_check") {
         clawdot_core::update::set_enabled(
@@ -1000,6 +1006,59 @@ impl Brain {
 }
 
 /// Build the speech providers from the `speech` configuration section.
+/// The speech clients that exist, so a change of voice or language in the portal reaches them while running.
+#[derive(Default)]
+struct SpeechHandles {
+    voices: Vec<Arc<std::sync::Mutex<String>>>,
+    languages: Vec<Arc<std::sync::Mutex<Option<String>>>>,
+}
+
+static SPEECH_HANDLES: std::sync::Mutex<SpeechHandles> = std::sync::Mutex::new(SpeechHandles {
+    voices: Vec::new(),
+    languages: Vec::new(),
+});
+
+/// Build the speech clients and remember how to change their voice and language later.
+fn build_registered_speech(
+    speech: &SpeechConfig,
+) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
+    let (stt, tts) = build_speech(speech)?;
+    let mut h = SPEECH_HANDLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    h.voices.push(tts.voice_handle());
+    h.languages.push(stt.language_handle());
+    Ok((stt, tts))
+}
+
+/// Apply the voice and language that are now set to every speech client.
+fn apply_speech(live: &serde_json::Map<String, serde_json::Value>) {
+    let h = SPEECH_HANDLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(v) = live
+        .get("voice")
+        .and_then(serde_json::Value::as_str)
+        .filter(|v| !v.is_empty())
+    {
+        for slot in &h.voices {
+            *slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = v.to_owned();
+        }
+    }
+    let language = live
+        .get("speech_language")
+        .and_then(serde_json::Value::as_str)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned);
+    for slot in &h.languages {
+        *slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = language.clone();
+    }
+}
+
 fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
     let missing =
         |k: &str| format!("speech.{k} is not configured (see docs/architecture/voice-pipeline.md)");
@@ -1412,6 +1471,9 @@ async fn main() -> ExitCode {
 
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
+    if let Some(url) = &args.speech.url {
+        clawdot_core::speech::set_source(url, args.speech.key_env.as_deref());
+    }
     #[cfg(feature = "tls")]
     match clawdot_core::update::UpdateConfig::new(
         args.updates.url.as_deref(),
@@ -1458,7 +1520,7 @@ async fn main() -> ExitCode {
             let addr: SocketAddr = listen
                 .parse()
                 .map_err(|e| format!("satellite.listen: {e}"))?;
-            let (stt, tts) = build_speech(&args.speech)?;
+            let (stt, tts) = build_registered_speech(&args.speech)?;
             let mut settings = satellite::Settings {
                 announcer: announcer.clone(),
                 ..satellite::Settings::default()
@@ -1521,7 +1583,7 @@ async fn main() -> ExitCode {
     #[cfg(feature = "esphome-satellite")]
     if !args.esphome.is_empty() {
         let started = async {
-            let (stt, tts) = build_speech(&args.speech)?;
+            let (stt, tts) = build_registered_speech(&args.speech)?;
             let mut settings = satellite::Settings {
                 announcer: announcer.clone(),
                 ..satellite::Settings::default()

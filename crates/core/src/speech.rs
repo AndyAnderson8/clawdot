@@ -14,6 +14,7 @@ use hyper::body::Bytes;
 use hyper::{Method, Request};
 use serde_json::{Value, json};
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -183,8 +184,23 @@ impl Client {
     }
 
     async fn post(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+        self.send(Method::POST, path, content_type, body).await
+    }
+
+    async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.send(Method::GET, path, "application/json", Vec::new())
+            .await
+    }
+
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
         let mut req = Request::builder()
-            .method(Method::POST)
+            .method(method)
             .uri(format!("{}{path}", self.endpoint.base))
             .header("host", &self.endpoint.host)
             .header("content-type", content_type)
@@ -236,7 +252,7 @@ impl Client {
 pub struct HttpTranscriber {
     client: Client,
     model: String,
-    language: Option<String>,
+    language: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for HttpTranscriber {
@@ -262,8 +278,14 @@ impl HttpTranscriber {
         Ok(Self {
             client: Client::new(base_url, key, deadline)?,
             model: model.to_owned(),
-            language: language.map(str::to_owned),
+            language: Arc::new(Mutex::new(language.map(str::to_owned))),
         })
+    }
+
+    /// A handle to change the spoken language while running (`None` means detect it). Every clone shares it.
+    #[must_use]
+    pub fn language_handle(&self) -> Arc<Mutex<Option<String>>> {
+        Arc::clone(&self.language)
     }
 }
 
@@ -274,8 +296,13 @@ impl Transcriber for HttpTranscriber {
             "clawdot-boundary-{:016x}",
             pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
         );
+        let language = self
+            .language
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         let mut fields = vec![("model", self.model.as_str()), ("response_format", "json")];
-        if let Some(l) = &self.language {
+        if let Some(l) = &language {
             fields.push(("language", l.as_str()));
         }
         let body = multipart(&boundary, &fields, &wav(pcm));
@@ -300,7 +327,7 @@ impl Transcriber for HttpTranscriber {
 pub struct HttpSynthesizer {
     client: Client,
     model: String,
-    voice: String,
+    voice: Arc<Mutex<String>>,
     source_rate: u32,
 }
 
@@ -308,7 +335,10 @@ impl std::fmt::Debug for HttpSynthesizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpSynthesizer")
             .field("model", &self.model)
-            .field("voice", &self.voice)
+            .field(
+                "voice",
+                &*self.voice.lock().unwrap_or_else(PoisonError::into_inner),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -332,16 +362,28 @@ impl HttpSynthesizer {
         Ok(Self {
             client: Client::new(base_url, key, deadline)?,
             model: model.to_owned(),
-            voice: voice.to_owned(),
+            voice: Arc::new(Mutex::new(voice.to_owned())),
             source_rate,
         })
+    }
+
+    /// A handle to change the voice while running. Every clone shares it.
+    #[must_use]
+    pub fn voice_handle(&self) -> Arc<Mutex<String>> {
+        Arc::clone(&self.voice)
     }
 }
 
 impl Synthesizer for HttpSynthesizer {
     async fn synthesize(&self, text: &str) -> Result<Vec<i16>, String> {
         let text: String = text.chars().take(MAX_TEXT).collect();
-        let body = json!({ "model": self.model, "voice": self.voice, "input": text, "response_format": "pcm" });
+        let voice = self
+            .voice
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let body =
+            json!({ "model": self.model, "voice": voice, "input": text, "response_format": "pcm" });
         let raw = self
             .client
             .post(
@@ -356,6 +398,85 @@ impl Synthesizer for HttpSynthesizer {
         }
         Ok(resample_to_16k(&samples, self.source_rate))
     }
+}
+
+static SOURCE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+/// Remember which speech server (address and the NAME of the key variable) the portal may ask for its voices.
+pub fn set_source(url: &str, key_env: Option<&str>) {
+    let _ = SOURCE.set((url.to_owned(), key_env.unwrap_or("").to_owned()));
+}
+
+/// The speech server set up at start, and its key read from the environment.
+#[must_use]
+pub fn source() -> Option<(String, String)> {
+    SOURCE.get().map(|(url, var)| {
+        let key = if var.is_empty() {
+            String::new()
+        } else {
+            std::env::var(var).unwrap_or_default()
+        };
+        (url.clone(), key)
+    })
+}
+
+/// The names in a list a server returns: a plain array, or an object holding one under `voices`, `data` or `models`,
+/// whose entries are strings or objects with an `id`, `name`, `voice_id` or `voice`. Sorted, without repeats, at most
+/// 1000, each at most 128 characters.
+#[must_use]
+pub fn names_in(v: &Value) -> Vec<String> {
+    let items = v
+        .as_array()
+        .or_else(|| v["voices"].as_array())
+        .or_else(|| v["data"].as_array())
+        .or_else(|| v["models"].as_array());
+    let mut names: Vec<String> = items
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| {
+                    x.as_str().map(str::to_owned).or_else(|| {
+                        ["id", "name", "voice_id", "voice"]
+                            .iter()
+                            .find_map(|k| x[*k].as_str().map(str::to_owned))
+                    })
+                })
+                .filter(|n| !n.is_empty() && n.len() <= 128)
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names.truncate(1000);
+    names
+}
+
+async fn list_at(base_url: &str, key: &str, path: &str, what: &str) -> Result<Vec<String>, String> {
+    let c = Client::new(base_url, key, Duration::from_secs(10))?;
+    let raw = c.get(path).await?;
+    let v: Value = serde_json::from_slice(&raw)
+        .map_err(|_| format!("the server's list of {what} is not readable"))?;
+    let names = names_in(&v);
+    if names.is_empty() {
+        return Err(format!("the server did not list any {what}"));
+    }
+    Ok(names)
+}
+
+/// The voices a speech server offers, from `GET <base>/audio/voices` (not every server has it).
+///
+/// # Errors
+/// A plain description of why the list could not be had.
+pub async fn list_voices(base_url: &str, key: &str) -> Result<Vec<String>, String> {
+    list_at(base_url, key, "/audio/voices", "voices").await
+}
+
+/// The models a language-model server offers, from `GET <base>/models` (the OpenAI-style list that OpenRouter, Ollama
+/// and most others serve).
+///
+/// # Errors
+/// A plain description of why the list could not be had.
+pub async fn list_models(base_url: &str, key: &str) -> Result<Vec<String>, String> {
+    list_at(base_url, key, "/models", "models").await
 }
 
 #[cfg(test)]
@@ -576,6 +697,93 @@ mod tests {
             !head.to_ascii_lowercase().contains("authorization"),
             "no key configured, none sent"
         );
+    }
+
+    // REQ-CFG-080
+    #[tokio::test]
+    async fn the_voice_and_language_can_change_while_running() {
+        let pcm: Vec<u8> = (0..2400i16).flat_map(|i| i.to_le_bytes()).collect();
+        let (port, server) = serve_once("200 OK", "audio/pcm", pcm).await;
+        let s = HttpSynthesizer::new(
+            &format!("http://127.0.0.1:{port}/v1"),
+            "",
+            "tts-1",
+            "alloy",
+            24_000,
+            T,
+        )
+        .unwrap();
+        *s.voice_handle().lock().unwrap() = "nova".into();
+        s.synthesize("Hi.").await.unwrap();
+        let (_, body) = server.await.unwrap();
+        let sent: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            sent["voice"], "nova",
+            "the new voice is used from the next request"
+        );
+
+        let (port, server) =
+            serve_once("200 OK", "application/json", br#"{"text":"hi"}"#.to_vec()).await;
+        let t = HttpTranscriber::new(&format!("http://127.0.0.1:{port}"), "", "m", Some("en"), T)
+            .unwrap();
+        *t.language_handle().lock().unwrap() = Some("de".into());
+        t.transcribe(&[1, 2, 3]).await.unwrap();
+        let (_, body) = server.await.unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("name=\"language\"\r\n\r\nde"), "{text}");
+    }
+
+    // REQ-CFG-081
+    #[test]
+    fn lists_of_names_are_read_in_every_common_shape() {
+        use serde_json::json;
+        assert_eq!(names_in(&json!(["b", "a", "a"])), ["a", "b"]);
+        assert_eq!(
+            names_in(&json!({"voices": [{"id": "x"}, {"name": "y"}, {"voice_id": "z"}]})),
+            ["x", "y", "z"]
+        );
+        assert_eq!(
+            names_in(&json!({"data": [{"id": "gpt-a"}, {"id": "gpt-b"}], "object": "list"})),
+            ["gpt-a", "gpt-b"]
+        );
+        assert_eq!(names_in(&json!({"models": ["m"]})), ["m"]);
+        assert!(names_in(&json!({"error": "no"})).is_empty());
+        assert!(
+            names_in(&json!([1, 2, {"other": "x"}, ""])).is_empty(),
+            "only names are taken"
+        );
+        let long = "x".repeat(129);
+        assert!(
+            names_in(&json!([long])).is_empty(),
+            "a name that is too long is dropped"
+        );
+    }
+
+    // REQ-CFG-081
+    #[tokio::test]
+    async fn a_server_list_is_fetched_and_a_missing_one_says_so() {
+        let (port, server) = serve_once(
+            "200 OK",
+            "application/json",
+            br#"{"data":[{"id":"m2"},{"id":"m1"}]}"#.to_vec(),
+        )
+        .await;
+        let got = list_models(&format!("http://127.0.0.1:{port}/v1"), "")
+            .await
+            .unwrap();
+        assert_eq!(got, ["m1", "m2"]);
+        let (head, _) = server.await.unwrap();
+        assert!(head.starts_with("GET /v1/models HTTP/1.1"), "{head}");
+        let (port, _s) = serve_once("404 Not Found", "application/json", b"{}".to_vec()).await;
+        let e = list_voices(&format!("http://127.0.0.1:{port}/v1"), "")
+            .await
+            .unwrap_err();
+        assert!(e.contains("404"), "{e}");
+        let (port, _s) = serve_once("200 OK", "application/json", b"[]".to_vec()).await;
+        let e = list_voices(&format!("http://127.0.0.1:{port}/v1"), "")
+            .await
+            .unwrap_err();
+        assert!(e.contains("did not list any voices"), "{e}");
     }
 
     #[tokio::test]
