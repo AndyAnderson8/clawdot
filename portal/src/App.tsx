@@ -3,9 +3,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { api, keep } from "./api.ts";
 import { Activity } from "./tabs/Activity.tsx";
 import { Dashboard } from "./tabs/Dashboard.tsx";
-import { Reminders } from "./tabs/Reminders.tsx";
+import { Clock } from "./tabs/Reminders.tsx";
 import { Bluetooth } from "./tabs/Bluetooth.tsx";
-import { Features } from "./tabs/Features.tsx";
 import { SettingsPage } from "./tabs/SettingsPage.tsx";
 import { Forgot } from "./forgot.tsx";
 import { fail, say, start, useApp } from "./store.ts";
@@ -19,12 +18,11 @@ interface Tab {
   label: string;
   view: ComponentType<ViewProps>;
 }
-/** The destinations, Home first. Settings is for things you set once; Features is for things you switch on and off. */
+/** The destinations, Home first. Everything you can change, including the Features switches, is under Settings. */
 export const TABS: [Tab, ...Tab[]] = [
   { id: "dashboard", label: "Home", view: Dashboard },
-  { id: "clock", label: "Clock", view: Reminders },
+  { id: "clock", label: "Clock", view: Clock },
   { id: "bluetooth", label: "Bluetooth", view: Bluetooth },
-  { id: "features", label: "Features", view: Features },
   { id: "settings", label: "Settings", view: SettingsPage },
 ];
 /** Reachable from Home (Recent, the chart) but not in the menu. */
@@ -32,7 +30,9 @@ const HIDDEN: Tab[] = [{ id: "activity", label: "Activity", view: Activity }];
 
 /** The destination and sub-page named in the address fragment (`#/settings/assistant`), or the first. */
 export function routeFromHash(hash: string): { tab: Tab; sub: string } {
-  const [name = "", sub = ""] = hash.replace(/^#\/?/, "").split("/");
+  const [name0 = "", sub0 = ""] = hash.replace(/^#\/?/, "").split("/");
+  // Features used to be a destination of its own.
+  const [name, sub] = name0 === "features" ? ["settings", "features"] : [name0, sub0];
   return { tab: [...TABS, ...HIDDEN].find((t) => t.id === name) ?? TABS[0], sub };
 }
 

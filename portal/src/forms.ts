@@ -123,6 +123,7 @@ export const LABEL: Record<string, string> = {
   llm_model: "Model",
   llm_fallback_model: "Backup model",
   summary_model: "Summary model",
+  speech_language: "Speech language",
   llm_key_env: "Key variable",
   voice: "Voice",
   listen: "Address this page uses",
@@ -150,12 +151,16 @@ export const FROM: Record<string, string> = {
   flag: "Command-line flag",
 };
 
-export type SettingKind = "text" | "zone" | "area" | "board" | "number" | "bool" | "time";
+export type SettingKind = "text" | "zone" | "area" | "board" | "number" | "bool" | "time" | "language" | "voice";
 export interface SettingSpec {
   key: string;
   kind: SettingKind;
   hint?: string;
   off?: boolean;
+  /** For a text box: the id of a list of suggestions to offer while typing. */
+  datalist?: string;
+  /** An optional setting: shown only once added, with this text on the button that adds it, and a Remove button. */
+  optional?: string;
   /** Hide the control (its value is still kept and saved) while this returns true for the form's current values. */
   hideWhen?: (vals: Record<string, string>) => boolean;
   /** For a whole number: the range the device accepts (shown to the browser as min and max). */

@@ -131,8 +131,8 @@ fn the_page_uses_plain_names_and_no_radio() {
     for word in ["inbox", "scheduled", "radio", "music", "station"] {
         assert!(!page.contains(word), "the page still says `{word}`");
     }
-    // Home first, then Clock, Bluetooth, Features and Settings; everything configurable is under Settings.
-    for tab in ["Home", "Clock", "Bluetooth", "Features", "Settings"] {
+    // Home first, then Clock, Bluetooth and Settings; everything configurable, the Features switches included, is under Settings.
+    for tab in ["Home", "Clock", "Bluetooth", "Settings"] {
         assert!(
             PAGE.contains(&format!("\"{tab}\"")),
             "missing destination {tab}"
@@ -227,6 +227,8 @@ async fn every_portal_listing_needs_a_sign_in() {
         ("GET", "/api/update"),
         ("POST", "/api/update/check"),
         ("POST", "/api/update/apply"),
+        ("GET", "/api/models"),
+        ("GET", "/api/voices"),
     ] {
         // Refused either way; after about 20 failures the rate limit answers 429 instead of 401.
         let s = call(&p, m, path, "", "{}").await.0;
@@ -921,4 +923,29 @@ async fn updates_need_the_administrator_and_say_so_when_they_are_not_running() {
         );
     }
     assert_eq!(call(&p, "GET", "/api/update", "", "").await.0, 401);
+}
+
+// REQ-CFG-081
+#[tokio::test]
+async fn model_and_voice_lists_need_the_administrator_and_explain_what_is_missing() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    assert_eq!(call(&p, "GET", "/api/models", "", "").await.0, 401);
+    assert_eq!(call(&p, "GET", "/api/voices", "", "").await.0, 401);
+    // No service chosen yet: say what to do, not a connection error.
+    let (s, v) = call(&p, "GET", "/api/models", &session, "").await;
+    assert_eq!(s, 409, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("Choose who answers"),
+        "{v}"
+    );
+    // No speech provider in this test portal.
+    let (s, v) = call(&p, "GET", "/api/voices", &session, "").await;
+    assert_eq!(s, 503, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("speech provider"),
+        "{v}"
+    );
 }

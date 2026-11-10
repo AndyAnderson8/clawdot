@@ -63,7 +63,7 @@ pub struct Field {
 }
 
 /// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039).
-pub const FIELDS: [Field; 27] = [
+pub const FIELDS: [Field; 28] = [
     Field {
         key: "device_name",
         live: true,
@@ -98,7 +98,11 @@ pub const FIELDS: [Field; 27] = [
     },
     Field {
         key: "voice",
-        live: false,
+        live: true,
+    },
+    Field {
+        key: "speech_language",
+        live: true,
     },
     Field {
         key: "listen",
@@ -318,6 +322,15 @@ fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Resu
             json!(n)
         }
         "voice" => json!(string("The voice", 64)?),
+        "speech_language" => {
+            let t = string("The speech language", 12)?;
+            if !t.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+                return Err(
+                    "The speech language is a language code such as en, de or pt-BR.".into(),
+                );
+            }
+            json!(t)
+        }
         "listen" => {
             let l = string("The listen address", 64)?;
             let a: SocketAddr = l.parse().map_err(|_| {
@@ -399,7 +412,7 @@ fn check(
     {
         return Err("Quiet hours cannot start and end at the same time. Use different times, or clear both.".into());
     }
-    if has("voice") && !speech_configured {
+    if (has("voice") || has("speech_language")) && !speech_configured {
         return Err(
             "A voice needs a speech provider. Add a `speech` section to the configuration file (see docs/architecture/voice-pipeline.md) and restart, or clear the voice.".into(),
         );

@@ -13,6 +13,8 @@ import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
 import { PROVIDERS, providerFor } from "../providers.ts";
 import { Field } from "../parts.tsx";
+import { ModelList } from "./Voice.tsx";
+import { FeaturesSection } from "./Features.tsx";
 import { Skills } from "./Skills.tsx";
 import { TestSpeaker } from "./TestSpeaker.tsx";
 import { Tools } from "./Tools.tsx";
@@ -29,9 +31,21 @@ const MODEL: Spec = [
       return !p || (p.id !== "custom" && p.id !== "local");
     },
   },
-  { key: "llm_model", kind: "text" },
-  { key: "llm_fallback_model", kind: "text", hint: "Tried if the model fails." },
-  { key: "summary_model", kind: "text", hint: "A cheaper model for spoken summaries." },
+  { key: "llm_model", kind: "text", datalist: "models-list" },
+  {
+    key: "llm_fallback_model",
+    kind: "text",
+    hint: "Tried if the model fails.",
+    optional: "Add a backup model",
+    datalist: "models-list",
+  },
+  {
+    key: "summary_model",
+    kind: "text",
+    hint: "A cheaper model for spoken summaries.",
+    optional: "Add a model for summaries",
+    datalist: "models-list",
+  },
 ];
 const LIMITS: Spec = [
   {
@@ -94,7 +108,6 @@ function ThemeChoice(): JSX.Element {
 }
 
 function General(props: { s: SettingsData }): JSX.Element {
-  const vi = props.s.voice_info ?? {};
   return (
     <>
       <Group
@@ -105,14 +118,20 @@ function General(props: { s: SettingsData }): JSX.Element {
           { key: "zone", kind: "zone", hint: "Reminders and alarms use this time." },
         ]}
       />
-      <section class="card">
-        <h3>Language</h3>
-        <dl class="kv">
-          <dt>Speech language</dt>
-          <dd>{vi.language || "Automatic"}</dd>
-        </dl>
-        <p class="mut">The speech language is set in the configuration file.</p>
-      </section>
+      <Group
+        title="Language"
+        settings={props.s}
+        specs={[
+          {
+            key: "speech_language",
+            kind: "language",
+            hint: props.s.speech_configured
+              ? "The language you speak to it. Detecting it works for most people, but naming it is more accurate."
+              : "Needs a speech provider in the configuration file.",
+            off: !props.s.speech_configured,
+          },
+        ]}
+      />
       <section class="card sgroup">
         <h3>Appearance</h3>
         <ThemeChoice />
@@ -134,40 +153,43 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
         extra={({ vals, setVals }) => {
           const cur = providerFor(vals["llm_url"] ?? "");
           return (
-            <div class="srow">
-              <div class="slabel">
-                <label for="provider">Who answers</label>
-                <p class="mut">{cur?.note ?? "Pick a service. You can change it at any time."}</p>
+            <>
+              <div class="srow">
+                <div class="slabel">
+                  <label for="provider">Who answers</label>
+                  <p class="mut">{cur?.note ?? "Pick a service. You can change it at any time."}</p>
+                </div>
+                <div class="sctl">
+                  <select
+                    id="provider"
+                    required
+                    value={cur?.id ?? ""}
+                    onChange={(e) => {
+                      const p = PROVIDERS.find((x) => x.id === e.currentTarget.value);
+                      if (!p) return;
+                      setVals({
+                        ...vals,
+                        llm_url: p.id === "custom" ? "https://" : p.url,
+                        llm_model: p.model || vals["llm_model"] || "",
+                        llm_key_env: p.keyEnv || vals["llm_key_env"] || "",
+                      });
+                    }}
+                  >
+                    {cur ? null : (
+                      <option value="" disabled>
+                        Choose a service
+                      </option>
+                    )}
+                    {PROVIDERS.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-              <div class="sctl">
-                <select
-                  id="provider"
-                  required
-                  value={cur?.id ?? ""}
-                  onChange={(e) => {
-                    const p = PROVIDERS.find((x) => x.id === e.currentTarget.value);
-                    if (!p) return;
-                    setVals({
-                      ...vals,
-                      llm_url: p.id === "custom" ? "https://" : p.url,
-                      llm_model: p.model || vals["llm_model"] || "",
-                      llm_key_env: p.keyEnv || vals["llm_key_env"] || "",
-                    });
-                  }}
-                >
-                  {cur ? null : (
-                    <option value="" disabled>
-                      Choose a service
-                    </option>
-                  )}
-                  {PROVIDERS.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
+              <ModelList />
+            </>
           );
         }}
         intro="Without one, the speaker understands only simple commands like timers. Leave a box empty to go back to the configuration file or the default."
@@ -184,7 +206,7 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
           },
           {
             key: "voice",
-            kind: "text",
+            kind: "voice",
             hint: s.speech_configured ? "" : "Needs a speech provider in the configuration file.",
             off: !s.speech_configured,
           },
@@ -192,7 +214,7 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
       />
       <TestSpeaker />
       <Group
-        title="How far it may go"
+        title="Limits for one request"
         settings={s}
         intro="How far the assistant may go to answer one request. Lower numbers make it stop sooner and cost less."
         specs={LIMITS}
@@ -402,6 +424,7 @@ interface Section {
 }
 export const SECTIONS: [Section, ...Section[]] = [
   { id: "general", label: "General", view: General },
+  { id: "features", label: "Features", view: FeaturesSection },
   { id: "assistant", label: "Assistant", view: Assistant },
   { id: "inputs", label: "Inputs", view: Inputs },
   { id: "tools", label: "Tools", view: Extensions },
@@ -421,7 +444,7 @@ export function SettingsPage(props: { sub: string }): JSX.Element {
     <div class="page">
       <header class="pagehead">
         <h2>Settings</h2>
-        <p>Things you set once. Switches for what the assistant does are under Features.</p>
+        <p>Everything you can change, in sections. Features are the switches for what the assistant does.</p>
       </header>
       <nav aria-label="Settings sections" class="tabs">
         {SECTIONS.map((x) => (

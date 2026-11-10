@@ -4,13 +4,13 @@ ClawDot has one administrator password for the web page. There is no recovery co
 
 | You have | Use |
 |---|---|
-| A speaker with an action button, or a PC running the device program | [Option 1](#1-the-action-button-or-the-pc-key) |
+| A speaker whose program reports its button to ClawDot, or a PC running the device program | [Option 1](#1-the-action-button-or-the-pc-key) |
 | A PC or server where you can open a terminal | [Option 2](#2-the-command-line) |
-| An Echo Dot with no button hold and no shell | [Option 3](#3-an-echo-dot-with-no-button-hold-and-no-shell) |
+| An Echo Dot on the TECHO5 image | [Option 3](#3-an-echo-dot-on-the-techo5-image) |
 
 ## 1. The action button, or the PC key
 
-1. **A speaker with an action button:** hold the button for 10 seconds. You hear a short tone and the light changes. (If you hear a low double beep instead, the speaker was refused; see the table below.)
+1. **A speaker whose program reports the button to ClawDot:** hold the button for 10 seconds. You hear a short tone and the light changes. (If you hear a low double beep instead, the speaker was refused; see the table below.)
 2. **The device program on a PC:** type `admin` and press Enter in the console where `clawdot-device` runs.
 3. Within 5 minutes, open the ClawDot page from a phone or computer on the same network. The sign-in page now says **The speaker is ready for a new password**. Choose a password of at least 8 characters.
 4. The page signs you in. Every other signed-in browser is signed out.
@@ -35,9 +35,19 @@ clawdot --reset-admin --data-dir <your data directory>
 
 Start ClawDot again and open the page: the first-run screen asks for a new password. This needs a shell on the machine, which is why Option 1 exists.
 
-## 3. An Echo Dot with no button hold and no shell
+## 3. An Echo Dot on the TECHO5 image
 
-A Dot running ClawDot has no screen and often no shell. If the button hold does not work (for example the base image does not report the button), reach the data directory some other way and delete `admin.json` from it, then restart: that is exactly what `--reset-admin` does. How depends on how the Dot was installed; the trial plan for the TECHO5 base image explains where the data directory lives. If you cannot reach the data directory either, the unit needs re-flashing.
+On this image the speaker's own software (`echod`) owns the button and does not tell ClawDot about it, so holding the button does **not** open the reset window. What it does instead: a first hold opens the firmware's own setup page, and holding on switches on Bluetooth pairing (two chimes, three minutes apart). That is not a mistake on the Dot, but it is not a way back in.
+
+The way back in is the USB cable. Plug the Dot into a computer and run, in PowerShell:
+
+```
+scripts/dev/dot-reset-admin.ps1 -Port COM5
+```
+
+(Use the serial port number the Dot shows up as.) It removes the password, keeping everything else, and restarts ClawDot. About 15 seconds later open the portal and choose a new password; until you do, anyone on your network who opens the page can choose it, so do it straight away.
+
+If you cannot reach the cable, the only other way is to reach the data directory by other means and delete `admin.json` from it, then restart ClawDot. If you cannot reach that either, the unit needs re-flashing.
 
 ## What this protects against
 

@@ -1,4 +1,4 @@
-// A forgotten password on a speaker with no shell: hold the action button, then set a new one here (REQ-CFG-071..073).
+// A forgotten password on a speaker with no shell: the way back in (REQ-CFG-071..073), and the box that appears while a reset window is open.
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, keep } from "./api.ts";
@@ -30,12 +30,11 @@ export function Forgot(): JSX.Element {
       <details class="help" id="forgot">
         <summary>Forgot your password?</summary>
         <p id="forgothelp">
-          Hold the action button on the speaker for 10 seconds. A box to set a new password then appears here for a few
-          minutes. Full steps are in{" "}
+          A forgotten password is reset on the speaker itself, with its USB cable or at its console.{" "}
           <a href={GUIDE} target="_blank" rel="noopener noreferrer">
-            the guide
-          </a>
-          .
+            The guide
+          </a>{" "}
+          has the steps for your device.
         </p>
       </details>
       {s.windowSecs > 0 ? (

@@ -61,8 +61,9 @@ export function Notes(): JSX.Element {
   return (
     <>
       <p class="lead">
-        Short facts you asked the assistant to remember, like “my printer is called Pixel”. It sees them every time it
-        answers. You can also say “remember that ...” to the speaker. Never put a password or a key in a memory.
+        Short facts you asked the assistant to remember, like “I'm allergic to peanuts” or “Mom's birthday is June 3”.
+        It sees them every time it answers. You can also say “remember that ...” to the speaker. Never put a password or
+        a key in a memory.
       </p>
       {missing ? (
         <div class="soon" role="status">
@@ -74,8 +75,8 @@ export function Notes(): JSX.Element {
         <div class="soon" role="status" id="notesoff">
           <h3>Memory is off</h3>
           <p>
-            The assistant is not remembering anything. Turn it on under <a href="#/features">Features</a>. What you
-            already saved is kept.
+            The assistant is not remembering anything. Turn it on under <a href="#/settings/features">Features</a>. What
+            you already saved is kept.
           </p>
         </div>
       ) : null}

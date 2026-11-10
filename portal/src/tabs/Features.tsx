@@ -19,7 +19,7 @@ const FEATURES: Feature[] = [
   {
     key: "notes",
     title: "Remember things",
-    text: "Say “remember that my printer is called Pixel” and it knows from then on.",
+    text: "Say “remember that Mom's birthday is June 3” and it knows from then on.",
     icon: "M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3Zm0 13a3 3 0 0 1 3-3h11",
     more: { href: "#/settings/memory", label: "See what it remembers" },
   },
@@ -94,24 +94,16 @@ function FeatureCard(props: { f: Feature; s: SettingsData }): JSX.Element | null
   );
 }
 
-export function Features(): JSX.Element {
-  const s = useApp();
-  const st = s.settings;
-  return (
-    <div class="page">
-      <header class="pagehead">
-        <h2>Features</h2>
-        <p>Switch abilities on or off. Changes apply right away.</p>
-      </header>
-      {st ? (
-        <div class="features">
-          {FEATURES.map((f) => (
-            <FeatureCard key={f.key} f={f} s={st} />
-          ))}
-        </div>
-      ) : (
-        <p class="empty">Loading.</p>
-      )}
+/** The switches, as a section of Settings. */
+export function FeaturesSection(): JSX.Element {
+  const st = useApp().settings;
+  return st ? (
+    <div class="features">
+      {FEATURES.map((f) => (
+        <FeatureCard key={f.key} f={f} s={st} />
+      ))}
     </div>
+  ) : (
+    <p class="empty">Loading.</p>
   );
 }
