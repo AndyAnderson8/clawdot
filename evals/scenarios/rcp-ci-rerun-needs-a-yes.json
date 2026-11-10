@@ -9,8 +9,8 @@
     {
       "say": "did the build pass, and if not run it again",
       "model": [
-        {"calls": [{"name": "github_list_runs", "args": {"owner": "andy", "repo": "clawdot"}}]},
-        {"calls": [{"name": "github_rerun_failed", "args": {"owner": "andy", "repo": "clawdot", "run_id": 4412}}]}
+        {"calls": [{"name": "github_list_runs", "args": {"owner": "octocat", "repo": "clawdot"}}]},
+        {"calls": [{"name": "github_rerun_failed", "args": {"owner": "octocat", "repo": "clawdot", "run_id": 4412}}]}
       ],
       "expect": {
         "ends": "held",

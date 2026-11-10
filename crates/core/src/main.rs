@@ -592,20 +592,9 @@ fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
     }
 }
 
-/// A name for the device: the host name, or "ClawDot".
+/// The default name for the device. Never the machine’s host name, which is often a person’s name; it can be changed in Settings.
 fn device_name() -> String {
-    let from_env = ["HOSTNAME", "COMPUTERNAME"]
-        .iter()
-        .find_map(|v| std::env::var(v).ok());
-    let name = from_env
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-        .unwrap_or_default();
-    let name: String = name.trim().chars().take(40).collect();
-    if name.is_empty() {
-        "ClawDot".to_owned()
-    } else {
-        name
-    }
+    "ClawDot".to_owned()
 }
 
 /// Facts shown next to the settings but not edited there: the speech provider's models and where speakers
@@ -840,6 +829,17 @@ struct Brain {
     persona: String,
     /// Turn limits, speech while working and notes.
     agent: AgentConfig,
+    /// A speech provider (address and speech model) is configured, so a speaker has a voice (REQ-CFG-070).
+    voice_configured: bool,
+}
+
+/// What the portal is told about the speaker (REQ-CFG-070).
+struct SpeakerView {
+    /// Some satellite could speak right now (idle and unmuted).
+    available: bool,
+    /// Speech is printed to the terminal, which counts as a speaker and needs no voice.
+    console: bool,
+    quiet: Option<clawdot_core::inbox::endpoint::QuietHours>,
 }
 
 /// What to say and which effects the satellite should carry out.
@@ -886,9 +886,21 @@ impl Brain {
     fn status_json(
         &self,
         satellites: usize,
+        speaker: &SpeakerView,
         stations: &[String],
         tools: &serde_json::Value,
     ) -> serde_json::Value {
+        let minute = self.assistant.minute_of_day();
+        let (quiet_set, quiet_active) = speaker
+            .quiet
+            .map_or((false, false), |q| (true, q.contains(minute)));
+        let mut who = serde_json::json!({
+            "connected": satellites > 0 || speaker.console,
+            "available": speaker.console || (satellites > 0 && speaker.available),
+        });
+        if speaker.console {
+            who["name"] = "console".into();
+        }
         let scheduled: Vec<serde_json::Value> = self
             .assistant
             .scheduled()
@@ -908,6 +920,11 @@ impl Brain {
             },
             "clock_valid": self.clock.wall_clock_valid(),
             "satellites": satellites,
+            "speaker": who,
+            "voice": { "configured": self.voice_configured },
+            // The satellite does not yet say whether it is muted or busy; both read as "not available".
+            "muted": false,
+            "quiet_hours": { "set": quiet_set, "active": quiet_active },
             "tools": tools,
             "stations": stations,
             "scheduled": scheduled,
@@ -1390,6 +1407,7 @@ async fn main() -> ExitCode {
         builtin: builtin.clone(),
         persona,
         agent: args.agent.clone(),
+        voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
     };
 
     core.set_ui_tools(brain.listing());
@@ -1457,6 +1475,21 @@ async fn main() -> ExitCode {
             if let Some(s) = args.satellite.follow_up_secs {
                 settings.dialog.follow_up_secs = s;
             }
+            settings.admin_reset = Some(satellite::AdminResetHook::new({
+                let core = Arc::clone(&core);
+                move || {
+                    use clawdot_core::admin::AdminError;
+                    core.admin_open_reset_window()
+                        .map(|s| u32::try_from(s).unwrap_or(0))
+                        .map_err(|e| match e {
+                            AdminError::NoPassword => {
+                                "No password is set, so there is nothing to reset.".to_owned()
+                            }
+                            AdminError::RateLimited => "Wait a minute and try again.".to_owned(),
+                            _ => "The reset window could not be opened.".to_owned(),
+                        })
+                }
+            }));
             let l = TcpListener::bind(addr)
                 .await
                 .map_err(|e| format!("cannot listen on {addr}: {e}"))?;
@@ -1597,7 +1630,12 @@ async fn main() -> ExitCode {
             }
             _ = tick.tick() => {
                 let tool_counts = serde_json::json!({ "builtin": builtin.len(), "http": brain.http_tools.specs().len(), "mcp": brain.mcp.tools().len() });
-                core.set_ui_status(brain.status_json(announcer.connected(), &station_names, &tool_counts));
+                let view = SpeakerView {
+                    available: announcer.connected() > 0 && announcer.is_available().await,
+                    console: args.console || args.echo_speech,
+                    quiet: core.quiet_hours(),
+                };
+                core.set_ui_status(brain.status_json(announcer.connected(), &view, &station_names, &tool_counts));
                 // Spoken text is echoed only to an interactive console: in server mode stdout goes to a
                 // journal or container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
                 while let Some(phrase) = core.take_speech() {

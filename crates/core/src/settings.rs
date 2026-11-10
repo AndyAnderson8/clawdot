@@ -215,7 +215,7 @@ fn check_zone(name: &str) -> Result<(), String> {
     #[cfg(feature = "tz")]
     {
         crate::sched::IanaZone::new(name).map(|_| ()).map_err(|_| {
-            format!("`{name}` is not a time zone name. Pick one from the list, for example America/Phoenix.")
+            format!("`{name}` is not a time zone name. Pick one from the list, for example Europe/Berlin.")
         })
     }
     #[cfg(not(feature = "tz"))]
@@ -574,7 +574,7 @@ impl SettingsState {
     /// A message that says what is wrong and how to fix it; the saved file and the state are unchanged.
     pub fn change(&mut self, patch: &Value) -> Result<(), String> {
         let Some(patch) = patch.as_object().filter(|p| !p.is_empty()) else {
-            return Err("Send the settings to change as a JSON object, for example {\"zone\":\"America/Phoenix\"}.".into());
+            return Err("Send the settings to change as a JSON object, for example {\"zone\":\"Europe/Berlin\"}.".into());
         };
         let mut saved = self.saved.clone();
         for (k, v) in patch {
@@ -713,11 +713,11 @@ mod tests {
             (json!("America/Chicago"), "file".into())
         );
         assert_eq!(source(&st, "max_requests_per_day"), "default");
-        st.change(&json!({"zone": "America/Phoenix", "max_requests_per_day": 40}))
+        st.change(&json!({"zone": "Europe/Berlin", "max_requests_per_day": 40}))
             .unwrap();
         assert_eq!(
             (st.get("zone"), source(&st, "zone")),
-            (json!("America/Phoenix"), "saved".into())
+            (json!("Europe/Berlin"), "saved".into())
         );
         assert_eq!(
             (
@@ -747,10 +747,10 @@ mod tests {
     fn saved_settings_survive_a_restart() {
         let dir = TempDir::new("persist");
         let mut st = open_in(&dir.0, Layer::new(), Layer::new());
-        st.change(&json!({"zone": "America/Phoenix", "persona": "Be brief.\nBe kind."}))
+        st.change(&json!({"zone": "Europe/Berlin", "persona": "Be brief.\nBe kind."}))
             .unwrap();
         let st2 = open_in(&dir.0, Layer::new(), Layer::new());
-        assert_eq!(st2.get("zone"), "America/Phoenix");
+        assert_eq!(st2.get("zone"), "Europe/Berlin");
         assert_eq!(st2.get("persona"), "Be brief.\nBe kind.");
         assert!(dir.0.join("settings.json").exists());
         assert!(!dir.0.join("settings.tmp").exists());
@@ -836,7 +836,7 @@ mod tests {
             (json!({"nonsense": 1}), "not a setting"),
             (json!({}), "JSON object"),
             (
-                json!({"zone": "America/Phoenix", "listen": "bad"}),
+                json!({"zone": "Europe/Berlin", "listen": "bad"}),
                 "127.0.0.1",
             ),
         ] {
@@ -884,7 +884,7 @@ mod tests {
         let dir = TempDir::new("restart");
         let mut st = open_in(&dir.0, Layer::new(), Layer::new());
         assert_eq!(st.json()["restart_needed"], json!([]));
-        st.change(&json!({"zone": "America/Phoenix", "listen": "0.0.0.0:4000", "board": "auto"}))
+        st.change(&json!({"zone": "Europe/Berlin", "listen": "0.0.0.0:4000", "board": "auto"}))
             .unwrap();
         let j = st.json();
         assert_eq!(
@@ -894,7 +894,7 @@ mod tests {
         assert_eq!(j["fields"]["zone"]["live"], true);
         assert_eq!(j["fields"]["listen"]["live"], false);
         let live = st.live_values();
-        assert_eq!(live["zone"], "America/Phoenix");
+        assert_eq!(live["zone"], "Europe/Berlin");
         assert!(!live.contains_key("listen") && !live.contains_key("board"));
         // Going back to the running value needs no restart.
         st.change(&json!({"listen": null, "board": null})).unwrap();

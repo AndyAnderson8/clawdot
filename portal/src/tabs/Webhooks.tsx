@@ -1,7 +1,8 @@
 import type { JSX } from "preact";
+import { Field } from "../parts.tsx";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
-import { snippets } from "../forms.ts";
+import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
 import { CopyButton } from "../parts.tsx";
 import { fail, get, load, say, set, sv, useApp } from "../store.ts";
 import type { Endpoint, WebhookToken } from "../types.ts";
@@ -26,7 +27,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     }
   };
   const remove = async () => {
-    if (!confirm("Delete the webhook " + e.name + "? Anything posting to it will be turned away.")) return;
+    if (!confirm("Delete the input " + e.name + "? Anything posting to it will be turned away.")) return;
     try {
       await api("DELETE", "/api/endpoints/" + e.name);
       const { [e.name]: _gone, ...rest } = get().fresh;
@@ -42,7 +43,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     <li>
       <div class="rowhead">
         <strong>{e.name}</strong>
-        <span class="badge">{e.adapter === "claude-code" ? "Claude Code" : "Plain JSON"}</span>
+        <span class="badge">{adapterName(e.adapter)}</span>
       </div>
       <code>{url}</code>
       <div class="acts">
@@ -83,7 +84,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
 export function Webhooks(): JSX.Element {
   const s = useApp();
   const [name, setName] = useState("");
-  const [adapter, setAdapter] = useState("claude-code");
+  const [adapter, setAdapter] = useState("generic");
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const ov = s.overview;
 
@@ -104,48 +105,60 @@ export function Webhooks(): JSX.Element {
 
   return (
     <>
-      <h2>Webhooks</h2>
-      <p>
-        A webhook is a web address that an agent or service posts to when something happens. Each has its own token,
-        which works like a password for that address.
+      <p class="lead">
+        Events from anything that can send a web request: a build server, a home automation hub, a script. Each input is
+        a web address with its own token, which works like a password for that address. The speaker reads events out
+        when it is idle.
       </p>
-      <ul class="rows">
-        {ov && !ov.endpoints.length ? (
-          <li class="mut">No webhooks yet. Create one below to connect your first agent.</li>
-        ) : null}
-        {ov?.endpoints.map((e) => (
-          <Hook
-            key={e.name}
-            e={e}
-            open={open[e.name] ?? !!s.fresh[e.name]}
-            setOpen={(v) => setOpen((o) => ({ ...o, [e.name]: v }))}
-          />
-        ))}
-      </ul>
+      <section class="card" id="inputlist">
+        <h3>
+          Your inputs<span class="count">{ov?.endpoints.length ?? 0}</span>
+        </h3>
+        <ul class="rows">
+          {ov && !ov.endpoints.length ? (
+            <li class="empty">
+              No inputs yet. Create one below, then paste its address and token into whatever should send events.
+            </li>
+          ) : null}
+          {ov?.endpoints.map((e) => (
+            <Hook
+              key={e.name}
+              e={e}
+              open={open[e.name] ?? !!s.fresh[e.name]}
+              setOpen={(v) => setOpen((o) => ({ ...o, [e.name]: v }))}
+            />
+          ))}
+        </ul>
+      </section>
       <form class="panel" onSubmit={create}>
-        <h3>Create a webhook</h3>
+        <h3>Create an input</h3>
         <p class="mut">
-          Give each agent or service its own webhook so you can cut one off without touching the rest. Use letters,
-          numbers, - and _.
+          Give each sender its own input so you can cut one off without touching the rest. Use letters, numbers, - and
+          _.
         </p>
-        <label for="wname">Name</label>
-        <input
-          id="wname"
-          type="text"
-          maxLength={32}
-          placeholder="For example: claude-code"
-          autoComplete="off"
-          autoCapitalize="none"
-          value={name}
-          onInput={(e) => setName(e.currentTarget.value)}
-        />
-        <label for="wadapter">What is sending?</label>
-        <select id="wadapter" value={adapter} onChange={(e) => setAdapter(e.currentTarget.value)}>
-          <option value="claude-code">Claude Code</option>
-          <option value="generic">Anything else (plain JSON)</option>
-        </select>
+        <Field id="wname" label="Name">
+          <input
+            id="wname"
+            type="text"
+            maxLength={32}
+            placeholder="For example: build-server"
+            autoComplete="off"
+            autoCapitalize="none"
+            value={name}
+            onInput={(e) => setName(e.currentTarget.value)}
+          />
+        </Field>
+        <Field id="wadapter" label="What format does it send?">
+          <select id="wadapter" value={adapter} onChange={(e) => setAdapter(e.currentTarget.value)}>
+            {ADAPTERS.map(([v, text]) => (
+              <option key={v} value={v}>
+                {text}
+              </option>
+            ))}
+          </select>
+        </Field>
         <div class="row">
-          <button>Create webhook</button>
+          <button>Create input</button>
         </div>
       </form>
     </>

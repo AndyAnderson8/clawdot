@@ -57,6 +57,27 @@ pub struct Answer {
     pub expects_reply: bool,
 }
 
+/// What a satellite's administrator-reset request does (REQ-SAT-020): open the local reset window and return the
+/// seconds it stays open, or a short reason in plain words.
+#[derive(Clone)]
+pub struct AdminResetHook(Arc<dyn Fn() -> Result<u32, String> + Send + Sync>);
+
+impl AdminResetHook {
+    /// Wrap the function the core provides.
+    pub fn new(f: impl Fn() -> Result<u32, String> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+}
+
+impl std::fmt::Debug for AdminResetHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdminResetHook")
+    }
+}
+
+/// A satellite may ask for the reset window at most this often.
+const RESET_ASK_EVERY: Duration = Duration::from_secs(5);
+
 /// Server settings.
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -77,6 +98,10 @@ pub struct Settings {
     pub max_sessions: usize,
     /// Lets the rest of the program speak to connected satellites.
     pub announcer: Announcer,
+    /// Opens the local administrator reset window when a satellite asks (REQ-SAT-020). `None` refuses.
+    pub admin_reset: Option<AdminResetHook>,
+    /// Set by [`serve`] for a connection from a loopback address; such a peer is on the device itself.
+    pub peer_loopback: bool,
 }
 
 impl Default for Settings {
@@ -90,6 +115,8 @@ impl Default for Settings {
             max_per_ip: 2,
             max_sessions: 4,
             announcer: Announcer::default(),
+            admin_reset: None,
+            peer_loopback: false,
         }
     }
 }
@@ -357,6 +384,9 @@ where
             .max(Duration::from_millis(10)),
     );
     let mut last_ping = Instant::now();
+    // A reset request is honoured from the device itself (loopback) or from a satellite that proved a token.
+    let reset_trusted = settings.peer_loopback || !settings.token_hashes.is_empty();
+    let mut last_reset_ask: Option<Instant> = None;
 
     loop {
         // What the previous step asked us to do.
@@ -387,6 +417,23 @@ where
                         send(&mut wr, &Message::SetMute { muted }).await?;
                     }
                     Message::MuteChanged { muted } => steps.push(dialog.set_muted(muted)),
+                    Message::AdminReset => {
+                        let slow = last_reset_ask.is_some_and(|t| t.elapsed() < RESET_ASK_EVERY);
+                        last_reset_ask = Some(Instant::now());
+                        let (open_secs, reason) = match (&settings.admin_reset, reset_trusted, slow) {
+                            (_, _, true) => (0, Some("Too many requests. Wait a few seconds.".to_owned())),
+                            (Some(hook), true, false) => match (hook.0)() {
+                                Ok(s) => (s, None),
+                                Err(why) => (0, Some(why)),
+                            },
+                            (Some(_), false, false) => (
+                                0,
+                                Some("This speaker is not trusted to open the reset window.".to_owned()),
+                            ),
+                            (None, _, _) => (0, Some("Not available.".to_owned())),
+                        };
+                        send(&mut wr, &Message::AdminResetWindow { open_secs, reason }).await?;
+                    }
                     Message::AudioChunk { format, payload, .. } => {
                         if format != AudioFormat::PCM_16K_MONO {
                             if !warned_format {
@@ -761,12 +808,13 @@ where
             drop(stream);
             continue;
         };
-        let (stt, tts, asks, settings) = (
+        let (stt, tts, asks, mut settings) = (
             Arc::clone(&stt),
             Arc::clone(&tts),
             asks.clone(),
             settings.clone(),
         );
+        settings.peer_loopback = peer.ip().is_loopback();
         tokio::spawn(async move {
             let _permit = permit;
             let _ip_guard = ip_guard;
@@ -1799,5 +1847,114 @@ mod tests {
             "a different request is not a stop"
         );
         assert_eq!(samples(&seen), "Finished.".len() * 100, "{seen:?}");
+    }
+
+    // ----- the administrator reset request (REQ-SAT-020, REQ-DEV-031) -----
+
+    async fn next_reset_answer(p: &mut Peer) -> (u32, Option<String>) {
+        loop {
+            match p.recv().await {
+                Message::AdminResetWindow { open_secs, reason } => return (open_secs, reason),
+                Message::Ping => p.send(&Message::Pong).await,
+                _ => {}
+            }
+        }
+    }
+
+    fn counting_hook(calls: &Arc<AtomicU64>, answer: Result<u32, String>) -> AdminResetHook {
+        let calls = Arc::clone(calls);
+        AdminResetHook::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            answer.clone()
+        })
+    }
+
+    async fn welcomed(s: Settings, token: Option<&str>) -> Peer {
+        let (mut p, h) = start(s, "x", "y");
+        std::mem::forget(h);
+        p.hello(token, PROTOCOL_VERSION).await;
+        assert!(matches!(p.recv().await, Message::Welcome(_)));
+        p
+    }
+
+    #[tokio::test]
+    async fn a_loopback_satellite_can_open_the_reset_window() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut s = fast();
+        s.peer_loopback = true;
+        s.admin_reset = Some(counting_hook(&calls, Ok(300)));
+        let mut p = welcomed(s, None).await;
+        p.send(&Message::AdminReset).await;
+        assert_eq!(next_reset_answer(&mut p).await, (300, None));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_network_satellite_without_a_token_is_refused_and_the_core_is_not_asked() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut s = fast();
+        s.admin_reset = Some(counting_hook(&calls, Ok(300)));
+        let mut p = welcomed(s, None).await;
+        p.send(&Message::AdminReset).await;
+        let (secs, reason) = next_reset_answer(&mut p).await;
+        assert_eq!(secs, 0);
+        assert!(reason.unwrap().contains("not trusted"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a guest on the LAN gets nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_network_satellite_that_proved_a_token_is_trusted() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut s = fast();
+        s.token_hashes = vec![hash_token("sat-secret")];
+        s.admin_reset = Some(counting_hook(&calls, Ok(300)));
+        let mut p = welcomed(s, Some("sat-secret")).await;
+        p.send(&Message::AdminReset).await;
+        assert_eq!(next_reset_answer(&mut p).await.0, 300);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_from_the_core_and_a_missing_hook_are_both_explained() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut s = fast();
+        s.peer_loopback = true;
+        s.admin_reset = Some(counting_hook(
+            &calls,
+            Err("Wait a minute and try again.".into()),
+        ));
+        let mut p = welcomed(s, None).await;
+        p.send(&Message::AdminReset).await;
+        assert_eq!(
+            next_reset_answer(&mut p).await,
+            (0, Some("Wait a minute and try again.".into()))
+        );
+        let mut s = fast();
+        s.peer_loopback = true;
+        let mut p = welcomed(s, None).await;
+        p.send(&Message::AdminReset).await;
+        assert_eq!(next_reset_answer(&mut p).await.0, 0);
+    }
+
+    #[tokio::test]
+    async fn a_satellite_cannot_hammer_the_reset_request() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut s = fast();
+        s.peer_loopback = true;
+        s.admin_reset = Some(counting_hook(&calls, Ok(300)));
+        let mut p = welcomed(s, None).await;
+        for _ in 0..5 {
+            p.send(&Message::AdminReset).await;
+        }
+        let mut answers = Vec::new();
+        for _ in 0..5 {
+            answers.push(next_reset_answer(&mut p).await.0);
+        }
+        assert_eq!(answers, [300, 0, 0, 0, 0]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

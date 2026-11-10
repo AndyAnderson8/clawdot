@@ -8,6 +8,7 @@
 //! * `POST /api/login`                         `{"password":..}`; returns a session token
 //! * `POST /api/logout`                        ends the session
 //! * `POST /api/admin/password`                `{"password":..}`; sets a new password
+//! * `POST /api/recover/window`                `{"password":..}`; during the local reset window (REQ-CFG-069)
 //! * `GET  /api/overview`                      endpoints and recent agent events
 //! * `GET  /api/schedule`, `POST /api/schedule`, `PUT|DELETE /api/schedule/{id}`   timers, alarms, reminders
 //! * `POST /api/tools/{name}/tier`            body `{"tier":..|null}`; the administrator's risk tier for a tool (REQ-SEC-030)
@@ -16,7 +17,8 @@
 //! * `GET  /api/audit`                         what the assistant did, newest first (filters and paging in `audit`)
 //! * `GET  /api/notes`, `POST /api/notes`, `DELETE /api/notes[/{id}]`   the notes the user asked to keep (REQ-CFG-044, 061)
 //! * `GET  /api/status`                      what the assistant is doing (model, satellites, tools, usage, schedule)
-//! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
+//! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak"). `202 {"ok":true}`
+//!   when queued; otherwise `{"ok":false,"reason":"no_voice|no_speaker|muted|busy|quiet_hours","message":..}` (REQ-CFG-070)
 //! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
 //! * `POST /api/endpoints/{name}/rotate`       a new token, returned once
 //! * `DELETE /api/endpoints/{name}`
@@ -150,7 +152,8 @@ fn admin_error(e: AdminError) -> Resp {
         AdminError::SetupRequired | AdminError::NotPrivate | AdminError::OpenRefused => {
             StatusCode::FORBIDDEN
         }
-        AdminError::AlreadySetUp => StatusCode::CONFLICT,
+        AdminError::AlreadySetUp | AdminError::NoPassword => StatusCode::CONFLICT,
+        AdminError::WindowClosed => StatusCode::FORBIDDEN,
         AdminError::BadPassword => StatusCode::BAD_REQUEST,
         AdminError::Storage | AdminError::NoRandomness => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -259,11 +262,18 @@ pub async fn handle(
         (&Method::GET, ["auth"]) => {
             let mut state = core.admin_state();
             state["peer_private"] = json!(admin::is_private(peer));
+            if !admin::is_private(peer) {
+                // Whether the reset window is open is for the local network only.
+                state["reset_window_secs"] = json!(0);
+            }
             state["version"] = json!(env!("CARGO_PKG_VERSION"));
             return Some(json_reply(StatusCode::OK, &state));
         }
         (&Method::POST, ["setup"]) => return Some(setup(core, peer, body).await),
         (&Method::POST, ["login"]) => return Some(login(core, body).await),
+        (&Method::POST, ["recover", "window"]) => {
+            return Some(recover_window(core, peer, body).await);
+        }
         (&Method::POST, ["logout"]) => {
             if let Some(t) = bearer(headers) {
                 core.admin_logout(t);
@@ -934,6 +944,36 @@ async fn change_password(core: &Arc<Core>, body: Incoming) -> Resp {
     }
 }
 
+/// A new password during the local reset window, from a private address, (REQ-CFG-069).
+async fn recover_window(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Pw {
+        password: String,
+    }
+    let req: Pw = match read_json(body).await {
+        Ok(r) => r,
+        Err((s, m)) => return error(s, m),
+    };
+    if !admin::password_ok(&req.password) {
+        return admin_error(AdminError::BadPassword);
+    }
+    if let Err(e) = core.admin_window_begin(peer) {
+        return admin_error(e);
+    }
+    let hash = match hash_in_background(req.password).await {
+        Ok(h) => h,
+        Err(e) => return admin_error(e),
+    };
+    match core.admin_window_finish(peer, hash) {
+        Ok(token) => json_reply(
+            StatusCode::OK,
+            &json!({ "mode": "password", "token": token }),
+        ),
+        Err(e) => admin_error(e),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Speak {
@@ -948,14 +988,76 @@ async fn speak(core: &Core, body: Incoming) -> Resp {
     let Ok(req) = serde_json::from_slice::<Speak>(&bytes) else {
         return error(StatusCode::BAD_REQUEST, "expected {\"text\":..}");
     };
-    if core.queue_speech(&req.text) {
-        json_reply(StatusCode::ACCEPTED, &json!({ "queued": true }))
-    } else {
-        error(
+    let text = req.text.trim();
+    if text.is_empty() || text.chars().count() > crate::app::MAX_SPEECH_CHARS {
+        return error(
             StatusCode::BAD_REQUEST,
-            "give some text of up to 200 characters, and wait for the last phrase to finish",
+            "give some text of up to 200 characters",
+        );
+    }
+    if let Some((status, reason, message)) = speak_refusal(&core.ui_status()) {
+        return speak_refused(status, reason, message);
+    }
+    if core.queue_speech(text) {
+        json_reply(StatusCode::ACCEPTED, &json!({ "ok": true, "queued": true }))
+    } else {
+        speak_refused(
+            StatusCode::CONFLICT,
+            "busy",
+            "The speaker is still saying the last phrase. Wait for it to finish, then try again.",
         )
     }
+}
+
+fn speak_refused(status: StatusCode, reason: &str, message: &str) -> Resp {
+    json_reply(
+        status,
+        &json!({ "ok": false, "reason": reason, "message": message, "error": message }),
+    )
+}
+
+/// Why a test phrase cannot be spoken right now, from the latest status snapshot (REQ-CFG-070). A snapshot that
+/// does not say (not published yet, or an older shape) is treated as unknown and nothing is refused.
+fn speak_refusal(status: &Value) -> Option<(StatusCode, &'static str, &'static str)> {
+    let flag = |a: &str, b: &str| status.get(a)?.get(b)?.as_bool();
+    // Speech printed to the terminal needs neither a satellite nor a voice.
+    if status
+        .get("speaker")
+        .and_then(|s| s.get("name"))
+        .and_then(Value::as_str)
+        == Some("console")
+    {
+        return None;
+    }
+    if flag("voice", "configured") == Some(false) {
+        return Some((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_voice",
+            "No voice is set up, so the speaker has nothing to speak with. Add a speech provider in the configuration file (see the voice pipeline guide), then restart ClawDot.",
+        ));
+    }
+    if flag("speaker", "connected") == Some(false) {
+        return Some((
+            StatusCode::CONFLICT,
+            "no_speaker",
+            "No speaker is connected. Start the speaker program on the device or a computer, check that it points at this address, then try again.",
+        ));
+    }
+    if status.get("muted").and_then(Value::as_bool) == Some(true) {
+        return Some((
+            StatusCode::CONFLICT,
+            "muted",
+            "The speaker is muted. Press its mute button to unmute it, then try again.",
+        ));
+    }
+    if flag("speaker", "available") == Some(false) {
+        return Some((
+            StatusCode::CONFLICT,
+            "busy",
+            "The speaker is in a conversation or muted. Wait a moment, or unmute it, then try again.",
+        ));
+    }
+    None
 }
 
 async fn create(core: &Core, body: Incoming) -> Resp {

@@ -50,7 +50,21 @@ export class Browser {
   requests: string[] = [];
   problems: string[] = [];
 
+  /** Starts Chrome, retrying a cold start: a fresh CI runner can take well over ten seconds to bring it up. */
   static async launch(chrome: string): Promise<Browser> {
+    let last: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await Browser.launchOnce(chrome);
+      } catch (e) {
+        last = e;
+        await sleep(1000);
+      }
+    }
+    throw last instanceof Error ? last : new Error("Chrome did not start");
+  }
+
+  private static async launchOnce(chrome: string): Promise<Browser> {
     const b = new Browser();
     b.dir = mkdtempSync(join(tmpdir(), "portal-chrome-"));
     b.proc = spawn(
@@ -69,10 +83,11 @@ export class Browser {
       { stdio: "ignore" },
     );
     let port = 0;
-    for (let i = 0; i < 100 && !port; i++) {
+    for (let i = 0; i < 300 && !port; i++) {
       try {
         port = Number(readFileSync(join(b.dir, "DevToolsActivePort"), "utf8").split("\n")[0]);
       } catch {
+        if (b.proc.exitCode !== null) break; // Chrome exited: no point waiting
         await sleep(100);
       }
     }

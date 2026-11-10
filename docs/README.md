@@ -6,6 +6,7 @@
 | Process | [git-workflow.md](process/git-workflow.md) | Git flow, merge commits, gated landing, releases, enforcement layers |
 | Process | [runbook.md](process/runbook.md) | Step-by-step commands for humans and agents: work, land, release, hotfix, fixes for common errors |
 | Process | [repo-settings.md](process/repo-settings.md) | GitHub rulesets and settings that enforce the git flow server-side |
+| Process | [personal-data.md](process/personal-data.md) | What must not appear in examples, and the hashed-denylist guard |
 | Agents | [../AGENTS.md](../AGENTS.md) | Binding rules for AI coding agents (identity, branches, commits) |
 | Specs | [specs/](specs/README.md) | What the system must do, with stable requirement IDs |
 | Architecture | [architecture/overview.md](architecture/overview.md) | Components, flows, constraints, risks |
@@ -41,6 +42,7 @@
 | Bridges | [../bridges/README.md](../bridges/README.md) | ntfy and Discord sidecars that make the speaker say messages, with filters, rate limits and no raw markup |
 | Guides | [guides/updates.md](guides/updates.md) | How ClawDot checks for, verifies and installs updates, and how the maintainer signs a release |
 | Guides | [guides/local-speech.md](guides/local-speech.md) | Free local speech to text (whisper.cpp) and text to speech (Piper) with an OpenAI-compatible URL, for the PC voice loop |
+| Guides | [guides/forgot-password.md](guides/forgot-password.md) | Forgot the administrator password: the 10 second button hold, the desktop key, the command line, and the Echo Dot |
 | Guides | [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | B0 trial of the TECHO5 Dot base image on the maintainer's unit: backups, install, measurements, rollback, go/no-go |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
 | Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |

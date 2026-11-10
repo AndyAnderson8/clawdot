@@ -1,0 +1,98 @@
+/* Design tokens. Names and neutral values follow the Astryx neutral theme (github.com/meta/astryx,
+   @astryxdesign/theme-neutral 0.7.11, MIT License, Copyright (c) Meta Platforms, Inc. and affiliates), trimmed to
+   what this page uses and flattened to plain variables so older phones work (no light-dark(), no @scope).
+   ClawDot's own palette comes from its logo: an ink-teal puck, a mint light ring, a coral crab. The sidebar is the
+   puck (ink), "live" is the ring (mint), and coral stays in the logo. A page under this Content-Security-Policy
+   cannot load a webfont, so type is the system stack. See ADR-0017 and docs/design/portal-v2.md. Light is the
+   default whatever the system prefers; data-theme="dark" or data-theme="system" is an explicit choice made in
+   Settings. */
+:root {
+  color-scheme: light;
+  --color-background-body: #eef3f3;
+  --color-background-surface: #ffffff;
+  --color-background-muted: #e6eded;
+  --color-card-border: #d4dfdf;
+  --color-text-primary: #10232a;
+  --color-text-secondary: #46595e;
+  --color-accent: #0e2a33;
+  --color-on-accent: #ffffff;
+  --color-border-emphasized: #d4dfdf;
+  --color-border-control: #7d9094;
+  --color-text-error: #b3202a;
+  --color-text-warning: #7a5f00;
+  --color-text-success: #1f6f3a;
+  --color-warning-muted: #fbe7ad;
+  --color-alert-line: #d9a920;
+  --color-live: #0b6e63;
+  --color-live-muted: #d3f1ea;
+  --color-mint: #2ee6c5;
+  --color-chart: #a3d9cd;
+  --color-rail: #0e2a33;
+  --color-rail-text: #c5dbd8;
+  --color-rail-strong: #ffffff;
+  --color-rail-active: rgb(46 230 197 / 0.16);
+  --color-rail-line: rgb(255 255 255 / 0.1);
+  --font-family-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-family-code: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.0625rem;
+  --font-size-xl: 1.5rem;
+  --font-size-2xl: 2rem;
+  --spacing-1: 0.25rem;
+  --spacing-2: 0.5rem;
+  --spacing-3: 0.75rem;
+  --spacing-4: 1rem;
+  --spacing-6: 1.5rem;
+  --spacing-8: 2rem;
+  --spacing-12: 3rem;
+  --radius-inner: 0.5rem;
+  --radius-element: 0.75rem;
+  --radius-card: 1rem;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-background-body: #0b1a1f;
+  --color-background-surface: #12262d;
+  --color-background-muted: #1a313a;
+  --color-card-border: #28434b;
+  --color-text-primary: #e8f3f1;
+  --color-text-secondary: #9fb6b8;
+  --color-accent: #2ee6c5;
+  --color-on-accent: #06231e;
+  --color-border-emphasized: #28434b;
+  --color-border-control: #6f8b90;
+  --color-text-error: #ffaea7;
+  --color-text-warning: #eec448;
+  --color-text-success: #90ca90;
+  --color-warning-muted: #3d3417;
+  --color-alert-line: #8a6d1b;
+  --color-live: #4fd9c0;
+  --color-live-muted: #123a35;
+  --color-chart: #24534b;
+  --color-rail: #07151a;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    color-scheme: dark;
+    --color-background-body: #0b1a1f;
+    --color-background-surface: #12262d;
+    --color-background-muted: #1a313a;
+    --color-card-border: #28434b;
+    --color-text-primary: #e8f3f1;
+    --color-text-secondary: #9fb6b8;
+    --color-accent: #2ee6c5;
+    --color-on-accent: #06231e;
+    --color-border-emphasized: #28434b;
+    --color-border-control: #6f8b90;
+    --color-text-error: #ffaea7;
+    --color-text-warning: #eec448;
+    --color-text-success: #90ca90;
+    --color-warning-muted: #3d3417;
+    --color-alert-line: #8a6d1b;
+    --color-live: #4fd9c0;
+    --color-live-muted: #123a35;
+    --color-chart: #24534b;
+    --color-rail: #07151a;
+  }
+}

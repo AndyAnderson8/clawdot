@@ -5,6 +5,8 @@
 //!   build. Constant memory, no new dependency. The iteration count and salt travel with the hash.
 //! * [`Admin`]: the setting (unset, open, or password), and the in-memory sessions.
 //! * [`is_private`]: which peers may complete setup or use open mode.
+//! * Forgotten password (REQ-CFG-069): a short in-memory *reset window* opened by a device button. There is no
+//!   recovery code (REQ-CFG-067, 068, 071..073 are removed).
 
 use crate::inbox::endpoint::{constant_time_eq, generate_token, hash_token, verify_token};
 use crate::sched::Ts;
@@ -25,6 +27,11 @@ pub const MAX_PASSWORD: usize = 128;
 pub const MAX_SESSIONS: usize = 8;
 /// How long a sign-in lasts.
 pub const SESSION_SECS: Ts = 12 * 3600;
+
+/// How long the local reset window stays open (REQ-CFG-069).
+pub const RESET_WINDOW_SECS: Ts = 300;
+/// After a window was used or ran out, a new one cannot be opened for this long.
+pub const RESET_COOLDOWN_SECS: Ts = 60;
 
 const PREFIX: &str = "pbkdf2-sha256";
 const BLOCK: usize = 64;
@@ -162,6 +169,10 @@ pub enum AdminError {
     Storage,
     /// No randomness from the OS.
     NoRandomness,
+    /// There is no password to reset (open mode or setup pending).
+    NoPassword,
+    /// The local reset window is not open.
+    WindowClosed,
 }
 
 impl std::fmt::Display for AdminError {
@@ -176,6 +187,8 @@ impl std::fmt::Display for AdminError {
             Self::BadPassword => "the password must be 8 to 128 characters",
             Self::Storage => "the setting could not be saved",
             Self::NoRandomness => "no randomness available",
+            Self::NoPassword => "no password is set",
+            Self::WindowClosed => "the reset window is not open",
         })
     }
 }
@@ -195,6 +208,7 @@ pub enum Setting {
     Password {
         /// See [`hash_password`].
         hash: String,
+        // Files written by older versions may carry a `recovery` hash; it is ignored on load and dropped on save.
     },
 }
 
@@ -229,6 +243,10 @@ pub struct Admin {
     /// (SHA-256 of the session token, expiry)
     sessions: Vec<(String, Ts)>,
     listen: IpAddr,
+    /// When the local reset window closes, if it is open. In memory only (REQ-CFG-069).
+    window: Option<Ts>,
+    /// When the last window ended (used or ran out); a new one waits for the cooldown.
+    window_ended: Option<Ts>,
 }
 
 impl Admin {
@@ -240,6 +258,8 @@ impl Admin {
             setting: Setting::Unset,
             sessions: Vec::new(),
             listen: IpAddr::from([127, 0, 0, 1]),
+            window: None,
+            window_ended: None,
         }
     }
 
@@ -281,7 +301,7 @@ impl Admin {
     /// Whether the stored credential is an old administrator token hash.
     #[must_use]
     pub fn legacy(&self) -> bool {
-        matches!(&self.setting, Setting::Password { hash } if is_legacy(hash))
+        matches!(&self.setting, Setting::Password { hash, .. } if is_legacy(hash))
     }
 
     /// Whether open mode may be chosen with this listen address.
@@ -345,7 +365,7 @@ impl Admin {
     #[must_use]
     pub fn password_hash(&self) -> Option<String> {
         match &self.setting {
-            Setting::Password { hash } => Some(hash.clone()),
+            Setting::Password { hash, .. } => Some(hash.clone()),
             _ => None,
         }
     }
@@ -412,6 +432,79 @@ impl Admin {
         }
         self.sessions.clear();
         self.new_session(now)
+    }
+
+    // ----- local reset window (REQ-CFG-069) -----
+
+    fn window_tick(&mut self, now: Ts) {
+        if let Some(end) = self.window
+            && now >= end
+        {
+            self.window = None;
+            self.window_ended = Some(end);
+        }
+    }
+
+    /// Seconds the local reset window has left (0 when closed).
+    pub fn window_left(&mut self, now: Ts) -> Ts {
+        self.window_tick(now);
+        self.window.map_or(0, |end| end - now)
+    }
+
+    /// Open the local reset window. Returns the seconds it stays open. Asking again while it is open reports the
+    /// time left and does not extend it.
+    ///
+    /// # Errors
+    /// [`AdminError::NoPassword`] unless a password is set; [`AdminError::RateLimited`] during the cooldown.
+    pub fn open_window(&mut self, now: Ts) -> Result<Ts, AdminError> {
+        if self.mode() != Mode::Password {
+            return Err(AdminError::NoPassword);
+        }
+        let left = self.window_left(now);
+        if left > 0 {
+            return Ok(left);
+        }
+        if self
+            .window_ended
+            .is_some_and(|e| now < e + RESET_COOLDOWN_SECS)
+        {
+            return Err(AdminError::RateLimited);
+        }
+        self.window = Some(now + RESET_WINDOW_SECS);
+        Ok(RESET_WINDOW_SECS)
+    }
+
+    /// Whether the window is open for `peer`: a private address and time left.
+    ///
+    /// # Errors
+    /// [`AdminError::NotPrivate`], [`AdminError::NoPassword`] or [`AdminError::WindowClosed`].
+    pub fn check_window(&mut self, peer: IpAddr, now: Ts) -> Result<(), AdminError> {
+        if self.mode() != Mode::Password {
+            return Err(AdminError::NoPassword);
+        }
+        if !is_private(peer) {
+            return Err(AdminError::NotPrivate);
+        }
+        if self.window_left(now) == 0 {
+            return Err(AdminError::WindowClosed);
+        }
+        Ok(())
+    }
+
+    /// Set a new password through the open window: the window closes and every session ends.
+    ///
+    /// # Errors
+    /// As [`Admin::check_window`], plus storage and randomness failures.
+    pub fn reset_in_window(
+        &mut self,
+        peer: IpAddr,
+        hash: String,
+        now: Ts,
+    ) -> Result<String, AdminError> {
+        self.check_window(peer, now)?;
+        self.window = None;
+        self.window_ended = Some(now);
+        self.set_password(hash, now)
     }
 }
 
@@ -666,5 +759,99 @@ mod tests {
         std::fs::write(dir.0.join("admin-token.hash"), "not a hash").unwrap();
         assert!(!migrate_legacy(&dir.0).unwrap());
         assert!(dir.0.join("admin-token.hash").exists());
+    }
+
+    fn with_password() -> (Admin, String) {
+        let mut a = Admin::new();
+        let t = a
+            .setup_password(ip("127.0.0.1"), "pw-hash".into(), 0)
+            .unwrap();
+        (a, t)
+    }
+
+    // REQ-CFG-067 (removed): an old file that still holds a recovery hash loads; the field is dropped on save.
+    #[test]
+    fn an_old_file_with_a_recovery_hash_loads_and_the_field_is_dropped_on_save() {
+        let dir = TempDir::new("admin-oldrec");
+        std::fs::write(
+            dir.0.join("admin.json"),
+            r#"{"schema":1,"data":{"mode":"password","hash":"pbkdf2-sha256$1$00$00","recovery":"pbkdf2-sha256$1$00$11"}}"#,
+        )
+        .unwrap();
+        let store = JsonStore::new(dir.0.join("admin.json"), SCHEMA);
+        let mut a = Admin::open(store).unwrap();
+        assert_eq!(a.mode(), Mode::Password);
+        a.set_password("h2".into(), 1).unwrap();
+        let text = std::fs::read_to_string(dir.0.join("admin.json")).unwrap();
+        assert!(!text.contains("recovery"), "{text}");
+        assert!(text.contains("h2"));
+    }
+
+    // REQ-CFG-072
+    #[test]
+    fn open_and_setup_modes_have_no_reset_window() {
+        let mut a = Admin::new();
+        assert_eq!(a.open_window(0), Err(AdminError::NoPassword));
+        a.setup_open(ip("127.0.0.1")).unwrap();
+        assert_eq!(a.open_window(0), Err(AdminError::NoPassword));
+        assert_eq!(
+            a.check_window(ip("127.0.0.1"), 0),
+            Err(AdminError::NoPassword)
+        );
+    }
+
+    // REQ-CFG-069
+    #[test]
+    fn the_reset_window_is_short_private_single_use_and_cooled_down() {
+        let (mut a, old) = with_password();
+        // Closed by default.
+        assert_eq!(
+            a.check_window(ip("192.168.1.9"), 10),
+            Err(AdminError::WindowClosed)
+        );
+        assert_eq!(a.open_window(10), Ok(RESET_WINDOW_SECS));
+        // Asking again does not extend it.
+        assert_eq!(a.open_window(100), Ok(RESET_WINDOW_SECS - 90));
+        assert_eq!(a.window_left(100), RESET_WINDOW_SECS - 90);
+        // A public address is refused even while it is open.
+        assert_eq!(
+            a.check_window(ip("8.8.8.8"), 100),
+            Err(AdminError::NotPrivate)
+        );
+        // It runs out.
+        assert_eq!(
+            a.check_window(ip("192.168.1.9"), 10 + RESET_WINDOW_SECS),
+            Err(AdminError::WindowClosed)
+        );
+        // After running out, the cooldown holds off a new one.
+        assert_eq!(
+            a.open_window(10 + RESET_WINDOW_SECS + 5),
+            Err(AdminError::RateLimited)
+        );
+        let t0 = 10 + RESET_WINDOW_SECS + RESET_COOLDOWN_SECS;
+        assert_eq!(a.open_window(t0), Ok(RESET_WINDOW_SECS));
+        // Use: new password, sessions end, the window closes, a replay fails.
+        let s = a
+            .reset_in_window(ip("10.0.0.7"), "pw2".into(), t0 + 1)
+            .unwrap();
+        assert!(!a.session_ok(&old, t0 + 2));
+        assert!(a.session_ok(&s, t0 + 2));
+        assert_eq!(
+            a.reset_in_window(ip("10.0.0.7"), "pw3".into(), t0 + 2),
+            Err(AdminError::WindowClosed)
+        );
+        assert_eq!(a.password_hash().as_deref(), Some("pw2"));
+        assert_eq!(a.open_window(t0 + 3), Err(AdminError::RateLimited));
+    }
+
+    #[test]
+    fn the_window_is_not_stored_so_a_restart_closes_it() {
+        let dir = TempDir::new("admin-window");
+        let store = JsonStore::new(dir.0.join("admin.json"), SCHEMA);
+        let mut a = Admin::open(store.clone()).unwrap();
+        a.setup_password(ip("127.0.0.1"), "h".into(), 0).unwrap();
+        a.open_window(1).unwrap();
+        let mut again = Admin::open(store).unwrap();
+        assert_eq!(again.window_left(2), 0);
     }
 }

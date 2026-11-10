@@ -204,6 +204,15 @@ fn every_message() -> Vec<Message> {
         },
         Message::MediaControl(MediaAction::Pause),
         Message::MediaControl(MediaAction::Resume),
+        Message::AdminReset,
+        Message::AdminResetWindow {
+            open_secs: 300,
+            reason: None,
+        },
+        Message::AdminResetWindow {
+            open_secs: 0,
+            reason: Some("Wait a minute and try again.".into()),
+        },
     ]
 }
 

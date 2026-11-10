@@ -2,9 +2,12 @@
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  /** A short machine-readable cause, when the device gives one (for example `no_speaker`). */
+  reason: string;
+  constructor(message: string, status: number, reason = "") {
     super(message);
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -35,13 +38,18 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = "Bearer " + token;
   const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-  let data: { error?: string } = {};
+  let data: { error?: string; message?: string; reason?: string } = {};
   try {
-    data = (await r.json()) as { error?: string };
+    data = (await r.json()) as { error?: string; message?: string; reason?: string };
   } catch {
     data = {};
   }
-  if (!r.ok) throw new ApiError(data.error ?? `The device answered with error ${r.status}.`, r.status);
+  if (!r.ok)
+    throw new ApiError(
+      data.message ?? data.error ?? `The device answered with error ${r.status}.`,
+      r.status,
+      data.reason ?? "",
+    );
   return data as T;
 }
 

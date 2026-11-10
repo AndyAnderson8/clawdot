@@ -1,6 +1,6 @@
 # ClawDot brand and theme
 
-Status: Accepted (design guidance, not a requirement). Applies to the logo files in [`assets/brand/`](../../assets/brand) and to the theme in `portal/src/theme.css`.
+Status: Accepted (design guidance, not a requirement). Applies to the logo files in [`assets/brand/`](../../assets/brand) and, for the portal, to the tokens in `portal/src/tokens.css` (see the note under Colour tokens).
 
 ## The mark
 
@@ -16,6 +16,8 @@ A friendly crab with both claws raised, standing on a low round puck, with a thi
 The wordmark is live text in the system UI font (bold, fixed width through `textLength`), so no font file is shipped. If a fixed outlined wordmark is ever needed for print, convert the text to paths at that time.
 
 ## Colour tokens
+
+> 2026-11-09: the portal no longer uses the table below. Its light-by-default palette and Astryx-based tokens are in [portal-v2.md](portal-v2.md) and `portal/src/tokens.css`; only Lagoon (`#0b6e63`) carries over, as the portal's live-state colour. The table stays as the record of the logo colours (ring aqua, shell coral, lagoon ink) and of the earlier dark-capable theme.
 
 | Token | Light | Dark | Role |
 |---|---|---|---|
@@ -73,4 +75,4 @@ The mark is a crab on a generic round puck with a ring of light. It does not use
 
 ## Screenshots
 
-The web UI on a phone-width window (headless Chrome against the real binary): [setup, dark](screenshots/ui-setup-dark.png), [setup, light](screenshots/ui-setup-light.png), [sign-in, dark](screenshots/ui-login-dark.png), [open-mode banner, light](screenshots/ui-open-banner-light.png). Tabbed portal (dark, 500 px wide): [Home](screenshots/portal-home-dark.png), [Reminders](screenshots/portal-reminders-dark.png), [Agents](screenshots/portal-agents-dark.png), [Tools](screenshots/portal-tools-dark.png), [Connections](screenshots/portal-connections-dark.png), [Webhooks](screenshots/portal-webhooks-dark.png), [Skills](screenshots/portal-skills-dark.png). Layout and tab names: [portal.md](portal.md).
+Portal screenshots (light theme, phone and desktop widths) are listed in [portal.md](portal.md#look).

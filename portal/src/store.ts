@@ -12,6 +12,8 @@ export interface AppState {
   legacy: boolean;
   openAllowed: boolean;
   peerPrivate: boolean;
+  /** Seconds the local reset window has left. */
+  windowSecs: number;
   settings: Settings | null;
   /** Bumped when settings are replaced, so forms start again from the new values. */
   settingsRev: number;
@@ -33,6 +35,7 @@ let state: AppState = {
   legacy: false,
   openAllowed: false,
   peerPrivate: false,
+  windowSecs: 0,
   settings: null,
   settingsRev: 0,
   status: null,
@@ -165,6 +168,7 @@ export async function start(): Promise<void> {
     legacy: !!st.legacy,
     openAllowed: !!st.open_allowed,
     peerPrivate: !!st.peer_private,
+    windowSecs: st.reset_window_secs ?? 0,
   });
   if (st.mode === "setup") {
     set({ view: "setup" });

@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.3 |
+| **Version** | 0.4 |
 | **Author(s)** | Maintainer direction, drafted by an agent |
 | **Created** | 2026-11-09 |
 | **Related** | [ADR-0015](../adr/0015-own-the-device-layer.md) (Proposed), [ADR-0012](../adr/0012-board-support-layer.md), [0001](0001-product-requirements.md) (REQ-BRD, REQ-VOI-013..019), [0002](0002-resource-budget.md), [0003](0003-satellite-protocol.md), [R-11](../research/11-wake-word-spike.md), [R-07](../research/07-echo-dot-gen2-hardware.md) |
@@ -70,6 +70,7 @@ IDs are stable. Priorities are MoSCoW; "Ver" is Test, Inspection, Analysis or De
 | REQ-DEV-028 | **Microphone faults.** A stalled, ended or failed capture in always-on mode MUST be reported once per attempt as a status line and a problem entry, and the microphone MUST be reopened with a backoff of 1 s doubling to at most 10 s, reset by the first good frame. A program that is not installed MUST be reported once and not retried. A fault is never taken for silence. | Must | A3 | T |
 | REQ-DEV-029 | **Wake word configuration.** The desktop daemon MUST load each wake model from a path given by the operator, with its manifest beside it (same name, `.json`), a recorded licence (default `Apache-2.0`, valid only for the official microWakeWord models), one sensitivity per word (default 0.5) and a refractory period (default 2000 ms). Push-to-talk MUST keep working whether or not an engine is loaded. A model that fails to load MUST stop startup with a message naming the file. The daemon MUST print the loaded words with their model hash and licence at start. | Must | A3 | T |
 | REQ-DEV-030 | **Status lines.** In verbose mode the daemon MUST print one short line per state change that a person needs (ready and how to talk, wake word heard, listening, thinking, speaking, muted, microphone fault and recovery), and MUST NOT print audio or transcripts of the user's speech. | Should | A3 | T |
+| REQ-DEV-031 | **Administrator reset gesture.** On a board with an `action` button, holding it for 10 seconds (a fixed time, not a board-file setting, so a stray press cannot reach it) MUST ask the core to open the local administrator reset window (REQ-CFG-069) with `clawdot.admin-reset`. The daemon MUST show that the request is being made and that the answer arrived: the core's `clawdot.admin-reset-window` with `open_secs > 0` is answered with the notification tone and the `inbox` LED state, a refusal with the error tone, so a person without a screen knows what happened. The hold works only while the daemon has a session with the core; it never opens the window by itself and never acts on its own, because the core decides (a loopback peer, or a satellite that presented a valid token, REQ-SAT-020). A board without the button offers the same through the portal-free equivalents: on the desktop board the key line `admin` in the device console; on a board with no button and no console the window cannot be opened from the device and the command line (REQ-CFG-022) is the way, which the guide says. A normal press or long press MUST keep its mapped action; the hold adds, it does not replace. | Should | A4 | T |
 | REQ-DEV-023 | Bluetooth speaker mode (A2DP sink and source) MAY be offered, with arbitration against announcements defined: an announcement ducks or pauses the Bluetooth source and restores it. | May | B6 | T/D |
 | REQ-DEV-024 | A Spotify Connect receiver MAY be offered. It MUST be off by default, MUST show the terms-of-service notice of section 5.4 when enabled, and MUST NOT be a dependency of any other feature. Spotify control through the brain is a software feature and identical on every board. | May | B6 | I/D |
 
@@ -186,6 +187,7 @@ Not applied here. Each is a minor, ignorable `clawdot.` addition (REQ-SAT-009, R
 | `clawdot.cancel-turn` | satellite to core | Tell the core a local cancel happened (REQ-DEV-005) |
 | `clawdot.set-quiet-hours` | core to satellite | Deliver quiet-hours settings (REQ-DEV-006) |
 | `clawdot.device-status` | satellite to core | Board name, daemon version, update mode, mute kind, clock trust |
+| `clawdot.admin-reset` / `clawdot.admin-reset-window` | satellite to core / core to satellite | The 10 second hold (REQ-DEV-031) and the core's answer. Added in spec 0003 version 0.3.3 (REQ-SAT-020) |
 | Update messages (`clawdot.update-available`, `clawdot.update-status`) | both | Updates, with the image recipe (REQ-DEV-007) |
 
 Until they land, the daemon uses the messages that exist (stop, indicator, mute, volume) and keeps the rest local.
@@ -227,3 +229,4 @@ The format is defined by [`schemas/board/board-1.schema.json`](../../schemas/boa
 | 0.1 | 2026-11-09 | First draft from ADR-0015's proposed text, refined: REQ-DEV-001..024, capability model, minimum hardware profile, board-file schema 1. |
 | 0.2 | 2026-11-09 | Section 7 points at spec 0007 for the first engine (REQ-DEV-017 is unchanged); the engine is a feature-gated adapter, not part of the default build. |
 | 0.3 | 2026-11-09 | REQ-DEV-025..030: always-on capture, half-duplex hold-off, mute, microphone faults, wake word configuration and status lines, for the PC voice loop. |
+| 0.4 | 2026-11-09 | REQ-DEV-031: the administrator reset gesture (hold the action button for 10 seconds, or `admin` in the desktop console), with the wire messages of spec 0003 0.3.3. |

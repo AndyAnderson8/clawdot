@@ -123,24 +123,35 @@ async fn call(p: &Portal, method: &str, path: &str, auth: &str, body: &str) -> (
 // REQ-CFG-025, REQ-CFG-026
 #[test]
 fn the_page_uses_plain_names_and_no_radio() {
-    let page = PAGE.to_lowercase();
+    // A radio *input* (the theme choice) is fine; radio stations are not.
+    let page = PAGE
+        .to_lowercase()
+        .replace("type:\"radio\"", "")
+        .replace("type=radio", "");
     for word in ["inbox", "scheduled", "radio", "music", "station"] {
         assert!(!page.contains(word), "the page still says `{word}`");
     }
-    for tab in [
-        "Home",
-        "Reminders",
-        "Agents",
-        "Tools",
-        "Connections",
-        "Skills",
-        "Webhooks",
-        "Settings",
-    ] {
-        assert!(PAGE.contains(&format!("\"{tab}\"")), "missing tab {tab}");
+    // Home first, then Clock, Bluetooth, Features and Settings; everything configurable is under Settings.
+    for tab in ["Home", "Clock", "Bluetooth", "Features", "Settings"] {
+        assert!(
+            PAGE.contains(&format!("\"{tab}\"")),
+            "missing destination {tab}"
+        );
     }
-    // The page is built from TypeScript (portal/), so the markup lives in the script as `role:"tablist"`.
-    assert!(PAGE.contains("tablist") && PAGE.contains("\"foot\""));
+    for gone in ["\"Agents\"", "\"Webhooks\"", "#/agents"] {
+        assert!(!PAGE.contains(gone), "the Agents tab is gone: {gone}");
+    }
+    // The page is built from TypeScript (portal/), so the markup lives in the script.
+    assert!(PAGE.contains("\"foot\""));
+}
+
+// REQ-CFG-071: the portal never tells anyone to run a command
+#[test]
+fn the_sign_in_help_never_tells_anyone_to_run_a_command() {
+    assert!(
+        !PAGE.contains("reset-admin") && !PAGE.to_lowercase().contains("recovery code"),
+        "the page tells people to run a command"
+    );
 }
 
 // REQ-CFG-027
@@ -374,7 +385,7 @@ async fn settings_are_saved_validated_and_need_the_administrator() {
     let setup = r#"{"mode":"password","password":"correct horse"}"#;
     let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
     let session = format!("Bearer {}", v["token"].as_str().unwrap());
-    let change = r#"{"zone":"America/Phoenix","max_requests_per_day":20}"#;
+    let change = r#"{"zone":"Europe/Berlin","max_requests_per_day":20}"#;
     // Not signed in, or signed in with a wrong token: refused, and nothing changes.
     for auth in ["", "Bearer wrong"] {
         let s = call(&p, "PUT", "/api/settings", auth, change).await.0;
@@ -383,7 +394,7 @@ async fn settings_are_saved_validated_and_need_the_administrator() {
     let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
     assert_eq!(v["fields"]["zone"]["value"], "UTC");
     // A bad value says what is wrong, and the good half is not applied.
-    let bad = r#"{"zone":"America/Phoenix","listen":"everywhere"}"#;
+    let bad = r#"{"zone":"Europe/Berlin","listen":"everywhere"}"#;
     let (s, v) = call(&p, "PUT", "/api/settings", &session, bad).await;
     assert_eq!(s, 400);
     assert!(
@@ -395,7 +406,7 @@ async fn settings_are_saved_validated_and_need_the_administrator() {
     // A good change is saved; the answer is the new listing, with what needs a restart.
     let (s, v) = call(&p, "PUT", "/api/settings", &session, change).await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["fields"]["zone"]["value"], "America/Phoenix");
+    assert_eq!(v["fields"]["zone"]["value"], "Europe/Berlin");
     assert_eq!(v["fields"]["zone"]["source"], "saved");
     assert_eq!(v["restart_needed"], json!([]));
     let (s, v) = call(
@@ -574,13 +585,13 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     assert_eq!(call(&p, "GET", "/api/notes", &session, "").await.0, 503);
     let store = Arc::new(NoteStore::in_memory(true));
     p.core.set_notes(Arc::clone(&store));
-    store.add("my NAS is called Andy-NAS", 10).unwrap();
+    store.add("my printer is called Pixel", 10).unwrap();
     let second = store.add("the spare key is under the pot", 11).unwrap();
     let (s, v) = call(&p, "GET", "/api/notes", &session, "").await;
     assert_eq!(s, 200);
     assert_eq!(v["enabled"], true);
     assert_eq!(v["notes"].as_array().unwrap().len(), 2);
-    assert_eq!(v["notes"][0]["text"], "my NAS is called Andy-NAS");
+    assert_eq!(v["notes"][0]["text"], "my printer is called Pixel");
     assert_eq!(v["limits"]["max_notes"], 50);
     // forget one by id, then a missing one, then all
     let path = format!("/api/notes/{}", second.id);
@@ -622,7 +633,7 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
         "POST",
         "/api/notes",
         &session,
-        &add("my NAS is Andy-NAS"),
+        &add("my printer is Pixel"),
     )
     .await;
     assert_eq!(s, 409);
@@ -635,15 +646,15 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
         "POST",
         "/api/notes",
         &session,
-        &add("  my NAS is   Andy-NAS "),
+        &add("  my printer is   Pixel "),
     )
     .await;
     assert_eq!(s, 200);
-    assert_eq!(v["notes"][0]["text"], "my NAS is Andy-NAS");
+    assert_eq!(v["notes"][0]["text"], "my printer is Pixel");
     assert_eq!(v["notes"][0]["ts"], 1_794_225_600);
     // the same refusals as the spoken path, each with a plain reason and no write
     for (body, status, needle) in [
-        (add("my NAS is andy-nas"), 409, "already saved"),
+        (add("my printer is pixel"), 409, "already saved"),
         (add("   "), 400, "Write what"),
         (add(&"a".repeat(201)), 400, "too long"),
         (
@@ -757,6 +768,132 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
     let (_, a) = call(&p, "GET", "/api/about", &session, "").await;
     assert_eq!(a["build"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(a["build"]["features"].is_array());
+}
+
+// ----- forgotten password: local reset window (REQ-CFG-069); there is no recovery code -----
+
+fn token_of(v: &Value) -> String {
+    format!("Bearer {}", v["token"].as_str().unwrap())
+}
+
+/// Set a password through the API; returns the session.
+async fn set_up_with_password(p: &Portal) -> String {
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (s, v) = call(p, "POST", "/api/setup", "", setup).await;
+    assert_eq!(s, 200);
+    assert!(v.get("recovery_code").is_none(), "no recovery code exists");
+    token_of(&v)
+}
+
+fn login_body(password: &str) -> String {
+    format!(r#"{{"password":"{password}"}}"#)
+}
+
+// The recovery-code endpoints are gone.
+#[tokio::test]
+async fn the_recovery_code_endpoints_are_gone() {
+    let p = start(false).await;
+    let session = set_up_with_password(&p).await;
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert!(auth.get("recovery").is_none());
+    assert_eq!(auth["reset_window_secs"], 0);
+    for path in ["/api/recover", "/api/admin/recovery"] {
+        let (s, _) = call(&p, "POST", path, &session, "{}").await;
+        assert_eq!(s, 404, "{path}");
+    }
+    // Changing the password does not issue a code either.
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/admin/password",
+        &session,
+        &login_body("changed password"),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(v.get("recovery_code").is_none());
+}
+
+// An older install that was in open mode can still move to a password.
+#[tokio::test]
+async fn setting_a_password_in_open_mode_works_and_shows_no_code() {
+    let p = start(false).await;
+    let (s, _) = call(&p, "POST", "/api/setup", "", r#"{"mode":"open"}"#).await;
+    assert_eq!(s, 200);
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/admin/password",
+        "",
+        &login_body("first password"),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(v.get("recovery_code").is_none());
+}
+
+// REQ-CFG-072
+#[tokio::test]
+async fn open_mode_has_no_reset_window() {
+    let p = start(false).await;
+    let (s, _) = call(&p, "POST", "/api/setup", "", r#"{"mode":"open"}"#).await;
+    assert_eq!(s, 200);
+    assert_eq!(
+        call(
+            &p,
+            "POST",
+            "/api/recover/window",
+            "",
+            &login_body("new password 1")
+        )
+        .await
+        .0,
+        409
+    );
+    assert!(p.core.admin_open_reset_window().is_err());
+    // Still open, still no password.
+    assert_eq!(call(&p, "GET", "/api/auth", "", "").await.1["mode"], "open");
+}
+
+// REQ-CFG-069
+#[tokio::test]
+async fn the_local_reset_window_sets_a_password_once() {
+    let p = start(false).await;
+    let session = set_up_with_password(&p).await;
+    let body = login_body("window password");
+    // Closed: refused.
+    assert_eq!(
+        call(&p, "POST", "/api/recover/window", "", &body).await.0,
+        403
+    );
+    // The device asks (the satellite path calls this); the page learns the window is open.
+    assert_eq!(p.core.admin_open_reset_window().unwrap(), 300);
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert_eq!(auth["reset_window_secs"], 300);
+    // A weak password does not use the window up.
+    assert_eq!(
+        call(&p, "POST", "/api/recover/window", "", &login_body("short"))
+            .await
+            .0,
+        400
+    );
+    let (s, v) = call(&p, "POST", "/api/recover/window", "", &body).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v.get("recovery_code").is_none());
+    assert_eq!(call(&p, "GET", "/api/about", &session, "").await.0, 401);
+    assert_eq!(
+        call(&p, "GET", "/api/about", &token_of(&v), "").await.0,
+        200
+    );
+    // One use: the window is shut.
+    assert_eq!(
+        call(&p, "POST", "/api/recover/window", "", &body).await.0,
+        403
+    );
+    let (_, auth) = call(&p, "GET", "/api/auth", "", "").await;
+    assert_eq!(auth["reset_window_secs"], 0);
+    // A second request for a window right away is held off by the cooldown.
+    assert!(p.core.admin_open_reset_window().is_err());
 }
 
 // REQ-UPD-005, REQ-UPD-006
