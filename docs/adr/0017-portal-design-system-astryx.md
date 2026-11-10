@@ -63,3 +63,15 @@ All permissive, none copyleft: `@astryxdesign/core` MIT, `@astryxdesign/theme-ne
 ## How to reproduce
 
 Scratch project outside the repository: `npm i react@19 react-dom@19 @astryxdesign/core @astryxdesign/theme-neutral @stylexjs/stylex preact@11.2.0 esbuild@0.28.2 --ignore-scripts`. One file imports the components listed above inside `<Theme theme={neutralTheme}>`; one esbuild call (`bundle`, `minify`, `format: "iife"`, `jsx: "automatic"`, `define process.env.NODE_ENV`), with `alias` of `react`, `react-dom`, `react-dom/client` and `react/jsx-runtime` to `preact/compat` (plus a shim exporting `use` and `useOptimistic`) for option a. The CSS is `astryx.css` and the neutral `theme.css` run through esbuild's CSS minifier. The page is served by a 10-line Node server that sets the Content-Security-Policy from `crates/core/src/ui.rs`, and loaded with the portal's own browser driver (`portal/test/browser/chrome.ts`) while collecting console errors, CSP violations and requests.
+
+## Amendment: measured result of the implementation (2026-11-09)
+
+The redesigned portal (Dashboard, Reminders, Activity, eight Settings sections, sign-in and setup) as built, with tokens and native controls:
+
+| | Before (ten tabs) | After | Change |
+|---|---|---|---|
+| Page raw | 90,034 B | 104,176 B | +14,142 B |
+| Page gzip (on the wire) | 30,248 B | 33,399 B | +3,151 B (+10.4%) |
+| Page brotli (not served) | 26,644 B | 29,329 B | +2,685 B |
+
+33.4 KB gzip is a third of the 100 KB target and 13% of the 250 KB ceiling. The new Dashboard, the section layout, the dark theme and the native-control styling cost 3.2 KB gzip together; the Astryx options measured above would have cost 280 to 350 KB on top. Build time is about 0.1 s. The browser test (24 steps) checks that every page has no horizontal scroll at 360 px, that every select is a real element with the platform appearance, and that no custom dropdown role exists.

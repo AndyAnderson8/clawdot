@@ -1,79 +1,34 @@
 # Portal design
 
-Status: Accepted (design guidance; requirements are REQ-CFG-025..031 in [spec 0001](../specs/0001-product-requirements.md)). Builds on [brand.md](brand.md) for colour tokens and the logo, and on [ui-stack.md](ui-stack.md) (plain HTML, CSS, and JavaScript for now).
-
-> 2026-11-09: the redesign (dashboard home, four destinations, light by default) is planned in [portal-v2.md](portal-v2.md), and the design system choice (Astryx tokens, native controls, no Astryx runtime) is in [ADR-0017](../adr/0017-portal-design-system-astryx.md). Where they differ from this page, they win once built.
-
-> 2026-11-09: the source language and framework are proposed in [ADR-0016](../adr/0016-portal-typescript-stack.md) (TypeScript, Preact, esbuild, committed output). The design below does not change.
+Status: Accepted (design guidance; requirements are REQ-CFG-025..031, 060..070 in [spec 0001](../specs/0001-product-requirements.md)). The reasoning, palette and wireframes of this version are in [portal-v2.md](portal-v2.md); the design system choice is [ADR-0017](../adr/0017-portal-design-system-astryx.md); the stack is [ADR-0016](../adr/0016-portal-typescript-stack.md) and [ui-stack.md](ui-stack.md). The brand mark and logo rules are in [brand.md](brand.md).
 
 ## Who and what for
 
-One person on a phone, just after plugging in a small crab-themed speaker. The portal has to answer three questions fast: is it alive, what will it do for me, and how do I change that. The earlier single-page layout failed because it used internal words (inbox, scheduled, endpoints), hid tools and connections entirely, and showed radio stations nobody asked for.
+One person, mostly on a phone, who owns a small speaker running ClawDot. They open the page to see at a glance that the speaker is fine and what it is about to do (the Dashboard), and rarely to change how it behaves (Settings). Everything else is a place to look things up.
 
-## Palette
+## Destinations
 
-Derived from the logo (aqua ring on a lagoon puck, coral crab). Full tokens and contrast ratios are in [brand.md](brand.md).
+Four, with the Dashboard first. A top bar on a wide screen, a fixed bottom bar on a phone. The address fragment names the page (`#/dashboard`, `#/reminders`, `#/activity`, `#/settings`, and `#/settings/<section>`).
 
-| Name | Light | Dark | Used for |
-|---|---|---|---|
-| Foam | `#f4f8f7` | `#0b1a1f` | Page background |
-| Lagoon ink | `#0e2a33` | `#e8f3f1` | Text, and the header band in both modes |
-| Puck blue | `#1f4d5b` | `#24414a` | Lines and raised parts of the header |
-| Ring aqua | `#2ee6c5` | `#2ee6c5` | The ring: active tab, "ready" state, accent in dark mode |
-| Deep teal | `#0b6e63` | n/a | Accent for text and buttons on light pages (6.1:1 on white) |
-| Shell coral | `#f2644f` | `#f2644f` | "Needs attention" marks only; never text on a light page |
+| Destination | What it is |
+|---|---|
+| Dashboard | The home page and the memorable element. One large sentence says what the speaker is doing (Ready, Listening, Thinking, Speaking, Muted, or why it cannot), with the ring from the logo beside it. Then: needs attention (language model not set, no speaker, no voice, clock not set, no password, muted, quiet hours on), each with a link to the fix; next up (the next five timers, alarms and reminders, with Cancel and a quick timer); recent (the latest actions and events); and in a side column "Say something" (test speak, disabled with the reason and a fix link when the device says it cannot speak) and today's usage. "Talk now" and "Mute" are shown disabled with the reason, because the page has no way to start those yet (REQ-CFG-031) |
+| Reminders | The full list of timers, alarms and reminders with edit, cancel, repeat days and dates |
+| Activity | What came in (events from inputs) and what the assistant did (the audit log), newest first, with filters and paging; read-only (REQ-CFG-060) |
+| Settings | Everything that is configuration, in sections: General (device name, time zone, language, theme), Assistant (language model, key variable name, personality, voice, how far it may go), Inputs (create, copy, rotate and delete webhooks; snippets), Tools and connections (tools with risk tiers, tool servers, skills), Notes, Safety (usage and action limits, quiet hours, dry run), Security (password, sign out), About and diagnostics (version, release notes, diagnostics, recent problems, save and load a settings file, board) |
 
-## Type
+On a phone, Settings is a list of sections and each section opens as its own screen with a "Settings" back link; on a wide screen the list stays on the left. Each settings group is a ruled form with its own Save; under each field one line says where the value comes from and whether it applies right away (REQ-CFG-062). Saved values that are not yet running appear in a "Restart needed" block; there is no Restart button because the core cannot restart itself safely. Keys are entered as the name of an environment variable; the page never asks for, shows or stores a secret.
 
-System fonts only. One family (the system UI sans) with weight doing the hierarchy: 700 for tab and section titles, 600 for actions, 400 for text. Times use tabular numerals; URLs, tokens, and snippets use the system monospace. Scale ratio 1.25 (0.875 to 1.953 rem). Everything is left-aligned; paragraphs stay under 60 characters wide.
+## Look
 
-## Layout
-
-```
-+----------------------------------+
-| (crab)  Kitchen Dot       (o) Ready |   header, always visible:
-+----------------------------------+      logo, device name, ring = status
-| Home  Reminders  Agents  Tools  > |   tab strip, scrolls sideways on a phone;
-|  ~~~~                              |   the active tab sits under a ring arc
-+----------------------------------+
-|  Ready. One speaker is connected. |
-|  Setup checklist  (o) (o) ( ) ( ) |   one column, ruled lists, actions
-|  Say something to the speaker     |   on the row they belong to
-+----------------------------------+
-| ClawDot 0.1.0   What is new       |   footer: running version and release notes
-+----------------------------------+
-```
-
-On a wide screen the same single column is kept (max 44 rem) so that nothing moves between phone and desktop.
-
-## Tabs and the words used
-
-| Tab | Replaces | Why this name |
-|---|---|---|
-| Home | Status | The first thing to see: is it working, plus the setup checklist and the test-speak box |
-| Reminders | "Scheduled" | Covers alarms, timers, and reminders, which are the three things people already say out loud |
-| Notes | n/a | The short facts you asked the assistant to remember: list, add, forget one or all after a confirmation (REQ-CFG-061) |
-| Agents | Inbox | What arrives here is news from your coding agents (Claude Code and others); "Agents" says whose news it is |
-| Activity | n/a | What the assistant did and what waited for your yes: the audit log in plain words, read-only, with filters and paging (REQ-CFG-060) |
-| Tools | n/a | Everything the assistant can do besides talking. Each tool shows how careful it is and has a "How careful" list (REQ-SEC-030): web tools and connections can be relaxed from "Asks you out loud first" after a confirmation, built-in tools can only be made stricter, and "Destructive" is shown but never selectable |
-| Connections | n/a | Outside tool servers (MCP). The page explains MCP in a sentence the first time |
-| Skills | n/a | Named instructions you write for the assistant, each switchable, with export and import |
-| Webhooks | Endpoints | A webhook is the web address an agent posts to; this tab creates them and gives copy-paste setup |
-| Settings | Admin password | Device name, time zone, language model, personality, voice, addresses, limits, board, password, and About (version, build, release notes, a diagnostics download, recent problems, and saving or loading a settings file; REQ-CFG-063 to 066). Grouped forms with one Save each; each field says where its value comes from and whether it needs a restart |
+Light by default whatever the system prefers; dark only by explicit choice or "match system" (Settings, General, kept by this browser). System fonts only. Neutral palette from the Astryx neutral theme, plus one brand colour (Lagoon `#0b6e63`) used only for live and connected states. No cards, shadows or gradients; one filled area per screen (the status block). Controls are the platform's own: real `<select>`, checkbox, radio, date and time inputs, lightly styled, never custom popups. Tokens: `portal/src/tokens.css`. Screenshots: [dashboard, phone](screenshots/dashboard-phone.png), [dashboard, desktop](screenshots/dashboard-desktop.png), [settings, desktop](screenshots/settings-desktop.png), [inputs, phone](screenshots/settings-inputs-phone.png), [reminders, phone](screenshots/reminders-phone.png), [dark theme, phone](screenshots/settings-dark-phone.png), [sign-in](screenshots/sign-in-phone.png), [setup](screenshots/setup-phone.png).
 
 ## Principles
 
-1. The ring is the one memorable element. It appears as the status indicator (aqua ready, coral needs attention, grey starting) and as the arc under the active tab, echoing the light on the puck. Nothing else is decorated.
-2. Lists with row actions, not stacks of cards. Surfaces are reserved for forms and for one-time secrets.
-3. Plain sentence case. Errors say what went wrong and how to fix it; empty states invite the next step ("No reminders yet. Add one, or say 'remind me at 5'").
-4. Never show a dead control. If the backend does not exist, say what the feature will do and that it is coming (REQ-CFG-031).
-5. Destructive actions use an outlined button and a confirm step. Secrets are shown once, then never again.
-6. Quality floor: AA contrast, a visible 3 px focus ring, reduced motion respected, 44 px tap targets, keyboard-operable tabs.
-
-## Settings tab
-
-Each group is a ruled form with its own Save button. Under every field one plain line says where the value comes from (default, configuration file, saved here, command-line flag) and whether it applies right away or needs a restart. Three groups cover the assistant itself (REQ-CFG-062): **Agent settings** (rounds, tool calls and seconds per request, seconds per tool call, say the plan, say progress, keep notes), **Daily action limits** (actions per day, the ones that ask first, dry run) and **Quiet hours** (a start and an end time; both or neither). Switches are On/Off lists, with a "Go back to the default" entry once a value has been saved; numbers carry their allowed range; a value set by a command-line flag says so. Saved values that are not yet running appear in a dashed "Restart needed" box with the instruction; there is no Restart button because the core cannot restart itself safely. Errors from the device are shown in red text inside the form they belong to. The time zone is a list prefilled from the browser's own time zone (never the internet address). Keys are entered as the name of an environment variable; the page never asks for, shows, or stores a secret.
-
-## Changes made in review of the first plan
-
-The first sketch was a tab strip with boxed cards, a big status number, and an underline for the active tab. It read like any admin template. It became ruled lists, a sentence for status instead of a number, and the ring arc for the active tab and status.
+1. The dashboard is a sentence, not a set of widgets. State is told in words first; the ring only confirms it, and breathes slowly only while the speaker listens, thinks or speaks (not under reduced motion).
+2. Colour means state. Everything else is ink on paper.
+3. Space and ruled lists do the grouping. Surfaces are reserved for the status block, the restart notice and one-time secrets.
+4. Words first. Plain sentence case, active voice; errors say what went wrong and how to fix it; empty states invite the next step. No product names as defaults and no personal examples; inputs are described as "events from anything that can send a web request", and coding-agent hooks are one adapter in a neutral list.
+5. Never show a dead control. If something cannot work, say why beside it and link to the fix (REQ-CFG-031, REQ-CFG-070).
+6. Destructive row actions (cancel, delete, forget) are red text buttons and ask first; secrets are shown once, then never again.
+7. Quality floor: AA contrast in both themes, a 3 px focus ring, 44 px tap targets, keyboard operable (real links, buttons and form controls), focus moves to the page after a move, reduced motion respected, no horizontal scroll at 360 px (checked for every page in the browser test).
