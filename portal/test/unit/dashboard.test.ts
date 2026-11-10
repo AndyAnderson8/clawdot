@@ -18,7 +18,7 @@ test("the speaker's state is told in words, from the device's own state when it 
   assert.equal(speakerView({ ...ready, speaker: { ...ready.speaker, state: "listening" } }).ring, "listening");
   assert.equal(speakerView({ ...ready, speaker: { ...ready.speaker, state: "speaking" } }).headline, "Speaking.");
   assert.equal(speakerView({ ...ready, muted: true }).headline, "Muted.");
-  assert.equal(speakerView({ ...ready, speaker: { connected: false } }).headline, "No speaker is connected.");
+  assert.equal(speakerView({ ...ready, speaker: { connected: false } }).headline, "Waiting for a speaker");
   assert.equal(speakerView({ ...ready, speaker: { connected: true, available: false } }).headline, "Busy or muted.");
   // An older core that says nothing about the speaker is not reported as a problem.
   assert.equal(speakerView({ llm: { configured: true } }).headline, "Ready.");

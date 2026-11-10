@@ -123,114 +123,168 @@ export function Reminders(): JSX.Element {
       : "");
 
   return (
-    <>
-      <h2>Reminders</h2>
-      <p>
-        Timers, alarms, and reminders you set here or by voice. They ring on the speaker even when the internet is down.
-      </p>
-      <ul class="rows">
-        {data && !data.items.length ? (
-          <li class="mut">Nothing set. Add a timer, alarm, or reminder below, or just ask the speaker.</li>
-        ) : null}
-        {data?.items.map((i) => (
-          <li key={i.id}>
-            <div class="rowhead">
-              <strong>{i.label || NAMES[i.kind]}</strong>
-              <span class="badge">{NAMES[i.kind]}</span>
+    <div class="page">
+      <header class="pagehead">
+        <h2>Clock</h2>
+        <p>
+          Timers, alarms and reminders, whether you set them here or by voice. They ring on the speaker even when the
+          internet is down.
+        </p>
+      </header>
+      <div class="stack">
+        <section class="card" id="clocklist">
+          <h3>
+            Coming up<span class="count">{data?.items.length ?? 0}</span>
+          </h3>
+          <ul class="rows">
+            {data && !data.items.length ? (
+              <li class="empty">Nothing set. Add a timer, alarm or reminder below, or just ask the speaker.</li>
+            ) : null}
+            {data?.items.map((i) => (
+              <li key={i.id}>
+                <div class="rowhead">
+                  <strong>{i.label || NAMES[i.kind]}</strong>
+                  <span class="badge">{NAMES[i.kind]}</span>
+                </div>
+                <div class="when">{whenLine(i, data.now)}</div>
+                <div class="acts">
+                  <button class="plain small" type="button" onClick={() => startEdit(i)}>
+                    Edit
+                  </button>
+                  <button class="danger" type="button" onClick={() => cancel(i)}>
+                    Cancel
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          {note ? <p class="mut chartnote">{note}</p> : null}
+        </section>
+
+        <form class="panel sgroup" ref={formRef} onSubmit={submit}>
+          <h3>{editing ? "Change this " + kind : "Add a timer, alarm or reminder"}</h3>
+          <div class="srow">
+            <div class="slabel">
+              <label for="rkind">Type</label>
+              <p class="mut">A timer counts down, an alarm rings at a time of day, a reminder speaks a message.</p>
             </div>
-            <div class="when">{whenLine(i, data.now)}</div>
-            <div class="acts">
-              <button class="plain" type="button" onClick={() => startEdit(i)}>
-                Edit
-              </button>
-              <button class="danger" type="button" onClick={() => cancel(i)}>
-                Cancel
-              </button>
-            </div>
-          </li>
-        ))}
-      </ul>
-      <p class="mut">{note}</p>
-      <form class="panel" ref={formRef} onSubmit={submit}>
-        <h3>{editing ? "Change this " + kind : "Add a timer, alarm, or reminder"}</h3>
-        <label for="rkind">Type</label>
-        <select
-          id="rkind"
-          aria-label="What to add"
-          value={kind}
-          onChange={(e) => setKind(e.currentTarget.value as ScheduleKind)}
-        >
-          <option value="timer">Timer (counts down)</option>
-          <option value="alarm">Alarm (a time of day)</option>
-          <option value="reminder">Reminder (a date and a message)</option>
-        </select>
-        {kind === "timer" ? (
-          <div id="rtimer">
-            <label for="ramount">Length</label>
-            <div class="row">
-              <input
-                id="ramount"
-                type="number"
-                min="1"
-                max="10080"
-                value={amount}
-                onInput={(e) => setAmount(e.currentTarget.value)}
-              />
-              <select id="runit" aria-label="Unit" value={unit} onChange={(e) => setUnit(e.currentTarget.value)}>
-                <option value="60">minutes</option>
-                <option value="3600">hours</option>
+            <div class="sctl">
+              <select
+                id="rkind"
+                aria-label="What to add"
+                value={kind}
+                onChange={(e) => setKind(e.currentTarget.value as ScheduleKind)}
+              >
+                <option value="timer">Timer (counts down)</option>
+                <option value="alarm">Alarm (a time of day)</option>
+                <option value="reminder">Reminder (a date and a message)</option>
               </select>
             </div>
           </div>
-        ) : null}
-        {kind === "alarm" ? (
-          <div id="ralarm">
-            <label for="rtime">Time</label>
-            <input id="rtime" type="time" value={time} onInput={(e) => setTime(e.currentTarget.value)} />
-            <label>Repeat on</label>
-            <fieldset class="days">
-              <legend class="sr">Repeat on</legend>
-              {DAYS.map((d, i) => (
-                <label key={d}>
+          {kind === "timer" ? (
+            <div class="srow" id="rtimer">
+              <div class="slabel">
+                <label for="ramount">Length</label>
+              </div>
+              <div class="sctl">
+                <div class="row">
                   <input
-                    type="checkbox"
-                    value={i}
-                    checked={days.includes(i)}
-                    onChange={(e) => setDays(e.currentTarget.checked ? [...days, i] : days.filter((x) => x !== i))}
+                    id="ramount"
+                    type="number"
+                    min="1"
+                    max="10080"
+                    value={amount}
+                    onInput={(e) => setAmount(e.currentTarget.value)}
                   />
-                  {d}
-                </label>
-              ))}
-            </fieldset>
-            <p class="mut">Leave every day off to ring once, at the next time it comes round.</p>
-          </div>
-        ) : null}
-        {kind === "reminder" ? (
-          <div id="rrem">
-            <label for="rdate">Date</label>
-            <input id="rdate" type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} />
-            <label for="rtime2">Time</label>
-            <input id="rtime2" type="time" value={time2} onInput={(e) => setTime2(e.currentTarget.value)} />
-          </div>
-        ) : null}
-        <label for="rlabel">{kind === "reminder" ? "What should it say?" : "Name (optional)"}</label>
-        <input
-          id="rlabel"
-          type="text"
-          maxLength={100}
-          placeholder={PLACEHOLDER[kind]}
-          value={label}
-          onInput={(e) => setLabel(e.currentTarget.value)}
-        />
-        <div class="row">
-          <button>{editing ? "Save changes" : "Add"}</button>
-          {editing ? (
-            <button class="plain" type="button" onClick={reset}>
-              Stop editing
-            </button>
+                  <select id="runit" aria-label="Unit" value={unit} onChange={(e) => setUnit(e.currentTarget.value)}>
+                    <option value="60">minutes</option>
+                    <option value="3600">hours</option>
+                  </select>
+                </div>
+              </div>
+            </div>
           ) : null}
-        </div>
-      </form>
-    </>
+          {kind === "alarm" ? (
+            <div id="ralarm">
+              <div class="srow">
+                <div class="slabel">
+                  <label for="rtime">Time</label>
+                </div>
+                <div class="sctl">
+                  <input id="rtime" type="time" value={time} onInput={(e) => setTime(e.currentTarget.value)} />
+                </div>
+              </div>
+              <div class="srow">
+                <div class="slabel">
+                  <label>Repeat on</label>
+                  <p class="mut">Leave every day off to ring once, at the next time it comes round.</p>
+                </div>
+                <div class="sctl">
+                  <fieldset class="days">
+                    <legend class="sr">Repeat on</legend>
+                    {DAYS.map((d, i) => (
+                      <label key={d}>
+                        <input
+                          type="checkbox"
+                          value={i}
+                          checked={days.includes(i)}
+                          onChange={(e) =>
+                            setDays(e.currentTarget.checked ? [...days, i] : days.filter((x) => x !== i))
+                          }
+                        />
+                        {d}
+                      </label>
+                    ))}
+                  </fieldset>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {kind === "reminder" ? (
+            <div id="rrem">
+              <div class="srow">
+                <div class="slabel">
+                  <label for="rdate">Date</label>
+                </div>
+                <div class="sctl">
+                  <input id="rdate" type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} />
+                </div>
+              </div>
+              <div class="srow">
+                <div class="slabel">
+                  <label for="rtime2">Time</label>
+                </div>
+                <div class="sctl">
+                  <input id="rtime2" type="time" value={time2} onInput={(e) => setTime2(e.currentTarget.value)} />
+                </div>
+              </div>
+            </div>
+          ) : null}
+          <div class="srow">
+            <div class="slabel">
+              <label for="rlabel">{kind === "reminder" ? "What should it say?" : "Name (optional)"}</label>
+            </div>
+            <div class="sctl">
+              <input
+                id="rlabel"
+                type="text"
+                maxLength={100}
+                placeholder={PLACEHOLDER[kind]}
+                value={label}
+                onInput={(e) => setLabel(e.currentTarget.value)}
+              />
+            </div>
+          </div>
+          <div class="row">
+            <button>{editing ? "Save changes" : "Add"}</button>
+            {editing ? (
+              <button class="plain" type="button" onClick={reset}>
+                Stop editing
+              </button>
+            ) : null}
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }

@@ -1,6 +1,7 @@
 // What the Dashboard says, as pure functions (unit-tested): the speaker's state in words, what needs attention with
 // a fix link for each, why a test phrase cannot be spoken, and the merged list of recent happenings.
 import { outcome, type Tone } from "./activity.ts";
+import { parts } from "./time.ts";
 import type { AgentEvent, AuditRecord, SpeakRefusal, SpeakerState, Status } from "./types.ts";
 
 export type RingState = "idle" | "listening" | "thinking" | "speaking" | "muted" | "off" | "attention";
@@ -35,8 +36,9 @@ export function speakerView(st: Status | null): SpeakerView {
   if (sp?.connected === false) {
     return {
       ring: "off",
-      headline: "No speaker is connected.",
-      detail: "Nothing can be heard or said until one connects.",
+      headline: "Waiting for a speaker",
+      detail:
+        "ClawDot is running, but no microphone and speaker are attached yet. On a Dot this connects by itself; on a computer, start the speaker program.",
     };
   }
   if (sp?.available === false) {
@@ -204,4 +206,33 @@ export function lastHeard(records: AuditRecord[]): number | null {
   let best: number | null = null;
   for (const r of records) if (r.trigger === "voice" && (best === null || r.ts > best)) best = r.ts;
   return best;
+}
+
+export interface Day {
+  /** The date in the device's zone, `2026-11-09`. */
+  date: string;
+  /** A short label for the axis: the weekday. */
+  label: string;
+  count: number;
+  today: boolean;
+}
+
+/** How many things the assistant did on each of the last `days` days, oldest first, from the activity log. */
+export function dailyCounts(records: AuditRecord[], now: number, zone: string, days = 14): Day[] {
+  const out: Day[] = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const ts = now - i * 86400;
+    out.push({
+      date: parts(ts, zone).date,
+      label: new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "short" }).format(new Date(ts * 1000)),
+      count: 0,
+      today: i === 0,
+    });
+  }
+  const at = new Map(out.map((d) => [d.date, d]));
+  for (const r of records) {
+    const d = at.get(parts(r.ts, zone).date);
+    if (d) d.count += 1;
+  }
+  return out;
 }
