@@ -269,7 +269,10 @@ await step("shell: four destinations, titles, current page, unknown address", as
 
 await step("Dashboard: live state, attention with fix links, next up, recent, quick add, test speak", async () => {
   await open("open");
-  await b.until(`T.text('#statusline') === 'Ready.' && T.all('#attention li').length === 1`, "dashboard");
+  await b.until(
+    `T.text('#statusline') === 'Ready.' && T.all('#attention li').length === 1 && (T.text('#statusdetail') ?? '').startsWith('Last heard')`,
+    "dashboard",
+  );
   await shot("dashboard");
   await shot("dashboard-wide", { width: 1100 });
   await eq(`T.q('#statusblock .ring').getAttribute('data-state')`, "idle", "the ring shows the state");
