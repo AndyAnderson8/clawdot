@@ -51,6 +51,28 @@ export function About(): JSX.Element {
       fail(x);
     }
   };
+  const resetAll = async () => {
+    const saved = Object.entries(get().settings?.fields ?? {}).filter(([, f]) => f.saved);
+    if (!saved.length) {
+      say("Nothing to reset: every setting is already at its default.");
+      return;
+    }
+    if (
+      !confirm(
+        "Put all " +
+          saved.length +
+          " saved settings back to their defaults? Your inputs, skills, memory and password are kept.",
+      )
+    )
+      return;
+    try {
+      const next = await api<Settings>("PUT", "/api/settings", Object.fromEntries(saved.map(([k]) => [k, null])));
+      set({ settings: Object.assign({}, get().settings, next), settingsRev: get().settingsRev + 1 });
+      say("All settings are back to their defaults.");
+    } catch (x) {
+      fail(x);
+    }
+  };
   const choose = async (ev: Event) => {
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -84,110 +106,147 @@ export function About(): JSX.Element {
   };
 
   return (
-    <>
-      <h3>About</h3>
-      <p id="aboutver">
-        ClawDot {s.version}. It runs entirely on your own device; this page never contacts anything outside your
-        network.
-      </p>
-      {about?.build ? (
-        <p class="mut" id="buildinfo">
-          {buildText(about)}
+    <div class="stack">
+      <section class="card">
+        <h3>About ClawDot</h3>
+        <p>
+          ClawDot is a voice assistant that runs on a small device you own, such as a smart speaker, a Raspberry Pi or a
+          computer. You choose the language model and the tools it may use. ClawDot listens, thinks, acts and speaks.
         </p>
-      ) : null}
-      <details id="about">
-        <summary>Release notes</summary>
-        {about ? <pre id="notes">{about.changelog}</pre> : null}
-      </details>
+        <dl class="kv">
+          <dt>Version</dt>
+          <dd id="aboutver">{s.version}</dd>
+          {about?.build ? (
+            <>
+              <dt>Build</dt>
+              <dd id="buildinfo">{buildText(about)}</dd>
+            </>
+          ) : null}
+        </dl>
+        <details id="about">
+          <summary>Release notes</summary>
+          {about ? <pre id="notes">{about.changelog}</pre> : null}
+        </details>
+      </section>
 
-      <h3>When something is wrong</h3>
-      <p>
-        Download a diagnostics file and send it with your bug report. It has the version, your settings without any
-        password or key, the names of your inputs, how many tools and records there are, and the latest problems. It
-        never has audio, anything you said, your notes, or an input token.
-      </p>
-      <div class="row">
-        <button type="button" id="diagdl" onClick={diagnostics}>
-          Download diagnostics
-        </button>
-      </div>
-      <details
-        id="logs"
-        onToggle={(ev) => {
-          if (ev.currentTarget.open && !logs) void loadLogs();
-        }}
-      >
-        <summary>Recent problems</summary>
-        {logs ? (
-          logs.lines.length ? (
-            <pre id="loglines" class="pre">
-              {logs.lines
-                .map(
-                  (l) =>
-                    fmt(l.ts, zone(), { dateStyle: "short", timeStyle: "medium" }) + "  " + l.level + "  " + l.text,
-                )
-                .join("\n")}
-            </pre>
-          ) : (
-            <p id="lognone">No problems since ClawDot started.</p>
-          )
-        ) : null}
+      <section class="card">
+        <h3>When something is wrong</h3>
+        <p class="mut">
+          Download a diagnostics file and send it with your bug report. It has the version, your settings without any
+          password or key, the names of your inputs, how many tools and records there are, and the latest problems. It
+          never has audio, anything you said, what it remembers, or an input token.
+        </p>
         <div class="row">
-          <button class="plain" type="button" onClick={loadLogs}>
-            Refresh
+          <button type="button" id="diagdl" onClick={diagnostics}>
+            Download diagnostics
           </button>
         </div>
-        <p class="mut">
-          Only ClawDot's own messages are listed, from memory since it started. The newest {logs?.max_lines ?? 200} are
-          kept.
-        </p>
-      </details>
+        <details
+          id="logs"
+          onToggle={(ev) => {
+            if (ev.currentTarget.open && !logs) void loadLogs();
+          }}
+        >
+          <summary>Recent problems</summary>
+          {logs ? (
+            logs.lines.length ? (
+              <pre id="loglines" class="pre">
+                {logs.lines
+                  .map(
+                    (l) =>
+                      fmt(l.ts, zone(), { dateStyle: "short", timeStyle: "medium" }) + "  " + l.level + "  " + l.text,
+                  )
+                  .join("\n")}
+              </pre>
+            ) : (
+              <p id="lognone">No problems since ClawDot started.</p>
+            )
+          ) : null}
+          <div class="row">
+            <button class="plain small" type="button" onClick={loadLogs}>
+              Refresh
+            </button>
+          </div>
+          <p class="mut">
+            Only ClawDot's own messages are listed, from memory since it started. The newest {logs?.max_lines ?? 200}{" "}
+            are kept.
+          </p>
+        </details>
+      </section>
 
-      <h3>Move settings to another device</h3>
-      <p>
-        Save your settings as a file, and load that file on another ClawDot. Passwords and keys are never in the file; a
-        key is only the name of the variable that holds it.
-      </p>
-      <div class="row">
-        <button class="plain" type="button" id="exportdl" onClick={exportSettings}>
-          Save my settings
-        </button>
-      </div>
-      <form
-        class="panel"
-        id="importform"
-        onSubmit={(ev) => {
-          ev.preventDefault();
-          void apply();
-        }}
-      >
-        <h3>Load a settings file</h3>
-        <label for="importfile">Settings file</label>
-        <input id="importfile" type="file" accept="application/json,.json" onChange={choose} />
-        {picked ? (
-          picked.changes.length ? (
-            <>
-              <p>Loading this file would change:</p>
-              <ul class="rows" id="importlist">
-                {picked.changes.map((c) => (
-                  <li key={c.key}>
-                    <strong>{c.label}</strong>
-                    <div class="mut">
-                      {c.from} to {c.to}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-              <button>Load these settings</button>
-            </>
-          ) : (
-            <p id="importsame">Everything in this file is already how it is here.</p>
-          )
-        ) : null}
-        <p class="errtext" role="alert">
-          {importErr}
+      <section class="card sgroup">
+        <h3>Move settings to another device</h3>
+        <p class="mut">
+          Save your settings as a file and load it on another ClawDot. Passwords and keys are never in the file; a key
+          is only the name of the variable that holds it.
         </p>
-      </form>
-    </>
+        <div class="srow">
+          <div class="slabel">
+            <label for="exportdl">Save your settings</label>
+            <p class="mut">Downloads a small file.</p>
+          </div>
+          <div class="sctl">
+            <button class="plain" type="button" id="exportdl" onClick={exportSettings}>
+              Save my settings
+            </button>
+          </div>
+        </div>
+        <form
+          class="srow"
+          id="importform"
+          onSubmit={(ev) => {
+            ev.preventDefault();
+            void apply();
+          }}
+        >
+          <div class="slabel">
+            <label for="importfile">Load a settings file</label>
+            <p class="mut">A file made by Save my settings. You see what would change before anything does.</p>
+          </div>
+          <div class="sctl">
+            <input id="importfile" type="file" accept="application/json,.json" onChange={choose} />
+            {picked ? (
+              picked.changes.length ? (
+                <>
+                  <p>Loading this file would change:</p>
+                  <ul class="rows" id="importlist">
+                    {picked.changes.map((c) => (
+                      <li key={c.key}>
+                        <strong>{c.label}</strong>
+                        <div class="mut">
+                          {c.from} to {c.to}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  <button>Load these settings</button>
+                </>
+              ) : (
+                <p id="importsame">Everything in this file is already how it is here.</p>
+              )
+            ) : null}
+            <p class="errtext" role="alert">
+              {importErr}
+            </p>
+          </div>
+        </form>
+      </section>
+      <section class="card sgroup">
+        <h3>Start over</h3>
+        <div class="srow">
+          <div class="slabel">
+            <label for="resetall">Reset all settings</label>
+            <p class="mut">
+              Puts every setting you saved here back to its default. Your inputs, skills, memory and password are kept.
+            </p>
+          </div>
+          <div class="sctl">
+            <button class="danger" type="button" id="resetall" onClick={resetAll}>
+              Reset all settings
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
