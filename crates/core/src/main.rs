@@ -587,20 +587,9 @@ fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
     }
 }
 
-/// A name for the device: the host name, or "ClawDot".
+/// The default name for the device. Never the machine’s host name, which is often a person’s name; it can be changed in Settings.
 fn device_name() -> String {
-    let from_env = ["HOSTNAME", "COMPUTERNAME"]
-        .iter()
-        .find_map(|v| std::env::var(v).ok());
-    let name = from_env
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-        .unwrap_or_default();
-    let name: String = name.trim().chars().take(40).collect();
-    if name.is_empty() {
-        "ClawDot".to_owned()
-    } else {
-        name
-    }
+    "ClawDot".to_owned()
 }
 
 /// Facts shown next to the settings but not edited there: the speech provider's models and where speakers
