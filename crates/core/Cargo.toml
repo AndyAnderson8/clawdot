@@ -16,7 +16,7 @@ default = ["tz", "tls"]
 # IANA time-zone support with a bundled database (correct daylight-saving behaviour, no OS tzdata needed).
 tz = ["dep:jiff"]
 # HTTPS to the language-model provider (rustls, bundled roots). Without it only http:// endpoints work.
-tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots", "dep:ring"]
 # Client for ESPHome voice satellites (spec 0004): dials a Dot or other ESPHome device with no Home Assistant.
 # Plaintext API only; adds no dependency. Off by default.
 esphome-satellite = []

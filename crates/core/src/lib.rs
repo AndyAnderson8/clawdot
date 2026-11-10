@@ -42,6 +42,8 @@ pub mod stopwatch;
 pub mod store;
 pub mod transport;
 pub mod ui;
+#[cfg(feature = "tls")]
+pub mod update;
 pub mod usage;
 pub mod vad;
 pub mod voice;

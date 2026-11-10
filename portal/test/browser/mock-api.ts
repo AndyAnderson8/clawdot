@@ -124,6 +124,7 @@ function seed(mode: string): Json {
       plan_speech: { value: true, source: "default", live: true },
       progress_speech: { value: true, source: "default", live: true },
       notes: { value: false, source: "default", live: true },
+      update_check: { value: true, source: "default", live: true },
       max_actions_per_day: { value: 100, source: "default", live: true },
       max_costly_per_day: { value: 20, source: "default", live: true },
       dry_run: { value: true, source: "flag", live: true, saved: false },
@@ -214,6 +215,22 @@ function seed(mode: string): Json {
     ],
     audit: auditSeed(t),
     logs: [{ ts: t - 30, level: "error", text: "could not save the notes: <b>disk full</b>" }],
+    update: {
+      current: "0.1.0-test",
+      enabled: true,
+      source: "api.github.com",
+      checking: false,
+      last_checked: t - 3600,
+      error: null,
+      available: false,
+      latest: null,
+      can_apply: false,
+      cannot_apply_because: null,
+      supervised: true,
+      phase: "",
+      apply_error: null,
+      installed: null,
+    },
     notesOn: true,
     notes: [{ id: 1, text: "my printer is <b>Pixel</b>", ts: t - 3600 }],
     nextNote: 2,
@@ -370,6 +387,20 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           build: { version: "0.1.0-test", profile: "release", os: "linux", arch: "aarch64", features: ["tz", "tls"] },
           changelog: "## [0.1.0]\n- First release",
         });
+      if (m === "GET" && path === "/api/update") return send(200, st["update"]);
+      if (m === "POST" && path === "/api/update/check") {
+        const u = st["update"] as Json;
+        u["last_checked"] = now();
+        return send(200, u);
+      }
+      if (m === "POST" && path === "/api/update/apply") {
+        const u = st["update"] as Json;
+        if (!u["latest"] || body.version !== u["latest"].version)
+          return err(409, "That version is not a newer one than this. Check for updates again.");
+        if (!u["can_apply"]) return err(409, String(u["cannot_apply_because"]));
+        u["phase"] = "installing";
+        return send(202, u);
+      }
       if (m === "GET" && path === "/api/logs")
         return send(200, {
           lines: st["logs"],

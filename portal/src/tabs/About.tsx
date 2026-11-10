@@ -3,6 +3,7 @@ import { useEffect, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { parseSettingsFile, settingsChanges, type SettingChange } from "../forms.ts";
 import { saveFile } from "../parts.tsx";
+import { Updates } from "./Updates.tsx";
 import { fail, get, say, set, useApp, zone } from "../store.ts";
 import { fmt } from "../time.ts";
 import type { About as AboutData, LogList, Settings } from "../types.ts";
@@ -128,6 +129,8 @@ export function About(): JSX.Element {
           {about ? <pre id="notes">{about.changelog}</pre> : null}
         </details>
       </section>
+
+      <Updates />
 
       <section class="card">
         <h3>When something is wrong</h3>

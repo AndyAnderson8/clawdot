@@ -2,7 +2,7 @@
 // a fix link for each, why a test phrase cannot be spoken, and the merged list of recent happenings.
 import { outcome, type Tone } from "./activity.ts";
 import { parts } from "./time.ts";
-import type { AgentEvent, AuditRecord, SpeakRefusal, SpeakerState, Status } from "./types.ts";
+import type { AgentEvent, AuditRecord, SpeakRefusal, SpeakerState, Status, UpdateStatus } from "./types.ts";
 
 export type RingState = "idle" | "listening" | "thinking" | "speaking" | "muted" | "off" | "attention";
 
@@ -57,7 +57,7 @@ export interface Attention {
 }
 
 /** What needs attention, most important first. An empty list means all is well. Unknown means not flagged. */
-export function attention(st: Status | null, mode: string): Attention[] {
+export function attention(st: Status | null, mode: string, update?: UpdateStatus | null): Attention[] {
   if (!st?.llm) return [];
   const out: Attention[] = [];
   if (st.llm.configured === false) {
@@ -94,6 +94,15 @@ export function attention(st: Status | null, mode: string): Attention[] {
       why: "Reminders and alarms wait until the device gets the time from the network.",
       to: "#/settings/general",
       label: "Check the time zone",
+    });
+  }
+  if (update?.available && update.latest) {
+    out.push({
+      id: "update",
+      title: `Version ${update.latest.version} is available`,
+      why: "Read what is new, then install it when you are ready.",
+      to: "#/settings/about",
+      label: "See what is new",
     });
   }
   if (mode === "open") {

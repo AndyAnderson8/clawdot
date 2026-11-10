@@ -310,6 +310,9 @@ pub async fn handle(
             | ["notes"]
             | ["notes", _]
             | ["about"]
+            | ["update"]
+            | ["update", "check"]
+            | ["update", "apply"]
     );
     if !known {
         return Some(error(StatusCode::NOT_FOUND, "not found"));
@@ -390,6 +393,9 @@ pub async fn handle(
             Ok(id) => notes_forget(core, Some(id)),
             Err(_) => error(StatusCode::NOT_FOUND, "no such note"),
         },
+        (&Method::GET, ["update"]) => update_status(),
+        (&Method::POST, ["update", "check"]) => update_check().await,
+        (&Method::POST, ["update", "apply"]) => update_apply(body).await,
         (&Method::GET, ["about"]) => json_reply(
             StatusCode::OK,
             &json!({ "version": env!("CARGO_PKG_VERSION"), "build": crate::diag::build_info(), "changelog": CHANGELOG }),
@@ -412,6 +418,68 @@ pub async fn handle(
         },
         _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     })
+}
+
+/// `GET /api/update`: whether a newer version exists, when it was last looked for, and whether it can be installed
+/// here (REQ-UPD-005).
+#[cfg(feature = "tls")]
+fn update_status() -> Resp {
+    match crate::update::global() {
+        Some(u) => json_reply(StatusCode::OK, &u.status()),
+        None => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Updates are not running on this device.",
+        ),
+    }
+}
+
+#[cfg(not(feature = "tls"))]
+fn update_status() -> Resp {
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "This build does not check for updates.",
+    )
+}
+
+/// `POST /api/update/check`: look for a newer version now. The answer is the same document as `GET /api/update`;
+/// a failed look is in its `error` field, not an HTTP error.
+#[cfg(feature = "tls")]
+async fn update_check() -> Resp {
+    let Some(u) = crate::update::global() else {
+        return update_status();
+    };
+    let _ = u.check().await;
+    json_reply(StatusCode::OK, &u.status())
+}
+
+#[cfg(not(feature = "tls"))]
+async fn update_check() -> Resp {
+    update_status()
+}
+
+/// `POST /api/update/apply` with `{"version": "1.2.3"}`: install the version the person confirmed (REQ-UPD-006).
+/// It starts at once and the page watches `GET /api/update`.
+#[cfg(feature = "tls")]
+async fn update_apply(body: Incoming) -> Resp {
+    let Some(u) = crate::update::global() else {
+        return update_status();
+    };
+    let v = match read_json::<Value>(body).await {
+        Ok(v) => v,
+        Err((s, m)) => return error(s, m),
+    };
+    let Some(version) = v["version"].as_str() else {
+        return error(StatusCode::BAD_REQUEST, "Say which version to install.");
+    };
+    match u.start_apply(version) {
+        Ok(()) => json_reply(StatusCode::ACCEPTED, &u.status()),
+        Err(why) => error(StatusCode::CONFLICT, &why),
+    }
+}
+
+#[cfg(not(feature = "tls"))]
+async fn update_apply(_body: Incoming) -> Resp {
+    update_status()
 }
 
 /// `GET /api/settings/export`: the saved settings as a file the page offers for download (REQ-CFG-065).

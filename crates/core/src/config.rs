@@ -63,6 +63,19 @@ pub struct AgentConfig {
     pub notes: Option<bool>,
 }
 
+/// Update checks (REQ-UPD-001 to REQ-UPD-010).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// Look for a newer release about once a day (default true; the person can change it in the portal).
+    pub check: Option<bool>,
+    /// Where releases are listed (default: the project's releases on GitHub). `https://` only.
+    pub url: Option<String>,
+    /// The maintainer's Ed25519 public key as 64 hexadecimal digits. Without one a newer version is announced but
+    /// never installed by ClawDot itself.
+    pub public_key: Option<String>,
+}
+
 /// Speech-to-text and text-to-speech provider (OpenAI-compatible).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -106,7 +119,7 @@ pub struct Config {
     pub listen: Option<String>,
     /// URL used in the integration snippets.
     pub public_url: Option<String>,
-    /// Device name shown in the portal header (default: the host name).
+    /// Device name shown on Home (default: ClawDot, never the host name).
     pub name: Option<String>,
     /// IANA time zone, for example `America/Chicago`.
     pub zone: Option<String>,
@@ -130,6 +143,9 @@ pub struct Config {
     /// Satellite server.
     #[serde(default)]
     pub satellite: SatelliteConfig,
+    /// Update checks.
+    #[serde(default)]
+    pub updates: UpdatesConfig,
     /// ESPHome voice satellites to dial (optional feature `esphome-satellite`; see spec 0004).
     #[cfg(feature = "esphome-satellite")]
     #[serde(default)]
