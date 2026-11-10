@@ -6,6 +6,7 @@
 | Process | [git-workflow.md](process/git-workflow.md) | Git flow, merge commits, gated landing, releases, enforcement layers |
 | Process | [runbook.md](process/runbook.md) | Step-by-step commands for humans and agents: work, land, release, hotfix, fixes for common errors |
 | Process | [repo-settings.md](process/repo-settings.md) | GitHub rulesets and settings that enforce the git flow server-side |
+| Process | [personal-data.md](process/personal-data.md) | What must not appear in examples, and the hashed-denylist guard |
 | Agents | [../AGENTS.md](../AGENTS.md) | Binding rules for AI coding agents (identity, branches, commits) |
 | Specs | [specs/](specs/README.md) | What the system must do, with stable requirement IDs |
 | Architecture | [architecture/overview.md](architecture/overview.md) | Components, flows, constraints, risks |

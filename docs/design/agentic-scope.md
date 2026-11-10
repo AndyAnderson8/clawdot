@@ -74,7 +74,7 @@ These apply to a turn started by voice, by an inbox event the user then answers,
 | Conversation history | In memory, for the current dialog | 20 messages, 24,000 bytes, expires after 600 s idle (`main.rs`, `Conversation::new(..., 20, 24_000, 600)`) | On (existing, REQ-AST-007) |
 | Recent actions | In memory: the last 10 actions with id, tool, target, tier, result | 10 entries, expires with the conversation | On. It is what lets "undo that" and "restart that container" resolve |
 | Announced event | The event being discussed, as fenced data | One current event (existing) | On |
-| Notes ("remember that my NAS is called Andy-NAS") | Persisted in `memory.json`, 0600 | 50 notes, 200 characters each, 8 KB total | **Off.** Opt-in setting; written only when the user explicitly asks ("remember..."), never by a model decision alone; listed, edited and deleted in the portal |
+| Notes ("remember that my printer is called Pixel") | Persisted in `memory.json`, 0600 | 50 notes, 200 characters each, 8 KB total | **Off.** Opt-in setting; written only when the user explicitly asks ("remember..."), never by a model decision alone; listed, edited and deleted in the portal |
 | Audit log | Persisted (section 3.6) | Ring, size-capped | On |
 | Raw audio | Never (REQ-SEC-002) | n/a | n/a |
 
@@ -109,7 +109,7 @@ Every tool, and every MCP tool, has a tier set by the administrator. The default
 Today `run_turn` (`crates/core/src/session.rs`) runs a confirm-required tool when the model supplies `confirmed: true`. The model can set that flag itself, in the same turn, so it protects against forgetfulness but not against injection or a confused model. Only `inbox_reply` has a real user-bound check (`is_yes`, 120 s window in `assistant/tools.rs`). The rule becomes:
 
 1. A T2 or T3 call is intercepted by the host. The host stores a pending action: tool, canonical arguments, a hash of both, the turn it was proposed in, an expiry (default 120 s).
-2. The host speaks (or has the model speak) a read-back generated from the stored arguments, not from model prose: "Restart container plex-1 on Andy-NAS. Yes or no?"
+2. The host speaks (or has the model speak) a read-back generated from the stored arguments, not from model prose: "Restart container plex-1 on the server. Yes or no?"
 3. Only a later user turn whose transcript is a plain yes releases it, for that hash only. A different argument, a different tool, a timeout, or an intervening unrelated request clears it. The model cannot supply or pass the confirmation; `confirmed` stays in schemas for compatibility but is ignored.
 4. A "no", "stop" or silence cancels it, and the audit log records `declined` or `expired`.
 5. Who said yes is unknown: ClawDot has no speaker identification (out of scope). So for T3, a spoken yes is not enough (3.2). For T2 the risk is accepted and recorded in the threat model: a guest or a TV could answer "yes". Mitigations are the short expiry, the read-back, the half-duplex mic and the audit log.

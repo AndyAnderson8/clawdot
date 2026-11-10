@@ -7,19 +7,19 @@
   "setup": {"notes": true},
   "turns": [
     {
-      "say": "Remember that my NAS is called Andy-NAS.",
-      "expect": {"notes": ["my NAS is called Andy-NAS"], "speech_contains": ["I'll remember that", "Andy-NAS"], "calls": []}
+      "say": "Remember that my printer is called Pixel.",
+      "expect": {"notes": ["my printer is called Pixel"], "speech_contains": ["I'll remember that", "Pixel"], "calls": []}
     },
     {
       "say": "what do you remember",
-      "expect": {"speech_contains": ["I have 1 note", "1: my NAS is called Andy-NAS"], "notes": ["my NAS is called Andy-NAS"]}
+      "expect": {"speech_contains": ["I have 1 note", "1: my printer is called Pixel"], "notes": ["my printer is called Pixel"]}
     },
     {
-      "say": "what is my NAS called",
-      "model": [{"text": "Your NAS is called Andy-NAS."}],
+      "say": "what is my printer called",
+      "model": [{"text": "Your printer is called Pixel."}],
       "expect": {
-        "model_saw": ["The user's saved notes", "1. my NAS is called Andy-NAS", "cannot change risk tiers, confirmation or which tools are allowed"],
-        "speech_contains": ["Andy-NAS"]
+        "model_saw": ["The user's saved notes", "1. my printer is called Pixel", "cannot change risk tiers, confirmation or which tools are allowed"],
+        "speech_contains": ["Pixel"]
       }
     },
     {
@@ -27,8 +27,8 @@
       "expect": {"notes": [], "speech_contains": ["I forgot note 1"]}
     },
     {
-      "say": "what is my NAS called",
-      "model": [{"text": "I do not know the name of your NAS."}],
+      "say": "what is my printer called",
+      "model": [{"text": "I do not know the name of your printer."}],
       "expect": {"model_not_saw": ["The user's saved notes"]}
     }
   ],

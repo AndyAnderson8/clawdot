@@ -144,6 +144,20 @@ else
   skipped+=("python checks")
 fi
 
+# Personal-data guard (docs/process/personal-data.md): needs only node, which CI and the portal toolchain have.
+if [ "$fast" -eq 0 ] || [ -n "$changed" ]; then
+  if command -v node >/dev/null 2>&1; then
+    step "personal data: no denylisted words in tracked files"
+    run node scripts/check-personal.mjs
+  elif [ -n "${CI:-}" ]; then
+    echo "FAILED: node is required for the personal-data check" >&2
+    fail=1
+  else
+    echo "note: node not installed; the personal-data check was skipped (CI runs it)"
+    skipped+=("personal-data check")
+  fi
+fi
+
 if [ "$fast" -eq 0 ] || changed_matches '\.md$'; then
   step "documentation: links and requirement IDs"
   run scripts/check-docs.sh

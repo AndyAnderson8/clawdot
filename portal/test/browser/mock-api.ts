@@ -210,7 +210,7 @@ function seed(mode: string): Json {
     audit: auditSeed(t),
     logs: [{ ts: t - 30, level: "error", text: "could not save the notes: <b>disk full</b>" }],
     notesOn: true,
-    notes: [{ id: 1, text: "my NAS is <b>Andy-NAS</b>", ts: t - 3600 }],
+    notes: [{ id: 1, text: "my printer is <b>Pixel</b>", ts: t - 3600 }],
     nextNote: 2,
     skills: [{ name: "Good night", instructions: "Turn off the lights.", tools: ["set_light"], enabled: true }],
     problems: [],

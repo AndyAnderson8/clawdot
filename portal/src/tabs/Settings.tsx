@@ -98,7 +98,7 @@ function Group(props: { title: string; intro?: string; specs: SettingSpec[]; set
               ))}
             </select>
           ) : (
-            <input id={id} type="text" value={v} placeholder={bz || "America/Phoenix"} onInput={input} />
+            <input id={id} type="text" value={v} placeholder={bz || "Europe/Berlin"} onInput={input} />
           );
         } else if (sp.kind === "area") {
           ctl = <textarea id={id} rows={7} maxLength={4000} value={v} onInput={input} />;
