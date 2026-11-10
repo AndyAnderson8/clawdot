@@ -715,6 +715,12 @@ impl Core {
         self.lock().inbox.set_quiet(quiet);
     }
 
+    /// The device-wide quiet-hours window, if one is set (REQ-INB-040).
+    #[must_use]
+    pub fn quiet_hours(&self) -> Option<QuietHours> {
+        self.lock().inbox.quiet()
+    }
+
     /// Record that events were spoken.
     pub fn mark_announced(&self, ids: &[u64]) {
         let mut g = self.lock();
