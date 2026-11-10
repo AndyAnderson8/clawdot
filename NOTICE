@@ -15,6 +15,14 @@ HTTPS support bundles the Mozilla root certificate list through the webpki-roots
 crate, licensed under the Community Data License Agreement Permissive 2.0
 (CDLA-Permissive-2.0). See https://github.com/rustls/webpki-roots.
 
+Design tokens
+-------------
+The web portal's stylesheet (portal/src/tokens.css) uses the token names and the neutral colour values of the Astryx
+neutral theme, trimmed and re-expressed as plain CSS variables:
+
+* meta/astryx, packages/themes/neutral (@astryxdesign/theme-neutral 0.7.11), MIT License,
+  Copyright (c) Meta Platforms, Inc. and affiliates. No Astryx component or runtime code is included (ADR-0017).
+
 Protocol references (nothing copied)
 ------------------------------------
 The optional ESPHome voice-satellite client (spec 0004) implements the client side of the ESPHome native API.

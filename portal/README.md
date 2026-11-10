@@ -39,16 +39,23 @@ Commit the regenerated `ui.html` together with the source change; `check-build` 
 ```text
 src/
   main.tsx        entry: mounts <App/>, starts the store, refreshes every 10 seconds
-  App.tsx         the shell: sign-in and setup screens, the header band, the tab list (TABS)
-  tabs/*.tsx      one component per tab: Home, Reminders, Notes, Agents, Activity, Tools, Connections, Skills, Webhooks, Settings
-  parts.tsx       small pieces several tabs share (Field, CopyButton, badges, go())
+  App.tsx         the shell: sign-in and setup screens, the top and bottom bars, the four destinations (TABS)
+  tabs/Dashboard.tsx, Reminders.tsx, Activity.tsx   the first three destinations
+  tabs/SettingsPage.tsx   Settings: the section list and each section (SECTIONS)
+  tabs/Settings.tsx       one group of settings with its own Save (Group)
+  tabs/Webhooks, Tools, Connections, Skills, Notes, About   the parts that sections are made of
+  dashboard.ts    what the Dashboard says, as pure functions (state words, attention items, recent list)
+  snippets.ts     copy-and-paste setup text for inputs; the adapter list
+  theme.ts        the light, dark or match-system choice (kept by this browser)
+  parts.tsx       small pieces several screens share (Field, CopyButton, badges, go())
   store.ts        what the page knows (one small store) and the actions that change it
   api.ts          the only code that talks to the device (fetch to this origin, bearer token)
   forms.ts        pure functions that turn form values into API request bodies
   time.ts         date and time formatting in the device's time zone
   types.ts        the shapes of the device's JSON API
-  theme.css, styles.css, index.html   look and the page shell (index.html holds the build markers)
-test/unit/        node:test unit tests for api, forms, time and the safety rules
+  tokens.css      design tokens (Astryx neutral names and values, trimmed; see ADR-0017)
+  styles.css, index.html   components and the page shell (index.html holds the build markers)
+test/unit/        node:test unit tests for api, forms, snippets, dashboard, time and the safety rules
 test/browser/     smoke test: a Chrome driver (chrome.ts), a fake device (mock-api.ts), the steps (smoke.ts)
 lint/             ESLint config and its own package.json (a separate install, see above)
 build.mjs         the esbuild script
@@ -65,10 +72,10 @@ build.mjs         the esbuild script
 - **Plain words** in the interface (see REQ-CFG-026): no jargon like "inbox" or "scheduled".
 - Style is whatever Prettier outputs (120 columns, double quotes, trailing commas). Do not hand-format; run `npm run format`.
 
-## Add a tab
+## Add a screen or a settings section
 
-1. Create `src/tabs/Name.tsx` exporting `function Name(): JSX.Element`. Start from `Agents.tsx` (read-only) or `Webhooks.tsx` (loads data and has forms).
+1. A destination (rare; keep to four): create `src/tabs/Name.tsx` exporting `function Name(): JSX.Element` and add `{ id, label, view }` to `TABS` in `App.tsx`. A settings section: add a component to `tabs/SettingsPage.tsx` and an entry to `SECTIONS`; compose it from `Group` forms and the existing parts.
 2. Add the response type to `types.ts` and, if it needs a body, a builder to `forms.ts` with a test in `test/unit/forms.test.ts`.
-3. Add the tab to `TABS` in `App.tsx`: `{ id: "name", label: "Name", view: Name }`. The address fragment (`#/name`), the title and keyboard navigation follow from that entry.
-4. Add a step for it to `test/browser/smoke.ts` and a handler for its endpoints to `test/browser/mock-api.ts`.
+3. Use native controls (`<select>`, `<input type=...>`) and the tokens in `tokens.css`; never a custom popup.
+4. Add a step to `test/browser/smoke.ts` and a handler for its endpoints to `test/browser/mock-api.ts`.
 5. Add the device side in `crates/core/src/ui.rs` and the requirement to the spec (`docs/specs/`), then `npm run check`, `npm run build`, commit the regenerated `ui.html`.

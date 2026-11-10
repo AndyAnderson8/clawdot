@@ -105,5 +105,5 @@ test("no external scripts, fonts, or images are referenced", () => {
 });
 
 test("the words REQ-CFG-026 forbids stay out of the sources", () => {
-  none(/\binbox\b|\bscheduled\b|\bradio\b|\bmusic\b|\bstation/i, "plain names only");
+  none(/\binbox\b|\bscheduled\b|(?<!type=")\bradio\b|\bmusic\b|\bstation/i, "plain names only");
 });

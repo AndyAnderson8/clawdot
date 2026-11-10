@@ -59,7 +59,6 @@ export function Notes(): JSX.Element {
   const now = Math.floor(Date.now() / 1000);
   return (
     <>
-      <h2>Notes</h2>
       <p>
         Short facts you asked the assistant to remember, like “my printer is called Pixel”. It sees them every time it
         answers. You can also say “remember that ...” to the speaker. Never put a password or a key in a note.
@@ -74,8 +73,8 @@ export function Notes(): JSX.Element {
         <div class="soon" role="status" id="notesoff">
           <h3>Notes are off</h3>
           <p>
-            The assistant is not keeping or using notes. Turn them on in <a href="#/settings">Settings</a>, under Agent
-            settings. Notes you already saved are kept.
+            The assistant is not keeping or using notes. Turn them on under Keeping notes, further down this page. Notes
+            you already saved are kept.
           </p>
         </div>
       ) : null}

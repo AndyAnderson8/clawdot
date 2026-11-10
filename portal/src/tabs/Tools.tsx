@@ -294,7 +294,7 @@ export function Tools(): JSX.Element {
   const own = by("builtin");
   return (
     <>
-      <h2>Tools</h2>
+      <h3 class="part">Tools</h3>
       <p>
         Everything the assistant can do besides talk. Turn any tool off or on. Tools that change things in the outside
         world ask you out loud first.

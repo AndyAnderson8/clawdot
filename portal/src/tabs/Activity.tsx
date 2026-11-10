@@ -13,9 +13,16 @@ import {
 } from "../activity.ts";
 import { Field } from "../parts.tsx";
 import { fail, loadExt, useApp, zone } from "../store.ts";
-import { whenText } from "../time.ts";
+import { ago, whenText } from "../time.ts";
 import type { AuditPage, AuditRecord } from "../types.ts";
 
+const STATE: Record<string, string> = {
+  new: "Waiting to be read out",
+  announced: "Read out",
+  acknowledged: "You handled it",
+  dismissed: "Dismissed",
+  snoozed: "Snoozed",
+};
 const TIERS: [string, string][] = [
   ["", "Any"],
   ["read_only", "Only reads"],
@@ -37,7 +44,7 @@ const DECISIONS: [string, string][] = [
 const TRIGGERS: [string, string][] = [
   ["", "Any"],
   ["voice", "Your voice"],
-  ["event", "Agent events"],
+  ["event", "Events from inputs"],
 ];
 
 function Select(props: {
@@ -145,10 +152,29 @@ export function Activity(): JSX.Element {
   return (
     <>
       <h2>Activity</h2>
-      <p>
-        Everything the assistant did or was asked to do, newest first: what ran, what waited for your yes, and what was
-        stopped. You can read this list but not change it.
-      </p>
+      <p>What came in and what the assistant did, newest first. You can read these lists but not change them.</p>
+      <h3 class="first">Events received</h3>
+      <ul class="rows" id="eventlist">
+        {s.overview && !s.overview.events.length ? (
+          <li class="empty">
+            Nothing has arrived yet. Events from anything that can send a web request show up here once you create an
+            input in <a href="#/settings/inputs">Settings</a>.
+          </li>
+        ) : null}
+        {s.overview?.events.map((e) => (
+          <li key={e.id}>
+            <div class="rowhead">
+              <strong>{e.title}</strong>
+              <span class="badge">{STATE[e.state] ?? e.state}</span>
+            </div>
+            <div class="mut">
+              {e.source} through the “{e.endpoint}” input, {ago(e.received_at, s.overview?.now ?? 0)}
+            </div>
+            {e.text ? <div>{e.text}</div> : null}
+          </li>
+        ))}
+      </ul>
+      <h3>What the assistant did</h3>
       {meta ? (
         <p class="mut" id="policy">
           {meta.policy.dry_run ? "Dry run is on: actions are described, not done. " : ""}
