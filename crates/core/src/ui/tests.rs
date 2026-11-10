@@ -213,6 +213,9 @@ async fn every_portal_listing_needs_a_sign_in() {
         ("POST", "/api/skills/edit"),
         ("POST", "/api/skills/delete"),
         ("POST", "/api/skills/enabled"),
+        ("GET", "/api/update"),
+        ("POST", "/api/update/check"),
+        ("POST", "/api/update/apply"),
     ] {
         // Refused either way; after about 20 failures the rate limit answers 429 instead of 401.
         let s = call(&p, m, path, "", "{}").await.0;
@@ -754,4 +757,31 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
     let (_, a) = call(&p, "GET", "/api/about", &session, "").await;
     assert_eq!(a["build"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(a["build"]["features"].is_array());
+}
+
+// REQ-UPD-005, REQ-UPD-006
+#[tokio::test]
+async fn updates_need_the_administrator_and_say_so_when_they_are_not_running() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    // No updater runs in this test, so each call says so plainly instead of failing oddly.
+    for (m, path, body) in [
+        ("GET", "/api/update", ""),
+        ("POST", "/api/update/check", "{}"),
+        ("POST", "/api/update/apply", r#"{"version":"9.9.9"}"#),
+    ] {
+        let (s, v) = call(&p, m, path, &session, body).await;
+        assert_eq!(s, 503, "{m} {path}: {v}");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("update"),
+            "{v}"
+        );
+    }
+    assert_eq!(call(&p, "GET", "/api/update", "", "").await.0, 401);
 }
