@@ -607,6 +607,12 @@ fn settings_extra(args: &Args) -> serde_json::Value {
         "voice_info": {
             "configured": args.speech.url.is_some(),
             "language": args.speech.language,
+            "provider": args
+                .speech
+                .url
+                .as_deref()
+                .and_then(|u| clawdot_core::transport::Endpoint::parse(u).ok())
+                .map(|e| e.host),
             "stt_model": args.speech.stt_model,
             "tts_model": args.speech.tts_model,
         },
