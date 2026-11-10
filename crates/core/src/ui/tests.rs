@@ -131,8 +131,8 @@ fn the_page_uses_plain_names_and_no_radio() {
     for word in ["inbox", "scheduled", "radio", "music", "station"] {
         assert!(!page.contains(word), "the page still says `{word}`");
     }
-    // Four destinations, Dashboard first; everything configurable is under Settings.
-    for tab in ["Dashboard", "Reminders", "Activity", "Settings"] {
+    // Home first, then Clock, Bluetooth, Features and Settings; everything configurable is under Settings.
+    for tab in ["Home", "Clock", "Bluetooth", "Features", "Settings"] {
         assert!(
             PAGE.contains(&format!("\"{tab}\"")),
             "missing destination {tab}"
@@ -149,7 +149,7 @@ fn the_page_uses_plain_names_and_no_radio() {
 #[test]
 fn the_sign_in_help_never_tells_anyone_to_run_a_command() {
     assert!(
-        !PAGE.contains("reset-admin"),
+        !PAGE.contains("reset-admin") && !PAGE.to_lowercase().contains("recovery code"),
         "the page tells people to run a command"
     );
 }

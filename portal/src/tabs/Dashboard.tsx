@@ -67,7 +67,7 @@ function LookPicker(props: { value: LookId; onPick: (id: LookId) => void }): JSX
   return (
     <details class="looks">
       <summary>Change look</summary>
-      <div class="lookgrid" role="radiogroup" aria-label="What your device looks like">
+      <div class="lookgrid" role="group" aria-label="What your device looks like">
         {LOOKS.map((l) => (
           <label key={l.id} class={"lookopt" + (l.id === props.value ? " on" : "")}>
             <input type="radio" name="look" checked={l.id === props.value} onChange={() => props.onPick(l.id)} />
