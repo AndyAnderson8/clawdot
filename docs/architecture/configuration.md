@@ -118,7 +118,7 @@ phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, 
 - **Recovery code** (REQ-CFG-067, 068). Setting a password shows a one-time recovery code, which you must save before
   continuing. On the sign-in page, "Forgot your password?" takes the code and a new password; the code works once and a
   new one is shown. Only a salted hash of it is stored. An install from before this version makes one in Settings
-  (REQ-CFG-070). Open mode has none (REQ-CFG-072).
+  (REQ-CFG-073). Open mode has none (REQ-CFG-072).
 - **Hold the button** (REQ-CFG-069, REQ-DEV-031). Holding the action button for 10 seconds (or typing `admin` in the
   desktop device console) opens a 5 minute window in which the sign-in page offers a new password without a code.
   Private networks only, one use. The core honours it only from a satellite on the device itself or one with a valid

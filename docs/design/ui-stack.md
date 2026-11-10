@@ -2,6 +2,8 @@
 
 Status: **Superseded in part (2026-11-09)** by [ADR-0016](../adr/0016-portal-typescript-stack.md), which measured five implementations of one tab (vanilla TypeScript, Preact, Lit, Svelte, Solid) and proposes TypeScript with Preact built by esbuild, output committed, no `build.rs` Node dependency. The build-pipeline reasoning below (committed output plus a CI rebuild check, no Node in `cargo build`) still holds; the recommendation of option B (no framework) was changed to option C because the portal reached eight tabs. This note is kept as the original comparison.
 
+Update (2026-11-09): the design system and component approach are in [ADR-0017](../adr/0017-portal-design-system-astryx.md).
+
 ## Context
 
 The embedded UI is one hand-written file, `crates/core/src/ui.html`, plus the theme `crates/core/src/ui-theme.css`, both pulled into the binary with `include_str!` (about 50 KB together after the tabbed portal, uncompressed; it was 18 KB). It has no dependencies, makes no external requests, and runs under a strict Content-Security-Policy (inline script and style only, `connect-src 'self'`). The device is a 48 MB-budget Echo Dot Gen 2 class machine (REQ-NFR-101..103, binary at most 8 MB), and the repository builds with Rust only. The UI will grow (history, voice and persona settings, connect-an-agent flow, `/display`), and the maintainer prefers TypeScript. This note compares three ways forward.

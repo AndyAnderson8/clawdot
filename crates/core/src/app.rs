@@ -667,7 +667,7 @@ impl Core {
         self.admin_lock().has_recovery()
     }
 
-    /// Store a new recovery hash for the signed-in administrator (REQ-CFG-070).
+    /// Store a new recovery hash for the signed-in administrator (REQ-CFG-073).
     ///
     /// # Errors
     /// [`AdminError::NoPassword`] unless a password is set; storage failures.
@@ -845,6 +845,12 @@ impl Core {
     /// are announced. Takes effect on the next check, so no restart is needed.
     pub fn set_quiet_hours(&self, quiet: Option<QuietHours>) {
         self.lock().inbox.set_quiet(quiet);
+    }
+
+    /// The device-wide quiet-hours window, if one is set (REQ-INB-040).
+    #[must_use]
+    pub fn quiet_hours(&self) -> Option<QuietHours> {
+        self.lock().inbox.quiet()
     }
 
     /// Record that events were spoken.

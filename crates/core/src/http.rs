@@ -1217,12 +1217,80 @@ mod tests {
             if call(h.addr, "POST", "/api/speak", &auth, &speak("again"))
                 .await
                 .0
-                == 400
+                == 409
             {
                 refused += 1;
             }
         }
         assert_eq!(refused, 10 - crate::app::MAX_PENDING_SPEECH);
+    }
+
+    /// REQ-CFG-070: a refused test phrase says why and how to fix it; only a queued one answers `ok: true`.
+    #[tokio::test]
+    async fn test_speak_says_why_it_stayed_silent() {
+        let h = start(Limits::default(), ServeOptions::default()).await;
+        let a = admin(&h);
+        let auth = [("Authorization", a.as_str())];
+        let say = r#"{"text":"hello"}"#;
+        let ready = || {
+            serde_json::json!({
+                "speaker": {"connected": true, "available": true},
+                "voice": {"configured": true}, "muted": false,
+            })
+        };
+        let cases = [
+            (
+                "no_voice",
+                503,
+                serde_json::json!({"speaker": {"connected": true}, "voice": {"configured": false}}),
+            ),
+            (
+                "no_speaker",
+                409,
+                serde_json::json!({"speaker": {"connected": false}, "voice": {"configured": true}}),
+            ),
+            (
+                "muted",
+                409,
+                serde_json::json!({"speaker": {"connected": true, "available": true}, "muted": true}),
+            ),
+            (
+                "busy",
+                409,
+                serde_json::json!({"speaker": {"connected": true, "available": false}}),
+            ),
+        ];
+        for (reason, code, status) in cases {
+            h.core.set_ui_status(status);
+            let (s, _, body) = call(h.addr, "POST", "/api/speak", &auth, say).await;
+            let v = json_of(&body);
+            assert_eq!(s, code, "{reason}: {body}");
+            assert_eq!(v["ok"], false, "{reason}");
+            assert_eq!(v["reason"], reason, "{body}");
+            assert!(
+                v["message"].as_str().is_some_and(|m| m.len() > 20),
+                "{reason} must explain itself: {body}"
+            );
+            assert!(
+                h.core.take_speech().is_none(),
+                "{reason} must queue nothing"
+            );
+        }
+        // A speaker that can speak takes it; so does a status that does not say (not published yet).
+        h.core.set_ui_status(ready());
+        let (s, _, body) = call(h.addr, "POST", "/api/speak", &auth, say).await;
+        assert_eq!(s, 202, "{body}");
+        assert_eq!(json_of(&body)["ok"], true);
+        h.core.set_ui_status(serde_json::json!({"version": "9"}));
+        assert_eq!(call(h.addr, "POST", "/api/speak", &auth, say).await.0, 202);
+        // Speech printed to the terminal needs neither a satellite nor a voice.
+        h.core.set_ui_status(serde_json::json!({
+            "speaker": {"connected": true, "available": true, "name": "console"},
+            "voice": {"configured": false},
+        }));
+        assert_eq!(call(h.addr, "POST", "/api/speak", &auth, say).await.0, 202);
+        // The administrator is still required.
+        assert_eq!(call(h.addr, "POST", "/api/speak", &[], say).await.0, 401);
     }
 
     // ----- first-run setup, sign-in, open mode (REQ-CFG-018..024) -----

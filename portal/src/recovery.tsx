@@ -1,4 +1,4 @@
-// Forgotten password: the one-time recovery code, the "forgot it" form, and the Settings control (REQ-CFG-067..072).
+// Forgotten password: the one-time recovery code, the "forgot it" form, and the Settings control (REQ-CFG-067..069, 071..073).
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, keep } from "./api.ts";

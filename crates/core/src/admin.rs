@@ -5,7 +5,7 @@
 //!   build. Constant memory, no new dependency. The iteration count and salt travel with the hash.
 //! * [`Admin`]: the setting (unset, open, or password), and the in-memory sessions.
 //! * [`is_private`]: which peers may complete setup or use open mode.
-//! * Recovery (REQ-CFG-067..072): a one-time recovery code ([`generate_recovery_code`]) whose slow hash is kept
+//! * Recovery (REQ-CFG-067..069, 071..073): a one-time recovery code ([`generate_recovery_code`]) whose slow hash is kept
 //!   beside the password hash, and a short in-memory *reset window* opened by a device button.
 
 use crate::inbox::endpoint::{constant_time_eq, generate_token, hash_token, verify_token};
@@ -476,7 +476,7 @@ impl Admin {
     }
 
     /// Replace the credential with a new password hash, ending every session. Returns a fresh session. A new
-    /// recovery hash replaces the old one; `None` keeps the one there is (REQ-CFG-070).
+    /// recovery hash replaces the old one; `None` keeps the one there is (REQ-CFG-073).
     ///
     /// # Errors
     /// Storage and randomness failures.
@@ -505,7 +505,7 @@ impl Admin {
         self.new_session(now)
     }
 
-    // ----- recovery (REQ-CFG-067..072) -----
+    // ----- recovery (REQ-CFG-067..069, 071..073) -----
 
     /// Whether a recovery code exists.
     #[must_use]
@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(a.password_hash().as_deref(), Some("pw2"));
     }
 
-    // REQ-CFG-070
+    // REQ-CFG-073
     #[test]
     fn an_old_file_without_a_code_loads_and_a_signed_in_admin_can_add_one() {
         let dir = TempDir::new("admin-norec");

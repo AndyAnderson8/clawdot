@@ -769,7 +769,7 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
     assert!(a["build"]["features"].is_array());
 }
 
-// ----- forgotten password: recovery code and local reset window (REQ-CFG-067..072) -----
+// ----- forgotten password: recovery code and local reset window (REQ-CFG-067..069, 071..073) -----
 
 fn token_of(v: &Value) -> String {
     format!("Bearer {}", v["token"].as_str().unwrap())
@@ -935,7 +935,7 @@ async fn guessing_recovery_codes_runs_into_the_rate_limit() {
     assert_eq!(call(&p, "POST", "/api/recover", "", &right).await.0, 429);
 }
 
-// REQ-CFG-070
+// REQ-CFG-073
 #[tokio::test]
 async fn an_install_without_a_code_can_make_one_and_changing_the_password_keeps_it() {
     let p = start(false).await;
@@ -980,7 +980,7 @@ async fn an_install_without_a_code_can_make_one_and_changing_the_password_keeps_
     assert_eq!(call(&p, "POST", "/api/recover", "", &old).await.0, 401);
 }
 
-// REQ-CFG-070: an installation moved from open mode to a password gets its first code then
+// REQ-CFG-073: an installation moved from open mode to a password gets its first code then
 #[tokio::test]
 async fn setting_a_password_in_open_mode_issues_the_first_code() {
     let p = start(false).await;

@@ -38,7 +38,7 @@ What remains of point 6: the default listen address is loopback; setup is accept
 
 ## Amendment 2026-11-09: recovery without a shell
 
-Decision point 7 (recovery is `clawdot --reset-admin`) assumed a shell. A smart speaker has none, and the portal told people to run a command they cannot run. Recovery is now layered (REQ-CFG-067..072, REQ-DEV-031, REQ-SAT-020); `--reset-admin` stays for PCs and servers.
+Decision point 7 (recovery is `clawdot --reset-admin`) assumed a shell. A smart speaker has none, and the portal told people to run a command they cannot run. Recovery is now layered (REQ-CFG-067..069, 071..073, REQ-DEV-031, REQ-SAT-020); `--reset-admin` stays for PCs and servers.
 
 1. **Recovery code.** Setting a password issues a one-time code (20 characters from 31 look-alike-free symbols, about 99 bits, shown as four groups of five). Only a salted PBKDF2 hash, with the password's parameters, is stored in `admin.json`. The code resets the password without a sign-in; it is single use and a new one is issued and shown once after each reset. Existing installs get one from Settings; `admin.json` gains an optional `recovery` field and old files load unchanged.
 2. **Local reset window.** A device that has an action button asks the core (`clawdot.admin-reset`) after a 10 second hold. The core opens a 5 minute, single-use, in-memory window in which a private-address peer can set a new password without a code, then issues a new code. Physical presence at the device is the root of trust, as it was for the shell.
