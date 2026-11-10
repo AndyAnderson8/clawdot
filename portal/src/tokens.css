@@ -1,0 +1,76 @@
+/* Design tokens. Names and neutral values follow the Astryx neutral theme (github.com/meta/astryx,
+   @astryxdesign/theme-neutral 0.7.11, MIT License, Copyright (c) Meta Platforms, Inc. and affiliates), trimmed to
+   what this page uses and flattened to plain variables so older phones work (no light-dark(), no @scope).
+   ClawDot overrides, made the Astryx way as overrides of the same properties: --color-live, --color-border-control,
+   and a system-font stack (a page under this Content-Security-Policy cannot load a webfont). See ADR-0017 and
+   docs/design/portal-v2.md. Contrast ratios are listed there. Light is the default whatever the system prefers;
+   data-theme="dark" or data-theme="system" (follow the system) is an explicit choice made in Settings. */
+:root {
+  color-scheme: light;
+  --color-background-body: #ffffff;
+  --color-background-surface: #ffffff;
+  --color-background-muted: #f1f1f1;
+  --color-text-primary: #1b1b1b;
+  --color-text-secondary: #474747;
+  --color-accent: #1b1b1b;
+  --color-on-accent: #ffffff;
+  --color-border-emphasized: #d4d4d4;
+  --color-border-control: #8a8a8a;
+  --color-text-error: #c0262c;
+  --color-text-warning: #836700;
+  --color-text-success: #2f7d33;
+  --color-warning-muted: #fae19e;
+  --color-live: #0b6e63;
+  --font-family-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-family-code: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.0625rem;
+  --font-size-xl: 1.5rem;
+  --font-size-2xl: 2rem;
+  --spacing-1: 0.25rem;
+  --spacing-2: 0.5rem;
+  --spacing-3: 0.75rem;
+  --spacing-4: 1rem;
+  --spacing-6: 1.5rem;
+  --spacing-8: 2rem;
+  --spacing-12: 3rem;
+  --radius-inner: 0.375rem;
+  --radius-element: 0.625rem;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-background-body: #1b1b1b;
+  --color-background-surface: #262626;
+  --color-background-muted: #303030;
+  --color-text-primary: #f1f1f1;
+  --color-text-secondary: #b3b3b3;
+  --color-accent: #f1f1f1;
+  --color-on-accent: #1b1b1b;
+  --color-border-emphasized: #474747;
+  --color-border-control: #8a8a8a;
+  --color-text-error: #ffaea7;
+  --color-text-warning: #eec448;
+  --color-text-success: #90ca90;
+  --color-warning-muted: #453a1c;
+  --color-live: #4fb1a0;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    color-scheme: dark;
+    --color-background-body: #1b1b1b;
+    --color-background-surface: #262626;
+    --color-background-muted: #303030;
+    --color-text-primary: #f1f1f1;
+    --color-text-secondary: #b3b3b3;
+    --color-accent: #f1f1f1;
+    --color-on-accent: #1b1b1b;
+    --color-border-emphasized: #474747;
+    --color-border-control: #8a8a8a;
+    --color-text-error: #ffaea7;
+    --color-text-warning: #eec448;
+    --color-text-success: #90ca90;
+    --color-warning-muted: #453a1c;
+    --color-live: #4fb1a0;
+  }
+}

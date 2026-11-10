@@ -24,7 +24,7 @@ const js = await esbuild.build({
   define: { "process.env.NODE_ENV": '"production"' },
   logLevel: "warning",
 });
-const css = esbuild.transformSync(readFileSync(src("theme.css"), "utf8") + readFileSync(src("styles.css"), "utf8"), {
+const css = esbuild.transformSync(readFileSync(src("tokens.css"), "utf8") + readFileSync(src("styles.css"), "utf8"), {
   loader: "css",
   minify: true,
 });
