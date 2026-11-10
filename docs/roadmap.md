@@ -20,7 +20,7 @@ Stated up front so the plan stays small. Each of these is either out of scope fo
 - **No smart-home hub.** Home Assistant and similar systems are optional tools the agent can call, not something ClawDot becomes or depends on.
 - **No local speech models on small devices.** Speech to text and text to speech run off-device (or on a PC); the Dot-class budget does not hold them.
 - **No ESP32 brain.** An ESP32-class chip can be a satellite later; the agent loop runs on a PC, a Pi or a Dot.
-- **No multiroom audio, calls, cameras or screens** in v1.0.
+- **No multiroom audio, calls, cameras or screens** in v1.0. Screen devices and Zigbee are planned after it (see Beyond v1.0, items 8, 11 and 12).
 
 ## Principles
 
@@ -400,7 +400,10 @@ Release early and often: tag `v0.x` releases as steps land, so the differentiato
 | 8 | **`/display` page** and semantic display events for screen speakers | Screens, kiosks | Display capability and `clawdot.display.*` reserved (SAT-016) |
 | 9 | **librespot Connect receiver sidecar (research)**: ClawDot's speaker as a Spotify Connect device, as a separate process | Music playing on the device itself | Media-source interface (MUS-003/005). Research only: reverse-engineered library, budget and terms-of-service concerns |
 | 10 | Podcasts and audiobooks (resume positions) | Music breadth | Media-source interface |
-| 11 | ESP32-S3 satellite (a satellite only, never the brain); scheduled routines such as a morning briefing; rules that act | Platform and feature breadth | Protocol; scheduler; bounded stores |
+| 11 | **Zigbee for devices that have a radio** (a Dot-class or Pi board with a Zigbee chip, or a USB dongle): pair and control lights, plugs and sensors directly, as optional tools, without a hub | Local smart-home control without a cloud or Home Assistant | Tools and rules; the portal's Lights and Media pages leave room; no hub (see Not doing) |
+| 12 | **Screen devices**: speakers with a display (smart-display class) as first-class satellites, showing the transcript, now playing, timers and cards; touch to stop or pick | Screens are a common target for this kind of assistant | Display capability and `clawdot.display.*` reserved (SAT-016); item 8 is the first step |
+| 13 | **Media page in the portal**: music, podcasts and radio providers chosen in one place, with Bluetooth on or off beside them (the page exists as a stub; providers are built later, with items 9 and 10) | One place for everything that plays | Media-source interface (MUS-003/005) |
+| 14 | ESP32-S3 satellite (a satellite only, never the brain); scheduled routines such as a morning briefing; rules that act | Platform and feature breadth | Protocol; scheduler; bounded stores |
 
 Moved into Phase A on 2026-11-09: standing "do X when Y" rules (first version tell-me and remind-me only) and opt-in bounded notes are in A5b. Item 2 (the ClawDot MCP server) follows the rules work, because it needs the no-act and scope machinery first.
 

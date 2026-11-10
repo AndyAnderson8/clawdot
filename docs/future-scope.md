@@ -47,6 +47,7 @@ Open an issue labelled `type:feature` + `scope:proposal` → write or amend a sp
 | **Multi-language** | Voice | English-first for v1.0 (wake word, grammar, prompts). | Wake-word and fast-path grammar localisation plan exists |
 | **Multi-room / announcements between satellites** | Audio | Out of scope. | Not planned |
 | **Display satellites / status screens** | Hardware | Capability model already allows a display. | Real use case |
+| **Zigbee for devices with a radio** | Hardware | Pair and control lights, plugs and sensors locally, as optional tools, without a hub or Home Assistant. | A board or dongle with a Zigbee radio, and a real use case |
 | **Echo Dot Gen 2 firmware port** | Hardware | Opportunistic only; no known unlock for retail units ([R-04](research/04-echo-dot-gen2.md)). An adb-root unit already runs ClawDot as an ordinary process ([R-07](research/07-echo-dot-gen2-hardware.md)), which the board layer builds on. The hardware *budget* is already normative. | Someone gains boot access |
 | **Speaker/voice identification** | Assistant | Privacy-heavy, resource-heavy. | Not planned |
 | **Quiet hours and DND for agent announcements**, with priority bypass and a held queue | Agent | No compared project does this; their DND silences HA announcements only. Read the base's DND entity where present. See [R-11](research/11-open-source-echo-feature-landscape.md) 4.2. | Inbox priority mapping is stable |
