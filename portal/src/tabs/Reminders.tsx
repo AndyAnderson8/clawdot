@@ -6,15 +6,15 @@ import { fail, say, usePolled, zone } from "../store.ts";
 import { DAYS, fmt, hhmm, parts, repeatText, span, whenText, zoneName } from "../time.ts";
 import type { ScheduleItem, ScheduleKind, ScheduleList } from "../types.ts";
 
-const NAMES: Record<ScheduleKind, string> = { timer: "Timer", alarm: "Alarm", reminder: "Reminder" };
+export const NAMES: Record<ScheduleKind, string> = { timer: "Timer", alarm: "Alarm", reminder: "Reminder" };
 const PLACEHOLDER: Record<ScheduleKind, string> = {
   timer: "For example: pasta",
   alarm: "For example: wake up",
-  reminder: "For example: call Mum",
+  reminder: "For example: call the dentist",
 };
 const today = () => parts(Math.floor(Date.now() / 1000), zone()).date;
 
-function whenLine(i: ScheduleItem, now: number): string {
+export function whenLine(i: ScheduleItem, now: number): string {
   const z = zone();
   if (i.kind === "timer") return `Rings in ${span(i.seconds_left)} (${whenText(i.fire_at, now, z)})`;
   if (i.repeat)

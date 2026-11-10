@@ -103,8 +103,8 @@ export function About(): JSX.Element {
       <h3>When something is wrong</h3>
       <p>
         Download a diagnostics file and send it with your bug report. It has the version, your settings without any
-        password or key, the names of your webhooks, how many tools and records there are, and the latest problems. It
-        never has audio, anything you said, your notes, or a webhook token.
+        password or key, the names of your inputs, how many tools and records there are, and the latest problems. It
+        never has audio, anything you said, your notes, or an input token.
       </p>
       <div class="row">
         <button type="button" id="diagdl" onClick={diagnostics}>

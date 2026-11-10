@@ -115,47 +115,6 @@ export function skillBody(
   return { name: name.trim(), instructions, tools: tools.split(/[\s,]+/).filter(Boolean), enabled };
 }
 
-/** Ready-to-paste setup text for one webhook. The token is the real one only right after it was made. */
-export function snippets(base: string, name: string, adapter: string, tok: string | undefined): [string, string][] {
-  const url = base + "/hook/" + name;
-  const t = tok || "YOUR_TOKEN";
-  const out: [string, string][] = [
-    [
-      "Try it from a terminal",
-      "curl -X POST " +
-        url +
-        " \\\n  -H 'Authorization: Bearer " +
-        t +
-        '\' \\\n  -d \'{"title":"Backup finished","summary":"12 GB copied"}\'',
-    ],
-  ];
-  if (adapter === "claude-code") {
-    const hook = (ev: string) =>
-      '    "' +
-      ev +
-      '": [{ "hooks": [{ "type": "http", "url": "' +
-      url +
-      '", "headers": { "Authorization": "Bearer ' +
-      t +
-      '" }, "timeout": 5 }] }]';
-    out.unshift([
-      "Claude Code: add to ~/.claude/settings.json",
-      '{\n  "hooks": {\n' + hook("Stop") + ",\n" + hook("Notification") + "\n  }\n}",
-    ]);
-    out.push([
-      "Let your voice replies reach Claude Code (run on the computer where it works)",
-      "CLAWDOT_TOKEN=" + t + " clawdot-bridge --url " + base + " --endpoint " + name,
-    ]);
-  }
-  out.push([
-    "GitHub Actions: add as the last step of a job",
-    "- name: Tell ClawDot\n  if: always()\n  run: |\n    curl -fsS -X POST " +
-      url +
-      ' \\\n      -H "Authorization: Bearer ${{ secrets.CLAWDOT_TOKEN }}" \\\n      -d \'{"title":"Build ${{ job.status }}","summary":"${{ github.repository }}"}\'',
-  ]);
-  return out;
-}
-
 export const LABEL: Record<string, string> = {
   device_name: "Device name",
   zone: "Time zone",

@@ -314,14 +314,28 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           status: {
             clock_valid: true,
             satellites: 1,
-            llm: { configured: true },
+            llm: { configured: true, model: "test-model" },
             usage: { requests_today: 3, max_requests_per_day: 100, spend_today: 0.0123 },
+            speaker: { connected: true, available: true },
+            voice: { configured: true },
+            muted: false,
+            quiet_hours: { set: false, active: false },
+            ...(st["statusExtra"] as Json | undefined),
           },
         });
       if (m === "GET" && path === "/api/overview")
         return send(200, { now: now(), endpoints: st["endpoints"], events: st["events"] });
-      if (m === "POST" && path === "/api/speak")
-        return body.text ? send(202, { queued: true }) : err(400, "give some text");
+      if (m === "POST" && path === "/api/speak") {
+        const why = st["speakRefusal"] as Json | undefined;
+        if (why)
+          return send(why["status"], {
+            ok: false,
+            reason: why["reason"],
+            message: why["message"],
+            error: why["message"],
+          });
+        return body.text ? send(202, { ok: true, queued: true }) : err(400, "give some text");
+      }
       if (m === "GET" && path === "/api/about")
         return send(200, {
           version: "0.1.0-test",

@@ -177,7 +177,7 @@ export function Connections(): JSX.Element {
   const servers = ext?.mcp ?? [];
   return (
     <>
-      <h2>Connections</h2>
+      <h3 class="part">Connections</h3>
       <p>
         A connection links ClawDot to an outside tool server using MCP (the Model Context Protocol), such as Home
         Assistant or a calendar. Its tools then show up under Tools, where you can turn each one off.

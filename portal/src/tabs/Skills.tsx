@@ -89,7 +89,7 @@ export function Skills(): JSX.Element {
 
   return (
     <>
-      <h2>Skills</h2>
+      <h3 class="part">Skills</h3>
       <p>
         A skill is a set of instructions you write for the assistant, for example “When I say good night, turn off the
         lights”. Turn skills on and off, or share them as files.

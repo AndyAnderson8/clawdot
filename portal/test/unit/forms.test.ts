@@ -11,7 +11,6 @@ import {
   settingsPatch,
   shownValue,
   skillBody,
-  snippets,
   toolDefinition,
   type ReminderForm,
   type SettingSpec,
@@ -122,28 +121,7 @@ test("skill body splits tools on commas and spaces", () => {
   assert.deepEqual(skillBody("a", "b", "", undefined).tools, []);
 });
 
-test("snippets: Claude Code gets hooks and a bridge line, and the placeholder token until a real one is shown", () => {
-  const withTok = snippets("http://dot:3335", "claude-code", "claude-code", "abc123");
-  assert.equal(withTok[0]![0], "Claude Code: add to ~/.claude/settings.json");
-  assert.ok(withTok[0]![1].includes('"url": "http://dot:3335/hook/claude-code"'));
-  assert.ok(withTok[0]![1].includes("Bearer abc123"));
-  JSON.parse(withTok[0]![1]); // the hooks snippet is valid JSON
-  assert.ok(
-    withTok.some(
-      ([t, s]) =>
-        t.startsWith("Let your voice replies") &&
-        s.includes("CLAWDOT_TOKEN=abc123") &&
-        s.includes("--endpoint claude-code"),
-    ),
-  );
-  const plain = snippets("http://dot:3335", "ci", "generic", undefined);
-  assert.deepEqual(
-    plain.map(([t]) => t),
-    ["Try it from a terminal", "GitHub Actions: add as the last step of a job"],
-  );
-  assert.ok(plain[0]![1].includes("Bearer YOUR_TOKEN"));
-  assert.ok(plain[1]![1].includes("${{ secrets.CLAWDOT_TOKEN }}"));
-});
+// (the snippets are tested in snippets.test.ts)
 
 const settings: Settings = {
   fields: {
