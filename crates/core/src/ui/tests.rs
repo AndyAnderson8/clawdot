@@ -123,24 +123,26 @@ async fn call(p: &Portal, method: &str, path: &str, auth: &str, body: &str) -> (
 // REQ-CFG-025, REQ-CFG-026
 #[test]
 fn the_page_uses_plain_names_and_no_radio() {
-    let page = PAGE.to_lowercase();
+    // A radio *input* (the theme choice) is fine; radio stations are not.
+    let page = PAGE
+        .to_lowercase()
+        .replace("type:\"radio\"", "")
+        .replace("type=radio", "");
     for word in ["inbox", "scheduled", "radio", "music", "station"] {
         assert!(!page.contains(word), "the page still says `{word}`");
     }
-    for tab in [
-        "Home",
-        "Reminders",
-        "Agents",
-        "Tools",
-        "Connections",
-        "Skills",
-        "Webhooks",
-        "Settings",
-    ] {
-        assert!(PAGE.contains(&format!("\"{tab}\"")), "missing tab {tab}");
+    // Four destinations, Dashboard first; everything configurable is under Settings.
+    for tab in ["Dashboard", "Reminders", "Activity", "Settings"] {
+        assert!(
+            PAGE.contains(&format!("\"{tab}\"")),
+            "missing destination {tab}"
+        );
     }
-    // The page is built from TypeScript (portal/), so the markup lives in the script as `role:"tablist"`.
-    assert!(PAGE.contains("tablist") && PAGE.contains("\"foot\""));
+    for gone in ["\"Agents\"", "\"Webhooks\"", "#/agents"] {
+        assert!(!PAGE.contains(gone), "the Agents tab is gone: {gone}");
+    }
+    // The page is built from TypeScript (portal/), so the markup lives in the script.
+    assert!(PAGE.contains("\"foot\""));
 }
 
 // REQ-CFG-027
