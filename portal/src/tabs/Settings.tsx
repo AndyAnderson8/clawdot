@@ -3,7 +3,7 @@ import { useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { currentText, FROM, labelOf, settingsPatch, type SettingSpec } from "../forms.ts";
 import { fail, get, say, set } from "../store.ts";
-import { zoneName } from "../time.ts";
+import { zoneName, zoneOptions } from "../time.ts";
 import type { Settings as SettingsData } from "../types.ts";
 
 function browserZone(): string {
@@ -58,6 +58,10 @@ export function Group(props: {
     }
   }
   const [vals, setVals] = useState(start0);
+  // Optional settings start hidden unless they already hold a value.
+  const [shown, setShown] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(specs.filter((sp) => sp.optional).map((sp) => [sp.key, (start0[sp.key] ?? "") !== ""])),
+  );
   const [err, setErr] = useState("");
   const errRef = useRef<HTMLParagraphElement>(null);
 
@@ -114,6 +118,7 @@ export function Group(props: {
       {specs.map((sp) => {
         const f = settings.fields[sp.key];
         if (!f || sp.hideWhen?.(vals)) return null;
+        if (sp.optional && !shown[sp.key]) return null;
         const id = "f-" + sp.key;
         const v = vals[sp.key] ?? "";
         const input = (e: Event) => setVals({ ...vals, [sp.key]: (e.currentTarget as HTMLInputElement).value });
@@ -121,9 +126,9 @@ export function Group(props: {
         if (sp.kind === "zone") {
           ctl = zs ? (
             <select id={id} value={v} onChange={input}>
-              {zones.map((z) => (
-                <option key={z} value={z}>
-                  {zoneName(z)}
+              {zoneOptions(zones).map((z) => (
+                <option key={z.id} value={z.id}>
+                  {z.label}
                 </option>
               ))}
             </select>
@@ -180,7 +185,10 @@ export function Group(props: {
         return (
           <div class="srow" key={sp.key}>
             <div class="slabel">
-              <label for={id}>{labelOf(sp.key)}</label>
+              <label for={id}>
+                {labelOf(sp.key)}
+                {sp.optional ? <span class="optional">Optional</span> : null}
+              </label>
               {hints[sp.key] ? <p class="mut">{hints[sp.key]}</p> : null}
               {f.source !== "default" || !f.live || f.ignored ? (
                 <p class="meta">
@@ -196,10 +204,44 @@ export function Group(props: {
                 </p>
               ) : null}
             </div>
-            <div class="sctl">{ctl}</div>
+            <div class="sctl">
+              {ctl}
+              {sp.optional ? (
+                <button
+                  class="plain small"
+                  type="button"
+                  onClick={() => {
+                    setVals({ ...vals, [sp.key]: "" });
+                    setShown({ ...shown, [sp.key]: false });
+                  }}
+                >
+                  Remove
+                </button>
+              ) : null}
+            </div>
           </div>
         );
       })}
+      {specs.some((sp) => sp.optional && !shown[sp.key]) ? (
+        <div class="addrow">
+          {specs
+            .filter((sp) => sp.optional && !shown[sp.key])
+            .map((sp) => (
+              <button
+                key={sp.key}
+                class="plain small addopt"
+                type="button"
+                onClick={() => {
+                  setShown({ ...shown, [sp.key]: true });
+                  setTimeout(() => document.getElementById("f-" + sp.key)?.focus(), 0);
+                }}
+              >
+                <span aria-hidden="true">+</span> {sp.optional}
+              </button>
+            ))}
+          <span class="mut">Optional</span>
+        </div>
+      ) : null}
       <p class="errtext" role="alert" ref={errRef}>
         {err}
       </p>

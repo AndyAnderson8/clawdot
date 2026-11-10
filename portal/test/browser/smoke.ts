@@ -639,7 +639,7 @@ await step("Tools: turn off, add a web tool, delete", async () => {
   await b.ev(`window.confirm = () => true`);
   await T(`set('#tier-set_light', 'reversible')`);
   await b.until(
-    `T.q('#tier-set_light').value === 'reversible' && T.rows('#part-tools ul.rows > li')[0].includes('Can be undone')`,
+    `T.q('#tier-set_light').value === 'reversible' && T.rows('#part-tools ul.rows > li')[0].includes('can be undone')`,
     "lowered",
   );
   assert.deepEqual(mock.log.find((l) => l.path === "/api/tools/set_light/tier")!.body, { tier: "reversible" });
@@ -651,8 +651,8 @@ await step("Tools: turn off, add a web tool, delete", async () => {
   await T(`set('#tier-set_light', '')`);
   await b.until(`T.q('#tier-set_light').value === 'costly'`, "back to the usual level");
   assert.deepEqual(mock.log.filter((l) => l.path === "/api/tools/set_light/tier").pop()!.body, { tier: null });
-  await T(`clickText('#part-tools ul.rows > li:nth-child(1)', 'Turn off')`);
-  await b.until(`T.all('.badge.bad').some((x) => x.textContent === 'Off')`, "Off badge");
+  await T(`click('#on-set_light')`);
+  await b.until(`T.q('#on-set_light').checked === false && T.q('.toolrow.off') !== null`, "switched off");
   assert.deepEqual(mock.log.find((l) => l.path === "/api/tools/set_light/enabled")!.body, { enabled: false });
   await T(`click('#builtin-tools summary')`);
   await eq(`T.q('#builtin-tools').open`, true, "built-in tools open");

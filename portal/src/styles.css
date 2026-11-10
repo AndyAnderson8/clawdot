@@ -939,6 +939,89 @@ label.inline {
   font-size: var(--font-size-base);
 }
 
+/* ---- Tool lists: dense rows with labelled columns ---- */
+.toolhead,
+.toolrow {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(0, 1fr) 17.5rem 5.5rem;
+  gap: var(--spacing-2) var(--spacing-4);
+  align-items: center;
+}
+.toolhead {
+  margin-top: var(--spacing-3);
+  padding: var(--spacing-2) 0;
+  border-bottom: 1px solid var(--color-card-border);
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 650;
+}
+ul.rows.tools {
+  margin: 0;
+}
+ul.rows.tools > li.toolrow {
+  padding: var(--spacing-3) 0;
+}
+ul.rows.tools > li.toolrow:first-child {
+  border-top: 0;
+}
+ul.rows.tools > li.toolrow:last-child {
+  padding-bottom: var(--spacing-3);
+}
+.toolrow.off .toolmain {
+  opacity: 0.55;
+}
+.toolname {
+  font-family: var(--font-family-code);
+  font-size: 0.875rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.tooldesc {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.35;
+}
+.toolorigin {
+  margin-top: 2px;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  opacity: 0.8;
+}
+.toolwhen select {
+  min-height: 2.25rem;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: 0.875rem;
+}
+.toolwhen .when {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+.toolwhen .when.ask {
+  color: var(--color-text-primary);
+}
+.tiernote {
+  margin: var(--spacing-1) 0 0;
+  font-size: 0.75rem;
+}
+.toolact {
+  justify-self: end;
+  font-size: 0.8125rem;
+}
+@media (max-width: 48rem) {
+  .toolhead {
+    display: none;
+  }
+  .toolrow {
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+  }
+  .toolwhen,
+  .toolact {
+    grid-column: 2;
+    justify-self: stretch;
+  }
+}
+
 /* ---- Sign in and setup ---- */
 #hero {
   display: flex;
@@ -1340,4 +1423,33 @@ details.looks > :not(summary) {
   .soon {
     padding: var(--spacing-4);
   }
+}
+
+/* ---- Optional settings: a small add button, a tag, and a way to remove ---- */
+.addrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3) 0 0;
+  border-top: 1px dashed var(--color-card-border);
+}
+.addopt {
+  border-style: dashed;
+}
+.addopt span[aria-hidden] {
+  font-size: 1.125rem;
+  line-height: 1;
+  margin-right: 2px;
+}
+.optional {
+  display: inline-block;
+  margin-left: var(--spacing-2);
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  background: var(--color-background-muted);
+  color: var(--color-text-secondary);
+  font-size: 0.6875rem;
+  font-weight: 650;
+  vertical-align: 0.1em;
 }

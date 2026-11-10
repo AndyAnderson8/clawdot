@@ -31,8 +31,13 @@ const MODEL: Spec = [
     },
   },
   { key: "llm_model", kind: "text" },
-  { key: "llm_fallback_model", kind: "text", hint: "Tried if the model fails." },
-  { key: "summary_model", kind: "text", hint: "A cheaper model for spoken summaries." },
+  { key: "llm_fallback_model", kind: "text", hint: "Tried if the model fails.", optional: "Add a backup model" },
+  {
+    key: "summary_model",
+    kind: "text",
+    hint: "A cheaper model for spoken summaries.",
+    optional: "Add a model for summaries",
+  },
 ];
 const LIMITS: Spec = [
   {
@@ -193,7 +198,7 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
       />
       <TestSpeaker />
       <Group
-        title="How far it may go"
+        title="Limits for one request"
         settings={s}
         intro="How far the assistant may go to answer one request. Lower numbers make it stop sooner and cost less."
         specs={LIMITS}

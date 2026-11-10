@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ago, DAYS, fmt, hhmm, parts, repeatText, span, whenText, zoneName } from "../../src/time.ts";
+import {
+  ago,
+  DAYS,
+  fmt,
+  hhmm,
+  parts,
+  repeatText,
+  span,
+  whenText,
+  zoneName,
+  zoneOptions,
+  offsetText,
+} from "../../src/time.ts";
 
 // 2026-11-09 12:00:00 UTC
 const NOON = Date.UTC(2026, 10, 9, 12, 0, 0) / 1000;
@@ -52,4 +64,23 @@ test("small formatters", () => {
   assert.equal(hhmm(7, 5), "07:05");
   assert.equal(hhmm(17, 30), "17:30");
   assert.equal(zoneName("America/New_York"), "America/New York");
+});
+
+test("zones carry their offset, sort west to east, and say when the offset moves with daylight saving", () => {
+  const now = new Date(Date.UTC(2026, 10, 10, 12));
+  const opts = zoneOptions(["Europe/Berlin", "America/Panama", "UTC", "Asia/Kolkata", "America/Los_Angeles"], now);
+  assert.deepEqual(
+    opts.map((o) => o.id),
+    ["America/Los_Angeles", "America/Panama", "UTC", "Europe/Berlin", "Asia/Kolkata"].sort(
+      (a, b) => opts.find((o) => o.id === a)!.offset - opts.find((o) => o.id === b)!.offset,
+    ),
+  );
+  const label = (id: string) => opts.find((o) => o.id === id)?.label;
+  assert.equal(label("America/Panama"), "(UTC-05:00) America/Panama", "no daylight saving, so no note");
+  assert.equal(label("UTC"), "(UTC) UTC");
+  assert.equal(label("Asia/Kolkata"), "(UTC+05:30) Asia/Kolkata");
+  assert.ok(label("Europe/Berlin")?.includes("changes with daylight saving"));
+  assert.ok(label("America/Los_Angeles")?.includes("changes with daylight saving"));
+  assert.equal(offsetText(-300), "UTC-05:00");
+  assert.equal(offsetText(0), "UTC");
 });

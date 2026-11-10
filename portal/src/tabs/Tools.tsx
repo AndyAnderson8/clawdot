@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import { relaxWarning, tierChoice, tierLabel } from "../activity.ts";
-import { ConfirmBadge, Field, OffBadge } from "../parts.tsx";
+import { relaxWarning, tierLabel } from "../activity.ts";
+import { Field } from "../parts.tsx";
 import { change, loadExt, say, useApp, usePolled } from "../store.ts";
 import { toolDefinition, type ParamForm } from "../forms.ts";
 import type { Extensions, Tool } from "../types.ts";
@@ -36,8 +36,22 @@ export function OnOffButton(props: { path: string; on: boolean; what: string }):
   );
 }
 
-/** The risk level of a tool: what the assistant must ask before using it (REQ-SEC-030). */
-function TierChoice(props: { t: Tool }): JSX.Element {
+/** The words in the "When it runs" column. */
+function whenWords(tier: string): string {
+  switch (tier) {
+    case "read_only":
+      return "Runs right away (only reads)";
+    case "reversible":
+      return "Runs right away (can be undone)";
+    case "costly":
+      return "Asks you out loud first";
+    default:
+      return tierLabel(tier);
+  }
+}
+
+/** "When it runs": what the assistant does before using a tool (REQ-SEC-030). Only the ones you may change are a list. */
+function WhenItRuns(props: { t: Tool }): JSX.Element {
   const { t } = props;
   const id = "tier-" + t.name;
   const pick = (to: string) => {
@@ -50,13 +64,23 @@ function TierChoice(props: { t: Tool }): JSX.Element {
       to === "" ? "Back to the usual level." : "Saved. It applies from the next request.",
     );
   };
+  if (!(t.tier && t.tier_options?.length)) {
+    // Not changeable here: say what it does, in the same words as the list.
+    return (
+      <span class={"when" + (t.confirm ? " ask" : "")}>
+        {t.tier ? whenWords(t.tier) : t.confirm ? "Asks you out loud first" : "Runs right away"}
+      </span>
+    );
+  }
   return (
     <div>
-      <label for={id}>How careful</label>
+      <label class="sr" for={id}>
+        When {t.name} runs
+      </label>
       <select id={id} value={t.tier} onChange={(e) => pick(e.currentTarget.value)}>
         {(t.tier_options ?? []).map((o) => (
           <option key={o} value={o}>
-            {tierChoice(o)}
+            {whenWords(o)}
           </option>
         ))}
         {t.tier_set ? (
@@ -67,10 +91,17 @@ function TierChoice(props: { t: Tool }): JSX.Element {
         </option>
       </select>
       {t.tier_set ? (
-        <p class="mut">Changed here. The usual level is “{tierLabel(t.tier_default ?? "costly")}”.</p>
+        <p class="mut tiernote">Changed here. The usual level is “{tierLabel(t.tier_default ?? "costly")}”.</p>
       ) : null}
     </div>
   );
+}
+
+/** Where a tool comes from, in a few words. */
+function origin(t: Tool): string {
+  if (t.source === "builtin") return "Built in";
+  if (t.source === "mcp") return "From " + (t.server ?? "a connection");
+  return t.origin === "config" ? "Your configuration file" : "Web tool you added";
 }
 
 function ToolRow(props: { t: Tool }) {
@@ -80,35 +111,61 @@ function ToolRow(props: { t: Tool }) {
       void change("DELETE", "/api/tools/" + t.name, undefined, "Deleted.");
   };
   return (
-    <li>
-      <div class="rowhead">
-        <strong>{t.name}</strong>
-        <span>
-          <OffBadge enabled={t.enabled} />{" "}
-          {t.tier ? (
-            <span class={"badge" + (t.confirm ? " good" : "")}>{tierLabel(t.tier)}</span>
-          ) : (
-            <ConfirmBadge confirm={t.confirm} />
-          )}
-        </span>
+    <li class={"toolrow" + (t.enabled ? "" : " off")}>
+      <input
+        id={"on-" + t.name}
+        class="switch"
+        type="checkbox"
+        checked={t.enabled}
+        aria-label={t.name + (t.enabled ? " is on" : " is off")}
+        onChange={() =>
+          change(
+            "POST",
+            "/api/tools/" + t.name + "/enabled",
+            { enabled: !t.enabled },
+            t.name + (t.enabled ? " turned off." : " turned on."),
+          )
+        }
+      />
+      <div class="toolmain">
+        <div class="toolname">{t.name}</div>
+        <div class="tooldesc">{t.description}</div>
+        <div class="toolorigin">{origin(t)}</div>
       </div>
-      <div class="mut">{t.description}</div>
-      {t.source === "http" ? (
-        <div class="mut">{t.origin === "config" ? "From your configuration file." : "Added here."}</div>
-      ) : null}
-      {t.source === "mcp" ? <div class="mut">From the connection {t.server}.</div> : null}
-      {t.tier && t.tier_options?.length ? <TierChoice t={t} /> : null}
-      <div class="acts">
-        <OnOffButton path={"/api/tools/" + t.name + "/enabled"} on={t.enabled} what={t.name} />
+      <div class="toolwhen">
+        <WhenItRuns t={t} />
+      </div>
+      <div class="toolact">
         {t.deletable ? (
-          <button class="danger" type="button" onClick={remove}>
+          <button class="danger small" type="button" onClick={remove}>
             Delete
           </button>
         ) : t.source === "http" ? (
-          <span class="mut">To remove it, delete it from the configuration file.</span>
+          <span class="mut" title="Delete it from the configuration file to remove it.">
+            In the file
+          </span>
         ) : null}
       </div>
     </li>
+  );
+}
+
+/** A list of tools with labelled columns, so each thing on a row says what it is. */
+export function ToolList(props: { tools: Tool[] }): JSX.Element {
+  return (
+    <>
+      <div class="toolhead" aria-hidden="true">
+        <span>On</span>
+        <span>Tool</span>
+        <span>When it runs</span>
+        <span />
+      </div>
+      <ul class="rows tools">
+        {props.tools.map((t) => (
+          <ToolRow key={t.name} t={t} />
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -299,15 +356,15 @@ export function Tools(): JSX.Element {
           Tools<span class="count">{(ext?.tools ?? []).length}</span>
         </h3>
         <p class="mut">
-          Everything the assistant can do besides talk. Turn any tool off or on. Tools that change things in the outside
-          world ask you out loud first.
+          Everything the assistant can do besides talk. Switch a tool off and it is never used. The column “When it
+          runs” is whether the assistant asks you out loud before it does something.
         </p>
         <details id="tier-help" class="help">
-          <summary>What do “Asks you first” and the other levels mean?</summary>
+          <summary>What does “When it runs” mean?</summary>
           <p>
-            Every tool has a level. “Asks you out loud first” tools are read back to you and run only when you say yes.
-            “Can be undone” and “Only reads” tools run right away. Web tools and connections start at “Asks you out loud
-            first”, and you can relax one only for a tool you trust. A built-in tool can only be made stricter. Nothing
+            Every tool has a level. A tool that asks you out loud first is read back to you and runs only when you say
+            yes. One that “can be undone” or “only reads” runs right away. Web tools and connections start at asking
+            first, and you can relax one only for a tool you trust. A built-in tool can only be made stricter. Nothing
             can be made destructive here.
           </p>
         </details>
@@ -319,11 +376,7 @@ export function Tools(): JSX.Element {
                 Web tools<span class="count">{web.length}</span>
               </h4>
               {web.length ? (
-                <ul class="rows">
-                  {web.map((t) => (
-                    <ToolRow key={t.name} t={t} />
-                  ))}
-                </ul>
+                <ToolList tools={web} />
               ) : (
                 <p class="mut">
                   No web tools yet. A web tool lets the assistant call a web address, for example to switch on a light.
@@ -334,11 +387,7 @@ export function Tools(): JSX.Element {
                 From connections<span class="count">{conn.length}</span>
               </h4>
               {conn.length ? (
-                <ul class="rows">
-                  {conn.map((t) => (
-                    <ToolRow key={t.name} t={t} />
-                  ))}
-                </ul>
+                <ToolList tools={conn} />
               ) : (
                 <p class="mut">None yet. Tools from outside servers appear here once you add a connection.</p>
               )}
@@ -347,11 +396,7 @@ export function Tools(): JSX.Element {
                   Built in<span class="count">{own.length}</span>
                   <span class="mut">what the assistant can already do</span>
                 </summary>
-                <ul class="rows">
-                  {own.map((t) => (
-                    <ToolRow key={t.name} t={t} />
-                  ))}
-                </ul>
+                <ToolList tools={own} />
               </details>
             </>
           ) : null}

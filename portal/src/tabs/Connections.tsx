@@ -2,10 +2,10 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { connectionDefinition } from "../forms.ts";
-import { ConfirmBadge, Field, OffBadge } from "../parts.tsx";
+import { Field, OffBadge } from "../parts.tsx";
 import { change, fail, loadExt, useApp, usePolled } from "../store.ts";
 import type { ConnectionTest, McpServer } from "../types.ts";
-import { OnOffButton, Problems } from "./Tools.tsx";
+import { OnOffButton, Problems, ToolList } from "./Tools.tsx";
 
 function Server(props: { s: McpServer }) {
   const s = props.s;
@@ -33,22 +33,7 @@ function Server(props: { s: McpServer }) {
       {s.tools.length ? (
         <details id={"tools-" + s.name}>
           <summary>{s.tools.length + (s.tools.length === 1 ? " tool" : " tools")}</summary>
-          <ul class="rows">
-            {s.tools.map((t) => (
-              <li key={t.name}>
-                <div class="rowhead">
-                  <strong>{t.name}</strong>
-                  <span>
-                    <OffBadge enabled={t.enabled} /> <ConfirmBadge confirm={t.confirm} />
-                  </span>
-                </div>
-                <div class="mut">{t.description}</div>
-                <div class="acts">
-                  <OnOffButton path={"/api/tools/" + t.name + "/enabled"} on={t.enabled} what={t.name} />
-                </div>
-              </li>
-            ))}
-          </ul>
+          <ToolList tools={s.tools} />
         </details>
       ) : s.connected ? (
         <p class="mut">Connected, but it offers no tools.</p>

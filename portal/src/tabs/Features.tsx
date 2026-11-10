@@ -19,7 +19,7 @@ const FEATURES: Feature[] = [
   {
     key: "notes",
     title: "Remember things",
-    text: "Say “remember that my printer is called Pixel” and it knows from then on.",
+    text: "Say “remember that Mom's birthday is June 3” and it knows from then on.",
     icon: "M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3Zm0 13a3 3 0 0 1 3-3h11",
     more: { href: "#/settings/memory", label: "See what it remembers" },
   },

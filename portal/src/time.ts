@@ -77,3 +77,51 @@ export function hhmm(h: number, m: number): string {
 export function zoneName(zone: string): string {
   return zone.replace(/_/g, " ");
 }
+
+/** The offset from UTC of `zone` at `at`, in minutes (Panama is -300). 0 for an unknown zone. */
+export function offsetMinutes(zone: string, at: Date): number {
+  try {
+    const name = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longOffset" })
+      .formatToParts(at)
+      .find((p) => p.type === "timeZoneName")?.value;
+    const m = /GMT([+-])(\d{1,2})(?::(\d{2}))?/.exec(name ?? "");
+    if (!m) return 0;
+    const mins = Number(m[2]) * 60 + Number(m[3] ?? 0);
+    return m[1] === "-" ? -mins : mins;
+  } catch {
+    return 0;
+  }
+}
+
+/** "UTC-05:00", "UTC+05:30", "UTC". */
+export function offsetText(minutes: number): string {
+  if (minutes === 0) return "UTC";
+  const a = Math.abs(minutes);
+  return `UTC${minutes < 0 ? "-" : "+"}${String(Math.floor(a / 60)).padStart(2, "0")}:${String(a % 60).padStart(2, "0")}`;
+}
+
+export interface ZoneOption {
+  id: string;
+  /** For example "(UTC-05:00) America/Panama", with "changes with daylight saving" where the offset moves in the year. */
+  label: string;
+  offset: number;
+}
+
+/** Every zone with its offset now, ordered from west to east and then by name. A zone whose offset differs between
+ *  winter and summer says so, because its offset is not the same all year. */
+export function zoneOptions(ids: string[], now = new Date()): ZoneOption[] {
+  const year = now.getUTCFullYear();
+  const jan = new Date(Date.UTC(year, 0, 15));
+  const jul = new Date(Date.UTC(year, 6, 15));
+  return ids
+    .map((id) => {
+      const offset = offsetMinutes(id, now);
+      const moves = offsetMinutes(id, jan) !== offsetMinutes(id, jul);
+      return {
+        id,
+        offset,
+        label: `(${offsetText(offset)}) ${zoneName(id)}${moves ? " (changes with daylight saving)" : ""}`,
+      };
+    })
+    .sort((a, b) => a.offset - b.offset || a.id.localeCompare(b.id));
+}
