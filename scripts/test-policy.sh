@@ -8,6 +8,9 @@ set -u
 # When run from a git hook, git exports variables that would point scratch-repo commands at the real repository.
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 root=$(git rev-parse --show-toplevel)
+# A landing into an integration branch sets CHECK_BASE for its own checks; the scratch repositories below have their own
+# `dev` and must measure against it.
+unset CHECK_BASE
 pass=0
 failn=0
 ok() { pass=$((pass + 1)); }
