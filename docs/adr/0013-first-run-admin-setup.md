@@ -38,18 +38,20 @@ What remains of point 6: the default listen address is loopback; setup is accept
 
 ## Amendment 2026-11-09: recovery without a shell
 
-Decision point 7 (recovery is `clawdot --reset-admin`) assumed a shell. A smart speaker has none, and the portal told people to run a command they cannot run. Recovery is now layered (REQ-CFG-067..069, 071..073, REQ-DEV-031, REQ-SAT-020); `--reset-admin` stays for PCs and servers.
+Decision point 7 (recovery is `clawdot --reset-admin`) assumed a shell. A smart speaker has none, and the portal told people to run a command they cannot run. Recovery gained a second path (REQ-CFG-069, 071, 072, REQ-DEV-031, REQ-SAT-020); `--reset-admin` stays for PCs and servers.
 
-1. **Recovery code.** Setting a password issues a one-time code (20 characters from 31 look-alike-free symbols, about 99 bits, shown as four groups of five). Only a salted PBKDF2 hash, with the password's parameters, is stored in `admin.json`. The code resets the password without a sign-in; it is single use and a new one is issued and shown once after each reset. Existing installs get one from Settings; `admin.json` gains an optional `recovery` field and old files load unchanged.
-2. **Local reset window.** A device that has an action button asks the core (`clawdot.admin-reset`) after a 10 second hold. The core opens a 5 minute, single-use, in-memory window in which a private-address peer can set a new password without a code, then issues a new code. Physical presence at the device is the root of trust, as it was for the shell.
-3. **Open mode and setup are untouched**: no code, no window.
+1. **Local reset window.** A device that has an action button asks the core (`clawdot.admin-reset`) after a 10 second hold. The core opens a 5 minute, single-use, in-memory window in which a private-address peer can set a new password. Physical presence at the device is the root of trust, as it was for the shell.
+2. **Open mode and setup are untouched**: no window.
 
-### Security review
+An earlier draft of this amendment also issued a one-time recovery code at setup. The maintainer rejected it, and it was removed on 2026-11-10 (see the next amendment). It never shipped in a release.
 
-- **Brute force.** The code is about 99 bits. `POST /api/recover` spends an attempt of the shared authentication rate limit before any hashing, so a flood cannot force expensive work and, once the budget is gone, even a correct code gets `429`. Verification is a constant-time compare of PBKDF2 outputs. Every failure (wrong, malformed, no code stored) has one text and status. The rate limit is shared with sign-in, so a flood can also delay a legitimate sign-in; that already held for sign-in and is accepted.
-- **Replay.** A code works once. The reset replaces the password and the code hash in one atomic save, and the check re-compares the hash that was verified with the stored one, so two requests racing with the same code cannot both succeed.
-- **Sessions.** Any reset ends every session, so a stolen session does not survive a recovery.
+## Amendment 2026-11-10: no recovery code
+
+There is no recovery code. REQ-CFG-067, 068 and 073 are removed; `POST /api/recover` and `POST /api/admin/recovery` are gone, and no response carries a `recovery_code`. The two ways back in are `clawdot --reset-admin` (shell) and the button-opened reset window (physical presence). An `admin.json` that still holds a `recovery` hash loads normally; the core ignores the field and drops it at the next save.
+
+### Security review of the reset window
+
 - **Window abuse by a guest on the LAN.** A guest could (a) pretend to be a speaker, or (b) press the button. For (a) the core honours `clawdot.admin-reset` only from a satellite on the loopback address (the daemon on the same device) or one that presented a valid satellite token, and not more often than once in 5 seconds; a networked satellite without a token is refused and the core is not asked. For (b) the guest must hold the button for 10 seconds at the device, the device shows the answer with a tone and light, and the window is 5 minutes, single use, closed on restart, private addresses only, with a 60 second cool-down after it ends. **Residual risk:** on a multi-user host, a local process can connect to the loopback satellite port and open the window; treat local users as trusted, as with `--reset-admin` (a satellite token does not help here: loopback is trusted by design). A person at the page during the window can set the password before the owner does; the device announces the window and a reset leaves a log line and an audit record.
-- **Logging.** Codes are never logged, audited, exported, put in diagnostics or returned again. The problem log and the audit trail record only the event ("recovery code used", "reset window opened/used/refused"). A response that carries a new code is `no-store` like every API reply.
-- **Downgrade.** A file written by this version still signs in under an older core (the extra field is ignored and dropped at its next save, which only means "no code"). A file without the field is "no code", never "an empty code that matches": `recovery_hash` has no value to compare against and the answer is the generic refusal.
-- **Weakness accepted.** The code is displayed in the browser tab and exists on screen until the person confirms; it is held in page memory only (not in session storage). Anyone shoulder-surfing at that moment, or any script injected into the page, could read it; the page's CSP forbids external scripts and agent text is rendered as text.
+- **Rate limit.** `POST /api/recover/window` (the path keeps its old name) spends an attempt of the shared authentication rate limit before any hashing.
+- **Sessions.** Any reset ends every session, so a stolen session does not survive it.
+- **Logging.** The problem log and the audit trail record only the event ("reset window opened/used/refused"), never a password.
