@@ -7,7 +7,8 @@ It answers the one call ClawDot's speech client makes:
 
 and replies with raw signed 16-bit little-endian mono samples ("pcm") at the voice's own sample rate
 (22,050 Hz for the medium voices, so set `speech.tts_sample_rate` to 22050), or a WAV file ("wav").
-`GET /v1/models` and `GET /health` exist so health checks and OpenAI SDKs work.
+`GET /v1/models` and `GET /health` exist so health checks and OpenAI SDKs work, and `GET /v1/audio/voices` lists the
+installed voices so ClawDot's portal can offer them as a choice.
 
 With `--stt-url http://127.0.0.1:8081` it also forwards `POST /v1/audio/transcriptions` unchanged to a
 whisper.cpp server, so ClawDot's single `speech.url` can point here for both directions.
@@ -95,6 +96,10 @@ def make_handler(voices: Voices, stt_url: str | None):
             elif self.path == "/v1/models":
                 body = json.dumps({"object": "list", "data": [{"id": "piper", "object": "model"}]})
                 self.reply(200, "application/json", body.encode())
+            elif self.path == "/v1/audio/voices":
+                # The voices that are installed, so the portal can offer a choice instead of a name to type.
+                names = sorted(p.stem for p in voices.directory.glob("*.onnx"))
+                self.reply(200, "application/json", json.dumps({"voices": names}).encode())
             else:
                 self.error(404, "not found")
 
