@@ -810,3 +810,37 @@ dl.kv dd {
   overflow-wrap: anywhere;
   user-select: all;
 }
+
+/* Narrow screens: every grid track may shrink below its content, and long words, addresses and tokens wrap. */
+main {
+  overflow-wrap: anywhere;
+}
+.dash,
+.settings {
+  grid-template-columns: minmax(0, 1fr);
+}
+.dash > *,
+.settings > *,
+.rowhead > *,
+.fix > *,
+.row > * {
+  min-width: 0;
+}
+@media (min-width: 56rem) {
+  .dash {
+    grid-template-columns: minmax(0, 1fr) 17rem;
+  }
+  .settings {
+    grid-template-columns: 13rem minmax(0, 1fr);
+  }
+}
+@media (max-width: 29.99rem) {
+  .nav a {
+    font-size: 0.8125rem;
+    padding: 0;
+  }
+}
+.badge {
+  white-space: normal;
+  max-width: 100%;
+}
