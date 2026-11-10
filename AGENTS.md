@@ -40,6 +40,7 @@ Run `scripts/check.sh` before landing. It must pass: formatting, lint and type-c
 - **Spec-driven.** Behaviour comes from `docs/specs/`. Change a spec before (or with) the code. Cite requirement IDs (`REQ-xxx-nnn`) in tests and commits.
 - **The resource budget is a feature** (`docs/specs/0002-resource-budget.md`): default config must fit Echo Dot Gen 2-class limits. Justify any new dependency with its size and memory cost.
 - **Security:** treat all external text (inbox events, LLM output, tool results) as untrusted data. Never log secrets or audio.
+- **No personal data in a public repo:** examples, tests and docs use neutral names (docs/process/personal-data.md); `scripts/check-personal.mjs` enforces it.
 - **Scope:** new scope goes through `docs/future-scope.md` and a spec amendment, not straight into code.
 - Decisions that are hard to reverse get an ADR in `docs/adr/`.
 
