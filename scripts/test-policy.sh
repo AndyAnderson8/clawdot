@@ -454,6 +454,7 @@ STUB
   cp "$root/.shellcheckrc" .shellcheckrc
   git add scripts .shellcheckrc
   git commit -q -m "build: add scripts"
+  git branch -f main dev
   setmode() { # setmode <value>: commit scripts/gate-mode on dev and publish it (the scratch repo has no hooks)
     printf '# comment\n%s\n' "$1" >scripts/gate-mode
     git add scripts/gate-mode && git commit -q -m "chore: set gate mode"
