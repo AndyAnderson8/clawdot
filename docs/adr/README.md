@@ -21,6 +21,7 @@ An ADR captures one significant decision, its context, and its consequences, so 
 | [0015](0015-own-the-device-layer.md) | Own the device layer: one portable daemon, board files, image recipes | Proposed |
 | [0016](0016-portal-typescript-stack.md) | Portal source language and framework: TypeScript with Preact, built by esbuild, output committed | Proposed |
 | [0017](0017-portal-design-system-astryx.md) | Portal design system: the Astryx token contract on Preact, native controls, no Astryx runtime | Proposed |
+| [0018](0018-landing-gate-mode.md) | Landing gate mode: a temporary stabilization mode for dev | Proposed |
 | [0019](0019-updates-and-remote-access.md) | Updates (daily check, install on confirmation, signed releases) and what a smart speaker should not share (SSH opt-in, no USB storage, no SMB) | Proposed |
 
 ## Rules

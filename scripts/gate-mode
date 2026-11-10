@@ -1,0 +1,4 @@
+# Landing gate mode for dev, read by scripts/land.sh (from committed dev). One of:
+#   full           every gate plus CI on a candidate ref before dev is pushed (the normal state)
+#   stabilization  fast local check only, no CI wait; temporary (ADR-0018), switch to full before the first release
+stabilization
