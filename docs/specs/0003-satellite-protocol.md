@@ -51,6 +51,7 @@ The satellite protocol is the **only contract** a hardware port must implement. 
 | REQ-SAT-018 | A connection that does not send `hello` within 10 s is dropped. A `hello` with an incompatible version, a wrong or missing token (when the core requires one), or a first message that is not `hello` gets a `clawdot.reject` with a reason, and the core closes the connection. A token failure uses the reason `unauthorized` and reveals nothing else. | Must | T |
 
 | REQ-SAT-019 | Speakers that are ESPHome voice-satellite servers (a Dot running a base image, the Home Assistant Voice PE, linux-voice-assistant) SHOULD attach through the optional adapter in [spec 0004](0004-esphome-satellite-client.md), which plays the satellite role on this protocol toward the pipeline. REQ-SAT-014 (Wyoming bridge) covers stock Wyoming satellites only. | Should | T |
+| REQ-SAT-020 | **Administrator reset request.** A satellite MAY send `clawdot.admin-reset` when its owner held the action button for 10 seconds (REQ-DEV-031). The core MUST answer every request with `clawdot.admin-reset-window`. It MUST honour the request, and open the local administrator reset window (REQ-CFG-069), only when the satellite's address is loopback or the satellite presented a valid token in `hello` (so a satellite that anyone on the network can start is not enough), when the administrator setting is in password mode, and when the cooldown of REQ-CFG-069 allows; otherwise it answers with `open_secs` 0 and a short `reason`. Neither message carries a secret. | Should | T |
 
 ## 5. Wire format
 
@@ -104,6 +105,7 @@ Uplink audio in any other format is dropped by the core after one `error` with c
 | `detection` | `name` string; `timestamp_ms` integer ms (optional; stock Wyoming calls it `timestamp`) | Wake word heard, or a button pressed as a stand-in. Opens listening. |
 | `clawdot.button` | `name` string (`action` opens listening, `mute` toggles mute; other names are ignored); `long` bool, default false | A button was pressed |
 | `clawdot.mute-changed` | `muted` bool | A mute switch changed on the device |
+| `clawdot.admin-reset` | none | The owner held the action button for 10 seconds; asks the core to open the local administrator reset window (REQ-SAT-020) |
 | `clawdot.playback-done` | `id` string (optional) | The satellite finished playing the last `audio-stop`ped reply |
 | `error` | `text` string; `code` string (optional) | A fault report; the core logs and ignores it |
 | `ping` / `pong` | none | Keepalive |
@@ -120,6 +122,7 @@ Note on field names: `detection` carries `timestamp_ms` but `audio-chunk` carrie
 | `clawdot.set-mute` | `muted` bool | Mute or unmute the microphone |
 | `clawdot.play-url` | `url` `http(s)://` address, at most 2048 bytes, no whitespace; `title` string, at most 200 characters | Play an audio stream (radio), replacing what was playing. Only sent to satellites that declared `media_url` |
 | `clawdot.media-control` | `action` `pause` or `resume` | Pause or resume stream playback (REQ-MUS-004) |
+| `clawdot.admin-reset-window` | `open_secs` integer, 0 when refused; `reason` string (optional, plain words) | The answer to `clawdot.admin-reset`: how long the reset window is open, so the device can show it |
 | `ping` | none | Keepalive; answer with `pong` |
 
 A known event whose fields are missing or out of range (for example `level` of 101) is a protocol error: the receiver ends the session. An **unknown** event name is always ignored (REQ-SAT-009, REQ-SAT-011). A satellite that never declared `media_url` ignores `clawdot.play-url` and `clawdot.media-control`.
@@ -167,3 +170,4 @@ A known event whose fields are missing or out of range (for example `level` of 1
 | 0.3 | 2026-11-07 | `clawdot.play-url` and `clawdot.media-control` commands and the `media_url` capability for internet radio on satellites with a player (additive; unknown events are still ignored). |
 | 0.3.1 | 2026-11-08 | Wire format, field tables, session behaviour, and limits written down from the implementation; event names corrected to the wire names; REQ-SAT-017 and REQ-SAT-018 added; JSON Schemas and the conformance harness added (section 9). No change to the protocol version number: the wire is unchanged. |
 | 0.3.2 | 2026-11-09 | REQ-SAT-019: ESPHome devices attach through the optional adapter of spec 0004; REQ-SAT-014 is for stock Wyoming satellites. No change to the wire or the protocol version. |
+| 0.3.3 | 2026-11-09 | REQ-SAT-020: `clawdot.admin-reset` and `clawdot.admin-reset-window` for the hardware-assisted administrator password reset (additive; unknown events are still ignored, no protocol version change). |
