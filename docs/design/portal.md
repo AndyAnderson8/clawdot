@@ -2,6 +2,8 @@
 
 Status: Accepted (design guidance; requirements are REQ-CFG-025..031 in [spec 0001](../specs/0001-product-requirements.md)). Builds on [brand.md](brand.md) for colour tokens and the logo, and on [ui-stack.md](ui-stack.md) (plain HTML, CSS, and JavaScript for now).
 
+> 2026-11-09: the redesign (dashboard home, four destinations, light by default) is planned in [portal-v2.md](portal-v2.md), and the design system choice (Astryx tokens, native controls, no Astryx runtime) is in [ADR-0017](../adr/0017-portal-design-system-astryx.md). Where they differ from this page, they win once built.
+
 > 2026-11-09: the source language and framework are proposed in [ADR-0016](../adr/0016-portal-typescript-stack.md) (TypeScript, Preact, esbuild, committed output). The design below does not change.
 
 ## Who and what for

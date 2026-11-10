@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-11-09
 - **Deciders:** Maintainer
+- **Addendum (2026-11-09):** styling and the component set are decided in [ADR-0017](0017-portal-design-system-astryx.md) (the Astryx token contract with our own native-control components). The framework decision here stands.
 
 ## Context
 
