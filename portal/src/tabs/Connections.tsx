@@ -22,7 +22,7 @@ function Server(props: { s: McpServer }) {
           <span class={"badge " + (s.connected ? "good" : "bad")}>{s.connected ? "Connected" : "Cannot connect"}</span>
         </span>
       </div>
-      <div class="mut">{s.url + (s.origin === "config" ? " (from your configuration file)" : "")}</div>
+      <div class="mut">{s.url + (s.origin === "config" ? " (set when ClawDot was installed)" : "")}</div>
       {!s.connected ? (
         <p>
           It did not answer: {s.error || "unknown reason"}. Check the address, that the server is running, and that the
@@ -45,7 +45,7 @@ function Server(props: { s: McpServer }) {
             Remove
           </button>
         ) : (
-          <span class="mut">To remove it, delete it from the configuration file.</span>
+          <span class="mut">To remove it, remove it from the settings file on the device.</span>
         )}
       </div>
     </li>

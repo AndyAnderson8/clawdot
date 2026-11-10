@@ -152,9 +152,9 @@ test("settings patch sends only what changed", () => {
 });
 
 test("labels", () => {
-  assert.equal(labelOf("llm_key_env"), "Key variable");
+  assert.equal(labelOf("llm_key_env"), "API key");
   assert.equal(labelOf("unknown_key"), "unknown_key");
-  assert.equal(restartText(["listen", "public_url"]), "address this page uses, address agents use");
+  assert.equal(restartText(["listen", "public_url"]), "portal address, address other programs use");
 });
 
 // REQ-CFG-062

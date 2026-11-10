@@ -13,10 +13,9 @@ import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
 import { PROVIDERS, providerFor } from "../providers.ts";
 import { Field } from "../parts.tsx";
-import { ModelList } from "./Voice.tsx";
+import { TestSpeaker } from "./TestSpeaker.tsx";
 import { FeaturesSection } from "./Features.tsx";
 import { Skills } from "./Skills.tsx";
-import { TestSpeaker } from "./TestSpeaker.tsx";
 import { Tools } from "./Tools.tsx";
 import { Webhooks } from "./Webhooks.tsx";
 
@@ -25,26 +24,24 @@ const MODEL: Spec = [
   {
     key: "llm_url",
     kind: "text",
-    hint: "Starts with https:// (or http:// for a model on your own network).",
+    hint: "Where the service is. It starts with https://, or http:// for a model on your own network.",
     hideWhen: (v) => {
       const p = providerFor(v["llm_url"] ?? "");
       return !p || (p.id !== "custom" && p.id !== "local");
     },
   },
-  { key: "llm_model", kind: "text", datalist: "models-list" },
+  { key: "llm_model", kind: "model", hint: "The model that answers you. The list comes from your provider." },
   {
     key: "llm_fallback_model",
-    kind: "text",
-    hint: "Tried if the model fails.",
+    kind: "model",
+    hint: "Used instead if the main model is unavailable.",
     optional: "Add a backup model",
-    datalist: "models-list",
   },
   {
     key: "summary_model",
-    kind: "text",
-    hint: "A cheaper model for spoken summaries.",
+    kind: "model",
+    hint: "A cheaper model for reading long results aloud in a few words.",
     optional: "Add a model for summaries",
-    datalist: "models-list",
   },
 ];
 const LIMITS: Spec = [
@@ -118,20 +115,6 @@ function General(props: { s: SettingsData }): JSX.Element {
           { key: "zone", kind: "zone", hint: "Reminders and alarms use this time." },
         ]}
       />
-      <Group
-        title="Language"
-        settings={props.s}
-        specs={[
-          {
-            key: "speech_language",
-            kind: "language",
-            hint: props.s.speech_configured
-              ? "The language you speak to it. Detecting it works for most people, but naming it is more accurate."
-              : "Needs a speech provider in the configuration file.",
-            off: !props.s.speech_configured,
-          },
-        ]}
-      />
       <section class="card sgroup">
         <h3>Appearance</h3>
         <ThemeChoice />
@@ -143,76 +126,67 @@ function General(props: { s: SettingsData }): JSX.Element {
 function Assistant(props: { s: SettingsData }): JSX.Element {
   const s = props.s;
   const keyHint =
-    "Type the NAME of the environment variable that holds your key, not the key. " +
+    "The name of the environment variable that holds your key, for example OPENROUTER_API_KEY. ClawDot never stores the key itself. " +
     (s.llm?.key_present ? "That variable is set." : "That variable is not set where ClawDot runs.");
   return (
     <>
       <Group
-        title="Language model"
+        title="Provider and model"
         settings={s}
+        intro="The service that runs the AI behind your speaker. Without one, the speaker understands only simple commands such as timers."
+        specs={[...MODEL.slice(0, 1), { key: "llm_key_env", kind: "text", hint: keyHint }, ...MODEL.slice(1)]}
         extra={({ vals, setVals }) => {
           const cur = providerFor(vals["llm_url"] ?? "");
           return (
-            <>
-              <div class="srow">
-                <div class="slabel">
-                  <label for="provider">Who answers</label>
-                  <p class="mut">{cur?.note ?? "Pick a service. You can change it at any time."}</p>
-                </div>
-                <div class="sctl">
-                  <select
-                    id="provider"
-                    required
-                    value={cur?.id ?? ""}
-                    onChange={(e) => {
-                      const p = PROVIDERS.find((x) => x.id === e.currentTarget.value);
-                      if (!p) return;
-                      setVals({
-                        ...vals,
-                        llm_url: p.id === "custom" ? "https://" : p.url,
-                        llm_model: p.model || vals["llm_model"] || "",
-                        llm_key_env: p.keyEnv || vals["llm_key_env"] || "",
-                      });
-                    }}
-                  >
-                    {cur ? null : (
-                      <option value="" disabled>
-                        Choose a service
-                      </option>
-                    )}
-                    {PROVIDERS.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+            <div class="srow">
+              <div class="slabel">
+                <label for="provider">Provider</label>
+                <p class="mut">{cur?.note ?? "Choose the service that will answer you."}</p>
               </div>
-              <ModelList />
-            </>
+              <div class="sctl">
+                <select
+                  id="provider"
+                  required
+                  value={cur?.id ?? ""}
+                  onChange={(e) => {
+                    const p = PROVIDERS.find((x) => x.id === e.currentTarget.value);
+                    if (!p) return;
+                    setVals({
+                      ...vals,
+                      llm_url: p.id === "custom" ? "https://" : p.url,
+                      llm_model: p.id === "custom" ? "" : p.model,
+                      llm_key_env: p.keyEnv || vals["llm_key_env"] || "",
+                    });
+                  }}
+                >
+                  {cur ? null : (
+                    <option value="" disabled>
+                      Choose a provider
+                    </option>
+                  )}
+                  {PROVIDERS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
           );
         }}
-        intro="Without one, the speaker understands only simple commands like timers. Leave a box empty to go back to the configuration file or the default."
-        specs={[...MODEL, { key: "llm_key_env", kind: "text", hint: keyHint }]}
       />
       <Group
-        title="Personality and voice"
+        title="Personality"
         settings={s}
+        intro="How the assistant talks. The skills you turn on are added after this."
         specs={[
           {
             key: "persona",
             kind: "area",
-            hint: "Instructions for how the assistant talks. Skills are added after this.",
-          },
-          {
-            key: "voice",
-            kind: "voice",
-            hint: s.speech_configured ? "" : "Needs a speech provider in the configuration file.",
-            off: !s.speech_configured,
+            hint: "Written to the assistant, in your own words.",
           },
         ]}
       />
-      <TestSpeaker />
       <Group
         title="Limits for one request"
         settings={s}
@@ -223,17 +197,74 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
   );
 }
 
-function Inputs(props: { s: SettingsData }): JSX.Element {
+/** Speech: the provider (shown, not yet changeable here), the voice and language, and a way to hear it. */
+function VoiceSection(props: { s: SettingsData }): JSX.Element {
+  const s = props.s;
+  const vi = s.voice_info ?? {};
+  return (
+    <>
+      <section class="card" id="speechprovider">
+        <h3>Speech provider</h3>
+        <p class="mut">
+          The service that turns what you say into text and the assistant&apos;s words into speech. It is chosen when
+          ClawDot is installed. Changing it from this page is not available yet.
+        </p>
+        {s.speech_configured ? (
+          <dl class="kv">
+            <dt>Provider</dt>
+            <dd>{vi.provider || "Not known"}</dd>
+            <dt>Hears you with</dt>
+            <dd>{vi.stt_model || "Not set"}</dd>
+            <dt>Speaks with</dt>
+            <dd>{vi.tts_model || "Not set"}</dd>
+          </dl>
+        ) : (
+          <p class="empty">
+            No speech provider is set up, so the speaker cannot hear you or talk yet. Whoever installed ClawDot can add
+            one; the local speech guide shows a free one.
+          </p>
+        )}
+      </section>
+      <Group
+        title="Voice and language"
+        settings={s}
+        specs={[
+          {
+            key: "voice",
+            kind: "voice",
+            hint: s.speech_configured ? "How the assistant sounds." : "Needs a speech provider.",
+            off: !s.speech_configured,
+          },
+          {
+            key: "speech_language",
+            kind: "language",
+            hint: s.speech_configured
+              ? "The language you speak to it. Detecting it works for most people; naming it is more accurate."
+              : "Needs a speech provider.",
+            off: !s.speech_configured,
+          },
+        ]}
+      />
+      <TestSpeaker />
+    </>
+  );
+}
+
+function Notifications(props: { s: SettingsData }): JSX.Element {
   return (
     <>
       <Webhooks />
       <Group
-        title="Addresses"
+        title="Where ClawDot can be reached"
         settings={props.s}
         intro="Changing these needs a restart. Use an address on your own network; do not expose this page to the internet."
         specs={[
-          { key: "listen", kind: "text", hint: "For example 0.0.0.0:3335 to allow your whole network." },
-          { key: "public_url", kind: "text", hint: "Used in the copy-and-paste setup for inputs." },
+          {
+            key: "listen",
+            kind: "text",
+            hint: "Where ClawDot serves this page and listens for senders. For example 0.0.0.0:3335 lets your whole network reach it.",
+          },
+          { key: "public_url", kind: "text", hint: "The address a sender posts to. It appears in the setup snippets." },
         ]}
       />
     </>
@@ -426,9 +457,10 @@ export const SECTIONS: [Section, ...Section[]] = [
   { id: "general", label: "General", view: General },
   { id: "features", label: "Features", view: FeaturesSection },
   { id: "assistant", label: "Assistant", view: Assistant },
-  { id: "inputs", label: "Inputs", view: Inputs },
+  { id: "voice", label: "Voice", view: VoiceSection },
   { id: "tools", label: "Tools", view: Extensions },
   { id: "memory", label: "Memory", view: MemorySection },
+  { id: "notifications", label: "Notifications", view: Notifications },
   { id: "safety", label: "Safety", view: Safety },
   { id: "security", label: "Security", view: Security },
   { id: "about", label: "About", view: AboutSection },
@@ -437,7 +469,8 @@ export const SECTIONS: [Section, ...Section[]] = [
 /** Everything you set once, in sections along the top. */
 export function SettingsPage(props: { sub: string }): JSX.Element {
   const s = useApp();
-  const active = SECTIONS.find((x) => x.id === props.sub) ?? SECTIONS[0];
+  const sub = props.sub === "inputs" ? "notifications" : props.sub;
+  const active = SECTIONS.find((x) => x.id === sub) ?? SECTIONS[0];
   const need = s.settings?.restart_needed ?? [];
   const View = active.view;
   return (

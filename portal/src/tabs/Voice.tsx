@@ -39,7 +39,12 @@ export function VoiceControl(props: {
   return (
     <div class="voicepick">
       {list ? (
-        <select id={props.id} value={props.value} onChange={(e) => props.onInput(e.currentTarget.value)} required>
+        <select
+          id={props.id}
+          class={props.value ? "" : "unset"}
+          value={props.value}
+          onChange={(e) => props.onInput(e.currentTarget.value)}
+        >
           {props.value ? null : (
             <option value="" disabled>
               Choose a voice
@@ -75,38 +80,103 @@ export function VoiceControl(props: {
   );
 }
 
-/** A button that asks the language-model service what it offers, and fills the lists in the model boxes. */
-export function ModelList(): JSX.Element {
-  const [models, setModels] = useState<string[]>([]);
+const known = new Map<string, Promise<string[]>>();
+
+/** The models a service offers, asked once per address and key variable. */
+function loadModels(url: string, keyEnv: string): Promise<string[]> {
+  const k = url + "|" + keyEnv;
+  let p = known.get(k);
+  if (!p) {
+    const q = "?url=" + encodeURIComponent(url) + (keyEnv ? "&key_env=" + encodeURIComponent(keyEnv) : "");
+    p = api<{ models: string[] }>("GET", "/api/models" + q).then((r) => r.models);
+    known.set(k, p);
+    p.catch(() => known.delete(k));
+  }
+  return p;
+}
+
+/** The model, chosen from what the provider offers. Only if the provider has no list is it a box to type in. */
+export function ModelSelect(props: {
+  id: string;
+  value: string;
+  url: string;
+  keyEnv: string;
+  onInput: (v: string) => void;
+}): JSX.Element {
+  const [models, setModels] = useState<string[] | null>(null);
+  const [why, setWhy] = useState("");
   const [busy, setBusy] = useState(false);
-  const load = async () => {
+  const [again, setAgain] = useState(0);
+  const askable = /^https?:\/\/[^/\s]{2,}/.test(props.url);
+  useEffect(() => {
+    setModels(null);
+    setWhy("");
+    if (!askable) return;
+    let live = true;
     setBusy(true);
-    try {
-      const r = await api<{ models: string[] }>("GET", "/api/models");
-      setModels(r.models);
-      say(r.models.length + " models found. Click in a model box to choose one.");
-    } catch (x) {
-      fail(x);
-    } finally {
-      setBusy(false);
-    }
-  };
+    loadModels(props.url, props.keyEnv)
+      .then((m) => {
+        if (live) setModels(m);
+      })
+      .catch((x) => {
+        if (live) setWhy(x instanceof Error ? x.message : "The list could not be loaded.");
+      })
+      .finally(() => {
+        if (live) setBusy(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [props.url, props.keyEnv, askable, again]);
+  if (busy) {
+    return (
+      <select id={props.id} disabled aria-busy="true">
+        <option>Loading the models</option>
+      </select>
+    );
+  }
+  if (models) {
+    const list = props.value && !models.includes(props.value) ? [props.value, ...models] : models;
+    return (
+      <select
+        id={props.id}
+        class={props.value ? "" : "unset"}
+        value={props.value}
+        onChange={(e) => props.onInput(e.currentTarget.value)}
+      >
+        {props.value ? null : (
+          <option value="" disabled>
+            Choose a model
+          </option>
+        )}
+        {list.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
+    );
+  }
   return (
-    <div class="srow">
-      <div class="slabel">
-        <label for="loadmodels">What it offers</label>
-        <p class="mut">Ask the service for its models, then choose from the list in the boxes below.</p>
-      </div>
-      <div class="sctl">
-        <button class="plain small" type="button" id="loadmodels" disabled={busy} onClick={load}>
-          {models.length ? "Ask again (" + models.length + " found)" : "See the models"}
-        </button>
-        <datalist id="models-list">
-          {models.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </div>
+    <div class="voicepick">
+      <input
+        id={props.id}
+        type="text"
+        value={props.value}
+        autoComplete="off"
+        placeholder="The name of a model"
+        onInput={(e) => props.onInput(e.currentTarget.value)}
+      />
+      {askable ? (
+        <p class="mut">
+          {why ? why + " " : ""}Type the name of a model.{" "}
+          <button class="plain small" type="button" onClick={() => setAgain(again + 1)}>
+            Try again
+          </button>
+        </p>
+      ) : (
+        <p class="mut">Choose a provider and the models it offers appear here.</p>
+      )}
     </div>
   );
 }

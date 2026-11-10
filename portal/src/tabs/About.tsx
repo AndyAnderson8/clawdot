@@ -62,7 +62,7 @@ export function About(): JSX.Element {
       !confirm(
         "Put all " +
           saved.length +
-          " saved settings back to their defaults? Your inputs, skills, memory and password are kept.",
+          " saved settings back to their defaults? Your senders, skills, memory and password are kept.",
       )
     )
       return;
@@ -136,8 +136,8 @@ export function About(): JSX.Element {
         <h3>When something is wrong</h3>
         <p class="mut">
           Download a diagnostics file and send it with your bug report. It has the version, your settings without any
-          password or key, the names of your inputs, how many tools and records there are, and the latest problems. It
-          never has audio, anything you said, what it remembers, or an input token.
+          password or key, the names of your senders, how many tools and records there are, and the latest problems. It
+          never has audio, anything you said, what it remembers, or a sender token.
         </p>
         <div class="row">
           <button type="button" id="diagdl" onClick={diagnostics}>
@@ -240,7 +240,7 @@ export function About(): JSX.Element {
           <div class="slabel">
             <label for="resetall">Reset all settings</label>
             <p class="mut">
-              Puts every setting you saved here back to its default. Your inputs, skills, memory and password are kept.
+              Puts every setting you saved here back to its default. Your senders, skills, memory and password are kept.
             </p>
           </div>
           <div class="sctl">

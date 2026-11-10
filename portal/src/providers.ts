@@ -20,7 +20,7 @@ export const PROVIDERS: Provider[] = [
     url: "https://openrouter.ai/api/v1",
     model: "openai/gpt-4o-mini",
     keyEnv: "OPENROUTER_API_KEY",
-    note: "One key for many models from many makers.",
+    note: "One account that reaches models from many makers.",
   },
   {
     id: "openai",
@@ -28,7 +28,7 @@ export const PROVIDERS: Provider[] = [
     url: "https://api.openai.com/v1",
     model: "gpt-4o-mini",
     keyEnv: "OPENAI_API_KEY",
-    note: "ChatGPT models.",
+    note: "The makers of ChatGPT.",
   },
   {
     id: "anthropic",
@@ -36,7 +36,7 @@ export const PROVIDERS: Provider[] = [
     url: "https://api.anthropic.com/v1",
     model: "claude-sonnet-5-5",
     keyEnv: "ANTHROPIC_API_KEY",
-    note: "Claude models, through Anthropic's OpenAI-compatible address.",
+    note: "The makers of Claude, through their OpenAI-compatible address.",
   },
   {
     id: "local",
@@ -44,7 +44,7 @@ export const PROVIDERS: Provider[] = [
     url: "http://localhost:11434/v1",
     model: "",
     keyEnv: "",
-    note: "Ollama, LM Studio or similar. Change the address if it runs on another machine.",
+    note: "A model you run yourself, with Ollama, LM Studio or similar. Change the address if it runs on another computer.",
   },
   {
     id: "custom",
@@ -52,7 +52,7 @@ export const PROVIDERS: Provider[] = [
     url: "",
     model: "",
     keyEnv: "",
-    note: "Any service with an OpenAI-style address.",
+    note: "Any other service that speaks the OpenAI style of request. You give its address.",
   },
 ];
 

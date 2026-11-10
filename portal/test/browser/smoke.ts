@@ -327,10 +327,10 @@ await step("Home: the look of the device is a choice kept in this browser", asyn
   await eq(`localStorage.getItem('clawdot-look')`, "computer", "and remembered by this browser");
 });
 
-await step("Test the speaker (Settings, Assistant): sends the phrase, and says why it cannot, with a fix", async () => {
+await step("Test the speaker (Settings, Voice): sends the phrase, and says why it cannot, with a fix", async () => {
   await open("open");
   await b.until(`!!T.q('#band')`, "portal");
-  await section("assistant", "Assistant");
+  await section("voice", "Voice");
   await b.until(`!!T.q('#sayform')`, "the test box");
   await T(`set('#speaktext', 'Hello')`);
   await T(`submit('#sayform')`);
@@ -338,15 +338,15 @@ await step("Test the speaker (Settings, Assistant): sends the phrase, and says w
   assert.deepEqual(mock.log.find((l) => l.path === "/api/speak")!.body, { text: "Hello" });
   await eq(`T.q('#speaktext').value`, "", "box cleared");
   // The device says so in its status: the box is disabled before anything is tried.
-  await open("open", "#/settings/assistant", {
+  await open("open", "#/settings/voice", {
     statusExtra: { speaker: { connected: false }, voice: { configured: false }, muted: false },
   });
   await b.until(`!!T.q('#sayform')`, "the test box");
   await eq(`T.q('#speaktext').disabled && T.q('#saybtn').disabled`, true, "test speak is disabled");
   await eq(`T.text('#sayblock').includes('No voice is set up')`, true, "with the reason");
-  await eq(`T.q('#sayfix').getAttribute('href')`, "#/settings/assistant", "and the fix link");
+  await eq(`T.q('#sayfix').getAttribute('href')`, "#/settings/voice", "and the fix link");
   // The device did not say, but refuses the phrase: the reason it gives is shown with its fix.
-  await open("open", "#/settings/assistant", {
+  await open("open", "#/settings/voice", {
     speakRefusal: { status: 409, reason: "no_speaker", message: "No speaker is connected. Start it." },
   });
   await b.until(`!!T.q('#speaktext') && !T.q('#speaktext').disabled`, "enabled when the status is silent");
@@ -451,7 +451,7 @@ await step("Bluetooth: says plainly that it is not available yet, and offers not
   );
 });
 
-await step("Activity: events from inputs are shown as text", async () => {
+await step("Activity: messages from senders are shown as text", async () => {
   await open("open", "#/activity");
   await b.until(`T.rows('#eventlist > li').length === 1`, "one event");
   await eq(
@@ -466,7 +466,7 @@ await step("Activity: events from inputs are shown as text", async () => {
   );
   await eq(`T.all('#eventlist img, #eventlist script').length`, 0, "no elements were created from it");
   await eq(`T.text('#eventlist .badge')`, "Waiting to be read out", "state wording");
-  await eq(`T.text('#eventlist .mut').includes('input')`, true, "says inputs, not agents");
+  await eq(`T.text('#eventlist .mut').includes('sender')`, true, "says senders, not agents");
 });
 
 await step(
@@ -758,16 +758,21 @@ await step("Skills: add, edit, turn off, download, add from text, delete", async
   await b.until(`T.rows('#part-skills ul.rows > li').length === 2`, "deleted");
 });
 
-await step("Inputs: create shows the token once, rotate, delete", async () => {
-  await open("open", "#/settings/inputs");
-  await b.until(`T.rows().length === 1`, "one input");
-  await shot("settings-inputs");
+await step("Notifications: add a sender in a dialog, token shown once, new token, remove", async () => {
+  await open("open", "#/settings/notifications");
+  await b.until(`T.rows().length === 1`, "one sender");
+  await eq(`T.q('#senderdialog').open`, false, "the add form is not in the way");
+  await shot("settings-notifications");
   await eq(`T.q('#snip-claude-code').open`, false, "snippets closed");
   await eq(`T.text('#panel li code')`, mock.url + "/hook/claude-code", "address");
+  await T(`click('#addsender')`);
+  await b.until(`T.q('#senderdialog').open === true`, "the dialog opens");
+  await eq(`T.text('#senderdialog h3')`, "Add a sender", "and says what it adds");
   await T(`set('#wname', 'ci')`);
   await T(`set('#wadapter', 'generic')`);
-  await T(`submit('#panel form.panel')`);
+  await T(`submit('#senderdialog form')`);
   await b.until(`T.q('#snip-ci')?.open === true && T.q('#snip-ci code.token')`, "token shown");
+  await eq(`T.q('#senderdialog').open`, false, "the dialog closes once the sender is added");
   await eq(`T.text('#snip-ci code.token')`, "tok-ci-1", "token");
   await eq(
     `T.all('#snip-ci pre').some((p) => p.textContent.includes('Bearer tok-ci-1'))`,
@@ -793,7 +798,7 @@ await step("Settings: save one group, errors stay in their form, provider preset
   await shot("settings-general");
   await shot("settings-wide", { width: 1100 });
   await eq(`T.text('.soon h4')`, "Restart needed", "restart box");
-  await eq(`T.text('.soon p').includes('address this page uses')`, true, "restart list uses plain names");
+  await eq(`T.text('.soon p').includes('portal address')`, true, "restart list uses plain names");
   await eq(`T.q('#f-zone').tagName`, "SELECT", "zone is a real select");
   await b.ev(`T.q('#f-device_name').form.requestSubmit()`);
   await b.ev("T.settle()");
@@ -814,8 +819,7 @@ await step("Settings: save one group, errors stay in their form, provider preset
   );
   await section("assistant", "Assistant");
   await shot("settings-assistant");
-  await eq(`T.q('#f-voice').disabled`, true, "voice disabled without a speech provider");
-  await eq(`T.q('#f-voice').getAttribute('placeholder')`, "Not available yet", "and it says why it is empty");
+  await eq(`T.q('#f-voice') === null`, true, "the voice is not a setting of the assistant: it has its own page");
   // a service is picked by name; the address is only asked for when it has to be
   await eq(
     `T.q('#provider').required && T.q('#provider').tagName === 'SELECT'`,
@@ -849,14 +853,16 @@ await step("Settings: save one group, errors stay in their form, provider preset
 });
 
 await step(
-  "Settings: the language is chosen by name, the voice from a list with a sample, the models from the service",
+  "Settings: the voice and language are chosen on the Voice page; the model comes from the provider",
   async () => {
     // Without a speech provider the language and the voice say so and cannot be changed.
-    await open("open", "#/settings/general");
+    await open("open", "#/settings/voice");
     await b.until(`!!T.q('#f-speech_language')`, "the language box");
     await eq(`T.q('#f-speech_language').disabled`, true, "disabled without a speech provider");
-    await open("open", "#/settings/general", { speechOn: true });
+    await eq(`T.text('#speechprovider').includes('No speech provider is set up')`, true, "and the page says why");
+    await open("open", "#/settings/voice", { speechOn: true });
     await b.until(`!!T.q('#f-speech_language') && !T.q('#f-speech_language').disabled`, "the language box");
+    await eq(`T.text('#speechprovider dd')`, "speech.example", "the speech provider is shown");
     await eq(`T.q('#f-speech_language').tagName`, "SELECT", "a dropdown, not a code to type");
     await eq(
       `T.all('#f-speech_language option').some((o) => o.textContent === 'English (en)') && T.all('#f-speech_language option').some((o) => o.textContent === 'German (de)')`,
@@ -874,25 +880,7 @@ await step(
     assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
       speech_language: "de",
     });
-    // Time zones show their offset, west to east.
-    const zones = await b.ev<string[]>(`T.all('#f-zone option').map((o) => o.textContent)`);
-    assert.ok(zones.length > 100 && zones.every((z) => z.startsWith("(UTC")), "every zone starts with its offset");
-    const offs = zones.map((z) => {
-      const m = /^\(UTC(?:([+-])(\d\d):(\d\d))?\)/.exec(z)!;
-      return m[1] ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
-    });
-    assert.deepEqual(
-      [...offs].sort((a, c) => a - c),
-      offs,
-      "ordered by offset",
-    );
-    assert.ok(
-      zones.some((z) => z.includes("changes with daylight saving")),
-      "zones that move say so",
-    );
-
-    // The assistant: the voice from the server's list, the models from the service, optional models added and removed.
-    await open("open", "#/settings/assistant", { speechOn: true });
+    // The voice, from the server's list, with a sample.
     await b.until(`T.q('#f-voice')?.tagName === 'SELECT'`, "the voice list");
     await eq(
       `T.all('#f-voice option').map((o) => o.textContent).filter((t) => t !== 'Choose a voice')`,
@@ -915,9 +903,44 @@ await step(
         "Hello. This is how I sound.",
       ),
     );
-    await T(`click('#loadmodels')`);
-    await b.until(`T.all('#models-list option').length === 3`, "the models the service offers");
-    await eq(`T.q('#f-llm_model').getAttribute('list')`, "models-list", "offered while typing in the model box");
+    await eq(`T.q('#sayform') !== null`, true, "the speaker test is on this page, not among the settings");
+
+    // Time zones show their offset, west to east.
+    await open("open", "#/settings/general");
+    await b.until(`!!T.q('#f-zone')`, "the zone list");
+    const zones = await b.ev<string[]>(`T.all('#f-zone option').map((o) => o.textContent)`);
+    assert.ok(zones.length > 100 && zones.every((z) => z.startsWith("(UTC")), "every zone starts with its offset");
+    const offs = zones.map((z) => {
+      const m = /^\(UTC(?:([+-])(\d\d):(\d\d))?\)/.exec(z)!;
+      return m[1] ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+    });
+    assert.deepEqual(
+      [...offs].sort((a, c) => a - c),
+      offs,
+      "ordered by offset",
+    );
+    assert.ok(
+      zones.some((z) => z.includes("changes with daylight saving")),
+      "zones that move say so",
+    );
+
+    // The assistant: provider, then its key, then the model as a list the provider supplied.
+    await open("open", "#/settings/assistant");
+    await b.until(`T.q('#f-llm_model')?.tagName === 'SELECT' && !T.q('#f-llm_model').disabled`, "the model list");
+    await eq(
+      `T.all('#f-llm_model option').map((o) => o.textContent).filter((t) => t !== 'Choose a model').sort()`,
+      ["free/model-c", "model-a", "model-b"],
+      "the models the provider offers",
+    );
+    const labels = await b.ev<string[]>(
+      `T.all('#panel form.panel:first-of-type .slabel label').map((l) => l.textContent.replace('Optional', '').trim())`,
+    );
+    assert.deepEqual(
+      labels.slice(0, 4),
+      ["Provider", "Address", "API key", "Model"],
+      "provider, then its key, then the model",
+    );
+    await eq(`T.q('#loadmodels') === null`, true, "no button to press to see the models");
     await eq(
       `T.q('#f-llm_fallback_model') === null && T.q('#f-summary_model') === null`,
       true,
@@ -926,9 +949,12 @@ await step(
     await T(`clickText('.addrow', '+ Add a backup model')`);
     await b.until(`!!T.q('#f-llm_fallback_model')`, "the backup model box appears");
     await eq(`T.text('.optional')`, "Optional", "and is marked optional");
+    await b.until(`T.q('#f-llm_fallback_model').tagName === 'SELECT'`, "as a list too");
     await T(`set('#f-llm_fallback_model', 'free/model-c')`);
     await T(`clickText('.sctl', 'Remove')`);
     await b.until(`T.q('#f-llm_fallback_model') === null`, "removed again");
+    // The Settings tabs wrap instead of scrolling.
+    await eq(`getComputedStyle(T.q('.tabs')).overflowX`, "visible", "no scrollbar on the tab strip");
   },
 );
 
@@ -964,10 +990,10 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
 
 await step("Settings: sections in a tab strip, native dropdowns, no horizontal scroll at 360 px", async () => {
   await open("open", "#/settings");
-  await b.until(`T.all('.tabs a').length === 9`, "the section tabs");
+  await b.until(`T.all('.tabs a').length === 10`, "the section tabs");
   await eq(
     `T.all('.tabs a').map((a) => a.textContent)`,
-    ["General", "Features", "Assistant", "Inputs", "Tools", "Memory", "Safety", "Security", "About"],
+    ["General", "Features", "Assistant", "Voice", "Tools", "Memory", "Notifications", "Safety", "Security", "About"],
     "every kind of configuration has a named section",
   );
   await eq(`T.all('.tabs a[aria-current="page"]').map((a) => a.textContent)`, ["General"], "the first is shown");
@@ -984,7 +1010,18 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
     "#/bluetooth",
     "#/activity",
   ];
-  for (const id of ["general", "features", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
+  for (const id of [
+    "general",
+    "features",
+    "assistant",
+    "voice",
+    "tools",
+    "memory",
+    "notifications",
+    "safety",
+    "security",
+    "about",
+  ])
     pages.push("#/settings/" + id);
   for (const hash of pages) {
     await b.ev(`location.hash = '${hash}'`);
@@ -1015,7 +1052,18 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
 
 await step("every page uses the same card pattern: titles, rows, one width for inputs and text areas", async () => {
   const pages = ["#/clock", "#/clock/timers", "#/clock/reminders", "#/clock/stopwatch", "#/bluetooth", "#/activity"];
-  for (const id of ["general", "features", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
+  for (const id of [
+    "general",
+    "features",
+    "assistant",
+    "voice",
+    "tools",
+    "memory",
+    "notifications",
+    "safety",
+    "security",
+    "about",
+  ])
     pages.push("#/settings/" + id);
   for (const hash of pages) {
     await open("open", hash);
@@ -1046,7 +1094,18 @@ await step("every page fits a 360 px and a 320 px phone with long content and a 
     "#/bluetooth",
     "#/activity",
   ];
-  for (const id of ["general", "features", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
+  for (const id of [
+    "general",
+    "features",
+    "assistant",
+    "voice",
+    "tools",
+    "memory",
+    "notifications",
+    "safety",
+    "security",
+    "about",
+  ])
     pages.push("#/settings/" + id);
   const bad: string[] = [];
   for (const [content, fixture] of [
@@ -1096,7 +1155,7 @@ await step("Settings: numbers show their source and range, save only what change
     "range is offered to the browser",
   );
   await eq(
-    `T.q('#f-agent_max_tool_calls').closest('.srow').textContent.includes('Configuration file.')`,
+    `T.q('#f-agent_max_tool_calls').closest('.srow').textContent.includes('Preset on this device.')`,
     true,
     "a value from the file says so",
   );
@@ -1117,7 +1176,11 @@ await step("Settings: numbers show their source and range, save only what change
   await b.until(`T.text('#msg') === 'Saved.'`, "saved");
   const put = mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!;
   assert.deepEqual(put.body, { agent_max_rounds: 5 });
-  await eq(`T.q('#f-agent_max_rounds').closest('.srow').textContent.includes('Saved here.')`, true, "source follows");
+  await eq(
+    `T.q('#f-agent_max_rounds').closest('.srow').textContent.includes('You changed this here.')`,
+    true,
+    "source follows",
+  );
   // a saved value can go back to its default, for the whole group at once
   await b.until(`T.all('.sgroup .head button').some((x) => x.textContent === 'Reset to defaults')`, "the reset button");
   await b.ev(`T.q('#f-agent_max_rounds').form.querySelector('.head button').click()`);
