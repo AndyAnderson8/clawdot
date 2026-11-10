@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.30 |
+| **Version** | 0.33 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -303,6 +303,24 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | REQ-BRD-015 | The Echo Dot Gen 2 board SHOULD drive the LED ring and read the buttons while the vendor LED and button daemons keep running, and SHOULD document which vendor services must be stopped for audio. Boards MUST report which parts they could not initialise (for example audio devices still held by another process) rather than failing the whole board. | Should | v1.x | T |
 | REQ-BRD-016 | Board events (buttons, mute changes, Wi-Fi changes) and board commands (LED states, volume) MUST be bounded: input queues have a fixed size and drop the oldest event on overflow (REQ-NFR-110). | Must | v1.x | T |
 
+### 4.11 Updates (`UPD`)
+
+A speaker that can only be updated by plugging it into a computer does not get updated. ClawDot looks for a newer release on its own, tells the person, and installs it only when they confirm and only when the release is signed by the project's key.
+
+| ID | Requirement | Pri | Ms | Ver |
+|---|---|---|---|---|
+| REQ-UPD-001 | When update checks are on (the `update_check` setting, on by default, changeable at any time without a restart), the core MUST ask for the newest release at most once in 24 hours, with a single `GET` of the configured releases address (default: the project's releases on GitHub). The request carries nothing but what a web request carries, plus the user agent `clawdot/<version>`. When checks are off it MUST NOT contact the address except when the person chooses "Check now". The last answer and the time of the check MUST survive a restart, so restarting does not cause an extra request. | Must | A6 | T |
+| REQ-UPD-002 | A version MUST be read as `major.minor.patch` with an optional `-pre` and `+build`, with or without a leading `v`. Only a later version counts as newer, a pre-release is older than its release, and anything that is not a version is never newer. | Must | A6 | T |
+| REQ-UPD-003 | The release listing MUST be treated as data: its notes are shown as plain text and never interpreted; a draft or pre-release is not offered; an address that is not `https` is dropped (a loopback address is allowed so the feature can be tested and served from the same machine). | Must | A6 | T |
+| REQ-UPD-004 | A release that can be installed carries three files: the program for this device (`clawdot-<os>-<arch>`, with `.exe` on Windows), `SHA256SUMS`, and `SHA256SUMS.sig` (an Ed25519 signature of `SHA256SUMS`, in hexadecimal). The hash list is read strictly (64 hexadecimal digits, a file name) and a signature that is not valid hexadecimal never verifies. | Must | A6 | T |
+| REQ-UPD-005 | `GET /api/update` MUST return the running version, whether checks are on, the host the releases come from, when they were last looked for, any error from the last look in plain words, whether a newer version exists with its notes and release page, whether it can be installed here and if not why, whether something restarts the program, and the progress of an install. `POST /api/update/check` looks now and returns the same document. Both need the administrator. A failed look MUST keep the last good answer. | Must | A6 | T |
+| REQ-UPD-006 | `POST /api/update/apply` with the version the person confirmed MUST install only that version, only if it is newer than the running one and was the version found, and only after the hash list's signature verifies against the project's public key and the downloaded program's SHA-256 equals its signed hash. On any failure nothing is replaced, and the portal is told why. It needs the administrator and runs in the background. | Must | A6 | T |
+| REQ-UPD-007 | The install MUST write the new program next to the running one, run it with `--version` and require it to report the new version, set the running program aside as `<name>.prev`, move the new one into place (restoring the old one if that fails), and leave a marker `update-pending` in the data directory. When something restarts the program (the `CLAWDOT_SUPERVISED` environment variable, or a service manager), the core exits after installing so the new version starts; otherwise it keeps running and says a restart is needed. | Must | A6 | T |
+| REQ-UPD-008 | A build with no public key (neither compiled in nor set as `updates.public_key`) MUST never install anything by itself. It still says that a newer version exists and where to download it. | Must | A6 | T |
+| REQ-UPD-009 | A download MUST follow at most five redirects, only to `https` addresses (or this machine), and MUST be refused if it is larger than allowed or does not finish in time. The whole install is limited to 15 minutes. | Must | A6 | T |
+| REQ-UPD-010 | The configuration MAY set `updates.check`, `updates.url` (`https` only) and `updates.public_key`; a bad value is refused at start with a message that names it. | Should | A6 | T |
+| REQ-UPD-011 | A new version that runs for two minutes is considered proven and the `update-pending` marker is removed. A supervisor script MAY use a marker that is still there, together with a crash soon after start, to put `<name>.prev` back. | Should | A6 | T |
+
 ## 5. Key user scenarios (acceptance)
 
 - **AC-1 Q&A:** Given the device idle, when the user says the wake word and "what's the capital of Australia", then a spoken answer begins ≤ 2.5 s after speech ends.
@@ -369,3 +387,4 @@ See [ADR-0012](../adr/0012-board-support-layer.md), [board-support](../architect
 | 0.28 | 2026-11-09 | Stopwatch (TMR-010..014): start, lap, stop, read and reset by voice and tool, saved across restarts, with the clock rules stated honestly |
 | 0.29 | 2026-11-09 | Recipes for the default toolset (EXT-007..010): declarative, tiered, testable against fakes, credentials by environment variable name, third-party terms cited and dated |
 | 0.30 | 2026-11-09 | Off-device bridges for ntfy and Discord (INB-028..031): default-deny filters, rate limits, no raw markup, secrets only in the environment |
+| 0.33 | 2026-11-10 | Updates (section 4.11, UPD-001..011): a daily check for a newer release, a manual check, and an install only on confirmation of a release signed by the project's key; with no key it only announces |

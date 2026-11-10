@@ -20,6 +20,7 @@ An ADR captures one significant decision, its context, and its consequences, so 
 | [0014](0014-language-rust-core-polyglot-edges.md) | Language: Rust core; Go, Python or others allowed at the edges | Proposed |
 | [0015](0015-own-the-device-layer.md) | Own the device layer: one portable daemon, board files, image recipes | Proposed |
 | [0016](0016-portal-typescript-stack.md) | Portal source language and framework: TypeScript with Preact, built by esbuild, output committed | Proposed |
+| [0019](0019-updates-and-remote-access.md) | Updates (daily check, install on confirmation, signed releases) and what a smart speaker should not share (SSH opt-in, no USB storage, no SMB) | Proposed |
 
 ## Rules
 - ADRs are immutable once Accepted. To change a decision, write a new ADR that **supersedes** it.
