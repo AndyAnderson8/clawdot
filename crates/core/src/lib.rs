@@ -11,11 +11,13 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod admin;
+mod announce_api;
 pub mod app;
 pub mod assistant;
 pub mod audit;
 pub mod cancel;
 pub mod config;
+pub mod diag;
 #[cfg(feature = "esphome-satellite")]
 pub mod esphome;
 #[cfg(feature = "esphome-satellite")]
@@ -31,10 +33,12 @@ pub mod mcp;
 pub mod media;
 pub mod notes;
 pub mod satellite;
+pub mod say;
 pub mod sched;
 pub mod session;
 pub mod settings;
 pub mod speech;
+pub mod stopwatch;
 pub mod store;
 pub mod transport;
 pub mod ui;

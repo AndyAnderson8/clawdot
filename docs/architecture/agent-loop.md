@@ -69,4 +69,4 @@ A failed or timed-out call is an error result for the model, who may try one alt
 
 ## What is not here
 
-Background tasks with ids (P2-3), rules (P2-1), token streaming, a local stop-word spotter and barge-in, and a portal screen for these settings (they are file-only; notes are manageable through the JSON endpoint and, for now, not yet in the page).
+Background tasks with ids (P2-3), rules (P2-1), token streaming, a local stop-word spotter and barge-in, and per-tool caps. The limits, the speech switches, the notes switch and the daily caps can be changed in the portal (Settings, "Agent settings", REQ-CFG-062) and apply to the next turn; notes are managed in the Notes tab.

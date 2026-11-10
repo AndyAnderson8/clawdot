@@ -263,6 +263,20 @@ impl Endpoints {
         &self.list
     }
 
+    /// The enabled endpoint that owns `token`, when the caller does not say which one (the announce API).
+    /// Every endpoint is compared, without an early exit, so timing does not reveal which one matched.
+    #[must_use]
+    pub fn authenticate_token(&self, token: &str) -> Option<&Endpoint> {
+        let presented = hash_token(token);
+        let mut found = None;
+        for ep in &self.list {
+            if constant_time_eq(&presented, &ep.token_hash) && ep.enabled {
+                found = Some(ep);
+            }
+        }
+        found
+    }
+
     /// The endpoint named `name` if it is enabled and `token` is right. A missing endpoint and a wrong
     /// token are indistinguishable to the caller, and both cost a hash.
     #[must_use]

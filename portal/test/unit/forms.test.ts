@@ -4,9 +4,12 @@ import {
   connectionDefinition,
   currentText,
   labelOf,
+  parseSettingsFile,
   reminderBody,
   restartText,
+  settingsChanges,
   settingsPatch,
+  shownValue,
   skillBody,
   snippets,
   toolDefinition,
@@ -174,4 +177,89 @@ test("labels", () => {
   assert.equal(labelOf("llm_key_env"), "Key variable");
   assert.equal(labelOf("unknown_key"), "unknown_key");
   assert.equal(restartText(["listen", "public_url"]), "address this page uses, address agents use");
+});
+
+// REQ-CFG-062
+test("agent settings: toggles become real booleans, times stay text, and an emptied box goes back to the default", () => {
+  const agent: SettingSpec[] = [
+    { key: "plan_speech", kind: "bool" },
+    { key: "dry_run", kind: "bool" },
+    { key: "agent_max_rounds", kind: "number", min: 1, max: 20 },
+    { key: "quiet_start", kind: "time" },
+    { key: "quiet_end", kind: "time" },
+  ];
+  const s: Settings = {
+    fields: {
+      plan_speech: { value: true, source: "default" },
+      dry_run: { value: false, source: "default" },
+      agent_max_rounds: { value: 8, source: "default" },
+      quiet_start: { value: null, source: "default" },
+      quiet_end: { value: null, source: "default" },
+    },
+  };
+  const cur = Object.fromEntries(agent.map((a) => [a.key, currentText(s, a.key)]));
+  assert.deepEqual(cur, {
+    plan_speech: "true",
+    dry_run: "false",
+    agent_max_rounds: "8",
+    quiet_start: "",
+    quiet_end: "",
+  });
+  assert.deepEqual(settingsPatch(agent, cur, cur), {});
+  assert.deepEqual(
+    settingsPatch(agent, cur, {
+      ...cur,
+      plan_speech: "false",
+      dry_run: "true",
+      agent_max_rounds: "5",
+      quiet_start: "22:00",
+      quiet_end: "07:00",
+    }),
+    { plan_speech: false, dry_run: true, agent_max_rounds: 5, quiet_start: "22:00", quiet_end: "07:00" },
+  );
+  assert.deepEqual(settingsPatch(agent, cur, { ...cur, plan_speech: "" }), { plan_speech: null });
+  assert.equal(labelOf("quiet_start"), "Quiet from");
+});
+
+// REQ-CFG-065
+test("a settings file is checked before anything is sent", () => {
+  const file = (o: unknown) => JSON.stringify(o);
+  const good = { format: "clawdot-settings", version: 1, settings: { device_name: "Den", dry_run: true, zone: null } };
+  assert.deepEqual(parseSettingsFile(file(good)), { settings: { device_name: "Den", dry_run: true, zone: null } });
+  const msg = (t: string): string => {
+    const r = parseSettingsFile(t);
+    return typeof r === "string" ? r : "loaded";
+  };
+  const notOurs = "That is not a ClawDot settings file. Use a file made by “Save my settings”.";
+  for (const bad of [
+    "{nope",
+    "[]",
+    "5",
+    file({ format: "other", version: 1, settings: {} }),
+    file({ format: "clawdot-settings", version: 1 }),
+  ]) {
+    assert.equal(parseSettingsFile(bad), notOurs, bad);
+  }
+  assert.match(msg(file({ ...good, version: 2 })), /different version/);
+  assert.match(msg(file({ ...good, settings: { persona: { a: 1 } } })), /persona/);
+  const many = Object.fromEntries(Array.from({ length: 65 }, (_, i) => ["k" + i, i]));
+  assert.match(msg(file({ ...good, settings: many })), /too many/);
+});
+
+// REQ-CFG-065
+test("loading a file lists only what would change, in plain words", () => {
+  const s: Settings = {
+    fields: {
+      device_name: { value: "Kitchen", source: "default" },
+      dry_run: { value: false, source: "default" },
+      quiet_start: { value: null, source: "default" },
+    },
+  };
+  assert.deepEqual(settingsChanges(s, { device_name: "Kitchen", dry_run: true, quiet_start: "22:00", nothing: null }), [
+    { key: "dry_run", label: "Dry run", from: "off", to: "on" },
+    { key: "quiet_start", label: "Quiet from", from: "not set", to: "22:00" },
+  ]);
+  assert.deepEqual(settingsChanges(s, { device_name: "Kitchen" }), []);
+  assert.equal(shownValue(""), "not set");
+  assert.equal(shownValue(3), "3");
 });

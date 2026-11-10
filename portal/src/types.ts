@@ -69,6 +69,11 @@ export interface Tool {
   origin?: string;
   server?: string;
   deletable?: boolean;
+  /** The risk tier in force, the one it was declared with, whether the portal changed it, and what may be chosen. */
+  tier?: string;
+  tier_default?: string;
+  tier_set?: boolean;
+  tier_options?: string[];
 }
 export interface McpServer {
   name: string;
@@ -100,9 +105,10 @@ export interface Extensions {
 }
 
 export interface SettingField {
-  value: string | number | null;
+  value: string | number | boolean | null;
   source: "default" | "file" | "saved" | "flag" | string;
   live?: boolean;
+  saved?: boolean;
   ignored?: boolean;
 }
 export interface Settings {
@@ -115,10 +121,68 @@ export interface Settings {
   note?: string;
 }
 
+/** One line of the audit log. Argument and result text can come from outside: show it as text only. */
+export interface AuditRecord {
+  id: number;
+  ts: number;
+  turn: number;
+  trigger: string;
+  tool: string;
+  tier: string;
+  args: unknown;
+  decision: string;
+  held_id?: number;
+  dry_run?: boolean;
+  status?: string;
+  result?: string;
+  detail?: string;
+  turn_cost_usd?: number;
+  note?: string;
+}
+export interface AuditPage {
+  records: AuditRecord[];
+  next_before: number | null;
+  log: { bytes: number; max_file_bytes: number; corrupt_lines: number; write_errors: number };
+  policy: { dry_run: boolean; max_actions_per_day: number; max_costly_per_day: number };
+}
+
+export interface Note {
+  id: number;
+  text: string;
+  ts: number;
+}
+export interface NotesList {
+  enabled: boolean;
+  notes: Note[];
+  limits: { max_notes: number; max_note_chars: number; max_total_bytes: number };
+}
+
 export interface WebhookToken {
   name: string;
   token: string;
 }
 export interface ConnectionTest {
   tools: { name: string }[];
+}
+
+export interface BuildInfo {
+  version: string;
+  profile: string;
+  os: string;
+  arch: string;
+  features: string[];
+}
+export interface About {
+  version: string;
+  build?: BuildInfo;
+  changelog: string;
+}
+export interface LogLine {
+  ts: number;
+  level: string;
+  text: string;
+}
+export interface LogList {
+  lines: LogLine[];
+  max_lines: number;
 }

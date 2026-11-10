@@ -10,10 +10,11 @@
 //! * `POST /api/admin/password`                `{"password":..}`; sets a new password
 //! * `GET  /api/overview`                      endpoints and recent agent events
 //! * `GET  /api/schedule`, `POST /api/schedule`, `PUT|DELETE /api/schedule/{id}`   timers, alarms, reminders
+//! * `POST /api/tools/{name}/tier`            body `{"tier":..|null}`; the administrator's risk tier for a tool (REQ-SEC-030)
 //! * `GET  /api/tools`, `/api/settings`, `/api/about`   what the Tools, Connections, Settings tabs show
 //! * `PUT  /api/settings`                      body `{key: value|null, ..}`; saves some settings (admin only)
 //! * `GET  /api/audit`                         what the assistant did, newest first (filters and paging in `audit`)
-//! * `GET  /api/notes`, `DELETE /api/notes[/{id}]`   the notes the user asked to keep (REQ-CFG-044)
+//! * `GET  /api/notes`, `POST /api/notes`, `DELETE /api/notes[/{id}]`   the notes the user asked to keep (REQ-CFG-044, 061)
 //! * `GET  /api/status`                      what the assistant is doing (model, satellites, tools, usage, schedule)
 //! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak")
 //! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
@@ -285,12 +286,16 @@ pub async fn handle(
             | ["tools"]
             | ["tools", _]
             | ["tools", _, "enabled"]
+            | ["tools", _, "tier"]
             | ["connections"]
             | ["connections", _]
             | ["connections", _, "enabled"]
             | ["skills"]
             | ["skills", _]
             | ["settings"]
+            | ["settings", "export"]
+            | ["diagnostics"]
+            | ["logs"]
             | ["audit"]
             | ["notes"]
             | ["notes", _]
@@ -332,6 +337,10 @@ pub async fn handle(
             Ok(on) => ext(core, ExtOp::ToolEnable((*name).to_owned(), on)).await,
             Err((s, m)) => error(s, m),
         },
+        (&Method::POST, ["tools", name, "tier"]) => match tier_choice(body).await {
+            Ok(t) => ext(core, ExtOp::ToolTier((*name).to_owned(), t)).await,
+            Err((s, m)) => error(s, m),
+        },
         (&Method::POST, ["connections", "test"]) => match read_json::<Value>(body).await {
             Ok(v) => match extensions::test_connection(&v, |n| std::env::var(n).ok()).await {
                 Ok(r) => json_reply(StatusCode::OK, &r),
@@ -360,8 +369,12 @@ pub async fn handle(
             Ok(v) => change_settings(core, &v).await,
             Err((s, m)) => error(s, m),
         },
+        (&Method::GET, ["settings", "export"]) => export_settings(core),
+        (&Method::GET, ["diagnostics"]) => diagnostics(core),
+        (&Method::GET, ["logs"]) => logs(query),
         (&Method::GET, ["audit"]) => audit(core, query),
         (&Method::GET, ["notes"]) => notes_list(core),
+        (&Method::POST, ["notes"]) => notes_add(core, body).await,
         (&Method::DELETE, ["notes"]) => notes_forget(core, None),
         (&Method::DELETE, ["notes", id]) => match id.parse::<u64>() {
             Ok(id) => notes_forget(core, Some(id)),
@@ -369,7 +382,7 @@ pub async fn handle(
         },
         (&Method::GET, ["about"]) => json_reply(
             StatusCode::OK,
-            &json!({ "version": env!("CARGO_PKG_VERSION"), "changelog": CHANGELOG }),
+            &json!({ "version": env!("CARGO_PKG_VERSION"), "build": crate::diag::build_info(), "changelog": CHANGELOG }),
         ),
         (&Method::GET, ["schedule"]) => schedule(core, SchedOp::List).await,
         (&Method::POST, ["schedule"]) => match read_json::<Value>(body).await {
@@ -389,6 +402,109 @@ pub async fn handle(
         },
         _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     })
+}
+
+/// `GET /api/settings/export`: the saved settings as a file the page offers for download (REQ-CFG-065).
+fn export_settings(core: &Core) -> Resp {
+    let v = core.export_settings();
+    if v.is_null() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Settings are not available yet.",
+        );
+    }
+    attachment(json_reply(StatusCode::OK, &v), "clawdot-settings.json")
+}
+
+/// Mark a response as a file to save.
+fn attachment(mut r: Resp, name: &'static str) -> Resp {
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+        r.headers_mut().insert("content-disposition", v);
+    }
+    r
+}
+
+/// `GET /api/logs?limit=`: the core's recent warnings and errors, newest first (REQ-CFG-064).
+fn logs(query: Option<&str>) -> Resp {
+    let limit = query
+        .unwrap_or("")
+        .split('&')
+        .find_map(|p| p.strip_prefix("limit="))
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, crate::diag::MAX_LINES);
+    json_reply(
+        StatusCode::OK,
+        &json!({
+            "lines": crate::diag::recent(limit),
+            "max_lines": crate::diag::MAX_LINES,
+            "note": "Only ClawDot's own messages, kept in memory since it started. No audio and none of what you said.",
+        }),
+    )
+}
+
+/// `GET /api/diagnostics`: one document for a bug report (REQ-CFG-063). It holds the versions, the settings and
+/// where each came from, the webhook names (never tokens), counts of tools and of audit records, and the
+/// recent problems. It holds no secret, no audio, no words of the user, no note text and no event text.
+fn diagnostics(core: &Core) -> Resp {
+    let mut settings = core.ui_settings();
+    // The persona is the user's own text and can be long; its size is enough for a bug report.
+    if let Some(p) = settings["fields"]["persona"].as_object_mut() {
+        let chars = p
+            .get("value")
+            .and_then(Value::as_str)
+            .map_or(0, |t| t.chars().count());
+        p.insert("value".into(), json!(format!("({chars} characters)")));
+    }
+    let endpoints: Vec<Value> = core
+        .endpoints()
+        .iter()
+        .map(|e| json!({ "name": e.name, "adapter": e.adapter, "enabled": e.enabled, "created_at": e.created_at }))
+        .collect();
+    let listing = core.ui_tools();
+    let count = |source: &str| {
+        listing["tools"]
+            .as_array()
+            .map_or(0, |t| t.iter().filter(|t| t["source"] == source).count())
+    };
+    let servers: Vec<Value> = listing["mcp"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|s| {
+                    json!({
+                        "name": s["name"], "connected": s["connected"], "enabled": s["enabled"],
+                        "error": s["error"].as_str().map(crate::audit::redact_text),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let doc = json!({
+        "format": "clawdot-diagnostics",
+        "generated_at": core.now(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "build": crate::diag::build_info(),
+        "status": core.ui_status(),
+        "settings": {
+            "fields": settings["fields"], "restart_needed": settings["restart_needed"],
+            "llm_key_present": settings["llm"]["key_present"],
+        },
+        "endpoints": endpoints,
+        "tools": {
+            "builtin": count("builtin"), "http": count("http"), "mcp": count("mcp"),
+            "skills": listing["skills"].as_array().map_or(0, Vec::len),
+            "connections": servers,
+            "problems": listing["problems"],
+        },
+        "audit": core.audit().map(|a| json!({ "summary": a.summary(), "health": {
+            "bytes": a.health().bytes, "corrupt_lines": a.health().corrupt_lines, "write_errors": a.health().write_errors,
+        }, "policy": { "dry_run": a.policy().dry_run, "max_actions_per_day": a.policy().max_actions_per_day,
+            "max_costly_per_day": a.policy().max_costly_per_day } })),
+        "recent_problems": crate::diag::recent(50),
+        "note": "No secrets, audio, spoken words, notes or event text are included.",
+    });
+    attachment(json_reply(StatusCode::OK, &doc), "clawdot-diagnostics.json")
 }
 
 /// `GET /api/audit`: the record of what the assistant did (REQ-SEC-014), newest first. Filters: `limit`
@@ -450,6 +566,35 @@ fn notes_list(core: &Core) -> Resp {
     )
 }
 
+/// `POST /api/notes` with `{"text":..}`: the administrator writes a note. It goes through the same store checks
+/// as a spoken "remember that" (REQ-CFG-061), and the answer is the new list.
+async fn notes_add(core: &Core, body: Incoming) -> Resp {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NewNote {
+        text: String,
+    }
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+    };
+    let req = match read_json::<NewNote>(body).await {
+        Ok(r) => r,
+        Err((s, _)) => return error(s, "expected {\"text\":..} with the note to keep"),
+    };
+    match store.add(&req.text, core.now()) {
+        Ok(_) => notes_list(core),
+        Err(e) => {
+            use crate::notes::NoteError::{Duplicate, Full, Off, Storage};
+            let status = match e {
+                Off | Duplicate | Full => StatusCode::CONFLICT,
+                Storage => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            error(status, &e.plain())
+        }
+    }
+}
+
 /// `DELETE /api/notes/{id}` forgets one note, `DELETE /api/notes` forgets all of them.
 fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     let Some(store) = core.notes() else {
@@ -462,7 +607,7 @@ fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     match done {
         Ok(n) => json_reply(StatusCode::OK, &json!({ "forgotten": n })),
         Err(crate::notes::NoteError::Missing) => error(StatusCode::NOT_FOUND, "no such note"),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.spoken()),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.plain()),
     }
 }
 
@@ -561,6 +706,23 @@ async fn enabled_flag(body: Incoming) -> Result<bool, (StatusCode, &'static str)
             "expected {\"enabled\": true or false}",
         )),
         Err(e) => Err(e),
+    }
+}
+
+/// `{"tier": "read_only"|"reversible"|"costly"|null}` (REQ-SEC-030).
+async fn tier_choice(
+    body: Incoming,
+) -> Result<Option<crate::session::Tier>, (StatusCode, &'static str)> {
+    let v = read_json::<Value>(body).await?;
+    match v.get("tier") {
+        Some(Value::Null) => Ok(None),
+        Some(t) => serde_json::from_value(t.clone()).map(Some).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "tier must be read_only, reversible, costly, or null",
+            )
+        }),
+        None => Err((StatusCode::BAD_REQUEST, "expected {\"tier\": ..}")),
     }
 }
 

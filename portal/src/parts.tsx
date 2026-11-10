@@ -70,3 +70,15 @@ export function OffBadge(props: { enabled: boolean }): JSX.Element | null {
 export function go(tab: string): void {
   location.hash = "#/" + tab;
 }
+
+/** Offer `text` to the browser as a file to save (no request is made). */
+export function saveFile(name: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

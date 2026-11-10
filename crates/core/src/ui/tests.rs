@@ -202,6 +202,7 @@ async fn every_portal_listing_needs_a_sign_in() {
         ("POST", "/api/tools"),
         ("DELETE", "/api/tools/x"),
         ("POST", "/api/tools/x/enabled"),
+        ("POST", "/api/tools/x/tier"),
         ("POST", "/api/connections"),
         ("POST", "/api/connections/test"),
         ("DELETE", "/api/connections/x"),
@@ -274,6 +275,35 @@ async fn the_portal_manages_tools_connections_and_skills() {
             .0,
         400
     );
+    // The administrator picks a tier (REQ-SEC-030): lowering, going back, and the refusals.
+    let tier = |t: &str| format!(r#"{{"tier":{t}}}"#);
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/tools/set_light/tier",
+        "",
+        &tier("\"reversible\""),
+    )
+    .await;
+    assert_eq!(
+        (s, &v["tools"][0]["tier"], &v["tools"][0]["tier_set"]),
+        (200, &json!("reversible"), &json!(true)),
+        "{v}"
+    );
+    let (s, v) = call(&p, "POST", "/api/tools/set_light/tier", "", &tier("null")).await;
+    assert_eq!((s, &v["tools"][0]["tier"]), (200, &json!("costly")));
+    for (path, body, want) in [
+        ("/api/tools/set_light/tier", tier("\"destructive\""), 400),
+        ("/api/tools/set_light/tier", tier("\"harmless\""), 400),
+        ("/api/tools/set_light/tier", "{}".to_owned(), 400),
+        ("/api/tools/nope/tier", tier("\"costly\""), 404),
+    ] {
+        assert_eq!(
+            call(&p, "POST", path, "", &body).await.0,
+            want,
+            "{path} {body}"
+        );
+    }
     let (s, v) = call(&p, "DELETE", "/api/tools/set_light", "", "").await;
     assert_eq!((s, v["tools"].as_array().unwrap().len()), (200, 0));
 
@@ -561,12 +591,167 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     let (s, v) = call(&p, "DELETE", "/api/notes", &session, "").await;
     assert_eq!((s, v["forgotten"].as_u64()), (200, Some(1)));
     assert!(store.list().is_empty());
-    // notes cannot be written through the API: only the user's voice writes them
-    for m in ["POST", "PUT"] {
-        assert_eq!(
-            call(&p, m, "/api/notes", &session, "{}").await.0,
-            405,
-            "{m}"
+    // only the signed-in administrator writes through the page; other methods are refused
+    assert_eq!(call(&p, "PUT", "/api/notes", &session, "{}").await.0, 405);
+}
+
+// REQ-CFG-061, REQ-SEC-017
+#[tokio::test]
+async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one() {
+    use crate::notes::NoteStore;
+    let p = start(false).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    let add = |text: &str| format!(r#"{{"text":{}}}"#, json!(text));
+    // never without a sign-in, and before notes exist
+    let s = call(&p, "POST", "/api/notes", "", &add("x")).await.0;
+    assert!(s == 401 || s == 429, "{s}");
+    assert_eq!(
+        call(&p, "POST", "/api/notes", &session, &add("x")).await.0,
+        503
+    );
+    // off: refused with the reason, nothing written
+    let store = Arc::new(NoteStore::in_memory(false));
+    p.core.set_notes(Arc::clone(&store));
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/notes",
+        &session,
+        &add("my NAS is Andy-NAS"),
+    )
+    .await;
+    assert_eq!(s, 409);
+    assert!(v["error"].as_str().unwrap().contains("turned off"), "{v}");
+    assert!(store.list().is_empty());
+    // on: saved, and the answer is the new list
+    store.set_enabled(true);
+    let (s, v) = call(
+        &p,
+        "POST",
+        "/api/notes",
+        &session,
+        &add("  my NAS is   Andy-NAS "),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["notes"][0]["text"], "my NAS is Andy-NAS");
+    assert_eq!(v["notes"][0]["ts"], 1_794_225_600);
+    // the same refusals as the spoken path, each with a plain reason and no write
+    for (body, status, needle) in [
+        (add("my NAS is andy-nas"), 409, "already saved"),
+        (add("   "), 400, "Write what"),
+        (add(&"a".repeat(201)), 400, "too long"),
+        (
+            add("the key is sk-abcdefghijklmnopqrstuvwxyz123456"),
+            400,
+            "password or a key",
+        ),
+        (r#"{"text":5}"#.to_owned(), 400, "expected"),
+        (r#"{"text":"a","extra":1}"#.to_owned(), 400, "expected"),
+    ] {
+        let (s, v) = call(&p, "POST", "/api/notes", &session, &body).await;
+        assert_eq!(s, status, "{body}");
+        assert!(v["error"].as_str().unwrap().contains(needle), "{body}: {v}");
+    }
+    assert_eq!(store.list().len(), 1);
+}
+
+// REQ-CFG-063, REQ-CFG-064, REQ-CFG-065, REQ-CFG-066
+#[tokio::test]
+async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secret() {
+    let p = start(false).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    for path in ["/api/diagnostics", "/api/logs", "/api/settings/export"] {
+        let s = call(&p, "GET", path, "", "").await.0;
+        assert!(s == 401 || s == 429, "{path}: {s}");
+    }
+    // An endpoint with a token, a saved setting with a secret-looking name, and a long persona.
+    let (_, e) = call(
+        &p,
+        "POST",
+        "/api/endpoints",
+        &session,
+        r#"{"name":"ci","adapter":"generic"}"#,
+    )
+    .await;
+    let token = e["token"].as_str().unwrap().to_owned();
+    let (s, _) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        r#"{"device_name":"Den","persona":"Secret persona text"}"#,
+    )
+    .await;
+    assert_eq!(s, 200);
+    crate::diag::error(
+        "diag-api-test could not do a thing with Bearer abcdefghijklmnopqrstuvwxyz123456",
+    );
+
+    let (s, d) = call(&p, "GET", "/api/diagnostics", &session, "").await;
+    assert_eq!(s, 200, "{d}");
+    assert_eq!(d["format"], "clawdot-diagnostics");
+    assert_eq!(d["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(d["settings"]["fields"]["device_name"]["value"], "Den");
+    assert_eq!(d["settings"]["fields"]["device_name"]["source"], "saved");
+    assert_eq!(d["endpoints"][0]["name"], "ci");
+    assert!(d["build"]["os"].is_string());
+    let text = d.to_string();
+    for forbidden in [
+        token.as_str(),
+        "token_hash",
+        "Secret persona text",
+        "abcdefghijklmnopqrstuvwxyz123456",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "diagnostics must not hold {forbidden}"
         );
     }
+    assert!(
+        text.contains("diag-api-test"),
+        "recent problems are included"
+    );
+
+    let (s, l) = call(&p, "GET", "/api/logs?limit=5", &session, "").await;
+    assert_eq!(s, 200);
+    assert!(l["lines"].as_array().unwrap().len() <= 5);
+    assert_eq!(l["max_lines"], crate::diag::MAX_LINES);
+    assert!(!l.to_string().contains("abcdefghijklmnopqrstuvwxyz123456"));
+
+    let (s, x) = call(&p, "GET", "/api/settings/export", &session, "").await;
+    assert_eq!(s, 200);
+    assert_eq!(x["format"], "clawdot-settings");
+    assert_eq!(x["settings"]["device_name"], "Den");
+    assert!(
+        x["settings"].get("zone").is_none(),
+        "only what was saved is exported"
+    );
+    // Importing is the same call as saving, with the same checks.
+    let (s, _) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        &x["settings"].to_string(),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, v) = call(
+        &p,
+        "PUT",
+        "/api/settings",
+        &session,
+        r#"{"zone":"Mars/Base"}"#,
+    )
+    .await;
+    assert_eq!(s, 400, "{v}");
+
+    let (_, a) = call(&p, "GET", "/api/about", &session, "").await;
+    assert_eq!(a["build"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(a["build"]["features"].is_array());
 }

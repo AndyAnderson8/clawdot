@@ -102,6 +102,12 @@ impl ToolHost for Assistant {
                 &[],
             ),
             spec(
+                "stopwatch",
+                "The stopwatch, which counts up. start begins it (it refuses while one is running), lap records a lap, stop ends it and gives the total, read says the time so far, reset throws it away.",
+                json!({ "action": {"type":"string","enum":["start","lap","stop","read","reset"]} }),
+                &["action"],
+            ),
+            spec(
                 "set_alarm",
                 "Set an alarm at a local time, once or repeating on some days.",
                 json!({ "hour": {"type":"integer","description":"0 to 23, 24-hour clock"},
@@ -170,6 +176,8 @@ impl ToolHost for Assistant {
     fn risk(&self, name: &str, args: &Value) -> Risk {
         Risk::fixed(match name {
             "current_time" | "list_timers" | "inbox_status" | "inbox_details" => Tier::ReadOnly,
+            "stopwatch" if opt_text(args, "action") == "read" => Tier::ReadOnly,
+            "stopwatch" => Tier::Reversible,
             "set_timer" | "cancel_timers" | "set_alarm" | "cancel_alarms" | "set_reminder"
             | "set_reminder_at" | "play_music" | "music_control" | "inbox_snooze"
             | "inbox_dismiss" => Tier::Reversible,
@@ -187,6 +195,7 @@ impl ToolHost for Assistant {
             "set_timer"
                 | "list_timers"
                 | "cancel_timers"
+                | "stopwatch"
                 | "set_alarm"
                 | "cancel_alarms"
                 | "set_reminder"
@@ -252,6 +261,13 @@ impl Assistant {
             return Err(super::CLOCK_UNSET.to_owned());
         }
         match name {
+            "stopwatch" => {
+                let action = text(args, "action")?;
+                let action = super::stopwatch::Action::parse(action).ok_or_else(|| {
+                    format!("unknown action `{action}`; use start, lap, stop, read or reset")
+                })?;
+                self.stopwatch(action)
+            }
             "set_timer" => {
                 let secs = int(args, "seconds")?;
                 let label = opt_text(args, "label").to_owned();

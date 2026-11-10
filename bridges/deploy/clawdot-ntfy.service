@@ -1,0 +1,29 @@
+# /etc/systemd/system/clawdot-ntfy.service
+# Secrets go in /etc/clawdot/ntfy.env (mode 0600, owned by root):
+#   CLAWDOT_TOKEN=cdt_...
+#   NTFY_TOKEN=tk_...            # only for a protected ntfy server
+# Settings (no secrets) go in /etc/clawdot/ntfy.toml. Copy bridges/clawdot_bridges to /opt/clawdot-bridges.
+[Unit]
+Description=ClawDot ntfy bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=/etc/clawdot/ntfy.env
+Environment=PYTHONPATH=/opt/clawdot-bridges PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m clawdot_bridges.ntfy --config /etc/clawdot/ntfy.toml
+Restart=on-failure
+RestartSec=10
+# A refused token exits 1; do not hammer the speaker while it is wrong.
+RestartPreventExitStatus=1 2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

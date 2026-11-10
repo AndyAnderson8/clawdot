@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "rcp-ci-rerun-needs-a-yes",
+  "use_case": "UC3",
+  "description": "The repository recipe shape: reading CI is read-only; re-running failed jobs costs build minutes, so it is read back and runs only after the user's yes.",
+  "tags": ["recipe", "ci", "confirmation"],
+  "tool_sets": ["recipes"],
+  "turns": [
+    {
+      "say": "did the build pass, and if not run it again",
+      "model": [
+        {"calls": [{"name": "github_list_runs", "args": {"owner": "andy", "repo": "clawdot"}}]},
+        {"calls": [{"name": "github_rerun_failed", "args": {"owner": "andy", "repo": "clawdot", "run_id": 4412}}]}
+      ],
+      "expect": {
+        "ends": "held",
+        "calls": [{"tool": "github_list_runs"}],
+        "held": {"tool": "github_rerun_failed", "args": {"run_id": 4412}, "speech_contains": ["4412", "Yes or no?"]}
+      }
+    },
+    {
+      "say": "yes",
+      "model": [{"text": "Done. The failed jobs of run 4412 are running again."}],
+      "expect": {
+        "calls": [{"tool": "github_rerun_failed", "args": {"run_id": 4412}}],
+        "no_held": true,
+        "audit": [{"tool": "github_rerun_failed", "decision": "approved"}]
+      }
+    }
+  ]
+}

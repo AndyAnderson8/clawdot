@@ -165,12 +165,12 @@ await step("header, status, tabs, titles, keyboard", async () => {
   await eq(`T.text('#devname')`, "Kitchen Dot", "device name from settings");
   await eq(
     `T.all('#tabs a').map((a) => a.textContent)`,
-    ["Home", "Reminders", "Agents", "Tools", "Connections", "Skills", "Webhooks", "Settings"],
+    ["Home", "Reminders", "Notes", "Agents", "Activity", "Tools", "Connections", "Skills", "Webhooks", "Settings"],
     "tab names (REQ-CFG-026)",
   );
   await eq(`T.q('#tabs').getAttribute('role')`, "tablist", "tablist role");
   await eq(`T.all('#tabs a[aria-selected="true"]').map((a) => a.id)`, ["tab-home"], "home selected first");
-  await eq(`T.all('#tabs a').map((a) => a.tabIndex)`, [0, -1, -1, -1, -1, -1, -1, -1], "roving tab index");
+  await eq(`T.all('#tabs a').map((a) => a.tabIndex)`, [0, -1, -1, -1, -1, -1, -1, -1, -1, -1], "roving tab index");
   await eq(`T.q('#panel').getAttribute('aria-labelledby')`, "tab-home", "panel labelled by its tab");
   await b.until(`document.title === "Home - ClawDot"`, "the Home title");
   // arrow keys move through the tabs, wrapping, and focus follows
@@ -265,14 +265,148 @@ await step("Agents: text from agents is shown as text", async () => {
   await eq(`T.text('.badge')`, "Waiting to be read out", "state wording");
 });
 
+await step("Notes: add, refuse, forget one, forget all after a confirmation, off state", async () => {
+  await open("open", "#/notes");
+  await b.until(`T.rows("#notelist > li").length === 1`, "one note");
+  await shot("notes");
+  await eq(`T.rows("#notelist > li")[0].includes("my NAS is <b>Andy-NAS</b>")`, true, "note shown literally");
+  await eq(`T.all("#panel #notelist b").length`, 0, "no markup from a note");
+  await T(`set("#note-text", "the spare key is under the pot")`);
+  await T(`submit("#noteform")`);
+  await b.until(`T.rows("#notelist > li").length === 2`, "added");
+  assert.deepEqual(mock.log.filter((l) => l.method === "POST" && l.path === "/api/notes").pop()!.body, {
+    text: "the spare key is under the pot",
+  });
+  await eq(`T.q("#note-text").value`, "", "box cleared");
+  await T(`set("#note-text", "the key is sk-abc")`);
+  await T(`submit("#noteform")`);
+  await b.until(`T.text("#noteform .errtext").includes("password or a key")`, "a refusal is shown in the form");
+  await eq(`T.rows("#notelist > li").length`, 2, "nothing was added");
+  // forgetting asks first: declining does nothing
+  await b.ev(`window.confirm = () => false`);
+  await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
+  await eq(`T.rows("#notelist > li").length`, 2, "declined confirmation keeps the note");
+  await b.ev(`window.confirm = () => true`);
+  await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
+  await b.until(`T.rows("#notelist > li").length === 1`, "one forgotten");
+  assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/notes/1"));
+  await T(`click("#forgetall")`);
+  await b.until(`!!T.q("#noteempty")`, "all forgotten");
+  assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/notes"));
+  mock.state["notesOn"] = false;
+  await b.ev(`location.hash = "#/home"`);
+  await tab("notes", "Notes");
+  await b.until(`!!T.q("#notesoff")`, "the off notice");
+  await eq(`T.q("#note-text").disabled`, true, "adding is disabled while notes are off");
+});
+
+await step("Activity: plain outcomes, filters, paging, text only, read-only", async () => {
+  await open("open", "#/activity");
+  await b.until(`T.rows("#auditlist > li").length === 7`, "seven records");
+  await shot("activity");
+  await eq(`T.rows("#auditlist > li")[0].startsWith("fetch_page")`, true, "newest first");
+  await eq(
+    `T.rows("#auditlist > li")[0].includes("<script>alert(3)</script> long page")`,
+    true,
+    "result shown literally",
+  );
+  await eq(`T.all("#panel img, #panel script, #auditlist b").length`, 0, "no elements were created from record text");
+  await T(`clickText("#auditlist > li:nth-child(1)", "Show the longer result")`);
+  await eq(
+    `T.q("#auditlist details").open && T.text("#auditlist details pre").includes("<img src=x")`,
+    true,
+    "long detail",
+  );
+  await eq(
+    `T.all("#auditlist .badge").map((x) => x.textContent)`,
+    ["Ran", "Suggested", "Blocked", "Declined", "Approved", "Held", "Ran"],
+    "outcome labels",
+  );
+  await eq(`T.rows("#auditlist > li")[5].includes("waiting for your yes")`, true, "held is explained");
+  await eq(`T.rows("#auditlist > li")[5].includes("token: [redacted]")`, true, "redacted argument shown");
+  await eq(`T.text("#policy").includes("100 actions, 20 of them")`, true, "policy line");
+  await eq(
+    `T.all("#panel button").map((x) => x.textContent).filter((x) => /delete|clear all|remove/i.test(x)).length`,
+    0,
+    "read-only",
+  );
+  await T(`set("#a-decision", "blocked:")`);
+  await b.until(`T.rows("#auditlist > li").length === 1`, "blocked filter");
+  await T(`set("#a-decision", "")`);
+  await T(`set("#a-tier", "reversible")`);
+  await b.until(
+    `T.rows("#auditlist > li").length === 1 && T.rows("#auditlist > li")[0].startsWith("set_timer")`,
+    "tier filter",
+  );
+  await T(`set("#a-tier", "")`);
+  await T(`set("#a-trigger", "event")`);
+  await b.until(
+    `T.rows("#auditlist > li").length === 1 && T.rows("#auditlist > li")[0].includes("Event from claude-code")`,
+    "trigger filter",
+  );
+  await T(`clickText("#auditfilter", "Clear filters")`);
+  await b.until(`T.rows("#auditlist > li").length === 7`, "cleared");
+  await T(`set("#a-tool", "set_light")`);
+  await T(`submit("#auditfilter")`);
+  await b.until(`T.rows("#auditlist > li").length === 3`, "tool filter");
+  const q = mock.log.filter((l) => l.path === "/api/audit").pop()!;
+  assert.equal(q.method, "GET");
+  assert.ok(
+    mock.log.every((l) => l.path !== "/api/audit" || l.method === "GET"),
+    "only reads",
+  );
+});
+
+await step("Activity: older records load a page at a time", async () => {
+  await open("open", "#/activity");
+  await b.until(`T.rows("#auditlist > li").length === 7`, "seven records");
+  await eq(`T.q("#auditmore") === null`, true, "no more button when all fit");
+  const more = Array.from({ length: 33 }, (_, i) => ({
+    v: 1,
+    id: 8 + i,
+    ts: 1,
+    day: 1,
+    turn: 8 + i,
+    trigger: "voice",
+    tool: "set_timer",
+    tier: "reversible",
+    args: {},
+    decision: "ran",
+    status: "ok",
+  }));
+  (mock.state["audit"] as unknown[]).push(...more);
+  await T(`clickText("#auditfilter", "Refresh")`);
+  await b.until(`T.rows("#auditlist > li").length === 25 && !!T.q("#auditmore")`, "first page of 25");
+  await T(`click("#auditmore")`);
+  await b.until(`T.rows("#auditlist > li").length === 40 && T.q("#auditmore") === null`, "all 40, no more button");
+});
+
 await step("Tools: turn off, add a web tool, delete", async () => {
   await open("open", "#/tools");
   await b.until(`T.all('h3').some((h) => h.textContent === 'Web tools (1)')`, "web tools heading");
   await shot("tools");
+  await eq(`T.q('#tier-set_light').value`, "costly", "a web tool starts at the careful level");
+  await eq(
+    `[...T.q('#tier-set_light').options].map((o) => o.value)`,
+    ["read_only", "reversible", "costly", "destructive"],
+    "choices",
+  );
+  await eq(`T.q('#tier-set_light option[value="destructive"]').disabled`, true, "destructive is never offered");
+  await b.ev(`window.confirm = () => false`);
+  await T(`set('#tier-set_light', 'read_only')`);
+  assert.ok(!mock.log.some((l) => l.path === "/api/tools/set_light/tier"), "declining the warning sends nothing");
+  await b.ev(`window.confirm = () => true`);
+  await T(`set('#tier-set_light', 'reversible')`);
+  await b.until(`T.q('#tier-set_light').value === 'reversible' && T.rows()[0].includes('Can be undone')`, "lowered");
+  assert.deepEqual(mock.log.find((l) => l.path === "/api/tools/set_light/tier")!.body, { tier: "reversible" });
+  await eq(`T.rows()[0].includes('The usual level is “Asks you first”')`, true, "says it was changed");
+  await T(`set('#tier-set_light', '')`);
+  await b.until(`T.q('#tier-set_light').value === 'costly'`, "back to the usual level");
+  assert.deepEqual(mock.log.filter((l) => l.path === "/api/tools/set_light/tier").pop()!.body, { tier: null });
   await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Turn off')`);
   await b.until(`T.all('.badge.bad').some((x) => x.textContent === 'Off')`, "Off badge");
   assert.deepEqual(mock.log.find((l) => l.path === "/api/tools/set_light/enabled")!.body, { enabled: false });
-  await T(`click('#panel details summary')`);
+  await T(`click('#builtin-tools summary')`);
   await eq(`T.q('#builtin-tools').open`, true, "built-in tools open");
   await T(`set('#tool-name', 'lamp')`);
   await T(`set('#tool-desc', 'Lamp')`);
@@ -420,6 +554,136 @@ await step("Settings: save one group, errors stay in their form, restart notice,
   assert.deepEqual(mock.log.find((l) => l.path === "/api/admin/password")!.body, { password: "brand new password" });
   await T(`click('#about summary')`);
   await b.until(`T.text('#notes')?.includes('First release')`, "release notes loaded");
+});
+
+await step("Settings: agent settings show their source, validate, and save booleans and times", async () => {
+  await open("open", "#/settings");
+  await b.until(`!!T.q('#f-agent_max_rounds')`, "agent settings form");
+  await eq(
+    `T.q('#f-agent_max_rounds').getAttribute('min') + '-' + T.q('#f-agent_max_rounds').getAttribute('max')`,
+    "1-20",
+    "range is offered to the browser",
+  );
+  await eq(
+    `T.q('#f-agent_max_tool_calls').closest('div').textContent.includes('Configuration file. Applies right away.')`,
+    true,
+    "source and liveness shown",
+  );
+  await eq(`T.q('#f-plan_speech').tagName`, "SELECT", "a toggle is a list of On and Off");
+  await eq(`T.q('#f-plan_speech').value`, "true", "current value");
+  await eq(`T.q('#f-quiet_start').type`, "time", "quiet hours use a time box");
+  await eq(
+    `T.q('#f-dry_run').closest('div').textContent.includes('Command-line flag. Applies right away.')`,
+    true,
+    "a value set by a flag says so",
+  );
+  // out of range: the browser stops it before anything is sent
+  await T(`set('#f-agent_max_rounds', '99')`);
+  await b.ev(`T.q('#f-agent_max_rounds').form.requestSubmit()`);
+  await eq(`T.q('#f-agent_max_rounds').validity.rangeOverflow`, true, "the range is enforced in the page");
+  assert.ok(!mock.log.some((l) => l.method === "PUT" && l.path === "/api/settings"), "nothing was sent");
+  // a good change sends only what changed, with real booleans and numbers
+  await T(`set('#f-agent_max_rounds', '5')`);
+  await T(`set('#f-plan_speech', 'false')`);
+  await b.ev(`T.q('#f-agent_max_rounds').form.requestSubmit()`);
+  await b.until(`T.text('#msg') === 'Saved.'`, "saved");
+  const put = mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!;
+  assert.deepEqual(put.body, { agent_max_rounds: 5, plan_speech: false });
+  await eq(`T.q('#f-agent_max_rounds').closest('div').textContent.includes('Saved here.')`, true, "source follows");
+  // quiet hours need both ends
+  await T(`set('#f-quiet_start', '22:00')`);
+  await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
+  await b.until(
+    `T.all('.errtext').some((e) => e.textContent.startsWith('Set both the quiet hours'))`,
+    "needs both ends",
+  );
+  await T(`set('#f-quiet_end', '07:00')`);
+  await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
+  await b.until(`T.text('#msg') === 'Saved.'`, "quiet hours saved");
+  assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, {
+    quiet_start: "22:00",
+    quiet_end: "07:00",
+  });
+  // a saved toggle can go back to its default
+  await eq(
+    `[...T.q('#f-plan_speech').options].map((o) => o.value)`,
+    ["true", "false", ""],
+    "default option once saved",
+  );
+  await T(`set('#f-plan_speech', '')`);
+  await b.ev(`T.q('#f-plan_speech').form.requestSubmit()`);
+  await b.until(`T.q('#f-plan_speech').value === 'true'`, "back to the default");
+  assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { plan_speech: null });
+});
+
+await step("About: build info, diagnostics download, recent problems, settings export and import", async () => {
+  await open("open", "#/settings");
+  await b.until(`!!T.q('#buildinfo')`, "build information");
+  await shot("about");
+  await eq(`T.text('#buildinfo')`, "A release build for linux on aarch64. Built with: tz, tls.", "build line");
+  // downloads: catch the file instead of saving it
+  await b.ev(`(() => {
+    window.__files = [];
+    URL.createObjectURL = (blob) => { window.__files.push(blob); return 'blob:test'; };
+    HTMLAnchorElement.prototype.click = function () { window.__names = (window.__names || []).concat(this.download); };
+  })()`);
+  await T(`click('#diagdl')`);
+  await b.until(`window.__files.length === 1`, "diagnostics offered as a file");
+  await eq(`window.__names[0]`, "clawdot-diagnostics.json", "file name");
+  await eq(`(async () => JSON.parse(await window.__files[0].text()).format)()`, "clawdot-diagnostics", "file content");
+  // recent problems load when the section opens, as text
+  await T(`click('#logs summary')`);
+  await b.until(`!!T.q('#loglines')`, "log lines");
+  await eq(
+    `T.text('#loglines').includes('<b>disk full</b>') && T.all('#loglines b').length === 0`,
+    true,
+    "shown as text",
+  );
+  // export what is saved here
+  await T(`click('#exportdl')`);
+  await b.until(`window.__files.length === 2`, "settings offered as a file");
+  await eq(
+    `(async () => JSON.parse(await window.__files[1].text()).settings.device_name)()`,
+    "Kitchen Dot",
+    "only saved values",
+  );
+  // import: a wrong file is explained, a right one is previewed and then sent as one save
+  const pick = (text: string) => `(async () => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([${JSON.stringify(text)}], 'settings.json', { type: 'application/json' }));
+    const input = document.querySelector('#importfile');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await T.settle(); await T.settle();
+  })()`;
+  await b.ev(pick("{not json"));
+  await b.until(`T.text('#importform .errtext').startsWith('That is not a ClawDot settings file')`, "plain refusal");
+  await b.ev(
+    pick(JSON.stringify({ format: "clawdot-settings", version: 1, settings: { device_name: "Kitchen Dot" } })),
+  );
+  await b.until(`!!T.q('#importsame')`, "nothing to change");
+  await b.ev(
+    pick(
+      JSON.stringify({
+        format: "clawdot-settings",
+        version: 1,
+        settings: { device_name: "Den", dry_run: false, plan_speech: false },
+      }),
+    ),
+  );
+  await b.until(`T.all('#importlist li').length === 3`, "a preview of three changes");
+  await eq(
+    `T.rows('#importlist li')[0].startsWith('Device name') && T.rows('#importlist li')[0].includes('Kitchen Dot to Den')`,
+    true,
+    "from and to",
+  );
+  await T(`submit('#importform')`);
+  await b.until(`T.text('#devname') === 'Den'`, "imported and applied");
+  assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+    device_name: "Den",
+    dry_run: false,
+    plan_speech: false,
+  });
 });
 
 await step("a 10-second refresh keeps what you typed", async () => {

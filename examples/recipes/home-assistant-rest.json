@@ -1,0 +1,40 @@
+{
+  "tools": [
+    {
+      "name": "home_state",
+      "description": "Read the state of one Home Assistant entity, for example light.kitchen or sensor.living_room_temperature.",
+      "method": "GET",
+      "url": "http://homeassistant.local:8123/api/states/{entity_id}",
+      "auth_env": "HA_TOKEN",
+      "params": {
+        "entity_id": { "type": "string", "description": "The entity id, for example climate.hall", "required": true }
+      },
+      "tier": "read_only"
+    },
+    {
+      "name": "home_light",
+      "description": "Turn a light on or off. Only the lights listed here can be changed.",
+      "method": "POST",
+      "url": "http://homeassistant.local:8123/api/services/light/{service}",
+      "auth_env": "HA_TOKEN",
+      "params": {
+        "service": { "type": "string", "description": "turn_on or turn_off", "enum": ["turn_on", "turn_off"], "required": true },
+        "entity_id": { "type": "string", "description": "Which light", "enum": ["light.kitchen", "light.living_room", "light.den"], "required": true }
+      },
+      "tier": "reversible"
+    },
+    {
+      "name": "home_assist",
+      "description": "Ask Home Assistant's own voice assistant to do or answer something in plain words, for example 'turn off the porch light' or 'is the garage door open'. Use home_light or home_state when they fit.",
+      "method": "POST",
+      "url": "http://homeassistant.local:8123/api/conversation/process",
+      "auth_env": "HA_TOKEN",
+      "params": {
+        "text": { "type": "string", "description": "What to say to Home Assistant", "required": true },
+        "language": { "type": "string", "description": "Always en", "enum": ["en"], "required": true }
+      },
+      "tier": "costly",
+      "timeout_secs": 15
+    }
+  ]
+}

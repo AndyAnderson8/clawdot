@@ -4,7 +4,7 @@
 
 use crate::admin::{Admin, AdminError, Mode as AdminMode};
 use crate::inbox::adapter::Adapter;
-use crate::inbox::endpoint::{self, Endpoint, Endpoints};
+use crate::inbox::endpoint::{self, Endpoint, Endpoints, QuietHours};
 use crate::inbox::event::{Event, EventState};
 use crate::inbox::queue::{FilterReason, Inbox, InboxLimits, Ingest, SourceStatus};
 use crate::inbox::reply::{self, Reply, ReplyKind, ReplyQueue};
@@ -15,7 +15,9 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Notify;
 
+mod announce;
 mod portal;
+pub use announce::{AnnounceError, Announcement, Caller, outcome_json};
 pub use portal::{Fail, Job, Op, SchedOp};
 
 /// Adapters available to endpoints, by name.
@@ -339,13 +341,13 @@ impl Core {
         let Some(s) = &self.stores else { return };
         // A failed write must not lose the in-memory event, but it must not be silent either.
         if let Err(e) = s.endpoints.save(&inner.endpoints) {
-            eprintln!("clawdot: could not save endpoints: {e}");
+            crate::diag::error(&format!("could not save endpoints: {e}"));
         }
         if let Err(e) = inner.inbox.save(&s.inbox) {
-            eprintln!("clawdot: could not save inbox: {e}");
+            crate::diag::error(&format!("could not save inbox: {e}"));
         }
         if let Err(e) = inner.replies.save(&s.replies) {
-            eprintln!("clawdot: could not save replies: {e}");
+            crate::diag::error(&format!("could not save replies: {e}"));
         }
     }
 
@@ -707,6 +709,12 @@ impl Core {
         })
     }
 
+    /// Set or clear the device-wide quiet-hours window (REQ-INB-040): while it lasts, only urgent events
+    /// are announced. Takes effect on the next check, so no restart is needed.
+    pub fn set_quiet_hours(&self, quiet: Option<QuietHours>) {
+        self.lock().inbox.set_quiet(quiet);
+    }
+
     /// Record that events were spoken.
     pub fn mark_announced(&self, ids: &[u64]) {
         let mut g = self.lock();
@@ -795,7 +803,8 @@ impl Core {
         let mut g = self.lock();
         let expired = g.replies.expire(now);
         g.inbox.prune(now, 24 * 3600);
-        if expired > 0 {
+        let lapsed = g.inbox.expire(now);
+        if expired > 0 || lapsed > 0 {
             self.persist(&g);
         }
     }

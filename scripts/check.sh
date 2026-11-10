@@ -108,6 +108,42 @@ else
   skipped+=("portal checks")
 fi
 
+# The Python sidecars (bridges/, the recipe helpers in examples/recipes/) use only the standard library for
+# their tests, which run offline. ruff (pinned in bridges/requirements-dev.txt) lints and checks formatting
+# when it is installed; CI installs it. python3 on a Windows PC may be the Store stub, so fall back to WSL.
+py_re='^(bridges/|examples/recipes/).*\.(py|toml|txt)$'
+# Each part runs only where it exists, so a repository without bridges/ or recipe helpers (a scratch
+# repository in the policy tests, a fork that dropped them) is checked silently and passes.
+has_bridge_tests=0; [ -d bridges/tests ] && has_bridge_tests=1
+has_recipe_tests=0; compgen -G 'examples/recipes/test_*.py' >/dev/null && has_recipe_tests=1
+if { [ "$fast" -eq 0 ] || changed_matches "$py_re"; } && [ $((has_bridge_tests + has_recipe_tests)) -gt 0 ]; then
+  py=()
+  if python3 -c 'import sys' >/dev/null 2>&1; then py=(python3)
+  elif command -v wsl.exe >/dev/null 2>&1 && scripts/in-wsl.sh python3 -c 'import sys' >/dev/null 2>&1; then py=(scripts/in-wsl.sh python3)
+  fi
+  if [ "${#py[@]}" -eq 0 ]; then
+    echo "note: python3 not found; the Python sidecar tests were skipped (CI runs them)"
+    skipped+=("python checks")
+  else
+    step "python sidecars: offline unit tests"
+    if [ "$has_bridge_tests" -eq 1 ]; then run "${py[@]}" -B -m unittest discover -s bridges/tests -t bridges -q; fi
+    if [ "$has_recipe_tests" -eq 1 ]; then run "${py[@]}" -B -m unittest discover -s examples/recipes -p 'test_*.py' -q; fi
+    if [ ! -f bridges/ruff.toml ]; then
+      :
+    elif "${py[@]}" -m ruff --version >/dev/null 2>&1; then
+      step "python sidecars: ruff lint and formatting"
+      ruff_paths=()
+      for d in bridges examples; do if [ -d "$d" ]; then ruff_paths+=("$d"); fi; done
+      run "${py[@]}" -m ruff check --config bridges/ruff.toml "${ruff_paths[@]}"
+      run "${py[@]}" -m ruff format --check --config bridges/ruff.toml "${ruff_paths[@]}"
+    else
+      echo "note: ruff not installed locally (pip install -r bridges/requirements-dev.txt; CI runs it)"
+    fi
+  fi
+else
+  skipped+=("python checks")
+fi
+
 if [ "$fast" -eq 0 ] || changed_matches '\.md$'; then
   step "documentation: links and requirement IDs"
   run scripts/check-docs.sh

@@ -50,12 +50,14 @@ On a wide screen the same single column is kept (max 44 rem) so that nothing mov
 |---|---|---|
 | Home | Status | The first thing to see: is it working, plus the setup checklist and the test-speak box |
 | Reminders | "Scheduled" | Covers alarms, timers, and reminders, which are the three things people already say out loud |
+| Notes | n/a | The short facts you asked the assistant to remember: list, add, forget one or all after a confirmation (REQ-CFG-061) |
 | Agents | Inbox | What arrives here is news from your coding agents (Claude Code and others); "Agents" says whose news it is |
-| Tools | n/a | Everything the assistant can do besides talking |
+| Activity | n/a | What the assistant did and what waited for your yes: the audit log in plain words, read-only, with filters and paging (REQ-CFG-060) |
+| Tools | n/a | Everything the assistant can do besides talking. Each tool shows how careful it is and has a "How careful" list (REQ-SEC-030): web tools and connections can be relaxed from "Asks you out loud first" after a confirmation, built-in tools can only be made stricter, and "Destructive" is shown but never selectable |
 | Connections | n/a | Outside tool servers (MCP). The page explains MCP in a sentence the first time |
 | Skills | n/a | Named instructions you write for the assistant, each switchable, with export and import |
 | Webhooks | Endpoints | A webhook is the web address an agent posts to; this tab creates them and gives copy-paste setup |
-| Settings | Admin password | Device name, time zone, language model, personality, voice, addresses, limits, board, password, and About with the version. Grouped forms with one Save each; each field says where its value comes from and whether it needs a restart |
+| Settings | Admin password | Device name, time zone, language model, personality, voice, addresses, limits, board, password, and About (version, build, release notes, a diagnostics download, recent problems, and saving or loading a settings file; REQ-CFG-063 to 066). Grouped forms with one Save each; each field says where its value comes from and whether it needs a restart |
 
 ## Principles
 
@@ -68,7 +70,7 @@ On a wide screen the same single column is kept (max 44 rem) so that nothing mov
 
 ## Settings tab
 
-Each group is a ruled form with its own Save button. Under every field one plain line says where the value comes from (default, configuration file, saved here, command-line flag) and whether it applies right away or needs a restart. Saved values that are not yet running appear in a dashed "Restart needed" box with the instruction; there is no Restart button because the core cannot restart itself safely. Errors from the device are shown in red text inside the form they belong to. The time zone is a list prefilled from the browser's own time zone (never the internet address). Keys are entered as the name of an environment variable; the page never asks for, shows, or stores a secret.
+Each group is a ruled form with its own Save button. Under every field one plain line says where the value comes from (default, configuration file, saved here, command-line flag) and whether it applies right away or needs a restart. Three groups cover the assistant itself (REQ-CFG-062): **Agent settings** (rounds, tool calls and seconds per request, seconds per tool call, say the plan, say progress, keep notes), **Daily action limits** (actions per day, the ones that ask first, dry run) and **Quiet hours** (a start and an end time; both or neither). Switches are On/Off lists, with a "Go back to the default" entry once a value has been saved; numbers carry their allowed range; a value set by a command-line flag says so. Saved values that are not yet running appear in a dashed "Restart needed" box with the instruction; there is no Restart button because the core cannot restart itself safely. Errors from the device are shown in red text inside the form they belong to. The time zone is a list prefilled from the browser's own time zone (never the internet address). Keys are entered as the name of an environment variable; the page never asks for, shows, or stores a secret.
 
 ## Changes made in review of the first plan
 

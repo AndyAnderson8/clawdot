@@ -265,6 +265,37 @@ rc=$?
 if [ "$rc" -eq 0 ]; then ok; else fail "commit-time check test failed at step code $rc (output: $(tail -3 "$fout" | tr '\n' ' '))"; fi
 rm -rf "$F" "$fout"
 
+# --- optional steps: the full gate passes in a repository with no portal/, no bridges/ and no Rust ----
+# (The Python sidecar and portal steps must run only where their directories exist and say nothing elsewhere.)
+O=$(mktemp -d)
+oout=$(mktemp)
+(
+  cd "$O" || exit 1
+  git init -q -b main
+  git config user.name T
+  git config user.email t@example.com
+  git config core.autocrlf false
+  mkdir -p scripts .githooks
+  for f in check.sh check-docs.sh check-commit-msg.sh lib-git.sh; do cp "$root/scripts/$f" scripts/; done
+  cp "$root/.shellcheckrc" .shellcheckrc
+  chmod +x scripts/*.sh
+  echo "# readme" >README.md
+  git add -A
+  git commit -q -m "chore: initialize repository"
+  git branch dev
+  scripts/check.sh >"$oout" 2>&1 || exit 51
+  grep -q "check: all gates passed" "$oout" || exit 52
+  ! grep -qiE "python|unittest|ruff|portal" "$oout" || exit 53
+  # With a bridges/ directory that has no tests the step still stays quiet and passes.
+  mkdir -p bridges && echo "# b" >bridges/README.md && git add -A && git commit -q -m "docs: add bridges readme"
+  scripts/check.sh >"$oout" 2>&1 || exit 54
+  ! grep -qiE "unittest|ruff" "$oout" || exit 55
+  exit 0
+)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else fail "optional-steps test failed at step code $rc (output: $(tail -3 "$oout" | tr '\n' ' '))"; fi
+rm -rf "$O" "$oout"
+
 # --- land.sh against a remote: rejected push, CI failure, held dev, verification (scratch repos, gh stub) ----
 R=$(mktemp -d)
 rout=$(mktemp)

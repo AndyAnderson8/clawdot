@@ -63,6 +63,8 @@ pub mod decision {
     pub const SKIPPED: &str = "blocked:pending";
     /// The user cancelled the turn: the call was dropped, or a held call was discarded (REQ-AST-022).
     pub const CANCELLED: &str = "cancelled";
+    /// An announcement the endpoint's filter dropped (REQ-INB-024).
+    pub const FILTERED: &str = "blocked:filtered";
     /// A turn limit, the deadline or a failure streak stopped the turn before this call (REQ-AST-019).
     pub const STOPPED: &str = "blocked:limit";
 }
@@ -474,7 +476,7 @@ impl AuditLog {
         line.push('\n');
         if let Err(e) = s.write(&line) {
             s.write_errors = s.write_errors.saturating_add(1);
-            eprintln!("clawdot: could not write the audit log: {e}");
+            crate::diag::error(&format!("could not write the audit log: {e}"));
             return None;
         }
         s.next_id = id.saturating_add(1);
@@ -502,6 +504,33 @@ impl AuditLog {
             corrupt_lines: s.corrupt_lines,
             write_errors: s.write_errors,
         }
+    }
+
+    /// What the log holds, for diagnostics: how many records, by decision and by tier, the time span, and the
+    /// last few calls that failed (tool and time only; no arguments or result text). REQ-CFG-063.
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        let s = lock(&self.state);
+        let (mut all, _) = s.read_all();
+        drop(s);
+        all.sort_by_key(|r| std::cmp::Reverse(r.id));
+        let mut by_decision = std::collections::BTreeMap::<String, u64>::new();
+        let mut by_tier = std::collections::BTreeMap::<String, u64>::new();
+        for r in &all {
+            *by_decision.entry(r.decision.clone()).or_default() += 1;
+            *by_tier.entry(r.tier.clone()).or_default() += 1;
+        }
+        let failed: Vec<Value> = all
+            .iter()
+            .filter(|r| r.status.as_deref() == Some("error"))
+            .take(10)
+            .map(|r| serde_json::json!({ "ts": r.ts, "tool": r.tool, "decision": r.decision }))
+            .collect();
+        serde_json::json!({
+            "records": all.len(), "by_decision": by_decision, "by_tier": by_tier,
+            "newest": all.first().map(|r| r.ts), "oldest": all.last().map(|r| r.ts),
+            "recent_failures": failed,
+        })
     }
 
     /// Records matching `q`, newest first.

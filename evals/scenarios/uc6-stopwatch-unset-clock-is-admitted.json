@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "uc6-stopwatch-unset-clock-is-admitted",
+  "use_case": "UC6",
+  "description": "With a clock that was never set the stopwatch does not start and the model is told why, so it can say so instead of inventing a time (REQ-TMR-012).",
+  "tags": ["stopwatch", "builtin", "clock"],
+  "builtin_tools": ["stopwatch"],
+  "setup": {"now": 1000000},
+  "turns": [
+    {
+      "say": "start the stopwatch",
+      "model": [
+        {"calls": [{"name": "stopwatch", "args": {"action": "start"}}]},
+        {"text": "My clock isn't set yet, so I can't start the stopwatch."}
+      ],
+      "expect": {
+        "model_saw": ["clock isn't set"],
+        "speech_contains": ["clock isn't set"],
+        "speech_not_contains": ["Stopwatch started"]
+      }
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 //! (REQ-INB-004..007, 012, 014, 016).
 
 use super::adapter::Mapped;
-use super::endpoint::{Endpoint, Endpoints};
+use super::endpoint::{Endpoint, Endpoints, QuietHours};
 use super::event::{Event, EventKind, EventState, Priority};
 use crate::sched::Ts;
 use crate::store::{JsonStore, StoreError};
@@ -87,6 +87,8 @@ pub struct SourceStatus {
 pub struct Inbox {
     state: InboxState,
     limits: InboxLimits,
+    /// The device-wide quiet-hours window (REQ-INB-040), on top of each endpoint's own.
+    quiet: Option<QuietHours>,
 }
 
 impl Inbox {
@@ -96,7 +98,14 @@ impl Inbox {
         Self {
             state: InboxState::default(),
             limits,
+            quiet: None,
         }
+    }
+
+    /// Set or clear the device-wide quiet-hours window: until it ends, only urgent events are announced
+    /// (REQ-INB-040).
+    pub fn set_quiet(&mut self, quiet: Option<QuietHours>) {
+        self.quiet = quiet;
     }
 
     /// Restore from a store.
@@ -107,6 +116,7 @@ impl Inbox {
         Ok(Self {
             state: store.load()?,
             limits,
+            quiet: None,
         })
     }
 
@@ -181,6 +191,8 @@ impl Inbox {
             status: mapped.status,
             priority: mapped.priority,
             session_ref: mapped.session_ref,
+            no_reply: mapped.no_reply,
+            expires_at: mapped.ttl_secs.map(|t| now.saturating_add(t)),
             received_at: now,
             state: EventState::New,
         });
@@ -226,7 +238,23 @@ impl Inbox {
         });
     }
 
+    /// Drop events whose time to live ran out before they were spoken (REQ-INB-023). Returns how many.
+    pub fn expire(&mut self, now: Ts) -> usize {
+        let before = self.state.events.len();
+        self.state.events.retain(|e| !Self::lapsed(e, now));
+        before - self.state.events.len()
+    }
+
+    /// Unspoken and past its time to live.
+    fn lapsed(e: &Event, now: Ts) -> bool {
+        matches!(e.state, EventState::New | EventState::Snoozed { .. })
+            && e.expires_at.is_some_and(|t| t <= now)
+    }
+
     fn announceable(&self, e: &Event, now: Ts, minute_of_day: u16, endpoints: &Endpoints) -> bool {
+        if Self::lapsed(e, now) {
+            return false;
+        }
         let due = match e.state {
             EventState::New => true,
             EventState::Snoozed { until } => until <= now,
@@ -235,10 +263,11 @@ impl Inbox {
         if !due {
             return false;
         }
-        let quiet = endpoints
-            .get(&e.endpoint)
-            .and_then(|ep| ep.filter.quiet_hours)
-            .is_some_and(|q| q.contains(minute_of_day));
+        let quiet = self.quiet.is_some_and(|q| q.contains(minute_of_day))
+            || endpoints
+                .get(&e.endpoint)
+                .and_then(|ep| ep.filter.quiet_hours)
+                .is_some_and(|q| q.contains(minute_of_day));
         !quiet || e.priority == Priority::Urgent
     }
 
@@ -312,7 +341,9 @@ impl Inbox {
         }
     }
 
-    /// The event a spoken reply should go to: the most recently announced one still open.
+    /// The event a spoken reply should go to: the most recently announced one still open. A one-way
+    /// announcement is never a target, and it does not hand the reply to an older event either, so an
+    /// answer meant for a doorbell message cannot land on a coding agent (REQ-INB-023).
     #[must_use]
     pub fn reply_target(&self) -> Option<&Event> {
         self.state
@@ -320,6 +351,7 @@ impl Inbox {
             .iter()
             .rev()
             .find(|e| e.state == EventState::Announced)
+            .filter(|e| !e.no_reply)
     }
 
     /// Per-source roll-up of what is open (REQ-INB-016), busiest first.
@@ -375,6 +407,8 @@ mod tests {
             status: None,
             priority,
             session_ref: session.map(str::to_owned),
+            no_reply: false,
+            ttl_secs: None,
         }
     }
 
@@ -662,6 +696,48 @@ mod tests {
         assert!(
             inbox.plan(10, true, 12 * 60, &eps).unwrap().rest.len() == 1,
             "normal is released in the morning"
+        );
+    }
+
+    // REQ-INB-040
+    #[test]
+    fn the_device_wide_window_holds_back_everything_but_urgent_and_can_be_cleared() {
+        let (mut inbox, eps) = setup();
+        let e = ep(&eps);
+        inbox.ingest(
+            1,
+            &e,
+            mapped(EventKind::Done, Priority::Normal, "normal", Some("a")),
+        );
+        let night = 23 * 60;
+        assert!(inbox.plan(10, true, night, &eps).is_some(), "no window yet");
+        inbox.set_quiet(Some(QuietHours {
+            start: 22 * 60,
+            end: 7 * 60,
+        }));
+        assert!(inbox.plan(10, true, night, &eps).is_none(), "held at night");
+        assert!(
+            inbox.plan(10, true, 3 * 60, &eps).is_none(),
+            "the window spans midnight"
+        );
+        inbox.ingest(
+            2,
+            &e,
+            mapped(EventKind::NeedsInput, Priority::Urgent, "urgent", Some("b")),
+        );
+        let plan = inbox.plan(10, true, night, &eps).unwrap();
+        assert_eq!(inbox.get(plan.lead).unwrap().title, "urgent");
+        assert!(plan.rest.is_empty(), "the normal one waits");
+        assert_eq!(
+            inbox.plan(10, true, 12 * 60, &eps).unwrap().rest.len(),
+            1,
+            "released after the window"
+        );
+        inbox.set_quiet(None);
+        assert_eq!(
+            inbox.plan(10, true, night, &eps).unwrap().rest.len(),
+            1,
+            "cleared at once"
         );
     }
 

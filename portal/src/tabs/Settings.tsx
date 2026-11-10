@@ -3,8 +3,9 @@ import { useRef, useState } from "preact/hooks";
 import { Fragment } from "preact";
 import { api, ApiError, keep } from "../api.ts";
 import { currentText, FROM, labelOf, restartText, settingsPatch, type SettingSpec } from "../forms.ts";
-import { fail, get, say, set, signedOut, start, useApp } from "../store.ts";
+import { fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
 import { zoneName } from "../time.ts";
+import { About } from "./About.tsx";
 import type { Settings as SettingsData } from "../types.ts";
 
 function browserZone(): string {
@@ -108,15 +109,27 @@ function Group(props: { title: string; intro?: string; specs: SettingSpec[]; set
               <option value="auto">Detect automatically</option>
             </select>
           );
+        } else if (sp.kind === "bool") {
+          ctl = (
+            <select id={id} value={v} disabled={sp.off} onChange={input}>
+              <option value="true">On</option>
+              <option value="false">Off</option>
+              {f.saved ? <option value="">Go back to the default or configuration file</option> : null}
+            </select>
+          );
+        } else if (sp.kind === "time") {
+          ctl = <input id={id} type="time" value={v} disabled={sp.off} onInput={input} />;
         } else if (sp.kind === "number") {
+          const whole = sp.min !== undefined;
           ctl = (
             <input
               id={id}
               type="number"
               value={v}
               autoComplete="off"
-              step="any"
-              min="0"
+              step={whole ? "1" : "any"}
+              min={whole ? String(sp.min) : "0"}
+              max={sp.max === undefined ? undefined : String(sp.max)}
               disabled={sp.off}
               onInput={input}
             />
@@ -230,6 +243,91 @@ function Details(props: { settings: SettingsData }) {
         ]}
       />
       <Group
+        title="Agent settings"
+        settings={s}
+        intro="How far the assistant may go to answer one request. Lower numbers make it stop sooner and cost less."
+        specs={[
+          {
+            key: "agent_max_rounds",
+            kind: "number",
+            min: 1,
+            max: 20,
+            hint: "How many times it may go back to the language model for one request. 1 to 20.",
+          },
+          {
+            key: "agent_max_tool_calls",
+            kind: "number",
+            min: 1,
+            max: 20,
+            hint: "The most tools it may use for one request. 1 to 20.",
+          },
+          {
+            key: "agent_deadline_secs",
+            kind: "number",
+            min: 5,
+            max: 300,
+            hint: "After this long it stops and says how far it got. 5 to 300.",
+          },
+          {
+            key: "agent_tool_timeout_secs",
+            kind: "number",
+            min: 1,
+            max: 120,
+            hint: "A tool that has not answered by then counts as failed. 1 to 120.",
+          },
+          {
+            key: "plan_speech",
+            kind: "bool",
+            hint: "Before a request with several steps, it says what it is about to do.",
+          },
+          {
+            key: "progress_speech",
+            kind: "bool",
+            hint: "Short phrases such as “Checking the lights” while a tool runs.",
+          },
+          { key: "notes", kind: "bool", hint: "Lets you say “remember that ...”. They are listed in the Notes tab." },
+        ]}
+      />
+      <Group
+        title="Daily action limits"
+        settings={s}
+        intro="A safety net for things the assistant does for you. Reading is never limited."
+        specs={[
+          {
+            key: "max_actions_per_day",
+            kind: "number",
+            min: 0,
+            max: 100000,
+            hint: "Anything that changes something, per day. 0 stops all of them.",
+          },
+          {
+            key: "max_costly_per_day",
+            kind: "number",
+            min: 0,
+            max: 100000,
+            hint: "The ones that ask you out loud first, which are part of the number above.",
+          },
+          {
+            key: "dry_run",
+            kind: "bool",
+            hint: "On: it only says what it would do and nothing changes. Good for trying out a new tool.",
+          },
+        ]}
+      />
+      <Group
+        title="Quiet hours"
+        settings={s}
+        intro={
+          "From the first time to the second, news from your agents waits unless it is urgent. Alarms, timers, and reminders you set still ring. Leave both empty for no quiet hours. Times are in " +
+          zoneName(String(sv("zone") || "UTC")) +
+          "."
+        }
+        specs={[
+          { key: "quiet_start", kind: "time" },
+          { key: "quiet_end", kind: "time", hint: "A window that ends earlier than it starts runs past midnight." },
+        ]}
+      />
+      <Group
         title="Board"
         settings={s}
         specs={[
@@ -257,7 +355,6 @@ function Details(props: { settings: SettingsData }) {
 export function Settings(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
-  const [notes, setNotes] = useState("");
 
   const savePassword = async (ev: Event) => {
     ev.preventDefault();
@@ -282,16 +379,6 @@ export function Settings(): JSX.Element {
     signedOut();
     await start();
   };
-  const toggled = async (ev: Event) => {
-    const d = ev.currentTarget as HTMLDetailsElement;
-    if (!d.open || notes) return;
-    try {
-      setNotes((await api<{ changelog: string }>("GET", "/api/about")).changelog);
-    } catch (x) {
-      fail(x);
-    }
-  };
-
   return (
     <>
       <h2>Settings</h2>
@@ -317,15 +404,7 @@ export function Settings(): JSX.Element {
           <button>Save password</button>
         </div>
       </form>
-      <h3>About</h3>
-      <p id="aboutver">
-        ClawDot {s.version}. It runs entirely on your own device; this page never contacts anything outside your
-        network.
-      </p>
-      <details id="about" onToggle={toggled}>
-        <summary>Release notes</summary>
-        {notes ? <pre id="notes">{notes}</pre> : null}
-      </details>
+      <About />
       <div class="row">
         <button class="plain" type="button" onClick={signOut}>
           Sign out
