@@ -1,0 +1,8 @@
+# Words that are legitimate in one file: "<path> <sha256 of the lowercase token>". See docs/process/personal-data.md.
+# The maintainer's name as the copyright holder and in the agent instructions.
+AGENTS.md 6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303fdc216756c
+NOTICE 6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303fdc216756c
+docs/adr/0007-license.md 6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303fdc216756c
+# The same first name belongs to a third-party author (a blog about unlocking the Echo Dot) credited by name.
+docs/guides/b0-techo5-trial-plan.md 6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303fdc216756c
+docs/research/09-echo-unlock-history.md 6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303fdc216756c

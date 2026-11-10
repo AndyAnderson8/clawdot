@@ -41,3 +41,6 @@ Thumbs.db
 /clawdot-pc.json
 /clawdot-data/
 /clawdot-core.log*
+
+# Local personal-data denylist (plain words; see docs/process/personal-data.md)
+/.personal-denylist

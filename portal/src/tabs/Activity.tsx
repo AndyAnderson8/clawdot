@@ -13,9 +13,16 @@ import {
 } from "../activity.ts";
 import { Field } from "../parts.tsx";
 import { fail, loadExt, useApp, zone } from "../store.ts";
-import { whenText } from "../time.ts";
+import { ago, whenText } from "../time.ts";
 import type { AuditPage, AuditRecord } from "../types.ts";
 
+const STATE: Record<string, string> = {
+  new: "Waiting to be read out",
+  announced: "Read out",
+  acknowledged: "You handled it",
+  dismissed: "Dismissed",
+  snoozed: "Snoozed",
+};
 const TIERS: [string, string][] = [
   ["", "Any"],
   ["read_only", "Only reads"],
@@ -37,7 +44,7 @@ const DECISIONS: [string, string][] = [
 const TRIGGERS: [string, string][] = [
   ["", "Any"],
   ["voice", "Your voice"],
-  ["event", "Agent events"],
+  ["event", "Events from inputs"],
 ];
 
 function Select(props: {
@@ -143,122 +150,155 @@ export function Activity(): JSX.Element {
   const now = s.overview?.now ?? Math.floor(Date.now() / 1000);
 
   return (
-    <>
-      <h2>Activity</h2>
-      <p>
-        Everything the assistant did or was asked to do, newest first: what ran, what waited for your yes, and what was
-        stopped. You can read this list but not change it.
-      </p>
-      {meta ? (
-        <p class="mut" id="policy">
-          {meta.policy.dry_run ? "Dry run is on: actions are described, not done. " : ""}
-          Limits per day: {meta.policy.max_actions_per_day} actions, {meta.policy.max_costly_per_day} of them ones that
-          ask you first. <a href="#/settings">Change in Settings</a>.
-        </p>
-      ) : null}
-      {missing ? (
-        <div class="soon" role="status">
-          <h3>No activity log</h3>
-          <p>This device is not keeping an activity log, so there is nothing to show.</p>
-        </div>
-      ) : (
-        <>
-          <form
-            class="panel"
-            id="auditfilter"
-            onSubmit={(ev) => {
-              ev.preventDefault();
-              apply(filters);
-            }}
-          >
-            <h3>Show only</h3>
-            <Field id="a-tool" label="Tool" hint="The exact tool name, for example set_timer.">
-              <input
-                id="a-tool"
-                type="text"
-                list="a-tools"
-                autoCapitalize="none"
-                autoComplete="off"
-                value={filters.tool}
-                onInput={(e) => setFilters({ ...filters, tool: e.currentTarget.value })}
-              />
-              <datalist id="a-tools">
-                {names.map((n) => (
-                  <option key={n} value={n} />
-                ))}
-              </datalist>
-            </Field>
-            <Select
-              id="a-tier"
-              label="How careful it is"
-              value={filters.tier}
-              options={TIERS}
-              onChange={(v) => apply({ ...filters, tier: v })}
-            />
-            <Select
-              id="a-decision"
-              label="What happened"
-              value={filters.decision}
-              options={DECISIONS}
-              onChange={(v) => apply({ ...filters, decision: v })}
-            />
-            <Select
-              id="a-trigger"
-              label="What started it"
-              value={filters.trigger}
-              options={TRIGGERS}
-              onChange={(v) => apply({ ...filters, trigger: v })}
-            />
-            <div class="row">
-              <button>Show</button>
-              <button class="plain" type="button" onClick={() => apply(NO_FILTERS)} disabled={!filtered}>
-                Clear filters
-              </button>
-              <button class="plain" type="button" onClick={() => void load(filters, null)}>
-                Refresh
-              </button>
-            </div>
-          </form>
-          {rows && !rows.length ? (
-            <p id="auditempty">
-              {filtered
-                ? "Nothing matches these filters."
-                : "Nothing yet. When the assistant sets a timer, calls a tool or asks for your yes, it shows up here."}
-            </p>
-          ) : null}
-          <ul class="rows" id="auditlist" aria-busy={busy ? "true" : "false"}>
-            {rows?.map((r) => (
-              <Row key={r.id} r={r} now={now} />
+    <div class="page">
+      <header class="pagehead">
+        <h2>Activity</h2>
+        <p>What came in and what the assistant did, newest first. You can read these lists but not change them.</p>
+      </header>
+      <div class="stack">
+        <section class="card">
+          <h3>
+            Events received<span class="count">{s.overview?.events.length ?? 0}</span>
+          </h3>
+          <ul class="rows" id="eventlist">
+            {s.overview && !s.overview.events.length ? (
+              <li class="empty">
+                Nothing has arrived yet. Events from anything that can send a web request show up here once you create
+                an input in <a href="#/settings/inputs">Settings</a>.
+              </li>
+            ) : null}
+            {s.overview?.events.map((e) => (
+              <li key={e.id}>
+                <div class="rowhead">
+                  <strong>{e.title}</strong>
+                  <span class="badge">{STATE[e.state] ?? e.state}</span>
+                </div>
+                <div class="mut">
+                  {e.source} through the “{e.endpoint}” input, {ago(e.received_at, s.overview?.now ?? 0)}
+                </div>
+                {e.text ? <div>{e.text}</div> : null}
+              </li>
             ))}
           </ul>
-          {next !== null ? (
-            <div class="row">
-              <button
-                class="plain"
-                type="button"
-                id="auditmore"
-                disabled={busy}
-                onClick={() => void load(filters, next)}
-              >
-                Show older
-              </button>
-            </div>
-          ) : null}
-          {meta && (meta.log.corrupt_lines > 0 || meta.log.write_errors > 0) ? (
-            <p class="mut" id="loghealth">
-              {meta.log.corrupt_lines > 0 ? meta.log.corrupt_lines + " lines in the log could not be read. " : ""}
-              {meta.log.write_errors > 0
-                ? meta.log.write_errors + " actions could not be written to the log. Check the disk."
-                : ""}
-            </p>
-          ) : null}
+        </section>
+        <section class="card">
+          <h3>
+            What the assistant did<span class="count">{rows?.length ?? 0}</span>
+          </h3>
           {meta ? (
-            <p class="mut">
-              The log keeps about {kb(meta.log.max_file_bytes * 2)} of history and drops the oldest first.
+            <p class="mut" id="policy">
+              {meta.policy.dry_run ? "Dry run is on: actions are described, not done. " : ""}
+              Limits per day: {meta.policy.max_actions_per_day} actions, {meta.policy.max_costly_per_day} of them ones
+              that ask you first. <a href="#/settings">Change in Settings</a>.
             </p>
           ) : null}
-        </>
-      )}
-    </>
+          {missing ? (
+            <div class="soon" role="status">
+              <h3>No activity log</h3>
+              <p>This device is not keeping an activity log, so there is nothing to show.</p>
+            </div>
+          ) : (
+            <>
+              <details id="auditfilterbox" open={filtered}>
+                <summary>Filter the list{filtered ? <span class="badge good">on</span> : null}</summary>
+                <form
+                  class="panel flat"
+                  id="auditfilter"
+                  onSubmit={(ev) => {
+                    ev.preventDefault();
+                    apply(filters);
+                  }}
+                >
+                  <Field id="a-tool" label="Tool" hint="The exact tool name, for example set_timer.">
+                    <input
+                      id="a-tool"
+                      type="text"
+                      list="a-tools"
+                      autoCapitalize="none"
+                      autoComplete="off"
+                      value={filters.tool}
+                      onInput={(e) => setFilters({ ...filters, tool: e.currentTarget.value })}
+                    />
+                    <datalist id="a-tools">
+                      {names.map((n) => (
+                        <option key={n} value={n} />
+                      ))}
+                    </datalist>
+                  </Field>
+                  <Select
+                    id="a-tier"
+                    label="How careful it is"
+                    value={filters.tier}
+                    options={TIERS}
+                    onChange={(v) => apply({ ...filters, tier: v })}
+                  />
+                  <Select
+                    id="a-decision"
+                    label="What happened"
+                    value={filters.decision}
+                    options={DECISIONS}
+                    onChange={(v) => apply({ ...filters, decision: v })}
+                  />
+                  <Select
+                    id="a-trigger"
+                    label="What started it"
+                    value={filters.trigger}
+                    options={TRIGGERS}
+                    onChange={(v) => apply({ ...filters, trigger: v })}
+                  />
+                  <div class="row">
+                    <button>Show</button>
+                    <button class="plain" type="button" onClick={() => apply(NO_FILTERS)} disabled={!filtered}>
+                      Clear filters
+                    </button>
+                    <button class="plain" type="button" onClick={() => void load(filters, null)}>
+                      Refresh
+                    </button>
+                  </div>
+                </form>
+              </details>
+              {rows && !rows.length ? (
+                <p class="empty" id="auditempty">
+                  {filtered
+                    ? "Nothing matches these filters."
+                    : "Nothing yet. When the assistant sets a timer, calls a tool or asks for your yes, it shows up here."}
+                </p>
+              ) : null}
+              <ul class="rows" id="auditlist" aria-busy={busy ? "true" : "false"}>
+                {rows?.map((r) => (
+                  <Row key={r.id} r={r} now={now} />
+                ))}
+              </ul>
+              {next !== null ? (
+                <div class="row">
+                  <button
+                    class="plain"
+                    type="button"
+                    id="auditmore"
+                    disabled={busy}
+                    onClick={() => void load(filters, next)}
+                  >
+                    Show older
+                  </button>
+                </div>
+              ) : null}
+              {meta && (meta.log.corrupt_lines > 0 || meta.log.write_errors > 0) ? (
+                <p class="mut" id="loghealth">
+                  {meta.log.corrupt_lines > 0 ? meta.log.corrupt_lines + " lines in the log could not be read. " : ""}
+                  {meta.log.write_errors > 0
+                    ? meta.log.write_errors + " actions could not be written to the log. Check the disk."
+                    : ""}
+                </p>
+              ) : null}
+              {meta ? (
+                <p class="mut">
+                  The log keeps about {kb(meta.log.max_file_bytes * 2)} of history and drops the oldest first.
+                </p>
+              ) : null}
+            </>
+          )}
+        </section>
+      </div>
+    </div>
   );
 }

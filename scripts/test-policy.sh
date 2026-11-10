@@ -8,6 +8,9 @@ set -u
 # When run from a git hook, git exports variables that would point scratch-repo commands at the real repository.
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 root=$(git rev-parse --show-toplevel)
+# A landing into an integration branch sets CHECK_BASE for its own checks; the scratch repositories below have their own
+# `dev` and must measure against it.
+unset CHECK_BASE
 pass=0
 failn=0
 ok() { pass=$((pass + 1)); }
@@ -397,7 +400,14 @@ oout=$(mktemp)
   git branch dev
   scripts/check.sh >"$oout" 2>&1 || exit 51
   grep -q "check: all gates passed" "$oout" || exit 52
-  ! grep -qiE "python|unittest|ruff|portal" "$oout" || exit 53
+  ! grep -qiE "python|unittest|ruff|portal|personal" "$oout" || exit 53
+  # The fast gate is just as quiet: no portal/, bridges/, personal-data script or node-dependent file needed.
+  echo "more" >>README.md && git add -A
+  scripts/check.sh --fast >"$oout" 2>&1 || exit 56
+  grep -q "check --fast: passed" "$oout" || exit 57
+  # (The closing "skipped: ..." summary names the steps that did not run; that line is not a step running.)
+  ! grep -v "^check --fast: skipped" "$oout" | grep -qiE "python|unittest|ruff|portal|personal|node" || exit 58
+  git commit -q -m "docs: touch readme"
   # With a bridges/ directory that has no tests the step still stays quiet and passes.
   mkdir -p bridges && echo "# b" >bridges/README.md && git add -A && git commit -q -m "docs: add bridges readme"
   scripts/check.sh >"$oout" 2>&1 || exit 54

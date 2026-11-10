@@ -115,9 +115,14 @@ phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, 
   opens the page can set the password or choose open mode. Mitigations: the default `listen` is loopback only;
   setup is accepted only from private addresses; the console prints the URL and a warning. Finish setup right after
   the first start, on a network you trust (threat T15, ADR-0013 amendment).
-- **Recovery** (REQ-CFG-022). Forgot the password, or want to start over? On the device, stop the server and run
-  `clawdot --reset-admin` (with the same `--data-dir`). It clears only the administrator setting; endpoints and
-  the rest of your state stay. The next start shows setup again.
+- **Hold the button** (REQ-CFG-069, REQ-DEV-031). Holding the action button for 10 seconds (or typing `admin` in the
+  desktop device console) opens a 5 minute window in which the sign-in page offers a new password. There is no recovery code.
+  Private networks only, one use. The core honours it only from a satellite on the device itself or one with a valid
+  satellite token (REQ-SAT-020).
+- **Recovery by command** (REQ-CFG-022). On a PC or server, stop the server and run `clawdot --reset-admin` (with the
+  same `--data-dir`). It clears only the administrator setting; endpoints and the rest of your state stay. The next
+  start shows setup again. The page itself never tells anyone to run a command (REQ-CFG-071). The guide for every
+  device type is [forgot-password.md](../guides/forgot-password.md).
 - **Upgrading** (REQ-CFG-023). If `admin-token.hash` exists from an earlier version, it is converted on the first
   start: the old token keeps working, typed into the password field, and the page invites you to set a real
   password (which retires the token). `--rotate-admin-token` is gone; use `--reset-admin`.

@@ -22,7 +22,7 @@ test("ago", () => {
 
 test("parts uses the device zone, not the browser's", () => {
   assert.deepEqual(parts(NOON, "UTC"), { date: "2026-11-09", time: "12:00" });
-  assert.deepEqual(parts(NOON, "America/Phoenix"), { date: "2026-11-09", time: "05:00" });
+  assert.deepEqual(parts(NOON, "America/New_York"), { date: "2026-11-09", time: "07:00" });
   assert.deepEqual(parts(NOON, "Pacific/Auckland"), { date: "2026-11-10", time: "01:00" });
 });
 

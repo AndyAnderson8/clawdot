@@ -64,6 +64,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/check-docs.sh
+      - name: Personal-data guard (hashed denylist, see docs/process/personal-data.md)
+        run: node scripts/check-personal.mjs
 
   scripts:
     name: scripts (shellcheck)

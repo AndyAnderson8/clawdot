@@ -551,11 +551,13 @@ impl Core {
     /// The administrator state the page needs to decide what to show.
     #[must_use]
     pub fn admin_state(&self) -> serde_json::Value {
-        let a = self.admin_lock();
+        let now = self.clock.now();
+        let mut a = self.admin_lock();
         serde_json::json!({
             "mode": a.mode().label(),
             "legacy": a.legacy(),
             "open_allowed": a.open_allowed(),
+            "reset_window_secs": a.window_left(now),
         })
     }
 
@@ -649,6 +651,74 @@ impl Core {
         self.admin_lock().set_password(hash, now)
     }
 
+    /// Open the local reset window on a device's request (REQ-CFG-069). Returns the seconds it is open.
+    ///
+    /// # Errors
+    /// [`AdminError::NoPassword`] unless a password is set; [`AdminError::RateLimited`] during the cooldown.
+    pub fn admin_open_reset_window(&self) -> Result<i64, AdminError> {
+        let now = self.clock.now();
+        let r = self.admin_lock().open_window(now);
+        match &r {
+            Ok(_) => self.audit_admin("reset window opened", true),
+            Err(_) => self.audit_admin("reset window refused", false),
+        }
+        r
+    }
+
+    /// Start a reset through the window: spends an attempt and checks the peer and the window.
+    ///
+    /// # Errors
+    /// [`AdminError::RateLimited`], [`AdminError::NotPrivate`], [`AdminError::WindowClosed`],
+    /// [`AdminError::NoPassword`].
+    pub fn admin_window_begin(&self, peer: IpAddr) -> Result<(), AdminError> {
+        if !self.spend_attempt() {
+            return Err(AdminError::RateLimited);
+        }
+        let now = self.clock.now();
+        self.admin_lock().check_window(peer, now)
+    }
+
+    /// Finish a reset through the window (REQ-CFG-069). Returns a new session.
+    ///
+    /// # Errors
+    /// As [`Core::admin_window_begin`], plus storage and randomness failures.
+    pub fn admin_window_finish(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
+        let now = self.clock.now();
+        let r = self.admin_lock().reset_in_window(peer, hash, now);
+        if r.is_ok() {
+            self.audit_admin("reset window used", true);
+        }
+        r
+    }
+
+    /// One line in the problem log and one audit record for an administrator password-reset event. Never a secret.
+    fn audit_admin(&self, what: &str, ok: bool) {
+        crate::diag::warn(&format!("administrator reset: {what}"));
+        if let Some(log) = self.audit.get() {
+            let now = self.clock.now();
+            log.record(
+                now,
+                now.div_euclid(86_400),
+                0,
+                "admin",
+                None,
+                &crate::audit::Act {
+                    tool: "admin_reset",
+                    tier: None,
+                    args: &serde_json::Value::Null,
+                    decision: if ok {
+                        crate::audit::decision::RAN
+                    } else {
+                        crate::audit::decision::INVALID
+                    },
+                    held_id: None,
+                    outcome: None,
+                    note: Some(what),
+                },
+            );
+        }
+    }
+
     // ----- status and test speech for the web UI -----
 
     /// Publish a snapshot of the assistant for the web UI to show (replaces the previous one).
@@ -713,6 +783,12 @@ impl Core {
     /// are announced. Takes effect on the next check, so no restart is needed.
     pub fn set_quiet_hours(&self, quiet: Option<QuietHours>) {
         self.lock().inbox.set_quiet(quiet);
+    }
+
+    /// The device-wide quiet-hours window, if one is set (REQ-INB-040).
+    #[must_use]
+    pub fn quiet_hours(&self) -> Option<QuietHours> {
+        self.lock().inbox.quiet()
     }
 
     /// Record that events were spoken.

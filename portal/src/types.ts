@@ -8,14 +8,26 @@ export interface AuthState {
   legacy?: boolean;
   open_allowed?: boolean;
   peer_private?: boolean;
+  /** Seconds the local reset window has left (0 when closed). */
+  reset_window_secs?: number;
 }
 
+/** What the speaker is doing, when the device says (older cores do not). */
+export type SpeakerState = "idle" | "listening" | "thinking" | "speaking" | "muted";
 export interface Status {
   clock_valid?: boolean;
   satellites?: number;
-  llm?: { configured?: boolean };
+  llm?: { configured?: boolean; model?: string | null };
   usage?: { requests_today: number; max_requests_per_day: number; spend_today: number };
+  /** REQ-CFG-070. A missing field means unknown, not false. */
+  speaker?: { connected?: boolean; available?: boolean; name?: string; state?: SpeakerState };
+  voice?: { configured?: boolean };
+  muted?: boolean;
+  quiet_hours?: { set?: boolean; active?: boolean };
 }
+
+/** Why the device would not speak a test phrase (REQ-CFG-070). */
+export type SpeakRefusal = "no_voice" | "no_speaker" | "busy" | "muted" | "quiet_hours";
 
 export type EventState = "new" | "announced" | "acknowledged" | "dismissed" | "snoozed";
 export interface AgentEvent {

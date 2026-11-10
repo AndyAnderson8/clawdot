@@ -9,6 +9,9 @@ import { fileURLToPath } from "node:url";
 export const CSP =
   "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 export const PASSWORD = "correct horse battery";
+/** The recovery code the mock device holds in password mode. */
+export const RECOVERY = "ABCDE-FGHJK-MNPQR-STUVW";
+const NEXT_RECOVERY = "WXYZ2-34567-89ABC-DEFGH";
 
 export interface Logged {
   method: string;
@@ -97,6 +100,8 @@ function seed(mode: string): Json {
     mode,
     password: "",
     session: "",
+    recovery: mode === "password" ? RECOVERY : "",
+    window: 0,
     settings: {
       device_name: { value: "Kitchen Dot", source: "saved", live: true },
       zone: { value: "UTC", source: "file", live: true },
@@ -210,7 +215,7 @@ function seed(mode: string): Json {
     audit: auditSeed(t),
     logs: [{ ts: t - 30, level: "error", text: "could not save the notes: <b>disk full</b>" }],
     notesOn: true,
-    notes: [{ id: 1, text: "my NAS is <b>Andy-NAS</b>", ts: t - 3600 }],
+    notes: [{ id: 1, text: "my printer is <b>Pixel</b>", ts: t - 3600 }],
     nextNote: 2,
     skills: [{ name: "Good night", instructions: "Turn off the lights.", tools: ["set_light"], enabled: true }],
     problems: [],
@@ -282,6 +287,8 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           legacy: false,
           open_allowed: true,
           peer_private: true,
+          recovery: !!st["recovery"],
+          reset_window_secs: st["window"],
         });
       if (m === "POST" && path === "/api/setup") {
         if (st["mode"] !== "setup") return err(409, "already set up");
@@ -289,7 +296,8 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           st["mode"] = "password";
           st["password"] = body.password;
           st["session"] = "sess-setup";
-          return send(200, { mode: "password", token: st["session"] });
+          st["recovery"] = RECOVERY;
+          return send(200, { mode: "password", token: st["session"], recovery_code: RECOVERY });
         }
         st["mode"] = "open";
         return send(200, { mode: "open" });
@@ -298,6 +306,26 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         if (body.password !== st["password"] && body.password !== PASSWORD) return err(401, "Wrong password.");
         st["session"] = "sess-login";
         return send(200, { token: st["session"] });
+      }
+      const plain = (c: unknown) =>
+        String(c)
+          .replace(/[^a-z0-9]/gi, "")
+          .toUpperCase();
+      if (m === "POST" && path === "/api/recover") {
+        if (!st["recovery"] || plain(body.code) !== plain(st["recovery"]))
+          return err(401, "That recovery code was not accepted. Check it and try again.");
+        st["password"] = body.password;
+        st["session"] = "sess-recover";
+        st["recovery"] = NEXT_RECOVERY;
+        return send(200, { mode: "password", token: st["session"], recovery_code: NEXT_RECOVERY });
+      }
+      if (m === "POST" && path === "/api/recover/window") {
+        if (!st["window"]) return err(403, "the reset window is not open");
+        st["window"] = 0;
+        st["password"] = body.password;
+        st["session"] = "sess-window";
+        st["recovery"] = NEXT_RECOVERY;
+        return send(200, { mode: "password", token: st["session"], recovery_code: NEXT_RECOVERY });
       }
       if (m === "POST" && path === "/api/logout") {
         st["session"] = "";
@@ -314,14 +342,28 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           status: {
             clock_valid: true,
             satellites: 1,
-            llm: { configured: true },
+            llm: { configured: true, model: "test-model" },
             usage: { requests_today: 3, max_requests_per_day: 100, spend_today: 0.0123 },
+            speaker: { connected: true, available: true },
+            voice: { configured: true },
+            muted: false,
+            quiet_hours: { set: false, active: false },
+            ...(st["statusExtra"] as Json | undefined),
           },
         });
       if (m === "GET" && path === "/api/overview")
         return send(200, { now: now(), endpoints: st["endpoints"], events: st["events"] });
-      if (m === "POST" && path === "/api/speak")
-        return body.text ? send(202, { queued: true }) : err(400, "give some text");
+      if (m === "POST" && path === "/api/speak") {
+        const why = st["speakRefusal"] as Json | undefined;
+        if (why)
+          return send(why["status"], {
+            ok: false,
+            reason: why["reason"],
+            message: why["message"],
+            error: why["message"],
+          });
+        return body.text ? send(202, { ok: true, queued: true }) : err(400, "give some text");
+      }
       if (m === "GET" && path === "/api/about")
         return send(200, {
           version: "0.1.0-test",
@@ -373,10 +415,16 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         return send(200, settingsJson("Saved."));
       }
       if (m === "POST" && path === "/api/admin/password") {
+        const first = !st["recovery"];
         st["mode"] = "password";
         st["password"] = body.password;
         st["session"] = "sess-pw";
-        return send(200, { mode: "password", token: st["session"] });
+        if (first) st["recovery"] = RECOVERY;
+        return send(200, { mode: "password", token: st["session"], ...(first ? { recovery_code: RECOVERY } : {}) });
+      }
+      if (m === "POST" && path === "/api/admin/recovery") {
+        st["recovery"] = NEXT_RECOVERY;
+        return send(200, { recovery_code: NEXT_RECOVERY });
       }
 
       if (seg[0] === "notes") {

@@ -46,13 +46,15 @@ export function CopyButton(props: { text: string | (() => string); label?: strin
   );
 }
 
-/** A label, a control, and an optional hint line. The control must carry the same id. */
+/** A row: the name and its hint on the left, the control on the right. The control must carry the same id. */
 export function Field(props: { id: string; label: string; hint?: string; children: ComponentChildren }): JSX.Element {
   return (
-    <div>
-      <label for={props.id}>{props.label}</label>
-      {props.children}
-      {props.hint ? <p class="mut">{props.hint}</p> : null}
+    <div class="srow">
+      <div class="slabel">
+        <label for={props.id}>{props.label}</label>
+        {props.hint ? <p class="mut">{props.hint}</p> : null}
+      </div>
+      <div class="sctl">{props.children}</div>
     </div>
   );
 }
