@@ -15,7 +15,6 @@ jobs:
   portal-browser:
     name: portal browser test, full (stress sweep included)
     runs-on: ubuntu-latest
-    if: hashFiles('portal/package.json') != ''
     defaults:
       run:
         working-directory: portal
