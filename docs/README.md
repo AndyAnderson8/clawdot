@@ -41,7 +41,7 @@
 | Guides | [guides/announce.md](guides/announce.md) | Make the speaker say something from a script, Home Assistant or CI: `POST /api/announce` and `clawdot say`, with snippets and failure modes |
 | Bridges | [../bridges/README.md](../bridges/README.md) | ntfy and Discord sidecars that make the speaker say messages, with filters, rate limits and no raw markup |
 | Guides | [guides/local-speech.md](guides/local-speech.md) | Free local speech to text (whisper.cpp) and text to speech (Piper) with an OpenAI-compatible URL, for the PC voice loop |
-| Guides | [guides/forgot-password.md](guides/forgot-password.md) | Forgot the administrator password: the recovery code, the 10 second button hold, the desktop key, the command line, and the Echo Dot |
+| Guides | [guides/forgot-password.md](guides/forgot-password.md) | Forgot the administrator password: the 10 second button hold, the desktop key, the command line, and the Echo Dot |
 | Guides | [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | B0 trial of the TECHO5 Dot base image on the maintainer's unit: backups, install, measurements, rollback, go/no-go |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
 | Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |

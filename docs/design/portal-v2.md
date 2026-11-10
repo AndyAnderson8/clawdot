@@ -131,7 +131,7 @@ Alignment: left-aligned text and labels above controls; actions right-aligned on
 | Tools and connections | Tools with risk tiers and on/off, tool servers, skills (add, edit, import, export) |
 | Notes | The notes the assistant keeps; add, forget, forget all |
 | Safety | Limits per day, quiet hours, daily spend, dry run |
-| Security | Admin password, recovery code, sign out |
+| Security | Admin password, sign out |
 | About and diagnostics | Version, build, release notes, diagnostics file, recent problems, save and load a settings file, addresses, board |
 
 ## Principles

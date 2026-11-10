@@ -115,12 +115,8 @@ phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, 
   opens the page can set the password or choose open mode. Mitigations: the default `listen` is loopback only;
   setup is accepted only from private addresses; the console prints the URL and a warning. Finish setup right after
   the first start, on a network you trust (threat T15, ADR-0013 amendment).
-- **Recovery code** (REQ-CFG-067, 068). Setting a password shows a one-time recovery code, which you must save before
-  continuing. On the sign-in page, "Forgot your password?" takes the code and a new password; the code works once and a
-  new one is shown. Only a salted hash of it is stored. An install from before this version makes one in Settings
-  (REQ-CFG-073). Open mode has none (REQ-CFG-072).
 - **Hold the button** (REQ-CFG-069, REQ-DEV-031). Holding the action button for 10 seconds (or typing `admin` in the
-  desktop device console) opens a 5 minute window in which the sign-in page offers a new password without a code.
+  desktop device console) opens a 5 minute window in which the sign-in page offers a new password. There is no recovery code.
   Private networks only, one use. The core honours it only from a satellite on the device itself or one with a valid
   satellite token (REQ-SAT-020).
 - **Recovery by command** (REQ-CFG-022). On a PC or server, stop the server and run `clawdot --reset-admin` (with the

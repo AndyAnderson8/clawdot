@@ -557,7 +557,6 @@ impl Core {
             "mode": a.mode().label(),
             "legacy": a.legacy(),
             "open_allowed": a.open_allowed(),
-            "recovery": a.has_recovery(),
             "reset_window_secs": a.window_left(now),
         })
     }
@@ -606,14 +605,9 @@ impl Core {
     ///
     /// # Errors
     /// See [`AdminError`].
-    pub fn admin_setup_password(
-        &self,
-        peer: IpAddr,
-        hash: String,
-        recovery: Option<String>,
-    ) -> Result<String, AdminError> {
+    pub fn admin_setup_password(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
         let now = self.clock.now();
-        self.admin_lock().setup_password(peer, hash, recovery, now)
+        self.admin_lock().setup_password(peer, hash, now)
     }
 
     /// Start a sign-in: spends an attempt and returns the stored hash to verify (do that off the async
@@ -652,58 +646,9 @@ impl Core {
     ///
     /// # Errors
     /// Storage and randomness failures.
-    pub fn admin_set_password(
-        &self,
-        hash: String,
-        recovery: Option<String>,
-    ) -> Result<String, AdminError> {
+    pub fn admin_set_password(&self, hash: String) -> Result<String, AdminError> {
         let now = self.clock.now();
-        self.admin_lock().set_password(hash, recovery, now)
-    }
-
-    /// Whether a recovery code exists (so a new password does not need to make one).
-    #[must_use]
-    pub fn admin_has_recovery(&self) -> bool {
-        self.admin_lock().has_recovery()
-    }
-
-    /// Store a new recovery hash for the signed-in administrator (REQ-CFG-073).
-    ///
-    /// # Errors
-    /// [`AdminError::NoPassword`] unless a password is set; storage failures.
-    pub fn admin_set_recovery(&self, hash: String) -> Result<(), AdminError> {
-        self.admin_lock().set_recovery(hash)
-    }
-
-    /// Start a reset with the recovery code: spends an attempt and returns the stored hash to check the code
-    /// against (off the async thread; it is slow). Open and setup modes answer `NoPassword`.
-    ///
-    /// # Errors
-    /// [`AdminError::RateLimited`], [`AdminError::NoPassword`], [`AdminError::Unauthorized`].
-    pub fn admin_recover_begin(&self) -> Result<String, AdminError> {
-        if !self.spend_attempt() {
-            return Err(AdminError::RateLimited);
-        }
-        self.admin_lock().recovery_hash()
-    }
-
-    /// Finish a reset with the recovery code (REQ-CFG-068). `verified` is what [`Core::admin_recover_begin`]
-    /// returned. Returns a new session.
-    ///
-    /// # Errors
-    /// [`AdminError::Unauthorized`] if the code was used meanwhile; storage and randomness failures.
-    pub fn admin_recover_finish(
-        &self,
-        verified: &str,
-        hash: String,
-        new_recovery: String,
-    ) -> Result<String, AdminError> {
-        let now = self.clock.now();
-        let r = self.admin_lock().recover(verified, hash, new_recovery, now);
-        if r.is_ok() {
-            self.audit_admin("recovery code used", true);
-        }
-        r
+        self.admin_lock().set_password(hash, now)
     }
 
     /// Open the local reset window on a device's request (REQ-CFG-069). Returns the seconds it is open.
@@ -737,25 +682,18 @@ impl Core {
     ///
     /// # Errors
     /// As [`Core::admin_window_begin`], plus storage and randomness failures.
-    pub fn admin_window_finish(
-        &self,
-        peer: IpAddr,
-        hash: String,
-        new_recovery: String,
-    ) -> Result<String, AdminError> {
+    pub fn admin_window_finish(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
         let now = self.clock.now();
-        let r = self
-            .admin_lock()
-            .reset_in_window(peer, hash, new_recovery, now);
+        let r = self.admin_lock().reset_in_window(peer, hash, now);
         if r.is_ok() {
             self.audit_admin("reset window used", true);
         }
         r
     }
 
-    /// One line in the problem log and one audit record for an administrator recovery event. Never a secret.
+    /// One line in the problem log and one audit record for an administrator password-reset event. Never a secret.
     fn audit_admin(&self, what: &str, ok: bool) {
-        crate::diag::warn(&format!("administrator recovery: {what}"));
+        crate::diag::warn(&format!("administrator reset: {what}"));
         if let Some(log) = self.audit.get() {
             let now = self.clock.now();
             log.record(
@@ -765,7 +703,7 @@ impl Core {
                 "admin",
                 None,
                 &crate::audit::Act {
-                    tool: "admin_recovery",
+                    tool: "admin_reset",
                     tier: None,
                     args: &serde_json::Value::Null,
                     decision: if ok {
