@@ -5,7 +5,7 @@
 //! volume, and quiet hours. Everything protocol-shaped stays in `clawdot_satellite::run`.
 
 use crate::board::Parts;
-use crate::button::{Action, ActionMap, ButtonEvent, ButtonSource, GestureDetector};
+use crate::button::{Action, ActionMap, ButtonEvent, ButtonSource, Gesture, GestureDetector};
 use crate::caps::{Capability, Declared};
 use crate::led::{LedController, LedState};
 use crate::quiet::{QuietPolicy, minute_of_day_now};
@@ -175,6 +175,7 @@ pub struct DaemonDevice {
     playing: bool,
     online: bool,
     stops: usize,
+    admin_reset_pending: bool,
 }
 
 impl std::fmt::Debug for DaemonDevice {
@@ -237,6 +238,7 @@ impl DaemonDevice {
             playing: false,
             online: false,
             stops: 0,
+            admin_reset_pending: false,
         }
     }
 
@@ -373,6 +375,7 @@ impl DaemonDevice {
                 ButtonEvent::Quit => {
                     let _ = self.trigger.try_send(Press::Quit);
                 }
+                ButtonEvent::AdminReset => self.admin_reset_pending = true,
                 ButtonEvent::Edge { button, down, at } => {
                     if let Some(g) = self.gestures.edge(&button, down, at)
                         && let Some(a) = self.actions.lookup(&button, g)
@@ -383,6 +386,10 @@ impl DaemonDevice {
             }
         }
         for (button, g) in self.gestures.tick(now) {
+            if g == Gesture::AdminHold {
+                self.admin_reset_pending = true;
+                continue;
+            }
             if let Some(a) = self.actions.lookup(&button, g) {
                 self.handle_action(a);
             }
@@ -492,6 +499,21 @@ impl Device for DaemonDevice {
 
     fn poll_mute_change(&mut self) -> Option<bool> {
         self.pending_mute.take()
+    }
+
+    fn poll_admin_reset(&mut self) -> bool {
+        std::mem::take(&mut self.admin_reset_pending)
+    }
+
+    fn admin_reset_window(&mut self, open_secs: u32, _reason: Option<&str>) {
+        // The core decides; the device only shows the answer, with a tone so a board without LEDs can too.
+        if open_secs > 0 {
+            self.leds.turn(LedState::Inbox);
+            self.play_tone(Tone::Inbox);
+        } else {
+            self.leds.turn(LedState::Error);
+            self.play_tone(Tone::Error);
+        }
     }
 }
 

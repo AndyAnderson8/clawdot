@@ -1423,6 +1423,21 @@ async fn main() -> ExitCode {
             if let Some(s) = args.satellite.follow_up_secs {
                 settings.dialog.follow_up_secs = s;
             }
+            settings.admin_reset = Some(satellite::AdminResetHook::new({
+                let core = Arc::clone(&core);
+                move || {
+                    use clawdot_core::admin::AdminError;
+                    core.admin_open_reset_window()
+                        .map(|s| u32::try_from(s).unwrap_or(0))
+                        .map_err(|e| match e {
+                            AdminError::NoPassword => {
+                                "No password is set, so there is nothing to reset.".to_owned()
+                            }
+                            AdminError::RateLimited => "Wait a minute and try again.".to_owned(),
+                            _ => "The reset window could not be opened.".to_owned(),
+                        })
+                }
+            }));
             let l = TcpListener::bind(addr)
                 .await
                 .map_err(|e| format!("cannot listen on {addr}: {e}"))?;
