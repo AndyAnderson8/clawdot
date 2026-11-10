@@ -74,8 +74,8 @@ export function Notes(): JSX.Element {
         <div class="soon" role="status" id="notesoff">
           <h3>Memory is off</h3>
           <p>
-            The assistant is not remembering anything. Turn it on under <a href="#/features">Features</a>. What you
-            already saved is kept.
+            The assistant is not remembering anything. Turn it on under <a href="#/settings/features">Features</a>. What
+            you already saved is kept.
           </p>
         </div>
       ) : null}

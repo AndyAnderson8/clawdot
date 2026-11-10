@@ -13,6 +13,7 @@ import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
 import { PROVIDERS, providerFor } from "../providers.ts";
 import { Field } from "../parts.tsx";
+import { FeaturesSection } from "./Features.tsx";
 import { Skills } from "./Skills.tsx";
 import { TestSpeaker } from "./TestSpeaker.tsx";
 import { Tools } from "./Tools.tsx";
@@ -402,6 +403,7 @@ interface Section {
 }
 export const SECTIONS: [Section, ...Section[]] = [
   { id: "general", label: "General", view: General },
+  { id: "features", label: "Features", view: FeaturesSection },
   { id: "assistant", label: "Assistant", view: Assistant },
   { id: "inputs", label: "Inputs", view: Inputs },
   { id: "tools", label: "Tools", view: Extensions },
@@ -421,7 +423,7 @@ export function SettingsPage(props: { sub: string }): JSX.Element {
     <div class="page">
       <header class="pagehead">
         <h2>Settings</h2>
-        <p>Things you set once. Switches for what the assistant does are under Features.</p>
+        <p>Everything you can change, in sections. Features are the switches for what the assistant does.</p>
       </header>
       <nav aria-label="Settings sections" class="tabs">
         {SECTIONS.map((x) => (

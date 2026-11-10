@@ -150,7 +150,7 @@ await step("sign-in: the help never tells you to run a command, and says what to
   const help = (await T(`text('#forgothelp')`)) as string;
   assert.equal(
     help,
-    "Hold the action button on the speaker for 10 seconds. A box to set a new password then appears here for a few minutes. Full steps are in the guide.",
+    "A forgotten password is reset on the speaker itself, with its USB cable or at its console. The guide has the steps for your device.",
   );
   await eq(`T.q('#forgot').tagName`, "DETAILS", "the help is a folded box you can see is clickable");
   await eq(`document.body.innerText.includes('reset-admin')`, false, "no command in the page");
@@ -246,15 +246,15 @@ await step("an expired session sends you back to sign in", async () => {
 });
 
 // ---------------------------------------------------------------- the shell
-await step("shell: five destinations, titles, current page, home link, unknown address", async () => {
+await step("shell: four destinations, titles, current page, home link, unknown address", async () => {
   await open("open");
   await b.until(`!!T.q('#band') && !!T.q('#statusline')`, "the dashboard");
   await eq(`T.text('#devname')`, "Kitchen Dot", "the speaker's name is on Home");
   await eq(`T.q('#home').getAttribute('aria-label')`, "ClawDot, go to Home", "the logo is the way home");
   await eq(
     `T.all('#tabs a').map((a) => a.textContent)`,
-    ["Home", "Clock", "Bluetooth", "Features", "Settings"],
-    "five destinations, Home first",
+    ["Home", "Clock", "Bluetooth", "Settings"],
+    "four destinations, Home first",
   );
   await eq(`T.all('#tabs a[aria-current="page"]').map((a) => a.id)`, ["tab-dashboard"], "home is current first");
   await b.until(`document.title === "Home - ClawDot"`, "the Home title");
@@ -378,15 +378,36 @@ await step("Home: says why the speaker is not connected, and lists what to fix (
   );
 });
 
-await step("Clock: list, edit, cancel, add timer and alarm, validation", async () => {
+await step("Clock: alarms, timers, reminders and the stopwatch each have their own page", async () => {
   await open("open", "#/clock");
-  await b.until(`T.rows().length === 2`, "two rows");
+  await b.until(`T.all('#clocktabs a').length === 4`, "the Clock tabs");
+  await eq(
+    `T.all('#clocktabs a').map((a) => a.textContent)`,
+    ["Alarms", "Timers", "Reminders", "Stopwatch"],
+    "each kind has a tab",
+  );
+  await eq(`T.text('#clocktabs a[aria-current="page"]')`, "Alarms", "alarms come first");
+  // Alarms: only alarms are listed, and the form makes alarms.
+  await b.until(`T.rows().length === 1`, "one alarm");
   await shot("clock");
-  await eq(`T.rows()[1].includes('<b>work</b>')`, true, "label shown as text");
+  await eq(`T.rows()[0].includes('<b>work</b>')`, true, "label shown as text");
   await eq(`T.q('#panel strong b') === null`, true, "no markup from the label");
-  await eq(`T.rows()[1].includes('Weekdays at')`, true, "repeat text");
+  await eq(`T.rows()[0].includes('Weekdays at')`, true, "repeat text");
+  await eq(`T.text('#clocklist h3').startsWith('Alarms')`, true, "the list has a title and a count");
+  await eq(`T.q('#rkind') === null`, true, "no type to choose: this page makes alarms");
+  await eq(`T.text('#panel form h3')`, "Add an alarm", "the form says what it makes");
+  await T(`set('#rtime', '06:30')`);
+  await T(`set('#rlabel', 'gym')`);
+  await T(`click('.days input[value="0"]')`);
+  await T(`click('.days input[value="2"]')`);
+  await T(`submit('#panel form.panel')`);
+  await b.until(`T.rows().length === 2`, "alarm added");
+  const post = mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").pop()!;
+  assert.deepEqual(post.body, { kind: "alarm", label: "gym", hour: 6, minute: 30, days: [0, 2] });
+  // Timers: the timer is listed here and the alarms are not.
+  await b.ev(`location.hash = '#/clock/timers'`);
+  await b.until(`T.text('#clocklist h3').startsWith('Timers') && T.rows().length === 1`, "the timer");
   await eq(`T.rows()[0].startsWith('pasta') && T.rows()[0].includes('Rings in 10 min')`, true, "timer text");
-  await eq(`T.text('#clocklist h3').startsWith('Coming up')`, true, "the list has a title and a count");
   await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Edit')`);
   await eq(`T.q('#rlabel').value`, "pasta", "edit loads the label");
   await eq(`T.text('#panel form h3')`, "Change this timer", "edit title");
@@ -397,24 +418,25 @@ await step("Clock: list, edit, cancel, add timer and alarm, validation", async (
   const put = mock.log.find((l) => l.method === "PUT")!;
   assert.equal(put.path, "/api/schedule/1");
   assert.deepEqual(put.body, { kind: "timer", label: "tea", seconds: 1200 });
-  await eq(`T.text('#panel form h3')`, "Add a timer, alarm or reminder", "form left edit mode");
-  await T(`clickText('#panel ul.rows > li:nth-child(2)', 'Cancel')`);
-  await b.until(`T.rows().length === 1`, "cancelled");
-  assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/schedule/2"));
-  await T(`set('#rkind', 'alarm')`);
-  await T(`set('#rtime', '06:30')`);
-  await T(`set('#rlabel', 'gym')`);
-  await T(`click('.days input[value="0"]')`);
-  await T(`click('.days input[value="2"]')`);
-  await T(`submit('#panel form.panel')`);
-  await b.until(`T.rows().length === 2`, "alarm added");
-  const post = mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").pop()!;
-  assert.deepEqual(post.body, { kind: "alarm", label: "gym", hour: 6, minute: 30, days: [0, 2] });
-  await T(`set('#rkind', 'reminder')`);
+  await eq(`T.text('#panel form h3')`, "Add a timer", "form left edit mode");
+  await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Cancel')`);
+  await b.until(
+    `T.rows().length === 1 && T.q('#clocklist .empty') !== null`,
+    "cancelled, and the empty list says what to do",
+  );
+  assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/schedule/1"));
+  // Reminders: validation.
+  await b.ev(`location.hash = '#/clock/reminders'`);
+  await b.until(`!!T.q('#rdate')`, "the reminder form");
   await T(`set('#rdate', '')`);
   await T(`submit('#panel form.panel')`);
   await eq(`T.text('#msg')`, "Pick a date and a time for the reminder.", "validation message");
   await eq(`(T.text('#clocklist p.mut') ?? '').length > 0`, true, "zone note present");
+  // Stopwatch: used by voice, so this page explains and offers nothing that would not work.
+  await b.ev(`location.hash = '#/clock/stopwatch'`);
+  await b.until(`!!T.q('#stopwatchcard')`, "the stopwatch page");
+  await eq(`T.text('#stopwatchcard').includes('Start the stopwatch')`, true, "says how to use it");
+  await eq(`T.q('#panel form') === null && T.q('#panel button') === null`, true, "no controls that do nothing");
 });
 
 await step("Bluetooth: says plainly that it is not available yet, and offers nothing that would not work", async () => {
@@ -447,27 +469,38 @@ await step("Activity: events from inputs are shown as text", async () => {
   await eq(`T.text('#eventlist .mut').includes('input')`, true, "says inputs, not agents");
 });
 
-await step("Features: switches turn abilities on and off right away", async () => {
-  await open("open", "#/features");
-  await b.until(`T.all('.features .feature').length === 5`, "five features");
-  await shot("features");
-  await eq(
-    `T.all('.feature h3').map((h) => h.textContent)`,
-    ["Remember things", "Say the plan first", "Say what it is doing", "Check for updates", "Practice mode"],
-    "in plain words",
-  );
-  await eq(
-    `T.all('.feature input.switch').every((i) => i.getAttribute('aria-describedby'))`,
-    true,
-    "each switch has its explanation",
-  );
-  const before = await b.ev<boolean>(`T.q('#feat-notes').checked`);
-  await T(`click('#feat-notes')`);
-  await b.until(`T.q('#feat-notes').checked === ${!before}`, "the switch moved");
-  const put = mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!;
-  assert.deepEqual(put.body, { notes: !before });
-  await eq(`T.q('#card-notes .more').getAttribute('href')`, "#/settings/memory", "memory is managed in Settings");
-});
+await step(
+  "Features (a section of Settings): switches turn abilities on and off right away; the old address still works",
+  async () => {
+    await open("open", "#/settings/features");
+    await b.until(`T.all('.features .feature').length === 5`, "five features");
+    await shot("features");
+    await eq(
+      `T.all('.feature h3').map((h) => h.textContent)`,
+      ["Remember things", "Say the plan first", "Say what it is doing", "Check for updates", "Practice mode"],
+      "in plain words",
+    );
+    await open("open", "#/features");
+    await b.until(
+      `T.text('.tabs a[aria-current="page"]') === 'Features'`,
+      "the old address opens the Features section of Settings",
+    );
+    await eq(`T.q('#tab-settings').getAttribute('aria-current')`, "page", "under Settings in the menu");
+    await open("open", "#/settings/features");
+    await b.until(`T.all('.features .feature').length === 5`, "back on the section");
+    await eq(
+      `T.all('.feature input.switch').every((i) => i.getAttribute('aria-describedby'))`,
+      true,
+      "each switch has its explanation",
+    );
+    const before = await b.ev<boolean>(`T.q('#feat-notes').checked`);
+    await T(`click('#feat-notes')`);
+    await b.until(`T.q('#feat-notes').checked === ${!before}`, "the switch moved");
+    const put = mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!;
+    assert.deepEqual(put.body, { notes: !before });
+    await eq(`T.q('#card-notes .more').getAttribute('href')`, "#/settings/memory", "memory is managed in Settings");
+  },
+);
 
 await step("Memory (Settings): add, refuse, forget one, forget all after a confirmation, off state", async () => {
   await open("open", "#/settings/memory");
@@ -501,7 +534,7 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
   await b.ev(`location.hash = "#/dashboard"`);
   await section("memory", "Memory");
   await b.until(`!!T.q("#notesoff")`, "the off notice");
-  await eq(`T.q("#notesoff a").getAttribute("href")`, "#/features", "it says where to turn it on");
+  await eq(`T.q("#notesoff a").getAttribute("href")`, "#/settings/features", "it says where to turn it on");
   await eq(`T.q("#note-text").disabled`, true, "adding is disabled while memory is off");
 });
 
@@ -847,10 +880,10 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
 
 await step("Settings: sections in a tab strip, native dropdowns, no horizontal scroll at 360 px", async () => {
   await open("open", "#/settings");
-  await b.until(`T.all('.tabs a').length === 8`, "the section tabs");
+  await b.until(`T.all('.tabs a').length === 9`, "the section tabs");
   await eq(
     `T.all('.tabs a').map((a) => a.textContent)`,
-    ["General", "Assistant", "Inputs", "Tools", "Memory", "Safety", "Security", "About"],
+    ["General", "Features", "Assistant", "Inputs", "Tools", "Memory", "Safety", "Security", "About"],
     "every kind of configuration has a named section",
   );
   await eq(`T.all('.tabs a[aria-current="page"]').map((a) => a.textContent)`, ["General"], "the first is shown");
@@ -858,8 +891,16 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
   await b.until(`T.text('.tabs a[aria-current="page"]') === 'Safety'`, "a section");
   await viewport(360);
   await eq(`document.documentElement.scrollWidth <= document.documentElement.clientWidth`, true, "no sideways scroll");
-  const pages = ["#/dashboard", "#/clock", "#/bluetooth", "#/features", "#/activity"];
-  for (const id of ["general", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
+  const pages = [
+    "#/dashboard",
+    "#/clock",
+    "#/clock/timers",
+    "#/clock/reminders",
+    "#/clock/stopwatch",
+    "#/bluetooth",
+    "#/activity",
+  ];
+  for (const id of ["general", "features", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
     pages.push("#/settings/" + id);
   for (const hash of pages) {
     await b.ev(`location.hash = '${hash}'`);
@@ -889,8 +930,8 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
 });
 
 await step("every page uses the same card pattern: titles, rows, one width for inputs and text areas", async () => {
-  const pages = ["#/clock", "#/bluetooth", "#/features", "#/activity"];
-  for (const id of ["general", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
+  const pages = ["#/clock", "#/clock/timers", "#/clock/reminders", "#/clock/stopwatch", "#/bluetooth", "#/activity"];
+  for (const id of ["general", "features", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
     pages.push("#/settings/" + id);
   for (const hash of pages) {
     await open("open", hash);
@@ -912,8 +953,16 @@ await step("every page uses the same card pattern: titles, rows, one width for i
 });
 
 await step("every page fits a 360 px and a 320 px phone with long content and a wide font", async () => {
-  const pages = ["#/dashboard", "#/clock", "#/bluetooth", "#/features", "#/activity"];
-  for (const id of ["general", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
+  const pages = [
+    "#/dashboard",
+    "#/clock",
+    "#/clock/timers",
+    "#/clock/reminders",
+    "#/clock/stopwatch",
+    "#/bluetooth",
+    "#/activity",
+  ];
+  for (const id of ["general", "features", "assistant", "inputs", "tools", "memory", "safety", "security", "about"])
     pages.push("#/settings/" + id);
   const bad: string[] = [];
   for (const [content, fixture] of [
@@ -1180,7 +1229,7 @@ await step("Updates: Home says a new version exists, and Features can turn the d
     "the notice on Home",
   );
   await eq(`T.q('#attention li a[href="#/settings/about"]').textContent`, "See what is new", "with where to go");
-  await open("open", "#/features");
+  await open("open", "#/settings/features");
   await b.until(`!!T.q('#feat-update_check')`, "the switch");
   await eq(`T.q('#feat-update_check').checked`, true, "on by default");
   await T(`click('#feat-update_check')`);
@@ -1191,8 +1240,8 @@ await step("Updates: Home says a new version exists, and Features can turn the d
 });
 
 await step("a 10-second refresh keeps what you typed", async () => {
-  await open("open", "#/clock");
-  await b.until(`T.rows().length === 2`, "rows");
+  await open("open", "#/clock/timers");
+  await b.until(`T.rows().length === 1`, "rows");
   await T(`set('#rlabel', 'half typed')`);
   (mock.state["schedule"] as unknown[]).push({
     id: 9,
@@ -1202,7 +1251,7 @@ await step("a 10-second refresh keeps what you typed", async () => {
     seconds_left: 60,
     repeat: null,
   });
-  await b.until(`T.rows().length === 3`, "the refresh brought the new row", 13000);
+  await b.until(`T.rows().length === 2`, "the refresh brought the new row", 13000);
   await eq(`T.q('#rlabel').value`, "half typed", "the form was not reset");
 });
 

@@ -131,8 +131,8 @@ fn the_page_uses_plain_names_and_no_radio() {
     for word in ["inbox", "scheduled", "radio", "music", "station"] {
         assert!(!page.contains(word), "the page still says `{word}`");
     }
-    // Home first, then Clock, Bluetooth, Features and Settings; everything configurable is under Settings.
-    for tab in ["Home", "Clock", "Bluetooth", "Features", "Settings"] {
+    // Home first, then Clock, Bluetooth and Settings; everything configurable, the Features switches included, is under Settings.
+    for tab in ["Home", "Clock", "Bluetooth", "Settings"] {
         assert!(
             PAGE.contains(&format!("\"{tab}\"")),
             "missing destination {tab}"

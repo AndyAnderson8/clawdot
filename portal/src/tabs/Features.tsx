@@ -94,24 +94,16 @@ function FeatureCard(props: { f: Feature; s: SettingsData }): JSX.Element | null
   );
 }
 
-export function Features(): JSX.Element {
-  const s = useApp();
-  const st = s.settings;
-  return (
-    <div class="page">
-      <header class="pagehead">
-        <h2>Features</h2>
-        <p>Switch abilities on or off. Changes apply right away.</p>
-      </header>
-      {st ? (
-        <div class="features">
-          {FEATURES.map((f) => (
-            <FeatureCard key={f.key} f={f} s={st} />
-          ))}
-        </div>
-      ) : (
-        <p class="empty">Loading.</p>
-      )}
+/** The switches, as a section of Settings. */
+export function FeaturesSection(): JSX.Element {
+  const st = useApp().settings;
+  return st ? (
+    <div class="features">
+      {FEATURES.map((f) => (
+        <FeatureCard key={f.key} f={f} s={st} />
+      ))}
     </div>
+  ) : (
+    <p class="empty">Loading.</p>
   );
 }

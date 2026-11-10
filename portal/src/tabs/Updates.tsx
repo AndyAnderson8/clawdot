@@ -159,7 +159,7 @@ export function Updates(): JSX.Element | null {
             {u.enabled
               ? `ClawDot looks about once a day at ${u.source || "the release page"}. Turn that off under `
               : "Checking every day is off. Turn it on under "}
-            <a href="#/features">Features</a>. Nothing about you or your speaker is sent.
+            <a href="#/settings/features">Features</a>. Nothing about you or your speaker is sent.
           </p>
         </>
       ) : (
