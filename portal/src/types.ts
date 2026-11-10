@@ -198,3 +198,28 @@ export interface LogList {
   lines: LogLine[];
   max_lines: number;
 }
+
+/** What `GET /api/update` says (REQ-UPD-005). */
+export interface UpdateRelease {
+  version: string;
+  notes: string;
+  page: string;
+  published: string;
+}
+export interface UpdateStatus {
+  current: string;
+  enabled: boolean;
+  source: string;
+  checking: boolean;
+  last_checked: number | null;
+  error: string | null;
+  available: boolean;
+  latest: UpdateRelease | null;
+  can_apply: boolean;
+  cannot_apply_because: string | null;
+  supervised: boolean;
+  /** Empty when idle; otherwise downloading, verifying, installing, installed, restarting or failed. */
+  phase: string;
+  apply_error: string | null;
+  installed: string | null;
+}
