@@ -145,7 +145,7 @@ else
 fi
 
 # Personal-data guard (docs/process/personal-data.md): needs only node, which CI and the portal toolchain have.
-if [ "$fast" -eq 0 ] || [ -n "$changed" ]; then
+if [ -f scripts/check-personal.mjs ] && { [ "$fast" -eq 0 ] || [ -n "$changed" ]; }; then
   if command -v node >/dev/null 2>&1; then
     step "personal data: no denylisted words in tracked files"
     run node scripts/check-personal.mjs
