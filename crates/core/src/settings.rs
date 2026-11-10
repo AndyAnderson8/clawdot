@@ -63,7 +63,7 @@ pub struct Field {
 }
 
 /// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039).
-pub const FIELDS: [Field; 26] = [
+pub const FIELDS: [Field; 27] = [
     Field {
         key: "device_name",
         live: true,
@@ -146,6 +146,10 @@ pub const FIELDS: [Field; 26] = [
     },
     Field {
         key: "notes",
+        live: true,
+    },
+    Field {
+        key: "update_check",
         live: true,
     },
     Field {
@@ -351,7 +355,7 @@ fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Resu
         "agent_tool_timeout_secs" => whole(v, "Seconds per tool call", 1, 120)?,
         "max_actions_per_day" => whole(v, "Actions per day", 0, 100_000)?,
         "max_costly_per_day" => whole(v, "Actions that ask first, per day", 0, 100_000)?,
-        "plan_speech" | "progress_speech" | "notes" | "dry_run" => {
+        "plan_speech" | "progress_speech" | "notes" | "dry_run" | "update_check" => {
             json!(
                 v.as_bool()
                     .ok_or_else(|| format!("`{key}` must be on or off (true or false)."))?

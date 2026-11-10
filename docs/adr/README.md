@@ -22,6 +22,7 @@ An ADR captures one significant decision, its context, and its consequences, so 
 | [0016](0016-portal-typescript-stack.md) | Portal source language and framework: TypeScript with Preact, built by esbuild, output committed | Proposed |
 | [0017](0017-portal-design-system-astryx.md) | Portal design system: the Astryx token contract on Preact, native controls, no Astryx runtime | Proposed |
 | [0018](0018-landing-gate-mode.md) | Landing gate mode: a temporary stabilization mode for dev | Proposed |
+| [0019](0019-updates-and-remote-access.md) | Updates (daily check, install on confirmation, signed releases) and what a smart speaker should not share (SSH opt-in, no USB storage, no SMB) | Proposed |
 
 ## Rules
 - ADRs are immutable once Accepted. To change a decision, write a new ADR that **supersedes** it.

@@ -36,6 +36,13 @@ const FEATURES: Feature[] = [
     icon: "M3 12h4l3-8 4 16 3-8h4",
   },
   {
+    key: "update_check",
+    title: "Check for updates",
+    text: "Looks for a newer version about once a day. It asks the project's release page and sends nothing about you or your speaker. Nothing is installed until you say so.",
+    icon: "M12 4v10m0 0-4-4m4 4 4-4M5 19h14",
+    more: { href: "#/settings/about", label: "See updates" },
+  },
+  {
     key: "dry_run",
     title: "Practice mode",
     text: "It only says what it would do, and nothing changes. Good for trying out a new tool.",

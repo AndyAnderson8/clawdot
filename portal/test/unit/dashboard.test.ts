@@ -141,3 +141,18 @@ test("the speaker waiting for a device is explained, not just refused", () => {
   assert.equal(v.headline, "Waiting for a speaker");
   assert.ok(v.detail.includes("On a Dot"));
 });
+
+test("a newer version is a notice with where to read about it, and nothing when there is none", () => {
+  const up = {
+    available: true,
+    latest: { version: "0.2.0", notes: "", page: "", published: "" },
+  } as never;
+  const list = attention(ready, "password", up);
+  assert.deepEqual(
+    list.map((a) => [a.id, a.to]),
+    [["update", "#/settings/about"]],
+  );
+  assert.equal(list[0]?.title, "Version 0.2.0 is available");
+  assert.deepEqual(attention(ready, "password", { available: false, latest: null } as never), []);
+  assert.deepEqual(attention(ready, "password", null), []);
+});

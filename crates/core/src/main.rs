@@ -9,7 +9,7 @@ use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, Effect, describe_fired};
 use clawdot_core::audit::{ActionPolicy, AuditConfig, AuditLog};
-use clawdot_core::config::{AgentConfig, Config, SatelliteConfig, SpeechConfig};
+use clawdot_core::config::{AgentConfig, Config, SatelliteConfig, SpeechConfig, UpdatesConfig};
 #[cfg(feature = "esphome-satellite")]
 use clawdot_core::esphome_cfg::EsphomeConfig;
 use clawdot_core::extensions::{ExtOp, Extensions, WithPolicy};
@@ -117,6 +117,7 @@ struct Args {
     stations: Vec<Station>,
     speech: SpeechConfig,
     satellite: SatelliteConfig,
+    updates: UpdatesConfig,
     #[cfg(feature = "esphome-satellite")]
     esphome: EsphomeConfig,
     voice_in: Option<PathBuf>,
@@ -160,6 +161,7 @@ fn parse() -> Result<Args, String> {
         stations: Vec::new(),
         speech: SpeechConfig::default(),
         satellite: SatelliteConfig::default(),
+        updates: UpdatesConfig::default(),
         #[cfg(feature = "esphome-satellite")]
         esphome: EsphomeConfig::default(),
         voice_in: None,
@@ -282,6 +284,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.stations.clone_from(&c.stations);
     a.speech.clone_from(&c.speech);
     a.satellite.clone_from(&c.satellite);
+    a.updates.clone_from(&c.updates);
     #[cfg(feature = "esphome-satellite")]
     a.esphome.clone_from(&c.esphome);
     a.create.extend(c.endpoints.iter().cloned());
@@ -340,6 +343,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     put("plan_speech", c.agent.plan_speech.map(Into::into));
     put("progress_speech", c.agent.progress_speech.map(Into::into));
     put("notes", c.agent.notes.map(Into::into));
+    put("update_check", c.updates.check.map(Into::into));
     put(
         "max_actions_per_day",
         c.limits.max_actions_per_day.map(Into::into),
@@ -390,6 +394,7 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
         ("plan_speech", turn.plan_speech.into()),
         ("progress_speech", turn.progress_speech.into()),
         ("notes", false.into()),
+        ("update_check", true.into()),
         ("max_actions_per_day", policy.max_actions_per_day.into()),
         ("max_costly_per_day", policy.max_costly_per_day.into()),
         ("dry_run", policy.dry_run.into()),
@@ -721,6 +726,14 @@ fn apply_live(
         if let Some(llm) = &mut brain.llm {
             llm.cfg = with_agent(llm.cfg.clone(), &brain.agent);
         }
+    }
+    #[cfg(feature = "tls")]
+    if changed("update_check") {
+        clawdot_core::update::set_enabled(
+            live.get("update_check")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+        );
     }
     if changed("notes")
         && let Some(n) = core.notes()
@@ -1137,6 +1150,11 @@ async fn say_command(rest: &[String]) -> ExitCode {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Used by an update to check that a new program starts before it replaces the running one.
+    if matches!(argv.first().map(String::as_str), Some("--version" | "-V")) {
+        println!("clawdot {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     if argv.first().map(String::as_str) == Some("say") {
         return say_command(&argv[1..]).await;
     }
@@ -1394,6 +1412,22 @@ async fn main() -> ExitCode {
 
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
+    #[cfg(feature = "tls")]
+    match clawdot_core::update::UpdateConfig::new(
+        args.updates.url.as_deref(),
+        args.updates.public_key.as_deref(),
+    ) {
+        Ok(cfg) => {
+            let on = applied
+                .get("update_check")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            if let Err(e) = clawdot_core::update::start(cfg, on, Some(args.data_dir.clone())) {
+                clawdot_core::diag::error(&format!("updates are not available: {e}"));
+            }
+        }
+        Err(e) => clawdot_core::diag::error(&format!("updates are not available: {e}")),
+    }
     settings_state.set_extra(settings_extra(&args));
     core.set_settings(settings_state);
     if let Some(input) = args.voice_in.clone() {

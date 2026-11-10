@@ -4,7 +4,7 @@ import { api, ApiError } from "../api.ts";
 import { attention, dailyCounts, lastHeard, recentItems, speakerView, type Day } from "../dashboard.ts";
 import { fail, sv, useApp, usePolled, zone } from "../store.ts";
 import { ago, whenText } from "../time.ts";
-import type { AuditPage, AuditRecord } from "../types.ts";
+import type { AuditPage, AuditRecord, UpdateStatus } from "../types.ts";
 import { Look, LOOKS, lookPref, setLookPref, type LookId } from "./looks.tsx";
 
 /** One number with a plain label. */
@@ -84,9 +84,16 @@ export function Dashboard(): JSX.Element {
   const s = useApp();
   const st = s.status;
   const [records, setRecords] = useState<AuditRecord[] | null>(null);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [look, setLook] = useState<LookId>(lookPref());
 
   usePolled(async () => {
+    try {
+      setUpdate(await api<UpdateStatus>("GET", "/api/update"));
+    } catch {
+      // No updater on this device is a normal state, not a failure.
+      setUpdate(null);
+    }
     try {
       setRecords((await api<AuditPage>("GET", "/api/audit?limit=200")).records);
     } catch (x) {
@@ -100,7 +107,7 @@ export function Dashboard(): JSX.Element {
   const view = speakerView(st);
   const heard = records ? lastHeard(records) : null;
   const detail = view.detail || (heard ? `Last heard ${ago(heard, now)}.` : records ? "Nothing heard yet." : "");
-  const todo = attention(st, s.mode);
+  const todo = attention(st, s.mode, update);
   const recent = recentItems(records ?? [], s.overview?.events ?? []);
   const u = st?.usage;
   const model = st?.llm?.model;
