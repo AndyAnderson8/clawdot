@@ -31,7 +31,7 @@ export function Forgot(): JSX.Element {
         <summary>Forgot your password?</summary>
         <p id="forgothelp">
           Hold the action button on the speaker for 10 seconds. A box to set a new password then appears here for a few
-          minutes. On a computer you can also run <code>clawdot --reset-admin</code>. More in{" "}
+          minutes. Full steps are in{" "}
           <a href={GUIDE} target="_blank" rel="noopener noreferrer">
             the guide
           </a>

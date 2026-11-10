@@ -365,6 +365,9 @@ footer a:hover {
   font-weight: 600;
   text-decoration: none;
 }
+.tabs a:focus-visible {
+  outline-offset: -3px;
+}
 .tabs a:hover {
   color: var(--color-text-primary);
 }

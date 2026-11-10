@@ -75,7 +75,7 @@ export function Skills(): JSX.Element {
     try {
       v = JSON.parse(importText);
     } catch {
-      say("That is not a skills file. Paste the text that Export gave you.", true);
+      say("That is not a skills file. Paste the contents of a skills file.", true);
       return;
     }
     if (await change("POST", "/api/skills/import", v, "Imported. Read each skill, then turn on the ones you trust."))

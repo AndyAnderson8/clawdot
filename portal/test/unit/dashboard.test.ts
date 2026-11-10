@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { attention, lastHeard, recentItems, refusal, speakBlock, speakerView, toolName } from "../../src/dashboard.ts";
+import {
+  attention,
+  dailyCounts,
+  lastHeard,
+  recentItems,
+  refusal,
+  speakBlock,
+  speakerView,
+  toolName,
+} from "../../src/dashboard.ts";
 import type { AgentEvent, AuditRecord, Status } from "../../src/types.ts";
 
 const ready: Status = {
@@ -109,4 +118,26 @@ test("last heard is the newest voice turn, and tool names read as words", () => 
   assert.equal(toolName("set_timer"), "Set timer");
   assert.equal(toolName("mcp-home-light"), "Mcp home light");
   assert.equal(toolName(""), "Something");
+});
+
+test("daily counts cover fourteen days ending today, count each action on its own day, and ignore older ones", () => {
+  const now = Date.UTC(2026, 10, 10, 12, 0, 0) / 1000;
+  const rec = (ts: number) => ({ id: 1, ts, tool: "set_timer", trigger: "voice" }) as never;
+  const days = dailyCounts([rec(now), rec(now - 60), rec(now - 86400), rec(now - 20 * 86400)], now, "UTC");
+  assert.equal(days.length, 14);
+  assert.equal(days.at(-1)?.today, true);
+  assert.equal(days.at(-1)?.date, "2026-11-10");
+  assert.equal(days.at(-1)?.count, 2);
+  assert.equal(days.at(-2)?.count, 1);
+  assert.equal(
+    days.reduce((n, d) => n + d.count, 0),
+    3,
+    "the old one is not counted",
+  );
+});
+
+test("the speaker waiting for a device is explained, not just refused", () => {
+  const v = speakerView({ llm: { configured: true }, speaker: { connected: false } });
+  assert.equal(v.headline, "Waiting for a speaker");
+  assert.ok(v.detail.includes("On a Dot"));
 });
