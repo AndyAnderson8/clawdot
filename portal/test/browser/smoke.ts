@@ -848,6 +848,90 @@ await step("Settings: save one group, errors stay in their form, provider preset
   await b.until(`T.text('#notes')?.includes('First release')`, "release notes loaded");
 });
 
+await step(
+  "Settings: the language is chosen by name, the voice from a list with a sample, the models from the service",
+  async () => {
+    // Without a speech provider the language and the voice say so and cannot be changed.
+    await open("open", "#/settings/general");
+    await b.until(`!!T.q('#f-speech_language')`, "the language box");
+    await eq(`T.q('#f-speech_language').disabled`, true, "disabled without a speech provider");
+    await open("open", "#/settings/general", { speechOn: true });
+    await b.until(`!!T.q('#f-speech_language') && !T.q('#f-speech_language').disabled`, "the language box");
+    await eq(`T.q('#f-speech_language').tagName`, "SELECT", "a dropdown, not a code to type");
+    await eq(
+      `T.all('#f-speech_language option').some((o) => o.textContent === 'English (en)') && T.all('#f-speech_language option').some((o) => o.textContent === 'German (de)')`,
+      true,
+      "languages are named",
+    );
+    await eq(
+      `T.q('#f-speech_language option').textContent`,
+      "Detect it automatically",
+      "automatic is the first choice",
+    );
+    await T(`set('#f-speech_language', 'de')`);
+    await b.ev(`T.q('#f-speech_language').form.requestSubmit()`);
+    await b.until(`T.text('#msg') === 'Saved.'`, "saved");
+    assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+      speech_language: "de",
+    });
+    // Time zones show their offset, west to east.
+    const zones = await b.ev<string[]>(`T.all('#f-zone option').map((o) => o.textContent)`);
+    assert.ok(zones.length > 100 && zones.every((z) => z.startsWith("(UTC")), "every zone starts with its offset");
+    const offs = zones.map((z) => {
+      const m = /^\(UTC(?:([+-])(\d\d):(\d\d))?\)/.exec(z)!;
+      return m[1] ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+    });
+    assert.deepEqual(
+      [...offs].sort((a, c) => a - c),
+      offs,
+      "ordered by offset",
+    );
+    assert.ok(
+      zones.some((z) => z.includes("changes with daylight saving")),
+      "zones that move say so",
+    );
+
+    // The assistant: the voice from the server's list, the models from the service, optional models added and removed.
+    await open("open", "#/settings/assistant", { speechOn: true });
+    await b.until(`T.q('#f-voice')?.tagName === 'SELECT'`, "the voice list");
+    await eq(
+      `T.all('#f-voice option').map((o) => o.textContent).filter((t) => t !== 'Choose a voice')`,
+      ["alloy", "nova", "onyx"],
+      "the voices on offer",
+    );
+    await eq(`T.q('#hearvoice').disabled`, true, "nothing to hear until a voice is chosen");
+    await T(`set('#f-voice', 'nova')`);
+    await eq(`T.q('#hearvoice').disabled`, true, "a new choice must be saved before it can be heard");
+    await eq(`T.text('.voicepick .mut')`, "Save to hear this voice.", "and it says so");
+    await b.ev(`T.q('#f-voice').form.requestSubmit()`);
+    await b.until(`T.text('#msg') === 'Saved.' && !T.q('#hearvoice').disabled`, "saved, so it can be heard");
+    assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+      voice: "nova",
+    });
+    await T(`click('#hearvoice')`);
+    await b.until(`T.text('#msg').startsWith('Playing a sample')`, "the sample is on its way");
+    assert.ok(
+      String((mock.log.filter((l) => l.path === "/api/speak").pop()!.body as { text: string }).text).startsWith(
+        "Hello. This is how I sound.",
+      ),
+    );
+    await T(`click('#loadmodels')`);
+    await b.until(`T.all('#models-list option').length === 3`, "the models the service offers");
+    await eq(`T.q('#f-llm_model').getAttribute('list')`, "models-list", "offered while typing in the model box");
+    await eq(
+      `T.q('#f-llm_fallback_model') === null && T.q('#f-summary_model') === null`,
+      true,
+      "optional models start out of the way",
+    );
+    await T(`clickText('.addrow', '+ Add a backup model')`);
+    await b.until(`!!T.q('#f-llm_fallback_model')`, "the backup model box appears");
+    await eq(`T.text('.optional')`, "Optional", "and is marked optional");
+    await T(`set('#f-llm_fallback_model', 'free/model-c')`);
+    await T(`clickText('.sctl', 'Remove')`);
+    await b.until(`T.q('#f-llm_fallback_model') === null`, "removed again");
+  },
+);
+
 await step("Settings: theme is light unless chosen, remembered, and never follows the system uninvited", async () => {
   await open("open", "#/settings/general");
   await b.until(`!!T.q('#themeform')`, "theme choice");

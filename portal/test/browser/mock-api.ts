@@ -112,6 +112,7 @@ function seed(mode: string): Json {
       summary_model: { value: null, source: "default", live: true },
       llm_key_env: { value: "API_KEY", source: "file", live: true },
       voice: { value: null, source: "default", live: true },
+      speech_language: { value: null, source: "default", live: true },
       listen: { value: "0.0.0.0:3335", source: "flag", live: false, ignored: true },
       public_url: { value: null, source: "default", live: true },
       max_requests_per_day: { value: 100, source: "default", live: true },
@@ -232,6 +233,7 @@ function seed(mode: string): Json {
       installed: null,
     },
     notesOn: true,
+    speechOn: false,
     notes: [{ id: 1, text: "my printer is <b>Pixel</b>", ts: t - 3600 }],
     nextNote: 2,
     skills: [{ name: "Good night", instructions: "Turn off the lights.", tools: ["set_light"], enabled: true }],
@@ -264,7 +266,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
     restart_needed: st["restart"],
     llm: { key_present: true },
     voice_info: { language: "en", stt_model: "whisper", tts_model: "voice-1" },
-    speech_configured: false,
+    speech_configured: !!st["speechOn"],
     speakers_listen: "0.0.0.0:3336",
     ...(note ? { note } : {}),
   });
@@ -387,6 +389,11 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           build: { version: "0.1.0-test", profile: "release", os: "linux", arch: "aarch64", features: ["tz", "tls"] },
           changelog: "## [0.1.0]\n- First release",
         });
+      if (m === "GET" && path === "/api/models") return send(200, { models: ["model-b", "model-a", "free/model-c"] });
+      if (m === "GET" && path === "/api/voices") {
+        if (!st["speechOn"]) return err(503, "No speech provider is set up, so there are no voices to choose from.");
+        return send(200, { voices: ["alloy", "nova", "onyx"], source: "builtin" });
+      }
       if (m === "GET" && path === "/api/update") return send(200, st["update"]);
       if (m === "POST" && path === "/api/update/check") {
         const u = st["update"] as Json;

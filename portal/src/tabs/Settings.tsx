@@ -5,6 +5,8 @@ import { currentText, FROM, labelOf, settingsPatch, type SettingSpec } from "../
 import { fail, get, say, set } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
 import type { Settings as SettingsData } from "../types.ts";
+import { languageOptions } from "../languages.ts";
+import { VoiceControl } from "./Voice.tsx";
 
 function browserZone(): string {
   try {
@@ -135,6 +137,27 @@ export function Group(props: {
           ) : (
             <input id={id} type="text" value={v} placeholder={bz || "Europe/Berlin"} onInput={input} />
           );
+        } else if (sp.kind === "language") {
+          ctl = (
+            <select id={id} value={v} disabled={sp.off} onChange={input}>
+              <option value="">Detect it automatically</option>
+              {languageOptions(v).map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          );
+        } else if (sp.kind === "voice") {
+          ctl = (
+            <VoiceControl
+              id={id}
+              value={v}
+              saved={current[sp.key] ?? ""}
+              off={sp.off}
+              onInput={(x) => setVals({ ...vals, [sp.key]: x })}
+            />
+          );
         } else if (sp.kind === "area") {
           ctl = <textarea id={id} rows={7} maxLength={4000} value={v} onInput={input} />;
         } else if (sp.kind === "board") {
@@ -176,6 +199,7 @@ export function Group(props: {
               type="text"
               value={v}
               autoComplete="off"
+              list={sp.datalist}
               disabled={sp.off}
               placeholder={sp.off ? "Not available yet" : undefined}
               onInput={input}
