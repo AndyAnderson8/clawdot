@@ -294,7 +294,7 @@ sout=$(mktemp)
   git commit -q -m "chore: initialize repository"
   git branch dev
   export PATH="$S/bin:$PATH"
-  export CALLS="$S/calls.log"
+  export CALLS="$S.calls"
   unset CI
   case_run() { # case_run <branch> <file> <content>: one commit on a fresh branch off dev, then the scoped check
     git switch -q -c "$1" dev
@@ -323,6 +323,7 @@ sout=$(mktemp)
   grep -q "^npm .*typecheck " "$CALLS" || exit 70
   grep -q "^npm .*check-build " "$CALLS" || exit 71
   grep -q "^npm .*test:browser QUICK=1$" "$CALLS" || exit 72
+  cat "$CALLS" >&2
   ! grep -qE "licenses|audit|^cargo " "$CALLS" || exit 73
 
   # 4. scripts: the policy tests run; no cargo, no npm
@@ -346,7 +347,7 @@ sout=$(mktemp)
 )
 rc=$?
 if [ "$rc" -eq 0 ]; then ok; else fail "path-selection test failed at step code $rc (output: $(tail -3 "$sout" | tr '\n' ' '))"; fi
-rm -rf "$S" "$sout"
+rm -rf "$S" "$S.calls" "$sout"
 
 # --- scripts/cargo.sh uses sccache only when installed, and never when disabled or already set ----
 W=$(mktemp -d)
