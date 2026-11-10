@@ -1,0 +1,12 @@
+# sha256 of lowercase tokens that must not appear in tracked files (see docs/process/personal-data.md).
+# The words are deliberately not written here. Add one with: node scripts/check-personal.mjs --hash <word>
+6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303fdc216756c  # a first name
+7f9acc271009325526d3defe7c907e505c2f48f4920f9fc4d22955ed775b446d  # a user name
+03a8f0dd8edb33781a836ac497800b5f9c5c47c2ddbfd0f89581140589725a85  # a place used as an example
+e51582861c6a439f7c42dabaec7528cd70067bf85ace2894f0a9f3c799b35206  # a machine name
+b3deb173436f3977aca49f7e5c055eda924a5b6d801a1d4700242539f2ed5351  # a machine name
+b299ca4a59ba13c2bbffc92e2a98afcb191972463770f64f7a1ff51978035715  # a host name
+99398b868eb989d8151defb202cb746c575c683542609efffd361c9247c2e390  # a host name
+b10198f778488767b4fdc37ad35cb36583efc591a6fc5be35bff475360227a2d  # an account name
+48c92e67306d4a850c07701a151ba4d2ef0c21697e2d214e95a8d58231df3675  # a host name
+21e63e26eab42a77f93d868a8a536c6e0c97d6769bd2cd44a65ed741f1e50a9a  # a container name
