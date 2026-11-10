@@ -415,6 +415,127 @@ rc=$?
 if [ "$rc" -eq 0 ]; then ok; else fail "land.sh remote test failed at step code $rc (output: $(tail -4 "$rout" | tr '\n' ' '))"; fi
 rm -rf "$R" "$rout"
 
+# --- gate mode (scripts/gate-mode): stabilization lands on the fast check without CI; full and main stay gated ----------
+G=$(mktemp -d)
+gout=$(mktemp)
+(
+  cd "$G" || exit 1
+  git init -q --bare origin.git
+  cat >origin.git/hooks/pre-receive <<'HOOK'
+#!/bin/sh
+while read -r old new ref; do
+  if [ "$ref" = refs/heads/dev ] && [ -f "$GIT_DIR/reject" ]; then echo "push declined due to repository rule violations" >&2; exit 1; fi
+done
+HOOK
+  chmod +x origin.git/hooks/pre-receive
+  mkdir -p bin
+  cat >bin/gh <<'STUB'
+#!/bin/sh
+echo "gh $*" >>"$G_GH_LOG"
+case "$1 $2" in
+  "run list") echo 1 ;;
+  "run watch") [ ! -f "$G_FAIL_CI" ] ;;
+esac
+STUB
+  chmod +x bin/gh
+  export G_GH_LOG="$G/gh.log" G_FAIL_CI="$G/fail-ci" PATH="$G/bin:$PATH" LAND_CI_POLL=0 LAND_WAIT_INTERVAL=1
+  : >"$G_GH_LOG"
+  git init -q -b main work
+  cd work || exit 1
+  git config user.name T
+  git config user.email t@example.com
+  git config core.autocrlf false
+  git remote add origin "$G/origin.git"
+  git commit -q --allow-empty -m "chore: initialize repository"
+  git branch dev
+  git switch -q dev
+  mkdir -p scripts
+  for f in "$root"/scripts/*.sh; do [ "$(basename "$f")" = test-policy.sh ] || cp "$f" scripts/; done
+  cp "$root/.shellcheckrc" .shellcheckrc
+  git add scripts .shellcheckrc
+  git commit -q -m "build: add scripts"
+  setmode() { # setmode <value>: commit scripts/gate-mode on dev and publish it (the scratch repo has no hooks)
+    printf '# comment\n%s\n' "$1" >scripts/gate-mode
+    git add scripts/gate-mode && git commit -q -m "chore: set gate mode"
+    git push -q origin main dev 2>/dev/null
+  }
+  mk() { # mk <branch> <file> [base]
+    git switch -q -c "$1" "${3:-dev}" && echo hi >"$2" && git add "$2" && git commit -q -m "feat: add $2"
+  }
+
+  # 1. no gate-mode file: the full gate and CI apply (default)
+  git push -q origin main dev 2>/dev/null
+  mk feature/a a.txt || exit 201
+  scripts/land.sh feature/a >"$gout" 2>&1 || exit 202
+  grep -q "run watch" "$G_GH_LOG" || exit 203
+  ! grep -q "FULL GATE SKIPPED" "$gout" || exit 204
+
+  # 2. stabilization: fast check, direct push, no candidate ref, no gh call, a clear notice
+  git switch -q dev && setmode stabilization
+  : >"$G_GH_LOG"
+  mk feature/b b.txt || exit 205
+  tipb=$(git rev-parse feature/b)
+  scripts/land.sh feature/b >"$gout" 2>&1 || exit 206
+  grep -q "FULL GATE SKIPPED BY MODE 'stabilization'" "$gout" || exit 207
+  grep -q "verified: origin/dev" "$gout" || exit 208
+  [ ! -s "$G_GH_LOG" ] || exit 209
+  [ -z "$(git ls-remote origin 'refs/heads/ci/*')" ] || exit 210
+  git fetch -q origin
+  git merge-base --is-ancestor "$tipb" origin/dev || exit 211
+  [ "$(git log -1 --format=%s origin/dev)" = "Merge feature/b into dev" ] || exit 212
+  ! git rev-parse -q --verify feature/b >/dev/null || exit 213
+  ! grep -q "check: all gates passed" "$gout" || exit 214
+
+  # 3. exit codes still work: rejected push (4), held dev (3), a bad commit message is refused (1)
+  prev=$(git rev-parse origin/dev)
+  mk feature/c c.txt || exit 215
+  : >"$G/origin.git/reject"
+  rc=0; scripts/land.sh feature/c >"$gout" 2>&1 || rc=$?
+  [ "$rc" -eq 4 ] || exit 216
+  grep -q "LOCAL dev" "$gout" || exit 217
+  git rev-parse -q --verify feature/c >/dev/null || exit 218
+  git switch -q dev && git reset -q --hard "$prev" && git switch -q feature/c
+  rm "$G/origin.git/reject"
+  git worktree add -q "$G/holder" dev
+  rc=0; scripts/land.sh feature/c >"$gout" 2>&1 || rc=$?
+  [ "$rc" -eq 3 ] || exit 219
+  git worktree remove --force "$G/holder"
+  git switch -q -c feature/badmsg dev && echo x >bad.txt && git add bad.txt && git commit -q -m "Added a thing" || exit 220
+  rc=0; scripts/land.sh feature/badmsg >"$gout" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || exit 221
+  [ "$(git rev-parse origin/dev)" = "$prev" ] || exit 222
+  git switch -q feature/c
+
+  # 4. an invalid value is an error, not a silent default
+  git switch -q dev && setmode bogus && git switch -q feature/c
+  git merge -q dev 2>/dev/null
+  rc=0; scripts/land.sh feature/c >"$gout" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || exit 223
+  grep -q "gate-mode must be" "$gout" || exit 224
+  git switch -q dev && setmode full && git switch -q feature/c && git merge -q dev
+
+  # 5. full again: CI is waited for, a CI failure exits 5 and leaves dev alone
+  prev=$(git rev-parse origin/dev)
+  : >"$G_GH_LOG"; : >"$G_FAIL_CI"
+  rc=0; scripts/land.sh feature/c >"$gout" 2>&1 || rc=$?
+  [ "$rc" -eq 5 ] || exit 225
+  grep -q "run watch" "$G_GH_LOG" || exit 226
+  [ "$(git rev-parse origin/dev)" = "$prev" ] || exit 227
+  rm "$G_FAIL_CI"
+
+  # 6. a hotfix into main keeps CI even in stabilization mode
+  git switch -q dev && setmode stabilization
+  git switch -q -c hotfix/h main && echo h >h.txt && git add h.txt && git commit -q -m "fix: hotfix" || exit 228
+  : >"$G_GH_LOG"; : >"$G_FAIL_CI"
+  rc=0; scripts/land.sh hotfix/h --into main >"$gout" 2>&1 || rc=$?
+  [ "$rc" -eq 5 ] || exit 229
+  grep -q "run watch" "$G_GH_LOG" || exit 230
+  exit 0
+)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok; else fail "gate mode test failed at step code $rc (output: $(tail -4 "$gout" | tr '\n' ' '))"; fi
+rm -rf "$G" "$gout"
+
 # --- integration branches: batch locally (no push, no CI), then land the batch (scratch repos, gh stub) ----------
 I=$(mktemp -d)
 iout=$(mktemp)

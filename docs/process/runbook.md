@@ -64,10 +64,13 @@ What it does: runs all gates on your branch, creates a **merge commit** on `dev`
 
 Exit codes: `0` landed and verified, `1` other error, `3` `dev` held by another worktree, `4` merge exists only in local `dev`, `5` CI or publishing failed, `6` (batching only, section 5a) integration branch moved underneath. `--wait SECONDS` (default 0) retries while another worktree holds `dev`.
 
+**Gate mode.** `cat scripts/gate-mode` shows the current mode. In `stabilization` (the current default, [ADR-0018](../adr/0018-landing-gate-mode.md)) landing into `dev` runs only the fast local check, pushes `dev` directly without waiting for CI, and prints `FULL GATE SKIPPED BY MODE`. Run `scripts/check.sh` yourself first if you want the full gate. To restore the full gate and CI, edit `scripts/gate-mode` to `full` on a `chore/` branch and land it; do this before the first release. Hotfixes into `main` and releases are always fully gated. If `dev` has a server rule requiring `gate`, the direct push is refused (exit `4`) until that rule is relaxed ([repo-settings.md](repo-settings.md)).
+
 If it fails:
 
 | Message | Fix |
 |---|---|
+| `scripts/gate-mode must be 'full' or 'stabilization'` | fix the file on a `chore/` branch (one word, comments with `#` allowed) |
 | `does not contain dev` | `git switch <branch> && git merge dev`, then land again |
 | `working tree is not clean` | commit or stash your changes |
 | a gate fails | fix it on your branch, commit, land again |
