@@ -44,6 +44,21 @@ git commit -m "feat(sched): add persistent timer store" -m "Why this change is n
 - Do not add `Co-Authored-By`, "Generated with ...", or any AI attribution. Hooks and CI reject it.
 - Hooks run on each commit and check only fast things: branch name, commit message, and `scripts/check.sh --fast` (changed shell files, docs if Markdown changed, `cargo fmt` and scoped `clippy` if Rust changed; docs-only commits skip Rust). Tests and `cargo-deny` run at `scripts/land.sh` and in CI. If a hook fails, fix the cause and commit again; never use `--no-verify`.
 
+### The fast loop
+
+While iterating, do not run the gate; run the smallest thing that answers your question:
+
+```
+scripts/cargo.sh check -p <crate>         # type-check one crate (seconds once warm)
+scripts/cargo.sh test -p <crate>          # that crate's tests
+npm --prefix portal test                  # portal unit tests (node --test, no browser)
+scripts/check.sh --fast --tests           # then, before batching: only the steps your changed paths need
+```
+
+The heavy checks (the whole-workspace tests, `cargo-deny`, the portal licence/audit steps and the 360/320 px stress sweep of the browser test) belong to `scripts/check.sh --full`, the landing into `dev`, CI, and the nightly workflow (`.github/workflows/nightly.yml`). The browser test runs only a quick smoke when `CLAWDOT_BROWSER_QUICK=1` is set, which the scoped check does.
+
+Optional compiler cache: `scripts/cargo.sh` uses [sccache](https://github.com/mozilla/sccache) as `RUSTC_WRAPPER` whenever it is on `PATH` (in WSL when cargo runs there), so worktrees, which each keep their own `target` directory, share compiled dependencies. Install it with `cargo install sccache --locked` (or `winget install Mozilla.sccache`, or your package manager). The cache lives outside the repository in `~/.cache/clawdot-sccache` (override with `SCCACHE_DIR`) and is capped at 10G (`SCCACHE_CACHE_SIZE`). `CLAWDOT_NO_SCCACHE=1` disables it, an `RUSTC_WRAPPER` you set yourself wins, and without sccache nothing changes. Incremental compilation of the workspace crates is unaffected; the cache pays off for dependencies and fresh worktrees. `sccache --show-stats` shows hits.
+
 ## 4. Keep your branch current
 
 ```
@@ -57,6 +72,8 @@ A branch can only be landed if it contains the latest `dev`.
 ```
 scripts/check.sh                  # optional preview: the FULL gate that land.sh and CI run (format, lint, types, tests, deny, docs, commits)
 scripts/check.sh --fast           # the quicker subset that the commit hook runs on staged files
+scripts/check.sh --fast --tests   # path-based scoped check (what land.sh --into integration/... runs); CHECK_BASE=<rev> sets the base
+scripts/check.sh --full           # the full gate, spelled out (the same as no flag)
 scripts/land.sh feature/timer-tool
 ```
 
