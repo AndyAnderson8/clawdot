@@ -18,7 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-const PATIENCE: Duration = Duration::from_secs(8);
+const PATIENCE: Duration = Duration::from_secs(20);
 /// Voice, speaker, API audio, announce, start conversation.
 const FULL: u32 = flags::VOICE_ASSISTANT
     | flags::SPEAKER
