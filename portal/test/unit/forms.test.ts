@@ -4,6 +4,8 @@ import {
   connectionDefinition,
   currentText,
   labelOf,
+  matching,
+  readSkillFiles,
   parseSettingsFile,
   reminderBody,
   restartText,
@@ -92,7 +94,7 @@ test("tool definition", () => {
   });
   assert.equal(
     toolDefinition({ ...f, params: [{ id: 3, name: " ", type: "string", required: true, description: "" }] }),
-    "Give each value a name, or remove it.",
+    "Give each detail a name, or remove it.",
   );
   assert.equal("auth_env" in (toolDefinition({ ...f, tokenVar: " " }) as object), false);
 });
@@ -240,4 +242,43 @@ test("loading a file lists only what would change, in plain words", () => {
   assert.deepEqual(settingsChanges(s, { device_name: "Kitchen" }), []);
   assert.equal(shownValue(""), "not set");
   assert.equal(shownValue(3), "3");
+});
+
+test("skills are read from Markdown files and skills files; what does not fit is listed with the reason", () => {
+  const r = readSkillFiles([
+    {
+      path: "skills/tidy/SKILL.md",
+      text: "---\nname: Tidy up\ndescription: Put things away\n---\nAsk which room first.\n",
+    },
+    { path: "skills/night/SKILL.md", text: "Turn off the lights." },
+    { path: "skills/README.md", text: "About this folder" },
+    { path: "skills/long.md", text: "x".repeat(2001) },
+    {
+      path: "skills/mine.json",
+      text: JSON.stringify({ skills: [{ name: "Saved", instructions: "Do it.", tools: ["a"] }] }),
+    },
+    { path: "skills/broken.json", text: "not json" },
+  ]);
+  assert.deepEqual(
+    r.found.map((s) => s.name),
+    ["Tidy up", "night", "Saved"],
+    "a header name wins, then the folder name",
+  );
+  assert.equal(r.found[0]?.instructions, "Put things away\n\nAsk which room first.");
+  assert.deepEqual(r.found[2]?.tools, ["a"]);
+  assert.equal(r.skipped.length, 2);
+  assert.ok(r.skipped.some((s) => s.includes("long.md") && s.includes("2001")));
+  assert.ok(r.skipped.some((s) => s.includes("broken.json")));
+});
+
+test("a search keeps rows that contain every word, in the name or the text", () => {
+  const rows = [
+    { name: "Good night", t: "turn off the lights" },
+    { name: "Morning", t: "say the weather" },
+  ];
+  const find = (q: string) => matching(rows, q, (r) => r.t).map((r) => r.name);
+  assert.deepEqual(find(""), ["Good night", "Morning"]);
+  assert.deepEqual(find("NIGHT"), ["Good night"]);
+  assert.deepEqual(find("the weather"), ["Morning"]);
+  assert.deepEqual(find("night weather"), []);
 });

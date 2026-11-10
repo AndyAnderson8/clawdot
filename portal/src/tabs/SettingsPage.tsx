@@ -8,7 +8,7 @@ import { setThemePref, themePref, type ThemePref } from "../theme.ts";
 import { zoneName } from "../time.ts";
 import type { Settings as SettingsData } from "../types.ts";
 import { About } from "./About.tsx";
-import { Connections } from "./Connections.tsx";
+import { Sources } from "./Connections.tsx";
 import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
 import { PROVIDERS, providerFor } from "../providers.ts";
@@ -271,19 +271,24 @@ function Notifications(props: { s: SettingsData }): JSX.Element {
   );
 }
 
-function Extensions(): JSX.Element {
+function ToolsSection(): JSX.Element {
   return (
     <>
+      <div id="part-sources" class="stack">
+        <Sources />
+      </div>
       <div id="part-tools" class="stack">
         <Tools />
       </div>
-      <div id="part-connections" class="stack">
-        <Connections />
-      </div>
-      <div id="part-skills" class="stack">
-        <Skills />
-      </div>
     </>
+  );
+}
+
+function SkillsSection(): JSX.Element {
+  return (
+    <div id="part-skills" class="stack">
+      <Skills />
+    </div>
   );
 }
 
@@ -458,7 +463,8 @@ export const SECTIONS: [Section, ...Section[]] = [
   { id: "features", label: "Features", view: FeaturesSection },
   { id: "assistant", label: "Assistant", view: Assistant },
   { id: "voice", label: "Voice", view: VoiceSection },
-  { id: "tools", label: "Tools", view: Extensions },
+  { id: "tools", label: "Tools", view: ToolsSection },
+  { id: "skills", label: "Skills", view: SkillsSection },
   { id: "memory", label: "Memory", view: MemorySection },
   { id: "notifications", label: "Notifications", view: Notifications },
   { id: "safety", label: "Safety", view: Safety },
