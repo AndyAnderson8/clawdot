@@ -8,6 +8,9 @@
 //! * `POST /api/login`                         `{"password":..}`; returns a session token
 //! * `POST /api/logout`                        ends the session
 //! * `POST /api/admin/password`                `{"password":..}`; sets a new password
+//! * `POST /api/admin/recovery`                creates or replaces the recovery code; shown once (REQ-CFG-070)
+//! * `POST /api/recover`                       `{"code":..,"password":..}`; forgot the password (REQ-CFG-068)
+//! * `POST /api/recover/window`                `{"password":..}`; during the local reset window (REQ-CFG-069)
 //! * `GET  /api/overview`                      endpoints and recent agent events
 //! * `GET  /api/schedule`, `POST /api/schedule`, `PUT|DELETE /api/schedule/{id}`   timers, alarms, reminders
 //! * `POST /api/tools/{name}/tier`            body `{"tier":..|null}`; the administrator's risk tier for a tool (REQ-SEC-030)
@@ -150,7 +153,8 @@ fn admin_error(e: AdminError) -> Resp {
         AdminError::SetupRequired | AdminError::NotPrivate | AdminError::OpenRefused => {
             StatusCode::FORBIDDEN
         }
-        AdminError::AlreadySetUp => StatusCode::CONFLICT,
+        AdminError::AlreadySetUp | AdminError::NoPassword => StatusCode::CONFLICT,
+        AdminError::WindowClosed => StatusCode::FORBIDDEN,
         AdminError::BadPassword => StatusCode::BAD_REQUEST,
         AdminError::Storage | AdminError::NoRandomness => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -259,11 +263,19 @@ pub async fn handle(
         (&Method::GET, ["auth"]) => {
             let mut state = core.admin_state();
             state["peer_private"] = json!(admin::is_private(peer));
+            if !admin::is_private(peer) {
+                // Whether the reset window is open is for the local network only.
+                state["reset_window_secs"] = json!(0);
+            }
             state["version"] = json!(env!("CARGO_PKG_VERSION"));
             return Some(json_reply(StatusCode::OK, &state));
         }
         (&Method::POST, ["setup"]) => return Some(setup(core, peer, body).await),
         (&Method::POST, ["login"]) => return Some(login(core, body).await),
+        (&Method::POST, ["recover"]) => return Some(recover(core, body).await),
+        (&Method::POST, ["recover", "window"]) => {
+            return Some(recover_window(core, peer, body).await);
+        }
         (&Method::POST, ["logout"]) => {
             if let Some(t) = bearer(headers) {
                 core.admin_logout(t);
@@ -281,6 +293,7 @@ pub async fn handle(
             | ["endpoints", _]
             | ["endpoints", _, "rotate"]
             | ["admin", "password"]
+            | ["admin", "recovery"]
             | ["schedule"]
             | ["schedule", _]
             | ["tools"]
@@ -325,6 +338,7 @@ pub async fn handle(
             Err(e) => endpoint_error(&e),
         },
         (&Method::POST, ["admin", "password"]) => change_password(core, body).await,
+        (&Method::POST, ["admin", "recovery"]) => new_recovery(core).await,
         (&Method::GET, ["tools"] | ["skills"]) => json_reply(StatusCode::OK, &core.ui_tools()),
         (&Method::POST, ["tools"]) => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
             Ok(v) => ext(core, ExtOp::ToolAdd(v)).await,
@@ -764,6 +778,17 @@ async fn read_json_limit<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|_| (StatusCode::BAD_REQUEST, "bad request body"))
 }
 
+/// A password hash plus a fresh recovery code and its hash, made together off the async thread.
+async fn hash_with_code(password: String) -> Result<(String, String, String), AdminError> {
+    tokio::task::spawn_blocking(move || {
+        let code = admin::generate_recovery_code()?;
+        let code_hash = admin::hash_recovery_code(&code)?;
+        Ok((admin::hash_password(&password)?, code, code_hash))
+    })
+    .await
+    .unwrap_or(Err(AdminError::NoRandomness))
+}
+
 /// Hashing is deliberately slow; keep it off the async thread.
 async fn hash_in_background(password: String) -> Result<String, AdminError> {
     tokio::task::spawn_blocking(move || admin::hash_password(&password))
@@ -797,14 +822,14 @@ async fn setup(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
             let Some(pw) = req.password.filter(|p| admin::password_ok(p)) else {
                 return admin_error(AdminError::BadPassword);
             };
-            let hash = match hash_in_background(pw).await {
+            let (hash, code, code_hash) = match hash_with_code(pw).await {
                 Ok(h) => h,
                 Err(e) => return admin_error(e),
             };
-            match core.admin_setup_password(peer, hash) {
+            match core.admin_setup_password(peer, hash, Some(code_hash)) {
                 Ok(token) => json_reply(
                     StatusCode::OK,
-                    &json!({ "mode": "password", "token": token }),
+                    &json!({ "mode": "password", "token": token, "recovery_code": code }),
                 ),
                 Err(e) => admin_error(e),
             }
@@ -853,14 +878,127 @@ async fn change_password(core: &Arc<Core>, body: Incoming) -> Resp {
     if !admin::password_ok(&req.password) {
         return admin_error(AdminError::BadPassword);
     }
-    let hash = match hash_in_background(req.password).await {
+    // The recovery code stays as it is; an installation that has none (open mode, or an older file) gets one now.
+    if core.admin_has_recovery() {
+        let hash = match hash_in_background(req.password).await {
+            Ok(h) => h,
+            Err(e) => return admin_error(e),
+        };
+        return match core.admin_set_password(hash, None) {
+            Ok(token) => json_reply(
+                StatusCode::OK,
+                &json!({ "mode": "password", "token": token }),
+            ),
+            Err(e) => admin_error(e),
+        };
+    }
+    let (hash, code, code_hash) = match hash_with_code(req.password).await {
         Ok(h) => h,
         Err(e) => return admin_error(e),
     };
-    match core.admin_set_password(hash) {
+    match core.admin_set_password(hash, Some(code_hash)) {
         Ok(token) => json_reply(
             StatusCode::OK,
-            &json!({ "mode": "password", "token": token }),
+            &json!({ "mode": "password", "token": token, "recovery_code": code }),
+        ),
+        Err(e) => admin_error(e),
+    }
+}
+
+/// `POST /api/admin/recovery`: a new recovery code for the signed-in administrator, shown once (REQ-CFG-070).
+async fn new_recovery(core: &Arc<Core>) -> Resp {
+    let made = tokio::task::spawn_blocking(|| {
+        let code = admin::generate_recovery_code()?;
+        let hash = admin::hash_recovery_code(&code)?;
+        Ok((code, hash))
+    })
+    .await
+    .unwrap_or(Err(AdminError::NoRandomness));
+    match made.and_then(|(code, hash)| core.admin_set_recovery(hash).map(|()| code)) {
+        Ok(code) => json_reply(StatusCode::OK, &json!({ "recovery_code": code })),
+        Err(e) => admin_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recover {
+    code: String,
+    password: String,
+}
+
+/// The one answer to every wrong or used recovery code (REQ-CFG-068).
+fn recovery_refused() -> Resp {
+    error(
+        StatusCode::UNAUTHORIZED,
+        "That recovery code was not accepted. Check it and try again.",
+    )
+}
+
+/// Forgot the password: a recovery code and a new password (REQ-CFG-068). No sign-in needed; the attempt is
+/// rate limited before any hashing, and the code works once.
+async fn recover(core: &Arc<Core>, body: Incoming) -> Resp {
+    let req: Recover = match read_json(body).await {
+        Ok(r) => r,
+        Err((s, m)) => return error(s, m),
+    };
+    if !admin::password_ok(&req.password) {
+        return admin_error(AdminError::BadPassword);
+    }
+    let stored = match core.admin_recover_begin() {
+        Ok(h) => h,
+        Err(AdminError::Unauthorized) => return recovery_refused(),
+        Err(e) => return admin_error(e),
+    };
+    let (code, pw) = (req.code, req.password);
+    let checked = tokio::task::spawn_blocking({
+        let stored = stored.clone();
+        move || admin::verify_recovery_code(&code, &stored)
+    })
+    .await
+    .unwrap_or(false);
+    if !checked {
+        return recovery_refused();
+    }
+    let (hash, new_code, new_hash) = match hash_with_code(pw).await {
+        Ok(h) => h,
+        Err(e) => return admin_error(e),
+    };
+    match core.admin_recover_finish(&stored, hash, new_hash) {
+        Ok(token) => json_reply(
+            StatusCode::OK,
+            &json!({ "mode": "password", "token": token, "recovery_code": new_code }),
+        ),
+        Err(AdminError::Unauthorized) => recovery_refused(),
+        Err(e) => admin_error(e),
+    }
+}
+
+/// A new password during the local reset window, from a private address, without a code (REQ-CFG-069).
+async fn recover_window(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Pw {
+        password: String,
+    }
+    let req: Pw = match read_json(body).await {
+        Ok(r) => r,
+        Err((s, m)) => return error(s, m),
+    };
+    if !admin::password_ok(&req.password) {
+        return admin_error(AdminError::BadPassword);
+    }
+    if let Err(e) = core.admin_window_begin(peer) {
+        return admin_error(e);
+    }
+    let (hash, code, code_hash) = match hash_with_code(req.password).await {
+        Ok(h) => h,
+        Err(e) => return admin_error(e),
+    };
+    match core.admin_window_finish(peer, hash, code_hash) {
+        Ok(token) => json_reply(
+            StatusCode::OK,
+            &json!({ "mode": "password", "token": token, "recovery_code": code }),
         ),
         Err(e) => admin_error(e),
     }
