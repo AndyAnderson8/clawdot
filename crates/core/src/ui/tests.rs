@@ -949,3 +949,37 @@ async fn model_and_voice_lists_need_the_administrator_and_explain_what_is_missin
         "{v}"
     );
 }
+
+// REQ-CFG-081
+#[test]
+fn a_query_value_is_decoded_and_a_missing_or_broken_one_is_none() {
+    use super::query_param;
+    assert_eq!(
+        query_param(
+            Some("url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&key_env=KEY_1"),
+            "url"
+        )
+        .as_deref(),
+        Some("https://openrouter.ai/api/v1")
+    );
+    assert_eq!(
+        query_param(Some("url=a&key_env=KEY_1"), "key_env").as_deref(),
+        Some("KEY_1")
+    );
+    assert_eq!(
+        query_param(Some("a+b=1&x=a+b"), "x").as_deref(),
+        Some("a b")
+    );
+    assert_eq!(query_param(Some("x=1"), "url"), None);
+    assert_eq!(query_param(None, "url"), None);
+    assert_eq!(
+        query_param(Some("x=%zz"), "x"),
+        None,
+        "a broken escape is refused, not guessed"
+    );
+    assert_eq!(
+        query_param(Some("x=%4"), "x").as_deref(),
+        Some("%4"),
+        "a lone percent sign stays as typed"
+    );
+}

@@ -265,7 +265,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
     fields: st["settings"],
     restart_needed: st["restart"],
     llm: { key_present: true },
-    voice_info: { language: "en", stt_model: "whisper", tts_model: "voice-1" },
+    voice_info: { language: "en", stt_model: "whisper", tts_model: "voice-1", provider: "speech.example" },
     speech_configured: !!st["speechOn"],
     speakers_listen: "0.0.0.0:3336",
     ...(note ? { note } : {}),

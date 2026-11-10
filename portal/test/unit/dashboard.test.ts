@@ -74,7 +74,7 @@ test("a test phrase is blocked, with a reason and a fix link, only when the devi
     null,
   );
   assert.equal(refusal("no_speaker").to, "#/settings/about");
-  assert.equal(refusal("no_voice").to, "#/settings/assistant");
+  assert.equal(refusal("no_voice").to, "#/settings/voice");
   assert.equal(refusal("busy").to, undefined);
 });
 

@@ -82,8 +82,8 @@ export function attention(st: Status | null, mode: string, update?: UpdateStatus
     out.push({
       id: "voice",
       title: "No voice set up",
-      why: "A speech provider is needed before the speaker can talk. Add one in the configuration file, then restart.",
-      to: "#/settings/assistant",
+      why: "A speech provider is needed before the speaker can talk. Choose one on the Voice page.",
+      to: "#/settings/voice",
       label: "See voice settings",
     });
   }
@@ -125,7 +125,7 @@ export function attention(st: Status | null, mode: string, update?: UpdateStatus
     out.push({
       id: "quiet",
       title: "Quiet hours are on",
-      why: "Events from your inputs wait until the quiet window ends. Alarms and timers still ring.",
+      why: "Messages from your senders wait until the quiet window ends. Alarms and timers still ring.",
       to: "#/settings/safety",
       label: "Change quiet hours",
     });
@@ -143,7 +143,7 @@ export interface SpeakBlock {
 const REFUSALS: Record<SpeakRefusal, Omit<SpeakBlock, "reason">> = {
   no_voice: {
     text: "No voice is set up, so the speaker has nothing to talk with.",
-    to: "#/settings/assistant",
+    to: "#/settings/voice",
     label: "See voice settings",
   },
   no_speaker: {

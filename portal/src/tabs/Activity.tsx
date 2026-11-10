@@ -44,7 +44,7 @@ const DECISIONS: [string, string][] = [
 const TRIGGERS: [string, string][] = [
   ["", "Any"],
   ["voice", "Your voice"],
-  ["event", "Events from inputs"],
+  ["event", "Messages from senders"],
 ];
 
 function Select(props: {
@@ -163,8 +163,8 @@ export function Activity(): JSX.Element {
           <ul class="rows" id="eventlist">
             {s.overview && !s.overview.events.length ? (
               <li class="empty">
-                Nothing has arrived yet. Events from anything that can send a web request show up here once you create
-                an input in <a href="#/settings/inputs">Settings</a>.
+                Nothing has arrived yet. Messages from other programs show up here once you add a sender in
+                <a href="#/settings/notifications">Settings</a>.
               </li>
             ) : null}
             {s.overview?.events.map((e) => (
@@ -174,7 +174,7 @@ export function Activity(): JSX.Element {
                   <span class="badge">{STATE[e.state] ?? e.state}</span>
                 </div>
                 <div class="mut">
-                  {e.source} through the “{e.endpoint}” input, {ago(e.received_at, s.overview?.now ?? 0)}
+                  {e.source} through the “{e.endpoint}” sender, {ago(e.received_at, s.overview?.now ?? 0)}
                 </div>
                 {e.text ? <div>{e.text}</div> : null}
               </li>

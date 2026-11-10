@@ -6,7 +6,7 @@ import { fail, get, say, set } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
 import type { Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
-import { VoiceControl } from "./Voice.tsx";
+import { ModelSelect, VoiceControl } from "./Voice.tsx";
 
 function browserZone(): string {
   try {
@@ -148,6 +148,16 @@ export function Group(props: {
               ))}
             </select>
           );
+        } else if (sp.kind === "model") {
+          ctl = (
+            <ModelSelect
+              id={id}
+              value={v}
+              url={vals["llm_url"] ?? ""}
+              keyEnv={vals["llm_key_env"] ?? ""}
+              onInput={(x) => setVals({ ...vals, [sp.key]: x })}
+            />
+          );
         } else if (sp.kind === "voice") {
           ctl = (
             <VoiceControl
@@ -199,7 +209,6 @@ export function Group(props: {
               type="text"
               value={v}
               autoComplete="off"
-              list={sp.datalist}
               disabled={sp.off}
               placeholder={sp.off ? "Not available yet" : undefined}
               onInput={input}
@@ -217,11 +226,9 @@ export function Group(props: {
               {f.source !== "default" || !f.live || f.ignored ? (
                 <p class="meta">
                   {[
-                    f.source !== "default" ? (FROM[f.source] ?? f.source) : "",
-                    f.live ? "" : "Needs a restart",
-                    f.ignored
-                      ? "A command-line flag is set, so a value saved here has no effect until the flag is removed"
-                      : "",
+                    f.source !== "default" && !f.ignored ? (FROM[f.source] ?? f.source) : "",
+                    f.live ? "" : "Applies after a restart",
+                    f.ignored ? "Fixed when ClawDot was started, so a value saved here has no effect" : "",
                   ]
                     .filter(Boolean)
                     .join(". ") + "."}
@@ -270,7 +277,7 @@ export function Group(props: {
         {err}
       </p>
       <div class="row">
-        <button>{"Save " + title.toLowerCase()}</button>
+        <button>{"Save " + title.charAt(0).toLowerCase() + title.slice(1)}</button>
       </div>
     </form>
   );

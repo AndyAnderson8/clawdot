@@ -118,7 +118,7 @@ function Setup() {
     <section id="setup">
       <h2>Set up ClawDot</h2>
       <p class="mut">
-        Tokens for inputs are separate and always required. Until you finish, anyone on your private network who opens
+        Tokens for senders are separate and always required. Until you finish, anyone on your private network who opens
         this page could do it instead, so do it now.
       </p>
       <form id="pwform" class="panel" onSubmit={setPassword}>
@@ -160,7 +160,7 @@ function Setup() {
         }}
       >
         <h3>Or leave it open on this network</h3>
-        <p class="mut">Anyone on this network can use this page and see what your inputs send.</p>
+        <p class="mut">Anyone on this network can use this page and see what your senders send.</p>
         <div class="row">
           <button class="danger" id="openbtn" disabled={!s.openAllowed || !s.peerPrivate}>
             Leave open

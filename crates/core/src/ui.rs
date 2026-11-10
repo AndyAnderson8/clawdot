@@ -395,7 +395,7 @@ pub async fn handle(
             Ok(id) => notes_forget(core, Some(id)),
             Err(_) => error(StatusCode::NOT_FOUND, "no such note"),
         },
-        (&Method::GET, ["models"]) => models(core).await,
+        (&Method::GET, ["models"]) => models(core, query).await,
         (&Method::GET, ["voices"]) => voices().await,
         (&Method::GET, ["update"]) => update_status(),
         (&Method::POST, ["update", "check"]) => update_check().await,
@@ -426,17 +426,24 @@ pub async fn handle(
 
 /// `GET /api/models`: the models the language-model service offers, asked of the service with the saved address and key
 /// (REQ-CFG-081). A service with no list, or a wrong key, is said in plain words and the page falls back to typing.
-async fn models(core: &Core) -> Resp {
+async fn models(core: &Core, query: Option<&str>) -> Resp {
     let s = core.ui_settings();
     let value = |k: &str| s["fields"][k]["value"].as_str().unwrap_or("").to_owned();
-    let url = value("llm_url");
+    // The page can ask about a choice that is not saved yet: `?url=...&key_env=NAME`.
+    let url = query_param(query, "url").unwrap_or_else(|| value("llm_url"));
     if url.is_empty() {
         return error(
             StatusCode::CONFLICT,
             "Choose who answers and save first, then the list of models can be asked for.",
         );
     }
-    let var = value("llm_key_env");
+    let var = query_param(query, "key_env").unwrap_or_else(|| value("llm_key_env"));
+    if var.len() > 64 || !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The key variable is a name made of letters, digits and underscores.",
+        );
+    }
     let key = if var.is_empty() {
         String::new()
     } else {
@@ -449,6 +456,29 @@ async fn models(core: &Core) -> Resp {
             &format!("Could not get the list of models: {e}."),
         ),
     }
+}
+
+/// The value of `key` in a query string, with percent-escapes and `+` decoded; `None` if absent or not text.
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    let raw = query?
+        .split('&')
+        .find_map(|p| p.strip_prefix(key)?.strip_prefix('='))?;
+    let mut out = Vec::with_capacity(raw.len());
+    let b = raw.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                let h = std::str::from_utf8(&b[i + 1..i + 3]).ok()?;
+                out.push(u8::from_str_radix(h, 16).ok()?);
+                i += 2;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The voices of OpenAI's speech service, which has a fixed set and no list to ask for.

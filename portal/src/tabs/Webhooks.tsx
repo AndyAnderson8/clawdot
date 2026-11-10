@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
 import { Field } from "../parts.tsx";
+import { AddButton, Dialog } from "../dialog.tsx";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
@@ -15,7 +16,8 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
   const url = base() + "/hook/" + e.name;
 
   const rotate = async () => {
-    if (!confirm("Make a new token for " + e.name + "? The old one stops working, so update whatever uses it.")) return;
+    if (!confirm("Make a new token for " + e.name + "? The old one stops working, so update the program that uses it."))
+      return;
     try {
       const r = await api<WebhookToken>("POST", "/api/endpoints/" + e.name + "/rotate");
       set({ fresh: { ...get().fresh, [e.name]: r.token } });
@@ -27,7 +29,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     }
   };
   const remove = async () => {
-    if (!confirm("Delete the input " + e.name + "? Anything posting to it will be turned away.")) return;
+    if (!confirm("Remove the sender " + e.name + "? Anything sending to it will be turned away.")) return;
     try {
       await api("DELETE", "/api/endpoints/" + e.name);
       const { [e.name]: _gone, ...rest } = get().fresh;
@@ -84,6 +86,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
 export function Webhooks(): JSX.Element {
   const s = useApp();
   const [name, setName] = useState("");
+  const [adding, setAdding] = useState(false);
   const [adapter, setAdapter] = useState("generic");
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const ov = s.overview;
@@ -94,6 +97,7 @@ export function Webhooks(): JSX.Element {
       const r = await api<WebhookToken>("POST", "/api/endpoints", { name: name.trim(), adapter });
       set({ fresh: { ...get().fresh, [r.name]: r.token } });
       setName("");
+      setAdding(false);
       setOpen((o) => ({ ...o, [r.name]: true }));
       say("Created. Copy the token now; it is shown once.");
       await load();
@@ -106,18 +110,21 @@ export function Webhooks(): JSX.Element {
   return (
     <>
       <p class="lead">
-        Events from anything that can send a web request: a build server, a home automation hub, a script. Each input is
-        a web address with its own token, which works like a password for that address. The speaker reads events out
-        when it is idle.
+        Let other programs speak through your speaker: a build server that has finished, a home automation hub, a
+        script. Each sender gets its own address and token, which works like a password. When a sender posts a message,
+        the speaker reads it out as soon as it is idle.
       </p>
       <section class="card" id="inputlist">
-        <h3>
-          Your inputs<span class="count">{ov?.endpoints.length ?? 0}</span>
-        </h3>
+        <div class="head">
+          <h3>
+            Senders<span class="count">{ov?.endpoints.length ?? 0}</span>
+          </h3>
+          <AddButton label="Add a sender" id="addsender" onClick={() => setAdding(true)} />
+        </div>
         <ul class="rows">
           {ov && !ov.endpoints.length ? (
             <li class="empty">
-              No inputs yet. Create one below, then paste its address and token into whatever should send events.
+              No senders yet. Add one, then paste its address and token into the program that should send messages.
             </li>
           ) : null}
           {ov?.endpoints.map((e) => (
@@ -130,37 +137,38 @@ export function Webhooks(): JSX.Element {
           ))}
         </ul>
       </section>
-      <form class="panel" onSubmit={create}>
-        <h3>Create an input</h3>
-        <p class="mut">
-          Give each sender its own input so you can cut one off without touching the rest. Use letters, numbers, - and
-          _.
-        </p>
-        <Field id="wname" label="Name">
-          <input
-            id="wname"
-            type="text"
-            maxLength={32}
-            placeholder="For example: build-server"
-            autoComplete="off"
-            autoCapitalize="none"
-            value={name}
-            onInput={(e) => setName(e.currentTarget.value)}
-          />
-        </Field>
-        <Field id="wadapter" label="What format does it send?">
-          <select id="wadapter" value={adapter} onChange={(e) => setAdapter(e.currentTarget.value)}>
-            {ADAPTERS.map(([v, text]) => (
-              <option key={v} value={v}>
-                {text}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <div class="row">
-          <button>Create input</button>
-        </div>
-      </form>
+      <Dialog id="senderdialog" title="Add a sender" open={adding} onClose={() => setAdding(false)}>
+        <form class="dlgform" onSubmit={create}>
+          <p class="mut">
+            Give each program its own sender, so you can turn one off without touching the rest. Use letters, numbers, -
+            and _.
+          </p>
+          <Field id="wname" label="Name">
+            <input
+              id="wname"
+              type="text"
+              maxLength={32}
+              placeholder="For example: build-server"
+              autoComplete="off"
+              autoCapitalize="none"
+              value={name}
+              onInput={(e) => setName(e.currentTarget.value)}
+            />
+          </Field>
+          <Field id="wadapter" label="Message format">
+            <select id="wadapter" value={adapter} onChange={(e) => setAdapter(e.currentTarget.value)}>
+              {ADAPTERS.map(([v, text]) => (
+                <option key={v} value={v}>
+                  {text}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <div class="row">
+            <button>Add sender</button>
+          </div>
+        </form>
+      </Dialog>
     </>
   );
 }

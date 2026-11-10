@@ -118,16 +118,16 @@ export function skillBody(
 export const LABEL: Record<string, string> = {
   device_name: "Device name",
   zone: "Time zone",
-  persona: "Personality",
-  llm_url: "Language model address",
+  persona: "Instructions",
+  llm_url: "Address",
   llm_model: "Model",
   llm_fallback_model: "Backup model",
-  summary_model: "Summary model",
-  speech_language: "Speech language",
-  llm_key_env: "Key variable",
+  summary_model: "Model for summaries",
+  speech_language: "Language you speak",
+  llm_key_env: "API key",
   voice: "Voice",
-  listen: "Address this page uses",
-  public_url: "Address agents use",
+  listen: "Portal address",
+  public_url: "Address other programs use",
   max_requests_per_day: "Requests per day",
   daily_spend_usd: "Daily spend limit",
   board: "Board",
@@ -145,20 +145,19 @@ export const LABEL: Record<string, string> = {
   quiet_end: "Quiet until",
 };
 export const FROM: Record<string, string> = {
-  default: "Default",
-  file: "Configuration file",
-  saved: "Saved here",
-  flag: "Command-line flag",
+  default: "Standard setting",
+  file: "Preset on this device",
+  saved: "You changed this here",
+  flag: "Set when ClawDot was started",
 };
 
-export type SettingKind = "text" | "zone" | "area" | "board" | "number" | "bool" | "time" | "language" | "voice";
+export type SettingKind =
+  "text" | "zone" | "area" | "board" | "number" | "bool" | "time" | "language" | "voice" | "model";
 export interface SettingSpec {
   key: string;
   kind: SettingKind;
   hint?: string;
   off?: boolean;
-  /** For a text box: the id of a list of suggestions to offer while typing. */
-  datalist?: string;
   /** An optional setting: shown only once added, with this text on the button that adds it, and a Remove button. */
   optional?: string;
   /** Hide the control (its value is still kept and saved) while this returns true for the form's current values. */
