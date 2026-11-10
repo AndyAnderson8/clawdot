@@ -40,6 +40,7 @@
 | Recipes | [recipes/README.md](recipes/README.md) | The default toolset as tested configurations: web search, Spotify (with its policy problem), Home Assistant, GitHub, calendar, Claude Code hook |
 | Guides | [guides/announce.md](guides/announce.md) | Make the speaker say something from a script, Home Assistant or CI: `POST /api/announce` and `clawdot say`, with snippets and failure modes |
 | Bridges | [../bridges/README.md](../bridges/README.md) | ntfy and Discord sidecars that make the speaker say messages, with filters, rate limits and no raw markup |
+| Guides | [guides/quick-start.md](guides/quick-start.md) | Start ClawDot on a computer, choose a language model, hear it answer, and keep it updated |
 | Guides | [guides/updates.md](guides/updates.md) | How ClawDot checks for, verifies and installs updates, and how the maintainer signs a release |
 | Guides | [guides/local-speech.md](guides/local-speech.md) | Free local speech to text (whisper.cpp) and text to speech (Piper) with an OpenAI-compatible URL, for the PC voice loop |
 | Guides | [guides/forgot-password.md](guides/forgot-password.md) | Forgot the administrator password: the 10 second button hold, the desktop key, the command line, and the Echo Dot |
