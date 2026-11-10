@@ -8,6 +8,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Browser, findChrome, sleep } from "./chrome.ts";
 import { PASSWORD, RECOVERY, startMock, type Mock } from "./mock-api.ts";
+import { STRESS } from "./stress.ts";
 
 const chrome = findChrome();
 if (!chrome) {
@@ -31,6 +32,54 @@ const HELPERS = `(() => {
     click: async (s) => { const e = document.querySelector(s); if (!e) throw new Error('no ' + s); e.click(); await settle(); },
     clickText: async (scope, text) => { const e = [...document.querySelectorAll(scope + ' button, ' + scope + ' a, ' + scope + ' summary')].find((x) => x.textContent.trim() === text); if (!e) throw new Error('no "' + text + '" in ' + scope); e.click(); await settle(); },
     submit: async (s) => { const f = document.querySelector(s); f.requestSubmit(); await settle(); },
+    wide: () => {
+      // A wide stack with extra spacing, so a layout that only fits narrow system fonts (Linux CI) shows itself here.
+      const st = document.createElement('style');
+      st.id = 'widefont';
+      st.textContent = 'html *:not(svg):not(svg *) { font-family: Verdana, "DejaVu Sans", "Arial Black", sans-serif !important; letter-spacing: 0.05em !important; } code, pre, .token { font-family: "Courier New", monospace !important; }';
+      if (!document.getElementById('widefont')) document.head.append(st);
+    },
+    // Things a fixed bar or a clipping box would hide: the focus ring's room, and the last row above the bottom bar.
+    hidden: () => {
+      const out = [];
+      const sel = 'a[href], button, input:not([type=hidden]), select, textarea, summary';
+      for (const el of document.querySelectorAll(sel)) {
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || el.closest('.sr') || getComputedStyle(el).position === 'fixed') continue;
+        for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+          const cs = getComputedStyle(p);
+          if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+          const pr = p.getBoundingClientRect();
+          if (r.left - 5 < pr.left - 0.5 || r.right + 5 > pr.right + 0.5) { out.push('focus ring clipped: ' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' by ' + p.tagName.toLowerCase() + (p.id ? '#' + p.id : '') + ' (' + Math.round(r.left) + '..' + Math.round(r.right) + ' in ' + Math.round(pr.left) + '..' + Math.round(pr.right) + ')'); break; }
+        }
+      }
+      window.scrollTo(0, document.documentElement.scrollHeight);
+      const nav = document.querySelector('#tabs');
+      const foot = document.querySelector('#foot');
+      if (nav && foot && getComputedStyle(nav).position === 'fixed' && foot.getBoundingClientRect().bottom > nav.getBoundingClientRect().top + 0.5)
+        out.push('the bottom bar covers the end of the page (footer bottom ' + Math.round(foot.getBoundingClientRect().bottom) + ' > bar top ' + Math.round(nav.getBoundingClientRect().top) + ')');
+      window.scrollTo(0, 0);
+      return out.slice(0, 6);
+    },
+    overflow: () => {
+      const vw = document.documentElement.clientWidth;
+      const clipped = (el) => { for (let p = el.parentElement; p; p = p.parentElement) { const o = getComputedStyle(p).overflowX; if (o !== 'visible' && p.getBoundingClientRect().right <= vw + 0.5) return true; } return false; };
+      const out = [];
+      for (const el of document.querySelectorAll('body *')) {
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.right <= vw + 0.5 || clipped(el)) continue;
+        if (getComputedStyle(el).position === 'fixed' && r.right <= vw + 0.5) continue;
+        out.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).join('.') : '') + ' right=' + Math.round(r.right) + ' width=' + Math.round(r.width) + ' scrollWidth=' + el.scrollWidth + ' "' + (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 40) + '"');
+        if (out.length >= 6) break;
+      }
+      if (!out.length && document.documentElement.scrollWidth > vw) {
+        // Nothing visibly sticks out, so content inside something does: list boxes whose own content is wider than they are.
+        const wider = (el) => el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflowX === "visible";
+        const inner = [...document.querySelectorAll("body *")].filter((el) => wider(el) && ![...el.children].some(wider)).slice(0, 5);
+        for (const el of inner) out.push("(content wider than box) " + el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + (typeof el.className === "string" && el.className ? "." + el.className.trim().split(/\\s+/).join(".") : "") + " clientWidth=" + el.clientWidth + " scrollWidth=" + el.scrollWidth);
+      }
+      return { viewport: vw, scrollWidth: document.documentElement.scrollWidth, offenders: out };
+    },
     rows: (s) => [...document.querySelectorAll(s ?? '#panel ul.rows > li')].map((li) => li.textContent),
   };
   window.confirm = () => true;
@@ -70,7 +119,13 @@ async function open(mode: "setup" | "password" | "open", hash = "", extra: Recor
   await b.goto(mock.url + "/api/auth");
   await b.ev("sessionStorage.clear()");
   mock.reset(mode);
-  Object.assign(mock.state, extra);
+  for (const [k, v] of Object.entries(extra)) {
+    const have = mock.state[k];
+    mock.state[k] =
+      v && typeof v === "object" && !Array.isArray(v) && have && typeof have === "object" && !Array.isArray(have)
+        ? { ...have, ...v }
+        : v;
+  }
   await b.goto(mock.url + "/" + hash);
   await b.ev(HELPERS);
 }
@@ -771,11 +826,6 @@ await step("Settings: sections, phone navigation, native controls, no horizontal
     await b.ev(`location.hash = '${hash}'`);
     await b.ev("T.settle()");
     await b.ev("new Promise((r) => setTimeout(r, 250))");
-    await eq(
-      `document.documentElement.scrollWidth <= window.innerWidth`,
-      true,
-      `no horizontal scroll at 360 px on ${hash}`,
-    );
     // Selects are the platform's own: real elements with the system appearance, no custom popups.
     await eq(
       `T.all('select').every((e) => getComputedStyle(e).appearance !== 'none')`,
@@ -789,6 +839,49 @@ await step("Settings: sections, phone navigation, native controls, no horizontal
     true,
     "native inputs",
   );
+  await viewport(1100);
+});
+
+await step("every page fits a 360 px and a 320 px phone with long content and a wide font", async () => {
+  const pages = ["#/dashboard", "#/reminders", "#/activity"];
+  for (const id of ["general", "assistant", "inputs", "tools", "notes", "safety", "security", "about"])
+    pages.push("#/settings/" + id);
+  const bad: string[] = [];
+  for (const [content, fixture] of [
+    ["stress content", STRESS],
+    ["normal content", {}],
+  ] as const)
+    for (const wide of [false, true]) {
+      for (const width of [360, 320]) {
+        await open("open", "", fixture);
+        await b.until(`!!T.q('#band')`, "the portal");
+        if (wide) await b.ev("T.wide()");
+        await viewport(width);
+        for (const hash of pages) {
+          await b.ev(`location.hash = '${hash}'`);
+          await b.ev("T.settle()");
+          await b.ev("new Promise((r) => setTimeout(r, 400))");
+          // open every folded part and every row of a form, so what is inside is measured too
+          if (hash.endsWith("/tools"))
+            for (let i = 0; i < 2; i++)
+              await T(`clickText('#part-tools form.panel', 'Add a value the assistant fills in')`);
+          await b.ev("document.querySelectorAll('details').forEach((d) => (d.open = true))");
+          await b.ev("new Promise((r) => setTimeout(r, 100))");
+          const o = await b.ev<{ viewport: number; scrollWidth: number; offenders: string[] }>("T.overflow()");
+          const hidden = await b.ev<string[]>("T.hidden()");
+          if (hidden.length)
+            bad.push(
+              `${hash} at ${width} px, ${content}${wide ? ", wide font" : ""}:\n         ` + hidden.join("\n         "),
+            );
+          if (o.scrollWidth > o.viewport || o.offenders.length)
+            bad.push(
+              `${hash} at ${width} px, ${content}${wide ? ", wide font" : ""}: scrollWidth ${o.scrollWidth} > viewport ${o.viewport}\n         ` +
+                o.offenders.join("\n         "),
+            );
+        }
+      }
+    }
+  assert.deepEqual(bad, [], "horizontal overflow:\n  " + bad.join("\n  "));
   await viewport(1100);
 });
 
