@@ -253,7 +253,7 @@ await step("shell: four destinations, titles, current page, home link, unknown a
   await eq(`T.q('#home').getAttribute('aria-label')`, "ClawDot, go to Home", "the logo is the way home");
   await eq(
     `T.all('#tabs a').map((a) => a.textContent)`,
-    ["Home", "Clock", "Bluetooth", "Settings"],
+    ["Home", "Clock", "Media", "Settings"],
     "four destinations, Home first",
   );
   await eq(`T.all('#tabs a[aria-current="page"]').map((a) => a.id)`, ["tab-dashboard"], "home is current first");
@@ -439,16 +439,31 @@ await step("Clock: alarms, timers, reminders and the stopwatch each have their o
   await eq(`T.q('#panel form') === null && T.q('#panel button') === null`, true, "no controls that do nothing");
 });
 
-await step("Bluetooth: says plainly that it is not available yet, and offers nothing that would not work", async () => {
-  await open("open", "#/bluetooth");
+await step("Media: nothing to play yet, points to Settings; Bluetooth is off and cannot be turned on yet", async () => {
+  await open("open", "#/media");
   await b.until(`!!T.q('#btcard')`, "the page");
-  await eq(`T.text('#btcard h3')`, "Paired devices", "the list has a title");
-  await eq(`T.text('#btcard .blank h3')`, "Bluetooth is not available on this device yet", "says so");
-  await eq(`T.q('#btcard button').disabled`, true, "pairing is shown disabled");
+  await eq(`T.text('#mediacard .blank h3')`, "Nothing to play yet", "says so");
+  await eq(`T.q('#mediasettings').getAttribute('href')`, "#/settings/media", "and says where to set it up");
+  await eq(`T.q('#btswitch').disabled && !T.q('#btswitch').checked`, true, "Bluetooth is shown off and cannot be used");
   assert.ok(
     mock.log.every((l) => !l.path.includes("bluetooth")),
     "no made-up request",
   );
+  await open("open", "#/bluetooth");
+  await b.until(`!!T.q('#btcard')`, "the old Bluetooth address lands on Media");
+  await open("open", "#/settings/media");
+  await b.until(`!!T.q('#mediaproviders')`, "the providers");
+  await eq(`T.all('#mediaproviders select').every((x) => x.disabled)`, true, "none can be chosen yet");
+  await shot("settings-media");
+  await open("open", "#/settings/lights");
+  await b.until(`!!T.q('#lightscard')`, "the lights");
+  await eq(`T.all('#lightscard svg.ledring').length`, 5, "a preview of the ring for each state");
+  await eq(
+    `T.all('#lightscard input').every((x) => x.disabled)`,
+    true,
+    "colours cannot be changed yet, and it says so",
+  );
+  await shot("settings-lights");
 });
 
 await step("Activity: messages from senders are shown as text", async () => {
@@ -1027,7 +1042,7 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
 
 await step("Settings: sections in a tab strip, native dropdowns, no horizontal scroll at 360 px", async () => {
   await open("open", "#/settings");
-  await b.until(`T.all('.tabs a').length === 11`, "the section tabs");
+  await b.until(`T.all('.tabs a').length === 13`, "the section tabs");
   await eq(
     `T.all('.tabs a').map((a) => a.textContent)`,
     [
@@ -1037,6 +1052,8 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
       "Voice",
       "Tools",
       "Skills",
+      "Media",
+      "Lights",
       "Memory",
       "Notifications",
       "Safety",
@@ -1056,7 +1073,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
     "#/clock/timers",
     "#/clock/reminders",
     "#/clock/stopwatch",
-    "#/bluetooth",
+    "#/media",
     "#/activity",
   ];
   for (const id of [
@@ -1066,6 +1083,8 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
     "voice",
     "tools",
     "skills",
+    "media",
+    "lights",
     "memory",
     "notifications",
     "safety",
@@ -1101,7 +1120,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
 });
 
 await step("every page uses the same card pattern: titles, rows, one width for inputs and text areas", async () => {
-  const pages = ["#/clock", "#/clock/timers", "#/clock/reminders", "#/clock/stopwatch", "#/bluetooth", "#/activity"];
+  const pages = ["#/clock", "#/clock/timers", "#/clock/reminders", "#/clock/stopwatch", "#/media", "#/activity"];
   for (const id of [
     "general",
     "features",
@@ -1141,7 +1160,7 @@ await step("every page fits a 360 px and a 320 px phone with long content and a 
     "#/clock/timers",
     "#/clock/reminders",
     "#/clock/stopwatch",
-    "#/bluetooth",
+    "#/media",
     "#/activity",
   ];
   for (const id of [

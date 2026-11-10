@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.34 |
+| **Version** | 0.35 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -198,7 +198,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-023 | An installation that has an `admin-token.hash` from an earlier version MUST keep working: on the first start the old token becomes the password-mode credential (entered in the password field), and the core converts the file without printing anything. The UI MUST let the signed-in administrator replace it with a real password (REQ-CFG-024). | Must | M4 | T |
 | REQ-CFG-024 | A signed-in administrator (or any private-address user in open mode) MUST be able to set a new administrator password in the UI; this moves an open installation to password mode and ends every other session. | Must | M4 | T |
 | REQ-CFG-025 | The UI MUST be a tabbed portal with a persistent header (logo, device name, a status indicator) and a footer showing the running version with a link to the release notes. The selected tab MUST be kept in the URL fragment so a tab can be bookmarked, and the tabs MUST be operable by keyboard. | Must | M4 | I |
-| REQ-CFG-026 | The portal's tabs and copy MUST use plain names a new user understands: Home, Reminders, Agents, Tools, Connections, Skills, Webhooks, Settings. The word "inbox" MUST NOT appear in the UI, "scheduled" MUST NOT be used as a heading, and music or radio MUST NOT appear in the portal. | Must | M4 | I |
+| REQ-CFG-026 | The portal's tabs and copy MUST use plain names a new user understands: Home, Clock, Media, Settings, and in Settings: Tools, Skills, Notifications, Voice, Lights. The word "inbox" MUST NOT appear in the UI and "scheduled" MUST NOT be used as a heading. Music, podcasts and radio MAY appear only on the Media page and its settings, which say plainly that nothing can play until a provider is supported. | Must | M4 | I |
 | REQ-CFG-027 | The Reminders tab MUST list every timer, alarm, and reminder with human-readable times in the device time zone, and let an administrator add, edit, and cancel them, through authenticated JSON endpoints (`/api/schedule`) handled by the same scheduler the voice commands use. | Must | M4 | T |
 | REQ-CFG-028 | The Webhooks tab MUST create, list, rotate, and delete endpoints, show the endpoint URL with a copy action, and show ready-to-paste snippets (curl, Claude Code hooks, GitHub Actions) with the token filled in only when it has just been created or rotated. | Must | M4 | D |
 | REQ-CFG-029 | The Tools and Connections tabs MUST list what the backend knows: every tool the assistant can call (built in, HTTP, MCP) with its source and whether it asks for confirmation, and every configured MCP server with its connection status and discovered tools. | Must | M4 | T |
@@ -400,3 +400,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.32 | 2026-11-10 | Recovery code removed (CFG-067, 068, 073 marked removed; CFG-069, 071, 072 reworded): the shell reset and the button-opened reset window stay |
 | 0.33 | 2026-11-10 | Updates (section 4.11, UPD-001..011): a daily check for a newer release, a manual check, and an install only on confirmation of a release signed by the project's key; with no key it only announces |
 | 0.34 | 2026-11-10 | The voice and the speech language change while running, and the portal asks the services for their models and voices (CFG-080, 081) |
+| 0.35 | 2026-11-10 | The portal has a Media page (a stub until providers exist), so music and radio may appear there (CFG-026) |
