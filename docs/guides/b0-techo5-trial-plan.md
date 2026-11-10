@@ -167,7 +167,7 @@ adb shell "mkdir -p /tmp/s; for s in a b; do mount -t ext4 -o ro /dev/block/plat
 
 ```powershell
 cd E:\b0\techo5-dot
-python tools/install-dot.py --serial <serial> --dry-run --name "ClawDot Dot" --wake-words okay_nabu,hey_jarvis,hey_mycroft --backups E:\b0\backups --work E:\b0\build
+python tools/install-dot.py --serial <serial> --dry-run --name "ClawDot" --wake-words okay_nabu,hey_jarvis,hey_mycroft --backups E:\b0\backups --work E:\b0\build
 ```
 
 Choices: `--wake-words` limits the models the installer *downloads* to the three Apache-2.0 ones [S: R-08 section 6; argparse in install-dot.py]; `--name` avoids a prompt; add `--ssh-key <file.pub>` if you want a key placed for a later SSH switch [S: install-dot.py]. Do not use `--for-someone-else` (it clears state). Do not pass `--wifi` if the unit already holds the Wi-Fi network from Fire OS; the installer says `saved Wi-Fi network <name>` and keeps it.
@@ -260,7 +260,7 @@ All of E happens in one installer run. The installer has no pause between its su
 
 ```powershell
 cd E:\b0\techo5-dot
-python tools/install-dot.py --serial <serial> --name "ClawDot Dot" --wake-words okay_nabu,hey_jarvis,hey_mycroft --backups E:\b0\backups --work E:\b0\build
+python tools/install-dot.py --serial <serial> --name "ClawDot" --wake-words okay_nabu,hey_jarvis,hey_mycroft --backups E:\b0\backups --work E:\b0\build
 ```
 
 Same options as the dry run, minus `--dry-run`. Run it from the TWRP session of phase C, so the backups and the write describe the same state.
@@ -270,7 +270,7 @@ Same options as the dry run, minus `--dry-run`. Run it from the TWRP session of 
 | W-a boot image to `recovery` | `dd` of the 13 MB image to p12, then reads back and compares md5 | `written and read back, md5 <32 hex>` | `partition reads back <x>, wanted <y>`. The TWRP backup is at `recovery.img`: go to R-B at once. The unit still has Fire OS; the old TWRP is gone from p12 until restored [S: install-dot.py step 5] |
 | W-b root filesystem to the cache store | pushes ~37 MB tar (49 MB unpacked), unpacks into `/cache/techo5/slots/a`, marks it `good`, sets `active` | `slot a: techo5-dot v1.0.60 (<sha>), 83 commands in /bin` | `installing the slot failed`. "Nothing else has changed yet; run again" [S: install-dot.py step 6]. Rerun once. A second failure: go to R-A or R-B because recovery already holds Linux |
 | W-c TWRP copy kept on the unit | pushes `recovery.img` to `/cache/techo5/twrp.img`, md5 checked; pushes `back-to-linux.sh` | `TWRP copy kept on the unit (to-twrp puts it back; /cache/techo5/back-to-linux.sh returns)` | `the TWRP copy on the unit does not match` |
-| W-d provisioning | `/data/misc/echolocal/name`, `psk`, `models/*`, optional `ssh/authorized_keys`, `/data/techo5-linux/` dirs | `== provisioning 'ClawDot Dot'` and `new key written to ...\home-assistant.key` | any `adb push` failure after the retries |
+| W-d provisioning | `/data/misc/echolocal/name`, `psk`, `models/*`, optional `ssh/authorized_keys`, `/data/techo5-linux/` dirs | `== provisioning 'ClawDot'` and `new key written to ...\home-assistant.key` | any `adb push` failure after the retries |
 | W-e arming | writes `TECHO5-TRIES 0 installed` at `misc` sector 14, checks it | no line on success | `the boot count in misc could not be reset` |
 | W-f reboot | `adb reboot recovery`, which now boots Linux | `waiting for the unit's Linux console on USB`, then `slot a, techo5-dot v1.0.60 (...), address <ip>, echod running` | see E2 |
 
