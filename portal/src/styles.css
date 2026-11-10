@@ -800,3 +800,13 @@ dl.kv dd {
     margin-bottom: 0;
   }
 }
+#rcode {
+  display: block;
+  font-size: 1.375rem;
+  letter-spacing: 0.04em;
+  padding: var(--spacing-4);
+  background: var(--color-background-muted);
+  border-radius: var(--radius-inner);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

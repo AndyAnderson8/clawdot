@@ -53,6 +53,10 @@ pub mod kind {
     pub const PLAY_URL: &str = "clawdot.play-url";
     /// Core to satellite: pause or resume stream playback.
     pub const MEDIA_CONTROL: &str = "clawdot.media-control";
+    /// The owner held the action button for 10 seconds (REQ-SAT-020).
+    pub const ADMIN_RESET: &str = "clawdot.admin-reset";
+    /// The core's answer to [`ADMIN_RESET`] (REQ-SAT-020).
+    pub const ADMIN_RESET_WINDOW: &str = "clawdot.admin-reset-window";
 }
 
 /// Protocol version. While `major` is 0 the format is unstable and peers must match exactly.
@@ -309,6 +313,15 @@ pub enum Message {
     },
     /// Pause or resume stream playback.
     MediaControl(MediaAction),
+    /// Satellite to core: the owner asks for the local administrator reset window (REQ-SAT-020).
+    AdminReset,
+    /// Core to satellite: how long the reset window is open, 0 when refused (REQ-SAT-020).
+    AdminResetWindow {
+        /// Seconds the window stays open; 0 means the request was refused.
+        open_secs: u32,
+        /// Plain words for a refusal.
+        reason: Option<String>,
+    },
     /// An event this version does not know; kept so peers can ignore it.
     Unknown(Frame),
 }
@@ -408,6 +421,14 @@ impl Message {
                 "action",
                 serde_json::to_value(a).unwrap_or(Value::Null),
             )),
+            Self::AdminReset => Frame::new(kind::ADMIN_RESET),
+            Self::AdminResetWindow { open_secs, reason } => {
+                let mut d = one("open_secs", Value::from(*open_secs));
+                if let Some(r) = reason {
+                    d.insert("reason".into(), Value::String(r.clone()));
+                }
+                Frame::new(kind::ADMIN_RESET_WINDOW).with_data(d)
+            }
             Self::Unknown(f) => f.clone(),
         }
     }
@@ -510,6 +531,22 @@ impl Message {
                     reason: e.to_string(),
                 })?)
             }
+            kind::ADMIN_RESET => Self::AdminReset,
+            kind::ADMIN_RESET_WINDOW => {
+                let open_secs = data
+                    .get("open_secs")
+                    .and_then(Value::as_u64)
+                    .and_then(|s| u32::try_from(s).ok())
+                    .ok_or_else(|| MessageError {
+                        kind: name.clone(),
+                        reason: "`open_secs` must be a whole number".into(),
+                    })?;
+                let reason = data
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(|r| r.chars().take(200).collect());
+                Self::AdminResetWindow { open_secs, reason }
+            }
             _ => Self::Unknown(Frame {
                 kind: name,
                 data,
@@ -589,6 +626,15 @@ mod tests {
             },
             Message::MediaControl(MediaAction::Pause),
             Message::MediaControl(MediaAction::Resume),
+            Message::AdminReset,
+            Message::AdminResetWindow {
+                open_secs: 300,
+                reason: None,
+            },
+            Message::AdminResetWindow {
+                open_secs: 0,
+                reason: Some("try again in a minute".into()),
+            },
             Message::SetIndicator(Indicator::WakeDetected),
             Message::SetMute { muted: false },
         ]

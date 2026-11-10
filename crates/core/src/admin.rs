@@ -5,6 +5,8 @@
 //!   build. Constant memory, no new dependency. The iteration count and salt travel with the hash.
 //! * [`Admin`]: the setting (unset, open, or password), and the in-memory sessions.
 //! * [`is_private`]: which peers may complete setup or use open mode.
+//! * Recovery (REQ-CFG-067..069, 071..073): a one-time recovery code ([`generate_recovery_code`]) whose slow hash is kept
+//!   beside the password hash, and a short in-memory *reset window* opened by a device button.
 
 use crate::inbox::endpoint::{constant_time_eq, generate_token, hash_token, verify_token};
 use crate::sched::Ts;
@@ -25,6 +27,15 @@ pub const MAX_PASSWORD: usize = 128;
 pub const MAX_SESSIONS: usize = 8;
 /// How long a sign-in lasts.
 pub const SESSION_SECS: Ts = 12 * 3600;
+
+/// Characters in a recovery code (not counting the dashes).
+pub const RECOVERY_LEN: usize = 20;
+/// Look-alike free alphabet (no 0, 1, I, L, O): 31 symbols, so 20 of them carry about 99 bits.
+const RECOVERY_ALPHABET: &[u8; 31] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+/// How long the local reset window stays open (REQ-CFG-069).
+pub const RESET_WINDOW_SECS: Ts = 300;
+/// After a window was used or ran out, a new one cannot be opened for this long.
+pub const RESET_COOLDOWN_SECS: Ts = 60;
 
 const PREFIX: &str = "pbkdf2-sha256";
 const BLOCK: usize = 64;
@@ -119,6 +130,54 @@ pub fn is_legacy(stored: &str) -> bool {
     !stored.starts_with(PREFIX)
 }
 
+/// A fresh recovery code: four groups of five characters, for example `ABCDE-23456-FGHJK-MNPQR`.
+///
+/// # Errors
+/// If the OS cannot supply random bytes.
+pub fn generate_recovery_code() -> Result<String, AdminError> {
+    let mut out = String::with_capacity(RECOVERY_LEN + 3);
+    let mut n = 0;
+    while n < RECOVERY_LEN {
+        let mut buf = [0u8; 32];
+        getrandom::fill(&mut buf).map_err(|_| AdminError::NoRandomness)?;
+        // 248 = 8 * 31: bytes at or above it are skipped so every symbol is equally likely.
+        for b in buf.into_iter().filter(|b| *b < 248) {
+            if n == RECOVERY_LEN {
+                break;
+            }
+            if n > 0 && n % 5 == 0 {
+                out.push('-');
+            }
+            out.push(char::from(RECOVERY_ALPHABET[usize::from(b) % 31]));
+            n += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// A typed recovery code in canonical form: letters and digits only, upper case. Dashes and spaces are ignored.
+fn normalize_code(code: &str) -> String {
+    code.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// Hash a recovery code for storage (same format and cost as a password hash).
+///
+/// # Errors
+/// If the OS cannot supply random bytes.
+pub fn hash_recovery_code(code: &str) -> Result<String, AdminError> {
+    hash_password(&normalize_code(code))
+}
+
+/// Whether a typed recovery code matches a stored hash. A wrong length is refused without the slow hash.
+#[must_use]
+pub fn verify_recovery_code(code: &str, stored: &str) -> bool {
+    let c = normalize_code(code);
+    c.len() == RECOVERY_LEN && verify_password(&c, stored)
+}
+
 /// Whether `ip` is loopback, private, link-local, or in 100.64.0.0/10 (shared space used by Tailscale and
 /// carrier-grade NAT). Open mode and setup are limited to these (REQ-CFG-020, REQ-CFG-021).
 #[must_use]
@@ -162,6 +221,10 @@ pub enum AdminError {
     Storage,
     /// No randomness from the OS.
     NoRandomness,
+    /// There is no password to recover (open mode or setup pending).
+    NoPassword,
+    /// The local reset window is not open.
+    WindowClosed,
 }
 
 impl std::fmt::Display for AdminError {
@@ -176,6 +239,8 @@ impl std::fmt::Display for AdminError {
             Self::BadPassword => "the password must be 8 to 128 characters",
             Self::Storage => "the setting could not be saved",
             Self::NoRandomness => "no randomness available",
+            Self::NoPassword => "no password is set",
+            Self::WindowClosed => "the reset window is not open",
         })
     }
 }
@@ -195,6 +260,9 @@ pub enum Setting {
     Password {
         /// See [`hash_password`].
         hash: String,
+        /// Hash of the recovery code (REQ-CFG-067). Absent in files written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recovery: Option<String>,
     },
 }
 
@@ -229,6 +297,10 @@ pub struct Admin {
     /// (SHA-256 of the session token, expiry)
     sessions: Vec<(String, Ts)>,
     listen: IpAddr,
+    /// When the local reset window closes, if it is open. In memory only (REQ-CFG-069).
+    window: Option<Ts>,
+    /// When the last window ended (used or ran out); a new one waits for the cooldown.
+    window_ended: Option<Ts>,
 }
 
 impl Admin {
@@ -240,6 +312,8 @@ impl Admin {
             setting: Setting::Unset,
             sessions: Vec::new(),
             listen: IpAddr::from([127, 0, 0, 1]),
+            window: None,
+            window_ended: None,
         }
     }
 
@@ -281,7 +355,7 @@ impl Admin {
     /// Whether the stored credential is an old administrator token hash.
     #[must_use]
     pub fn legacy(&self) -> bool {
-        matches!(&self.setting, Setting::Password { hash } if is_legacy(hash))
+        matches!(&self.setting, Setting::Password { hash, .. } if is_legacy(hash))
     }
 
     /// Whether open mode may be chosen with this listen address.
@@ -311,10 +385,11 @@ impl Admin {
         &mut self,
         peer: IpAddr,
         hash: String,
+        recovery: Option<String>,
         now: Ts,
     ) -> Result<String, AdminError> {
         self.check_setup(peer)?;
-        self.setting = Setting::Password { hash };
+        self.setting = Setting::Password { hash, recovery };
         self.finish_setup()?;
         self.new_session(now)
     }
@@ -345,7 +420,7 @@ impl Admin {
     #[must_use]
     pub fn password_hash(&self) -> Option<String> {
         match &self.setting {
-            Setting::Password { hash } => Some(hash.clone()),
+            Setting::Password { hash, .. } => Some(hash.clone()),
             _ => None,
         }
     }
@@ -400,18 +475,197 @@ impl Admin {
         }
     }
 
-    /// Replace the credential with a new password hash, ending every session. Returns a fresh session.
+    /// Replace the credential with a new password hash, ending every session. Returns a fresh session. A new
+    /// recovery hash replaces the old one; `None` keeps the one there is (REQ-CFG-073).
     ///
     /// # Errors
     /// Storage and randomness failures.
-    pub fn set_password(&mut self, hash: String, now: Ts) -> Result<String, AdminError> {
-        let before = std::mem::replace(&mut self.setting, Setting::Password { hash });
+    pub fn set_password(
+        &mut self,
+        hash: String,
+        recovery: Option<String>,
+        now: Ts,
+    ) -> Result<String, AdminError> {
+        let keep = match &self.setting {
+            Setting::Password { recovery, .. } => recovery.clone(),
+            _ => None,
+        };
+        let before = std::mem::replace(
+            &mut self.setting,
+            Setting::Password {
+                hash,
+                recovery: recovery.or(keep),
+            },
+        );
         if let Err(e) = self.save() {
             self.setting = before;
             return Err(e);
         }
         self.sessions.clear();
         self.new_session(now)
+    }
+
+    // ----- recovery (REQ-CFG-067..069, 071..073) -----
+
+    /// Whether a recovery code exists.
+    #[must_use]
+    pub fn has_recovery(&self) -> bool {
+        matches!(
+            &self.setting,
+            Setting::Password {
+                recovery: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// The stored recovery hash, to verify outside the lock.
+    ///
+    /// # Errors
+    /// [`AdminError::NoPassword`] in open or setup mode; [`AdminError::Unauthorized`] when no code exists.
+    pub fn recovery_hash(&self) -> Result<String, AdminError> {
+        match &self.setting {
+            Setting::Password {
+                recovery: Some(r), ..
+            } => Ok(r.clone()),
+            Setting::Password { .. } => Err(AdminError::Unauthorized),
+            _ => Err(AdminError::NoPassword),
+        }
+    }
+
+    /// Create or replace the recovery code of a signed-in administrator.
+    ///
+    /// # Errors
+    /// [`AdminError::NoPassword`] unless a password is set; storage failures.
+    pub fn set_recovery(&mut self, new: String) -> Result<(), AdminError> {
+        let Setting::Password { recovery, .. } = &mut self.setting else {
+            return Err(AdminError::NoPassword);
+        };
+        let before = recovery.replace(new);
+        if let Err(e) = self.save() {
+            if let Setting::Password { recovery, .. } = &mut self.setting {
+                *recovery = before;
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Finish a reset with the recovery code. `verified` is the hash the caller checked the code against; if the
+    /// stored one changed meanwhile (another request used the code first) this fails, so a code works once.
+    /// Sets the new password and the new recovery hash in one save, ends every session, and returns a session.
+    ///
+    /// # Errors
+    /// [`AdminError::Unauthorized`] when the code was already used; storage and randomness failures.
+    pub fn recover(
+        &mut self,
+        verified: &str,
+        hash: String,
+        new_recovery: String,
+        now: Ts,
+    ) -> Result<String, AdminError> {
+        match &self.setting {
+            Setting::Password {
+                recovery: Some(r), ..
+            } if constant_time_eq(r, verified) => {}
+            Setting::Password { .. } => return Err(AdminError::Unauthorized),
+            _ => return Err(AdminError::NoPassword),
+        }
+        self.window = None;
+        self.replace_credentials(hash, new_recovery, now)
+    }
+
+    fn replace_credentials(
+        &mut self,
+        hash: String,
+        recovery: String,
+        now: Ts,
+    ) -> Result<String, AdminError> {
+        let before = std::mem::replace(
+            &mut self.setting,
+            Setting::Password {
+                hash,
+                recovery: Some(recovery),
+            },
+        );
+        if let Err(e) = self.save() {
+            self.setting = before;
+            return Err(e);
+        }
+        self.sessions.clear();
+        self.new_session(now)
+    }
+
+    fn window_tick(&mut self, now: Ts) {
+        if let Some(end) = self.window
+            && now >= end
+        {
+            self.window = None;
+            self.window_ended = Some(end);
+        }
+    }
+
+    /// Seconds the local reset window has left (0 when closed).
+    pub fn window_left(&mut self, now: Ts) -> Ts {
+        self.window_tick(now);
+        self.window.map_or(0, |end| end - now)
+    }
+
+    /// Open the local reset window. Returns the seconds it stays open. Asking again while it is open reports the
+    /// time left and does not extend it.
+    ///
+    /// # Errors
+    /// [`AdminError::NoPassword`] unless a password is set; [`AdminError::RateLimited`] during the cooldown.
+    pub fn open_window(&mut self, now: Ts) -> Result<Ts, AdminError> {
+        if self.mode() != Mode::Password {
+            return Err(AdminError::NoPassword);
+        }
+        let left = self.window_left(now);
+        if left > 0 {
+            return Ok(left);
+        }
+        if self
+            .window_ended
+            .is_some_and(|e| now < e + RESET_COOLDOWN_SECS)
+        {
+            return Err(AdminError::RateLimited);
+        }
+        self.window = Some(now + RESET_WINDOW_SECS);
+        Ok(RESET_WINDOW_SECS)
+    }
+
+    /// Whether the window is open for `peer`: a private address and time left.
+    ///
+    /// # Errors
+    /// [`AdminError::NotPrivate`], [`AdminError::NoPassword`] or [`AdminError::WindowClosed`].
+    pub fn check_window(&mut self, peer: IpAddr, now: Ts) -> Result<(), AdminError> {
+        if self.mode() != Mode::Password {
+            return Err(AdminError::NoPassword);
+        }
+        if !is_private(peer) {
+            return Err(AdminError::NotPrivate);
+        }
+        if self.window_left(now) == 0 {
+            return Err(AdminError::WindowClosed);
+        }
+        Ok(())
+    }
+
+    /// Set a new password through the open window: the window closes, a new recovery code replaces the old.
+    ///
+    /// # Errors
+    /// As [`Admin::check_window`], plus storage and randomness failures.
+    pub fn reset_in_window(
+        &mut self,
+        peer: IpAddr,
+        hash: String,
+        new_recovery: String,
+        now: Ts,
+    ) -> Result<String, AdminError> {
+        self.check_window(peer, now)?;
+        self.window = None;
+        self.window_ended = Some(now);
+        self.replace_credentials(hash, new_recovery, now)
     }
 }
 
@@ -445,7 +699,10 @@ pub fn migrate_legacy(dir: &std::path::Path) -> Result<bool, StoreError> {
     if hash.len() != 64 || unhex(&hash).is_none() {
         return Ok(false);
     }
-    store.save(&Setting::Password { hash })?;
+    store.save(&Setting::Password {
+        hash,
+        recovery: None,
+    })?;
     std::fs::remove_file(&old)?;
     Ok(true)
 }
@@ -592,7 +849,9 @@ mod tests {
     #[test]
     fn sessions_expire_are_capped_and_can_end() {
         let mut a = Admin::new();
-        let t = a.setup_password(ip("127.0.0.1"), "h".into(), 100).unwrap();
+        let t = a
+            .setup_password(ip("127.0.0.1"), "h".into(), None, 100)
+            .unwrap();
         assert_eq!(a.authorize(Some(&t), ip("127.0.0.1"), 101), Ok(()));
         assert_eq!(
             a.authorize(Some("nope"), ip("127.0.0.1"), 101),
@@ -622,8 +881,10 @@ mod tests {
     #[test]
     fn a_new_password_ends_other_sessions() {
         let mut a = Admin::new();
-        let old = a.setup_password(ip("127.0.0.1"), "h1".into(), 0).unwrap();
-        let fresh = a.set_password("h2".into(), 1).unwrap();
+        let old = a
+            .setup_password(ip("127.0.0.1"), "h1".into(), None, 0)
+            .unwrap();
+        let fresh = a.set_password("h2".into(), None, 1).unwrap();
         assert!(!a.session_ok(&old, 2));
         assert!(a.session_ok(&fresh, 2));
         assert_eq!(a.password_hash().as_deref(), Some("h2"));
@@ -666,5 +927,181 @@ mod tests {
         std::fs::write(dir.0.join("admin-token.hash"), "not a hash").unwrap();
         assert!(!migrate_legacy(&dir.0).unwrap());
         assert!(dir.0.join("admin-token.hash").exists());
+    }
+
+    fn with_password() -> (Admin, String) {
+        let mut a = Admin::new();
+        let t = a
+            .setup_password(ip("127.0.0.1"), "pw-hash".into(), Some("rc-hash".into()), 0)
+            .unwrap();
+        (a, t)
+    }
+
+    // REQ-CFG-067
+    #[test]
+    fn recovery_codes_are_long_unambiguous_and_hashed() {
+        let a = generate_recovery_code().unwrap();
+        let b = generate_recovery_code().unwrap();
+        assert_ne!(a, b);
+        assert_eq!(
+            a.len(),
+            RECOVERY_LEN + 3,
+            "four groups of five: {}",
+            a.len()
+        );
+        let groups: Vec<&str> = a.split('-').collect();
+        assert_eq!(groups.len(), 4);
+        assert!(groups.iter().all(|g| g.len() == 5));
+        for c in a.chars().filter(|c| *c != '-') {
+            assert!(RECOVERY_ALPHABET.contains(&(c as u8)), "{c}");
+            assert!(!"01ILO".contains(c));
+        }
+        let h = hash_recovery_code(&a).unwrap();
+        assert!(h.starts_with("pbkdf2-sha256$100000$"));
+        assert!(!h.contains(&a.replace('-', "")));
+        // Typed any way a person might: lower case, spaces, no dashes.
+        assert!(verify_recovery_code(&a, &h));
+        assert!(verify_recovery_code(
+            &a.to_lowercase().replace('-', " "),
+            &h
+        ));
+        assert!(verify_recovery_code(&a.replace('-', ""), &h));
+        assert!(!verify_recovery_code(&b, &h));
+        assert!(!verify_recovery_code("", &h));
+        assert!(!verify_recovery_code(&a[..10], &h), "too short");
+    }
+
+    // REQ-CFG-067: every symbol of the alphabet turns up (no modulo bias would leave one out; this guards the loop).
+    #[test]
+    fn recovery_codes_use_the_whole_alphabet() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..80 {
+            seen.extend(
+                generate_recovery_code()
+                    .unwrap()
+                    .chars()
+                    .filter(|c| *c != '-'),
+            );
+        }
+        assert_eq!(seen.len(), 31);
+    }
+
+    // REQ-CFG-068
+    #[test]
+    fn a_recovery_code_works_once_and_the_new_one_replaces_it() {
+        let (mut a, old_session) = with_password();
+        assert!(a.has_recovery());
+        let verified = a.recovery_hash().unwrap();
+        let s = a.recover(&verified, "pw2".into(), "rc2".into(), 5).unwrap();
+        assert!(!a.session_ok(&old_session, 6), "every session ended");
+        assert!(a.session_ok(&s, 6));
+        assert_eq!(a.password_hash().as_deref(), Some("pw2"));
+        assert_eq!(a.recovery_hash().as_deref(), Ok("rc2"));
+        // Replay: the same verified hash (a second request that was already checking) fails.
+        assert_eq!(
+            a.recover(&verified, "pw3".into(), "rc3".into(), 6),
+            Err(AdminError::Unauthorized)
+        );
+        assert_eq!(a.password_hash().as_deref(), Some("pw2"));
+    }
+
+    // REQ-CFG-073
+    #[test]
+    fn an_old_file_without_a_code_loads_and_a_signed_in_admin_can_add_one() {
+        let dir = TempDir::new("admin-norec");
+        std::fs::write(
+            dir.0.join("admin.json"),
+            r#"{"schema":1,"data":{"mode":"password","hash":"pbkdf2-sha256$1$00$00"}}"#,
+        )
+        .unwrap();
+        let store = JsonStore::new(dir.0.join("admin.json"), SCHEMA);
+        let mut a = Admin::open(store.clone()).unwrap();
+        assert_eq!(a.mode(), Mode::Password);
+        assert!(!a.has_recovery());
+        assert_eq!(a.recovery_hash(), Err(AdminError::Unauthorized));
+        a.set_recovery("rc".into()).unwrap();
+        assert!(Admin::open(store.clone()).unwrap().has_recovery());
+        // A password change keeps the code; a new one replaces it.
+        a.set_password("h2".into(), None, 1).unwrap();
+        assert_eq!(a.recovery_hash().as_deref(), Ok("rc"));
+        a.set_password("h3".into(), Some("rc2".into()), 2).unwrap();
+        assert_eq!(a.recovery_hash().as_deref(), Ok("rc2"));
+        assert_eq!(
+            Admin::open(store).unwrap().recovery_hash().as_deref(),
+            Ok("rc2")
+        );
+    }
+
+    // REQ-CFG-072
+    #[test]
+    fn open_and_setup_modes_have_nothing_to_recover() {
+        let mut a = Admin::new();
+        assert_eq!(a.recovery_hash(), Err(AdminError::NoPassword));
+        assert_eq!(a.set_recovery("x".into()), Err(AdminError::NoPassword));
+        assert_eq!(a.open_window(0), Err(AdminError::NoPassword));
+        a.setup_open(ip("127.0.0.1")).unwrap();
+        assert_eq!(a.recovery_hash(), Err(AdminError::NoPassword));
+        assert_eq!(a.open_window(0), Err(AdminError::NoPassword));
+        assert_eq!(
+            a.check_window(ip("127.0.0.1"), 0),
+            Err(AdminError::NoPassword)
+        );
+    }
+
+    // REQ-CFG-069
+    #[test]
+    fn the_reset_window_is_short_private_single_use_and_cooled_down() {
+        let (mut a, old) = with_password();
+        // Closed by default.
+        assert_eq!(
+            a.check_window(ip("192.168.1.9"), 10),
+            Err(AdminError::WindowClosed)
+        );
+        assert_eq!(a.open_window(10), Ok(RESET_WINDOW_SECS));
+        // Asking again does not extend it.
+        assert_eq!(a.open_window(100), Ok(RESET_WINDOW_SECS - 90));
+        assert_eq!(a.window_left(100), RESET_WINDOW_SECS - 90);
+        // A public address is refused even while it is open.
+        assert_eq!(
+            a.check_window(ip("8.8.8.8"), 100),
+            Err(AdminError::NotPrivate)
+        );
+        // It runs out.
+        assert_eq!(
+            a.check_window(ip("192.168.1.9"), 10 + RESET_WINDOW_SECS),
+            Err(AdminError::WindowClosed)
+        );
+        // After running out, the cooldown holds off a new one.
+        assert_eq!(
+            a.open_window(10 + RESET_WINDOW_SECS + 5),
+            Err(AdminError::RateLimited)
+        );
+        let t0 = 10 + RESET_WINDOW_SECS + RESET_COOLDOWN_SECS;
+        assert_eq!(a.open_window(t0), Ok(RESET_WINDOW_SECS));
+        // Use: new password and a new code, sessions end, the window closes, a replay fails.
+        let s = a
+            .reset_in_window(ip("10.0.0.7"), "pw2".into(), "rc2".into(), t0 + 1)
+            .unwrap();
+        assert!(!a.session_ok(&old, t0 + 2));
+        assert!(a.session_ok(&s, t0 + 2));
+        assert_eq!(a.recovery_hash().as_deref(), Ok("rc2"));
+        assert_eq!(
+            a.reset_in_window(ip("10.0.0.7"), "pw3".into(), "rc3".into(), t0 + 2),
+            Err(AdminError::WindowClosed)
+        );
+        assert_eq!(a.password_hash().as_deref(), Some("pw2"));
+        assert_eq!(a.open_window(t0 + 3), Err(AdminError::RateLimited));
+    }
+
+    #[test]
+    fn the_window_is_not_stored_so_a_restart_closes_it() {
+        let dir = TempDir::new("admin-window");
+        let store = JsonStore::new(dir.0.join("admin.json"), SCHEMA);
+        let mut a = Admin::open(store.clone()).unwrap();
+        a.setup_password(ip("127.0.0.1"), "h".into(), Some("r".into()), 0)
+            .unwrap();
+        a.open_window(1).unwrap();
+        let mut again = Admin::open(store).unwrap();
+        assert_eq!(again.window_left(2), 0);
     }
 }

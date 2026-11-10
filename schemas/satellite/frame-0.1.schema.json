@@ -243,6 +243,26 @@
           "properties": { "action": { "enum": ["pause", "resume"] } }
         }
       }
+    },
+    "clawdot.admin-reset": {
+      "type": "object",
+      "required": ["type"],
+      "properties": { "type": { "const": "clawdot.admin-reset" } }
+    },
+    "clawdot.admin-reset-window": {
+      "type": "object",
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "const": "clawdot.admin-reset-window" },
+        "data": {
+          "type": "object",
+          "required": ["open_secs"],
+          "properties": {
+            "open_secs": { "type": "integer", "minimum": 0 },
+            "reason": { "type": "string" }
+          }
+        }
+      }
     }
   }
 }

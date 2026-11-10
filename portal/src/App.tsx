@@ -5,6 +5,7 @@ import { Activity } from "./tabs/Activity.tsx";
 import { Dashboard } from "./tabs/Dashboard.tsx";
 import { Reminders } from "./tabs/Reminders.tsx";
 import { SettingsPage } from "./tabs/SettingsPage.tsx";
+import { Forgot, RecoveryNotice, showCode } from "./recovery.tsx";
 import { fail, say, start, sv, useApp } from "./store.ts";
 
 /** What a view is given: the part of the address after the destination (`#/settings/assistant` gives "assistant"). */
@@ -60,8 +61,9 @@ function Setup() {
   const [pw2, setPw2] = useState("");
   const finish = async (body: { mode: string; password?: string }) => {
     try {
-      const r = await api<{ token?: string }>("POST", "/api/setup", body);
+      const r = await api<{ token?: string; recovery_code?: string }>("POST", "/api/setup", body);
       keep(r.token);
+      showCode(r.recovery_code);
       say("");
       await start();
     } catch (x) {
@@ -180,9 +182,7 @@ function Login() {
           <button>Sign in</button>
         </div>
       </form>
-      <p class="mut">
-        Forgot it? On the device, run <code>clawdot --reset-admin</code> and open this page again.
-      </p>
+      <Forgot />
     </section>
   );
 }
@@ -227,7 +227,8 @@ export function App(): JSX.Element {
         {inApp ? <Bar tab={tab} /> : null}
       </div>
       <main>
-        {s.view === "setup" || s.view === "login" ? (
+        {s.recoveryCode ? <RecoveryNotice /> : null}
+        {!s.recoveryCode && (s.view === "setup" || s.view === "login") ? (
           <div id="hero">
             <Logo />
             <div>
@@ -236,9 +237,9 @@ export function App(): JSX.Element {
             </div>
           </div>
         ) : null}
-        {s.view === "setup" ? <Setup /> : null}
-        {s.view === "login" ? <Login /> : null}
-        {inApp ? (
+        {!s.recoveryCode && s.view === "setup" ? <Setup /> : null}
+        {!s.recoveryCode && s.view === "login" ? <Login /> : null}
+        {inApp && !s.recoveryCode ? (
           <div id="app">
             <div id="panel" tabIndex={-1}>
               <Active key={tab.id} sub={sub} />

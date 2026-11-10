@@ -192,7 +192,7 @@ async fn an_administrator_session_names_the_endpoint() {
     let hash = clawdot_core::admin::hash_password("adm-secret").unwrap();
     let session = h
         .core
-        .admin_setup_password([127, 0, 0, 1].into(), hash)
+        .admin_setup_password([127, 0, 0, 1].into(), hash, None)
         .unwrap();
     let auth = bearer(&session);
     let hdr = [("Authorization", auth.as_str())];

@@ -11,6 +11,7 @@ import { About } from "./About.tsx";
 import { Connections } from "./Connections.tsx";
 import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
+import { RecoverySettings, showCode } from "../recovery.tsx";
 import { Skills } from "./Skills.tsx";
 import { Tools } from "./Tools.tsx";
 import { Webhooks } from "./Webhooks.tsx";
@@ -255,8 +256,9 @@ function Security(): JSX.Element {
     const password = pw;
     setPw("");
     try {
-      const r = await api<{ token: string }>("POST", "/api/admin/password", { password });
+      const r = await api<{ token: string; recovery_code?: string }>("POST", "/api/admin/password", { password });
       keep(r.token);
+      showCode(r.recovery_code);
       say("Password saved.");
       await start();
     } catch (x) {
@@ -296,6 +298,7 @@ function Security(): JSX.Element {
           <button>Save password</button>
         </div>
       </form>
+      <RecoverySettings />
       <h3>This browser</h3>
       <div class="row">
         <button class="plain" type="button" onClick={signOut}>

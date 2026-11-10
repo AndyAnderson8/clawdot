@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Browser, findChrome, sleep } from "./chrome.ts";
-import { PASSWORD, startMock, type Mock } from "./mock-api.ts";
+import { PASSWORD, RECOVERY, startMock, type Mock } from "./mock-api.ts";
 
 const chrome = findChrome();
 if (!chrome) {
@@ -88,6 +88,78 @@ const shot = async (name: string, o: { dark?: boolean; width?: number } = {}) =>
 };
 
 // ---------------------------------------------------------------- first run and sign-in
+await step("sign-in: the help never tells you to run a command, and says what to do", async () => {
+  await open("password");
+  await b.until(`T.text('#login h2') === 'Sign in'`, "sign-in screen");
+  const help = (await T(`text('#forgothelp')`)) as string;
+  assert.equal(
+    help,
+    "Forgot it? Use your recovery code. No code? Hold the action button for 10 seconds, or see the guide.",
+  );
+  await eq(`document.body.innerText.includes('reset-admin')`, false, "no command in the page");
+});
+
+await step("forgot password: a wrong code is refused, the right one sets a password and shows a new code", async () => {
+  await open("password");
+  await b.until(`!!T.q('#forgot')`, "the forgot button");
+  await eq(`T.q('#recoverform') === null`, true, "the form starts closed");
+  await T(`click('#forgot')`);
+  await eq(`T.q('#forgot').getAttribute('aria-expanded')`, "true", "expanded state is announced");
+  await T(`set('#rcin', 'AAAAA-AAAAA-AAAAA-AAAAA')`);
+  await T(`set('#rcpw', 'brand new pass')`);
+  await T(`submit('#recoverform')`);
+  await b.until(
+    `T.text('#msg') === 'That recovery code was not accepted. Check it and try again.'`,
+    "refusal shown as the device wrote it",
+  );
+  await eq(`T.q('#msg').className`, "toast err", "error styling");
+  await eq(`!!T.q('#login')`, true, "still on the sign-in page");
+  // Typed in lower case without dashes, as a person might.
+  await T(`set('#rcin', ${JSON.stringify(RECOVERY.replaceAll("-", "").toLowerCase())})`);
+  await T(`set('#rcpw', 'brand new pass')`);
+  await T(`submit('#recoverform')`);
+  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "a new code is shown");
+  await eq(`T.text('#rcode') !== ${JSON.stringify(RECOVERY)}`, true, "it is a new code");
+  await T(`click('#rsaved')`);
+  await T(`click('#rcont')`);
+  await b.until(`!!T.q('#band')`, "signed in");
+  const call = mock.log.find((l) => l.path === "/api/recover" && l.auth === "")!;
+  assert.ok(call, "the call was made without a session");
+});
+
+await step("reset window: the sign-in page offers a new password only while the device says it is open", async () => {
+  await open("password");
+  await b.until(`!!T.q('#login')`, "sign-in");
+  await eq(`T.q('#windowform') === null`, true, "closed window: nothing offered");
+  mock.state["window"] = 240;
+  await b.goto(mock.url + "/");
+  await b.ev(HELPERS);
+  await b.until(`!!T.q('#windowform')`, "open window: the form shows");
+  await T(`set('#wpw', 'window password')`);
+  await T(`submit('#windowform')`);
+  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "a new code after the reset");
+  await T(`click('#rsaved')`);
+  await T(`click('#rcont')`);
+  await b.until(`!!T.q('#band')`, "signed in");
+});
+
+await step("a signed-in administrator can make a recovery code in Settings", async () => {
+  await open("open");
+  await b.until(`!!T.q('#band')`, "portal in open mode");
+  await section("security", "Security");
+  await eq(`T.q('#recsec') === null`, true, "open mode has nothing to recover");
+  await T(`set('#newpw', 'a fresh password')`);
+  await T(`submit('#pwsec')`);
+  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "the first code after setting a password");
+  await T(`click('#rsaved')`);
+  await T(`click('#rcont')`);
+  await section("security", "Security");
+  await b.until(`!!T.q('#recsec')`, "the recovery section");
+  await T(`click('#recmake')`);
+  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "a replacement code");
+  await eq(`T.text('#rcode')`, "WXYZ2-34567-89ABC-DEFGH", "shown once");
+});
+
 await step("setup: mismatched and short passwords are refused, a good one signs in", async () => {
   await open("setup");
   await b.until(`T.text('#setup h2') === 'Set up ClawDot'`, "setup screen");
@@ -104,7 +176,15 @@ await step("setup: mismatched and short passwords are refused, a good one signs 
   await T(`set('#pw1', 'longenough1')`);
   await T(`set('#pw2', 'longenough1')`);
   await T(`submit('#pwform')`);
+  // The recovery code is shown once, and the person must say they saved it.
+  await b.until(`T.text('#recoverynote h2') === 'Save your recovery code'`, "the recovery code notice");
+  await eq(`T.text('#rcode')`, RECOVERY, "the code is shown");
+  await shot("recovery-code");
+  await eq(`T.q('#rcont').disabled`, true, "continue waits for the box");
+  await T(`click('#rsaved')`);
+  await T(`click('#rcont')`);
   await b.until(`!!T.q('#band') && !!T.q('#statusline')`, "the portal after setup");
+  await eq(`document.body.innerText.includes(${JSON.stringify(RECOVERY)})`, false, "the code is not shown again");
   const call = mock.log.find((l) => l.path === "/api/setup")!;
   assert.deepEqual(call.body, { mode: "password", password: "longenough1" });
   await eq(`T.q('#pw1') === null`, true, "setup form gone");
@@ -626,6 +706,9 @@ await step("Settings: save one group, errors stay in their form, restart notice,
   await T(`submit('#pwsec')`);
   await b.until(`T.q('#banner') === null`, "banner gone once a password is set");
   assert.deepEqual(mock.log.find((l) => l.path === "/api/admin/password")!.body, { password: "brand new password" });
+  await b.until(`!!T.q('#rsaved')`, "the first recovery code is offered");
+  await T(`click('#rsaved')`);
+  await T(`click('#rcont')`);
   await section("about", "About and diagnostics");
   await T(`click('#about summary')`);
   await b.until(`T.text('#notes')?.includes('First release')`, "release notes loaded");
