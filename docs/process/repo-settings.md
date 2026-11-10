@@ -21,6 +21,7 @@ To apply when the GitHub repository is created. They make the server enforce the
 - Target: `refs/heads/dev`.
 - Block deletion. Block force pushes.
 - Require status check **`gate`** for the pushed commit. `scripts/land.sh` pushes a candidate ref first so the exact SHA already has a passing `gate` when it is pushed to `dev`.
+- While `scripts/gate-mode` is `stabilization` ([ADR-0018](../adr/0018-landing-gate-mode.md)), `land.sh` pushes `dev` directly without a candidate ref, so this required-check rule must not be active on `dev` (or must list the maintainer as a bypass actor); restore it when the mode returns to `full`. `main` is unaffected.
 - Do not require "up to date before merging" (the landing script guarantees the branch contains `dev`).
 
 ### Integration branches
