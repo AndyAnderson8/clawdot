@@ -992,10 +992,14 @@ mod tests {
                 !no_namespaces.contains("http://") && !no_namespaces.contains("src=\"https://"),
                 "external reference in page"
             );
-            // The theme is spliced in, in both colour schemes, with reduced motion handled.
+            // The tokens are inlined: light by default, dark only by explicit choice or match-system, reduced motion handled.
             assert!(!body.contains("/*@theme*/"), "theme marker left in page");
             let squeezed = body.replace(": ", ":");
-            assert!(squeezed.contains("--acc:") && squeezed.contains("prefers-color-scheme:dark"));
+            assert!(
+                squeezed.contains("--color-text-primary:")
+                    && squeezed.contains("[data-theme=dark]")
+                    && squeezed.contains("prefers-color-scheme:dark")
+            );
             assert!(squeezed.contains("prefers-reduced-motion:reduce"));
             assert!(!body.contains("url("), "the page loads nothing by URL");
             // Agent text must only be rendered as text. The bundled Preact runtime mentions `innerHTML`
