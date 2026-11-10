@@ -108,6 +108,12 @@ impl Inbox {
         self.quiet = quiet;
     }
 
+    /// The device-wide quiet-hours window, if one is set.
+    #[must_use]
+    pub fn quiet(&self) -> Option<QuietHours> {
+        self.quiet
+    }
+
     /// Restore from a store.
     ///
     /// # Errors
