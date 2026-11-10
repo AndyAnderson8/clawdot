@@ -7,22 +7,31 @@
 #                                    or history scan; scripts/land.sh and CI always run the full gate.
 #   scripts/check.sh --fast --tests  the fast subset plus `cargo test` for the affected packages (used when batching into an
 #                                    integration branch; CHECK_BASE=<rev> sets what "changed" is measured against, default dev)
+#                                    --fast --tests also (a) runs the policy tests when scripts/, .githooks/ or .claude/ changed
+#                                    and (b) runs the portal browser test in its quick form (CLAWDOT_BROWSER_QUICK=1, no
+#                                    narrow-width stress sweep); its portal steps are lint, format, types, unit tests and the
+#                                    built-page check. Only steps whose paths changed run at all.
+#   scripts/check.sh --full          the full gate, spelled out (identical to no flag); includes the stress sweep
 #   scripts/check.sh --release X.Y.Z additionally verify release readiness
 set -u -o pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
 fast=0
 tests=0
+full=0
 release=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --fast) fast=1 ;;
     --tests) tests=1 ;;
+    --full) full=1 ;;
     --release) release="${2:-}"; shift ;;
-    *) echo "usage: $0 [--fast [--tests]] [--release X.Y.Z]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--fast [--tests] | --full] [--release X.Y.Z]" >&2; exit 2 ;;
   esac
   shift
 done
+if [ "$full" -eq 1 ] && [ "$fast" -eq 1 ]; then echo "--full and --fast are exclusive" >&2; exit 2; fi
+if [ "$tests" -eq 1 ] && [ "$fast" -eq 0 ]; then echo "--tests only modifies --fast" >&2; exit 2; fi
 
 fail=0
 step() { printf '\n==> %s\n' "$1"; }
@@ -73,6 +82,10 @@ policy_relevant() {
 if [ "$fast" -eq 0 ] && [ -f scripts/test-policy.sh ] && policy_relevant; then
   step "policy tooling: commit-message rules, agent guard, landing and release flow"
   run scripts/test-policy.sh
+elif [ "$fast" -eq 1 ] && [ "$tests" -eq 1 ] && [ -f scripts/test-policy.sh ] && changed_matches '^(scripts/|\.githooks/|\.claude/|\.shellcheckrc)'; then
+  # Scoped landing (integration batching, stabilization): the policy tests run only for a change to the tooling.
+  step "policy tooling (scripts changed): commit-message rules, agent guard, landing and release flow"
+  run scripts/test-policy.sh
 fi
 
 # The portal (TypeScript, ADR-0016) is checked only when its sources or the generated page changed (always in
@@ -97,8 +110,14 @@ if [ -d portal ] && portal_relevant; then
     run npm --prefix portal run --silent typecheck
     run npm --prefix portal test --silent
     run npm --prefix portal run --silent check-build
+    if [ "$fast" -eq 1 ] && [ "$tests" -eq 1 ]; then
+      # Quick browser smoke only: the smoke test skips itself where no Chrome is installed. The heavy narrow-width
+      # stress sweep runs in the full gate and the nightly workflow (it honours CLAWDOT_BROWSER_QUICK).
+      step "portal: quick browser smoke test"
+      CLAWDOT_BROWSER_QUICK=1 run npm --prefix portal run --silent test:browser
+    fi
     if [ "$fast" -eq 0 ]; then
-      step "portal: licences, audit, browser smoke test"
+      step "portal: licences, audit, browser smoke test and stress sweep"
       run npm --prefix portal run --silent licenses
       run npm --prefix portal run --silent audit
       run npm --prefix portal run --silent test:browser
