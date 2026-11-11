@@ -311,7 +311,7 @@ where
 }
 
 #[cfg(feature = "tls")]
-fn tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
+pub(crate) fn tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
     use std::sync::Arc;
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());

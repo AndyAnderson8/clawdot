@@ -23,6 +23,11 @@ esphome-satellite = []
 # Noise encryption for the ESPHome client (REQ-ESP-014), built on `ring`, which the tls feature already pulls in.
 esphome-noise = ["esphome-satellite", "dep:ring"]
 
+# Optional realtime (speech-to-speech) voice (ADR-0020, REQ-RTV-001): one streaming WebSocket to a provider
+# instead of separate listen, think and speak steps. Meant for a PC or Pi. Adds no crate (a minimal
+# WebSocket client is built in) and uses the TLS stack the `tls` feature already has. Off by default.
+realtime = ["tls"]
+
 [[bin]]
 name = "clawdot"
 path = "src/main.rs"

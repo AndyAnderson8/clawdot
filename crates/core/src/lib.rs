@@ -33,6 +33,8 @@ pub mod llm;
 pub mod mcp;
 pub mod media;
 pub mod notes;
+#[cfg(feature = "realtime")]
+pub mod realtime;
 pub mod satellite;
 pub mod say;
 pub mod sched;
