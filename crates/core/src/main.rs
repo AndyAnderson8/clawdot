@@ -32,7 +32,7 @@ use clawdot_core::session::{
     ChatBackend, Conversation, MAX_CALLS_CEILING, MAX_DEADLINE_CEILING_SECS, MAX_ROUNDS_CEILING,
     ToolHost, TurnConfig, TurnCtl,
 };
-use clawdot_core::settings::{self, Layer, SettingsState, public_url_from_listen};
+use clawdot_core::settings::{self, Group, Layer, SettingsState, public_url_from_listen};
 use clawdot_core::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
 use clawdot_core::store::JsonStore;
 use clawdot_core::transport::HttpBackend;
@@ -385,47 +385,7 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
         };
         layer.insert("persona".into(), text.into());
     }
-    let turn = TurnConfig::default();
-    let policy = ActionPolicy::default();
-    let defaults: Layer = [
-        ("device_name", serde_json::json!(device_name())),
-        ("zone", "UTC".into()),
-        ("persona", DEFAULT_PERSONA.into()),
-        ("listen", settings::DEFAULT_LISTEN.into()),
-        ("llm_key_env", "OPENROUTER_API_KEY".into()),
-        ("speech_provider", "openai".into()),
-        ("board", "none".into()),
-        ("agent_max_rounds", turn.max_tool_loops.into()),
-        ("agent_max_tool_calls", turn.max_tool_calls.into()),
-        ("agent_deadline_secs", turn.deadline_secs.into()),
-        (
-            "agent_tool_timeout_secs",
-            turn.tool_timeout.as_secs().into(),
-        ),
-        ("plan_speech", turn.plan_speech.into()),
-        ("progress_speech", turn.progress_speech.into()),
-        ("notes", false.into()),
-        ("update_check", true.into()),
-        ("max_actions_per_day", policy.max_actions_per_day.into()),
-        ("max_costly_per_day", policy.max_costly_per_day.into()),
-        ("dry_run", policy.dry_run.into()),
-        ("realtime_enabled", false.into()),
-        ("realtime_voice", rtvoice::DEFAULT_VOICE.into()),
-        ("realtime_key_env", rtvoice::DEFAULT_KEY_ENV.into()),
-        (
-            "realtime_transcription_model",
-            rtvoice::DEFAULT_TRANSCRIPTION.into(),
-        ),
-        ("realtime_usd_per_min_in", rtvoice::DEFAULT_USD_IN.into()),
-        ("realtime_usd_per_min_out", rtvoice::DEFAULT_USD_OUT.into()),
-        (
-            "realtime_max_session_secs",
-            rtvoice::DEFAULT_MAX_SESSION_SECS.into(),
-        ),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v))
-    .collect();
+    let defaults: Layer = settings::built_in_defaults();
     let (state, warnings) = SettingsState::open(
         Some(&args.data_dir),
         defaults,
@@ -612,11 +572,6 @@ fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
             "Post events with:\n  curl -X POST {public}/hook/{endpoint} -H 'Authorization: Bearer <token>' -d '{{\"title\":\"Backup finished\",\"summary\":\"12 GB copied\"}}'\n"
         );
     }
-}
-
-/// The default name for the device. Never the machine’s host name, which is often a person’s name; it can be changed in Settings.
-fn device_name() -> String {
-    "ClawDot".to_owned()
 }
 
 /// Facts shown next to the settings but not edited there: the speech provider's models and where speakers
@@ -831,29 +786,16 @@ fn apply_live(
             .and_then(serde_json::Value::as_f64);
         brain.usage.set_limits(l);
     }
-    if [
-        "agent_max_rounds",
-        "agent_max_tool_calls",
-        "agent_deadline_secs",
-        "agent_tool_timeout_secs",
-        "plan_speech",
-        "progress_speech",
-    ]
-    .iter()
-    .any(|k| changed(k))
-    {
+    if settings::group_changed(Group::Agent, live, applied) {
         brain.agent = agent_from(live, brain.agent.summarize_over_chars);
         if let Some(llm) = &mut brain.llm {
             llm.cfg = with_agent(llm.cfg.clone(), &brain.agent);
         }
     }
-    if changed("voice") || changed("speech_language") {
+    if settings::group_changed(Group::Speech, live, applied) {
         apply_speech(live);
     }
-    if live
-        .keys()
-        .any(|k| k.starts_with("realtime_") && changed(k))
-    {
+    if settings::group_changed(Group::Realtime, live, applied) {
         brain.rt.set_settings(RtSettings::from_live(live));
     }
     #[cfg(feature = "tls")]
@@ -873,20 +815,15 @@ fn apply_live(
                 .unwrap_or(false),
         );
     }
-    if ["dry_run", "max_actions_per_day", "max_costly_per_day"]
-        .iter()
-        .any(|k| changed(k))
+    if settings::group_changed(Group::Policy, live, applied)
         && let Some(a) = core.audit()
     {
         a.set_policy(policy_from(live));
     }
-    if changed("quiet_start") || changed("quiet_end") {
+    if settings::group_changed(Group::Quiet, live, applied) {
         core.set_quiet_hours(quiet_from(live));
     }
-    if ["llm_url", "llm_model", "llm_key_env"]
-        .iter()
-        .any(|k| changed(k))
-    {
+    if settings::group_changed(Group::Llm, live, applied) {
         let max_tokens = brain.usage.limits().max_output_tokens_per_turn;
         match build_llm(
             text("llm_url"),
