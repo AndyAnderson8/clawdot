@@ -56,7 +56,7 @@ Not done here: fencing every tool result in angle brackets and naming which argu
 
 A skill's `tools` list is a permission, not just a hint. In `extensions.rs`, `Extensions::active_scope(user_text)` finds the enabled skills the user named in this turn (the skill's name as whole words, any case) and, if any of them lists tools, returns the union of those lists. `WithPolicy` stores it at the start of the turn (`begin_turn`), then drops every other tool from what the model is offered and refuses a call to one by name. Because it only filters, a scope can narrow what is available but never turn a tool on, lower a tier or skip a confirmation: a tool that is off stays off, and the held-action rules above still apply to what remains. A skill with an empty list, a skill that is off, and a turn that names no skill have no scope. The scope lasts for one turn: the user's "yes" to a held action is a new turn and releases the stored action as proposed in the scoped turn.
 
-Not done: scopes for inbox endpoints and rules, and a tier ceiling per scope (agentic-scope P1-5), and showing an imported skill's allow-list in the portal before it is enabled (imported skills already arrive off).
+Not done: scopes for inbox endpoints and rules, and a tier ceiling per scope (agentic-scope P1-5), and showing an imported skill's allow-list in the portal before it is enabled (imported skills already arrive off and marked for review, and cannot be turned on until accepted, REQ-SKL-002).
 
 ## Audit log (REQ-SEC-014)
 

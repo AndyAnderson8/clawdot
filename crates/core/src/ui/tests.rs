@@ -228,6 +228,9 @@ async fn every_portal_listing_needs_a_sign_in() {
         ("POST", "/api/update/apply"),
         ("GET", "/api/models"),
         ("GET", "/api/voices"),
+        ("GET", "/api/hive/peers"),
+        ("PUT", "/api/speech/key"),
+        ("DELETE", "/api/speech/key"),
     ] {
         // Refused either way; after about 20 failures the rate limit answers 429 instead of 401.
         let s = call(&p, m, path, "", "{}").await.0;
@@ -369,6 +372,38 @@ async fn the_portal_manages_tools_connections_and_skills() {
             .0,
         400
     );
+    // REQ-SKL-001, REQ-SKL-002: a skill folder sent as files, then accepted
+    let folder = r#"{"format":"skill-folder","files":[{"path":"tea/SKILL.md","text":"---\nname: tea\ndescription: Brew tea\n---\nSteep it."},{"path":"tea/a.md","text":"notes"}]}"#;
+    let (s, v) = call(&p, "POST", "/api/skills/import", "", folder).await;
+    assert_eq!(s, 200, "{v}");
+    let tea = v["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["name"] == "tea")
+        .unwrap();
+    assert_eq!(
+        (
+            tea["description"].as_str(),
+            tea["needs_review"].as_bool(),
+            tea["source"].as_str()
+        ),
+        (Some("Brew tea"), Some(true), Some("tea/SKILL.md"))
+    );
+    assert_eq!(v["import"]["added"], 1);
+    let on = r#"{"name":"tea","enabled":true}"#;
+    assert_eq!(call(&p, "POST", "/api/skills/enabled", "", on).await.0, 400);
+    let (s, v) = call(&p, "POST", "/api/skills/accept", "", r#"{"name":"tea"}"#).await;
+    assert_eq!(s, 200);
+    assert!(
+        v["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["name"] == "tea" && k["needs_review"] == false)
+    );
+    assert_eq!(call(&p, "POST", "/api/skills/enabled", "", on).await.0, 200);
+    call(&p, "POST", "/api/skills/delete", "", r#"{"name":"tea"}"#).await;
     assert_eq!(
         call(&p, "POST", "/api/skills/unknown", "", "{}").await.0,
         404
@@ -593,7 +628,21 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     assert_eq!(v["enabled"], true);
     assert_eq!(v["notes"].as_array().unwrap().len(), 2);
     assert_eq!(v["notes"][0]["text"], "my printer is called Pixel");
-    assert_eq!(v["limits"]["max_notes"], 50);
+    assert_eq!(v["limits"]["max_notes"], crate::notes::MAX_NOTES);
+    // REQ-MEM-004: search, best first, with the place voice commands use
+    let (s, v) = call(&p, "GET", "/api/notes?q=spare+KEY", &session, "").await;
+    assert_eq!(s, 200);
+    assert_eq!(v["query"], "spare KEY");
+    assert_eq!(v["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(v["notes"][0]["position"], 2);
+    assert_eq!(v["notes"][0]["id"], second.id);
+    let (s, v) = call(&p, "GET", "/api/notes?q=zzzz", &session, "").await;
+    assert_eq!((s, v["notes"].as_array().unwrap().len()), (200, 0));
+    assert_eq!(
+        call(&p, "GET", "/api/notes?q=key", "", "").await.0,
+        401,
+        "search needs the administrator"
+    );
     // change one in place: the list comes back, a duplicate or a missing one is refused
     let edit_path = format!("/api/notes/{}", second.id);
     let (s, v) = call(
@@ -691,7 +740,11 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
     for (body, status, needle) in [
         (add("my printer is pixel"), 409, "already remembered"),
         (add("   "), 400, "Write what"),
-        (add(&"a".repeat(201)), 400, "too long"),
+        (
+            add(&"a".repeat(crate::notes::MAX_NOTE_CHARS + 1)),
+            400,
+            "too long",
+        ),
         (
             add("the key is sk-abcdefghijklmnopqrstuvwxyz123456"),
             400,
@@ -983,6 +1036,46 @@ async fn model_and_voice_lists_need_the_administrator_and_explain_what_is_missin
     );
 }
 
+// REQ-HIV-002. The hive state is process-wide, so this is the only test that starts it.
+#[tokio::test]
+async fn hive_peers_is_administrator_only_and_holds_no_secret() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    assert_eq!(call(&p, "GET", "/api/hive/peers", "", "").await.0, 401);
+    // Not started (or not built): a plain 404, not a crash.
+    assert_eq!(
+        call(&p, "GET", "/api/hive/peers", &session, "").await.0,
+        404
+    );
+    #[cfg(feature = "hive")]
+    {
+        let dir = crate::store::testutil::TempDir::new("hive-api");
+        let opts = crate::hive::Options {
+            mode: crate::hive::Mode::Off,
+            port: 3335,
+            addr: None,
+            publish_name: false,
+            name: String::new(),
+        };
+        crate::hive::start(&dir.0, &opts).unwrap();
+        let (s, v) = call(&p, "GET", "/api/hive/peers", &session, "").await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["self"]["name"], "Test Dot");
+        assert_eq!(v["self"]["id"].as_str().unwrap().len(), 64);
+        assert_eq!(v["self"]["port"], 3335);
+        assert_eq!(v["discovery"], "off");
+        assert_eq!(v["peers"], json!([]));
+        let text = v.to_string();
+        assert!(
+            !text.contains("pkcs8") && !text.contains("private"),
+            "{text}"
+        );
+        assert_ne!(v["self"]["id"], v["self"]["public_key"]);
+    }
+}
+
 // REQ-CFG-081
 #[test]
 fn a_query_value_is_decoded_and_a_missing_or_broken_one_is_none() {
@@ -1080,5 +1173,29 @@ async fn a_pasted_key_is_kept_masked_and_never_returned_whole() {
     // Forgotten again.
     let (s, v) = call(&p, "DELETE", "/api/llm/key", &session, "").await;
     assert_eq!((s, v["hint"].is_null()), (200, true));
+    // REQ-VOI-023: the speech key is kept apart from the language-model key, with the same rules.
+    let put = r#"{"key":"xi-speech-0123456789abcdef01"}"#;
+    assert_eq!(call(&p, "PUT", "/api/speech/key", "", put).await.0, 401);
+    assert_eq!(call(&p, "DELETE", "/api/speech/key", "", "").await.0, 401);
+    let (s, v) = call(&p, "PUT", "/api/speech/key", &session, put).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["hint"], "xi-spe…ef01");
+    assert!(!v.to_string().contains("0123456789abcdef"));
+    let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
+    assert_eq!(v["speech"]["key_hint"], "xi-spe…ef01");
+    assert_eq!(v["speech"]["key_present"], true);
+    assert!(v["llm"]["key_hint"].is_null(), "the two keys are separate");
+    assert!(!v.to_string().contains("0123456789abcdef"));
+    assert_eq!(crate::secrets::get(crate::secrets::LLM_KEY), None);
+    for bad in [r#"{"key":"two words"}"#, r#"{"key":""}"#] {
+        assert_eq!(
+            call(&p, "PUT", "/api/speech/key", &session, bad).await.0,
+            400
+        );
+    }
+    let (s, v) = call(&p, "DELETE", "/api/speech/key", &session, "").await;
+    assert_eq!((s, v["hint"].is_null()), (200, true));
+    let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
+    assert_eq!(v["speech"]["key_present"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }

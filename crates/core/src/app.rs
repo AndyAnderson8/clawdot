@@ -16,8 +16,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Notify;
 
 mod announce;
+mod ask;
 mod portal;
+pub(crate) use announce::AuditAs;
 pub use announce::{AnnounceError, Announcement, Caller, outcome_json};
+pub use ask::{AskEnd, AskError, AskTicket, MAX_PENDING_ASKS};
 pub use portal::{Fail, Job, Op, SchedOp};
 
 /// Adapters available to endpoints, by name.
@@ -212,6 +215,7 @@ pub struct Core {
     jobs: Mutex<Option<tokio::sync::mpsc::Sender<portal::Job>>>,
     audit: std::sync::OnceLock<Arc<crate::audit::AuditLog>>,
     notes: std::sync::OnceLock<Arc<crate::notes::NoteStore>>,
+    asks: Mutex<Vec<ask::PendingAsk>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -306,6 +310,7 @@ impl Core {
             jobs: Mutex::new(None),
             audit: std::sync::OnceLock::new(),
             notes: std::sync::OnceLock::new(),
+            asks: Mutex::new(Vec::new()),
         }
     }
 
@@ -836,6 +841,22 @@ impl Core {
             .reply_target()
             .cloned()
             .ok_or(ReplyError::NothingToReplyTo)?;
+        // A question an agent asked out loud (REQ-EXT-012): the answer goes to the one waiting caller, as
+        // data, and to no bridge.
+        let end = if kind == ReplyKind::Ack {
+            AskEnd::Acknowledged
+        } else {
+            AskEnd::Answered(text.to_owned())
+        };
+        if self.deliver_ask(ev.id, end) {
+            g.inbox.acknowledge(ev.id);
+            self.persist(&g);
+            return Ok(Replied {
+                event_id: ev.id,
+                title: ev.title,
+                source: ev.source,
+            });
+        }
         g.replies
             .push(now, &ev.endpoint, ev.id, ev.session_ref.clone(), kind, text)
             .map_err(|_| ReplyError::QueueFull)?;
@@ -858,6 +879,7 @@ impl Core {
             return false;
         };
         let done = g.inbox.dismiss(id);
+        self.deliver_ask(id, AskEnd::Dismissed);
         self.persist(&g);
         done
     }

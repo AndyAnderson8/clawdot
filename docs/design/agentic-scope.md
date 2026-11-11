@@ -74,7 +74,7 @@ These apply to a turn started by voice, by an inbox event the user then answers,
 | Conversation history | In memory, for the current dialog | 20 messages, 24,000 bytes, expires after 600 s idle (`main.rs`, `Conversation::new(..., 20, 24_000, 600)`) | On (existing, REQ-AST-007) |
 | Recent actions | In memory: the last 10 actions with id, tool, target, tier, result | 10 entries, expires with the conversation | On. It is what lets "undo that" and "restart that container" resolve |
 | Announced event | The event being discussed, as fenced data | One current event (existing) | On |
-| Notes ("remember that my printer is called Pixel") | Persisted in `memory.json`, 0600 | 50 notes, 200 characters each, 8 KB total | **Off.** Opt-in setting; written only when the user explicitly asks ("remember..."), never by a model decision alone; listed, edited and deleted in the portal |
+| Notes ("remember that my printer is called Pixel") | Persisted in `memory.json`, 0600 | 500 notes, 300 characters each, 64 KB total (raised by REQ-MEM-001; was 50, 200, 8 KB) | **Off.** Opt-in setting; written only when the user explicitly asks ("remember..."), never by a model decision alone; listed, edited and deleted in the portal |
 | Audit log | Persisted (section 3.6) | Ring, size-capped | On |
 | Raw audio | Never (REQ-SEC-002) | n/a | n/a |
 
