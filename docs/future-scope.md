@@ -45,7 +45,7 @@ Open an issue labelled `type:feature` + `scope:proposal` → write or amend a sp
 | **Routines** (e.g. morning briefing on an alarm) | Assistant | Triggers + actions; scheduler exists. | v1.0 shipped |
 | **Ebooks read aloud** | Media | Cloud TTS for long text is costly; revisit with a cost model. | Cost controls proven |
 | **Multi-language** | Voice | English-first for v1.0 (wake word, grammar, prompts). | Wake-word and fast-path grammar localisation plan exists |
-| **Multi-room / announcements between satellites** | Audio | Out of scope. | Not planned |
+| **Multi-room / announcements between satellites** | Audio | Synchronised audio and announcements between rooms are out of scope. Sharing memories, skills and settings between speakers, and choosing which speaker answers, are planned as the **hive** (roadmap item 25, [R-14](research/14-hive.md)). | Not planned for audio |
 | **Display satellites / status screens** | Hardware | Capability model already allows a display. | Real use case |
 | **Realtime voice API** | Voice | Optional speech-to-speech provider for lower delay; tools and safety checks stay in ClawDot. | ClawDot running off the Dot (PC, Pi or relay), and a budget that allows it |
 | **Cloned voice through a provider** | Voice | A voice made from a short recording by a provider, picked from the voice list. Local training is not planned. | Consent rules for whose voice it is |
@@ -60,7 +60,7 @@ Open an issue labelled `type:feature` + `scope:proposal` → write or amend a sp
 | **Assistant-slot routing** (second wake word or spoken prefix to ClawDot; the first stays on the base's own assistant) | Assistant | Keeps the base useful as a fallback and avoids a hard dependency. Depends on the B0 finding that a non-HA client can own a slot. Avoid TECHO5's shared-conversation trap (its issue 328). | B0 trial shows the base serves a non-HA client |
 | **Wake-word near-miss capture** (opt-in, local only) | Voice | For the PC/Pi wake engine tuning; on the Dot read the base's score events instead. TECHO5 and EchoMuse have it. | Wake-word eval harness exists |
 | **HTTPS option** for the portal and webhook receiver (off by default) | Security | Webhook secrets cross the LAN in clear text otherwise; `rustls` is already in the lockfile. Self-signed or local CA. | Threat model entry accepted |
-| **Where-to-speak choice for inbox events** (nearest or last-used device) | Audio | Differs from the base's nearest-device-answers (that is for questions). Only matters with two or more satellites. | A second satellite is in use |
+| **Where-to-speak choice for inbox events** (nearest or last-used device) | Audio | Differs from the base's nearest-device-answers (that is for questions). Only matters with two or more satellites. The hive's shared inbox endpoints (R-14, H5) is where this lands. | A second satellite is in use |
 | **Realtime speech-to-speech provider** (user key, opt-in, minute cap) | Voice | TECHO5 shows design and costs (daily minute cap, no memory between turns). Bypasses our STT/LLM/TTS split; reuse its rule that nothing changes state after reading outside content. | Provider interface and cost caps are stable |
 | **ChatGPT-subscription sign-in as an LLM provider** | Providers | LibreEcho does it through an undocumented backend; terms and stability unknown. Watch only. | OpenAI documents a third-party route |
 | **Base-control tool** (volume, mute state, radio, ring effect) exposed to the agent via MCP/HTTP tool | Agent | Entities the base already exposes over ESPHome become one tool. | B2 ESPHome client works |

@@ -9,6 +9,7 @@
 | Process | [personal-data.md](process/personal-data.md) | What must not appear in examples, and the hashed-denylist guard |
 | Agents | [../AGENTS.md](../AGENTS.md) | Binding rules for AI coding agents (identity, branches, commits) |
 | Specs | [specs/](specs/README.md) | What the system must do, with stable requirement IDs |
+| API | [api/README.md](api/README.md) | The HTTP API as an OpenAPI 3.1 description ([openapi.yaml](api/openapi.yaml)): portal calls and webhook endpoints, with a curl session |
 | Architecture | [architecture/overview.md](architecture/overview.md) | Components, flows, constraints, risks |
 | Architecture | [architecture/extensibility.md](architecture/extensibility.md) | Core, packs, sidecars; media backends; trust model |
 | Architecture | [architecture/configuration.md](architecture/configuration.md) | The configuration file: keys, defaults, validation |
