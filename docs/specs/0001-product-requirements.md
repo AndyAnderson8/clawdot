@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.45 |
+| **Version** | 0.46 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -459,3 +459,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.43 | 2026-11-11 | Speech providers beyond the OpenAI style: ElevenLabs and Deepgram, a speech key, voice list details (VOI-021..024) |
 | 0.44 | 2026-11-11 | Bounded, searchable memory and SKILL.md skill import with review (MEM-001..005, SKL-001..005) |
 | 0.45 | 2026-11-11 | Realtime voice is configured, settings-driven, and runs a turn after the wake word with a fallback (RTV-008..011) |
+| 0.46 | 2026-11-11 | REQ-AST-026 (a conversation per speaker) and REQ-AST-027 (long work does not block the loop) added. |
