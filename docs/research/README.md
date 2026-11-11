@@ -20,6 +20,7 @@ Short, dated notes that capture what we learned from external sources and what i
 | [R-07](07-echo-dot-gen2-hardware.md) | Echo Dot Gen 2 hands-on hardware findings (buttons, LED ring, audio, Wi-Fi, clock, services) | ADR-0012, spec 0001 §4.10, board support |
 | [R-11](11-wake-word-spike.md) | SPIKE-002 PC finding: wake-word engines, licences, custom-word training, measurements, the engine seam | roadmap A3, ADR-0002, REQ-VOI-001/009 |
 | [R-08](08-existing-echo-dot-projects.md) | Prior art for the Dot: EchoMuse, TECHO5 Dot, NEO (hardware drive, ESPHome link, licences, Phase B recommendation) | roadmap Phase B, ADR-0012, spec 0003 |
+| [R-12](12-agent-harness-brains.md) | Hermes Agent and opencode as an optional brain: how each is driven, three link designs, safety, loop improvements | REQ-EXT-006, REQ-INB-020, future-scope |
 
 An earlier survey of two reference repositories and the wider landscape (make-a-smart-speaker, chatgpt-openai-smart-speaker, Home Assistant, OpenVoiceOS, Willow, Pipecat, LiveKit) was done in conversation; its conclusions are the eight "ideas to add" reflected below.
 

@@ -6,3 +6,8 @@ docs/adr/0007-license.md 6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303f
 # The same first name belongs to a third-party author (a blog about unlocking the Echo Dot) credited by name.
 docs/guides/b0-techo5-trial-plan.md 6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303fdc216756c
 docs/research/09-echo-unlock-history.md 6177321eac992341d1ad0823a07e76bfc4ee6909db120e377ea303fdc216756c
+# The public project name of Nous Research's Hermes Agent (repository and docs addresses), in the research note and recipe about it.
+docs/research/12-agent-harness-brains.md 21e63e26eab42a77f93d868a8a536c6e0c97d6769bd2cd44a65ed741f1e50a9a
+docs/recipes/hermes-brain.md 21e63e26eab42a77f93d868a8a536c6e0c97d6769bd2cd44a65ed741f1e50a9a
+docs/recipes/README.md 21e63e26eab42a77f93d868a8a536c6e0c97d6769bd2cd44a65ed741f1e50a9a
+docs/open-questions.md 21e63e26eab42a77f93d868a8a536c6e0c97d6769bd2cd44a65ed741f1e50a9a
