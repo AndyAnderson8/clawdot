@@ -72,6 +72,75 @@
   --color-chart: #24534b;
   --color-rail: #07151a;
 }
+/* More themes. Each one sets the same colour variables as light and dark; nothing else changes. */
+:root[data-theme="graphite"] {
+  color-scheme: dark;
+  --color-background-body: #141516;
+  --color-background-surface: #1d1f21;
+  --color-background-muted: #26292b;
+  --color-card-border: #34383b;
+  --color-text-primary: #ececec;
+  --color-text-secondary: #a3a8ab;
+  --color-accent: #e6e6e6;
+  --color-on-accent: #141516;
+  --color-border-emphasized: #34383b;
+  --color-border-control: #7b8184;
+  --color-text-error: #ffaea7;
+  --color-text-warning: #eec448;
+  --color-text-success: #90ca90;
+  --color-warning-muted: #3a3317;
+  --color-alert-line: #8a6d1b;
+  --color-live: #5ad1bd;
+  --color-live-muted: #17332f;
+  --color-chart: #2f5c54;
+  --color-rail: #0c0d0e;
+}
+:root[data-theme="contrast"] {
+  color-scheme: light;
+  --color-background-body: #ffffff;
+  --color-background-surface: #ffffff;
+  --color-background-muted: #f0f0f0;
+  --color-card-border: #1a1a1a;
+  --color-text-primary: #000000;
+  --color-text-secondary: #1f1f1f;
+  --color-accent: #000000;
+  --color-on-accent: #ffffff;
+  --color-border-emphasized: #1a1a1a;
+  --color-border-control: #000000;
+  --color-text-error: #a00010;
+  --color-text-warning: #5c4400;
+  --color-text-success: #0a5a20;
+  --color-warning-muted: #fff1b8;
+  --color-alert-line: #8a6a00;
+  --color-live: #00574d;
+  --color-live-muted: #c8f5ec;
+  --color-chart: #3f9d8c;
+  --color-rail: #000000;
+  --color-rail-text: #f2f2f2;
+}
+:root[data-theme="ocean"] {
+  color-scheme: light;
+  --color-background-body: #eaf1f8;
+  --color-background-surface: #ffffff;
+  --color-background-muted: #dde8f3;
+  --color-card-border: #c5d6e6;
+  --color-text-primary: #0f2233;
+  --color-text-secondary: #455a70;
+  --color-accent: #0f3d63;
+  --color-on-accent: #ffffff;
+  --color-border-emphasized: #c5d6e6;
+  --color-border-control: #7389a1;
+  --color-text-error: #b3202a;
+  --color-text-warning: #7a5f00;
+  --color-text-success: #1f6f3a;
+  --color-warning-muted: #fbe7ad;
+  --color-alert-line: #d9a920;
+  --color-live: #0a6a8a;
+  --color-live-muted: #cfeaf3;
+  --color-chart: #9cc9e3;
+  --color-rail: #0f3d63;
+  --color-rail-text: #c9dcee;
+}
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
     color-scheme: dark;

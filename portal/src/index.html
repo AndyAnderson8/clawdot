@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ClawDot</title>
-<script>try{var t=localStorage.getItem("clawdot-theme");document.documentElement.dataset.theme=t==="dark"||t==="system"?t:"light"}catch(e){document.documentElement.dataset.theme="light"}</script>
+<script>try{var t=localStorage.getItem("clawdot-theme"),ok=["light","dark","system","graphite","contrast","ocean","custom"];if(t==="custom"){var c=localStorage.getItem("clawdot-theme-css");if(c){var st=document.createElement("style");st.id="customtheme";st.textContent=c;document.head.appendChild(st)}}document.documentElement.dataset.theme=ok.indexOf(t)>=0?t:"light"}catch(e){document.documentElement.dataset.theme="light"}</script>
 <style>/*@css*/</style>
 </head>
 <body>
