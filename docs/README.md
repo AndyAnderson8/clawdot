@@ -47,6 +47,7 @@
 | Guides | [guides/local-speech.md](guides/local-speech.md) | Free local speech to text (whisper.cpp) and text to speech (Piper) with an OpenAI-compatible URL, for the PC voice loop |
 | Guides | [guides/forgot-password.md](guides/forgot-password.md) | Forgot the administrator password: the 10 second button hold, the desktop key, the command line, and the Echo Dot |
 | Guides | [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | B0 trial of the TECHO5 Dot base image on the maintainer's unit: backups, install, measurements, rollback, go/no-go |
+| Guides | [guides/hive.md](guides/hive.md) | Hive milestone H0: the speaker's Ed25519 identity and mDNS discovery of other speakers (optional `hive` feature), what it does and does not do, and the Avahi route for the Dot |
 | Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
 | Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |
 | Planning | [open-questions.md](open-questions.md) | Questions for the maintainer, each with the default chosen meanwhile |
