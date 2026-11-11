@@ -448,6 +448,14 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           return send(200, { hint: null });
         }
       }
+      if (m === "GET" && path === "/api/hive/peers") {
+        if (!st["hive"]) return err(404, "not found");
+        return send(200, {
+          discovery: "native",
+          self: { id: "5e56829b0991be4b6be71bba3f639cac", name: "Kitchen Dot", port: 3335 },
+          peers: st["hive"],
+        });
+      }
       if (m === "DELETE" && path === "/api/llm/key") {
         st["keyHint"] = "";
         return send(200, { hint: null });

@@ -18,6 +18,7 @@ import { HardwareCard } from "./HardwareCard.tsx";
 import { Lights } from "./Lights.tsx";
 import { Planned } from "./Planned.tsx";
 import { SavedKey } from "./SavedKey.tsx";
+import { Speakers } from "./Speakers.tsx";
 import { Themes } from "./Themes.tsx";
 import { MediaSettings } from "./Media.tsx";
 import { Tools } from "./Tools.tsx";
@@ -619,6 +620,7 @@ export const SECTIONS: [Section, ...Section[]] = [
     why: "No light ring was found on this device, so these settings would do nothing here.",
   },
   { id: "webhooks", label: "Webhooks", group: "Integrations", view: Notifications },
+  { id: "speakers", label: "Speakers", group: "Integrations", view: () => <Speakers /> },
   {
     id: "homeassistant",
     label: "Home Assistant",

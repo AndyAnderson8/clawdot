@@ -1290,6 +1290,28 @@ await step("Settings: General says what the device is; settings it cannot use ar
   mock.state["hwLeds"] = true;
 });
 
+await step("Settings: other speakers on the network are listed, or the page says it is not looking", async () => {
+  await open("open", "#/settings/speakers");
+  await b.until(`!!T.q('#speakersoff')`, "not turned on: it says so, and how it is turned on");
+  await eq(`T.q('#peerlist') === null`, true, "and lists nothing made up");
+  await open("open", "#/settings/speakers", {
+    hive: [{ id: "8e003daaa50dbc7b", name: "<b>Bedroom</b>", address: "192.0.2.7", port: 3335, last_seen_secs: 70 }],
+  });
+  await b.until(`T.rows('#peerlist > li').length === 1`, "one other speaker");
+  await eq(`T.text('#selfname')`, "Kitchen Dot", "this speaker is named");
+  await eq(
+    `T.rows('#peerlist > li')[0].includes('<b>Bedroom</b>') && T.all('#peerlist b').length === 0`,
+    true,
+    "a name from the network is shown as text",
+  );
+  await eq(
+    `T.rows('#peerlist > li')[0].includes('192.0.2.7') && T.rows('#peerlist > li')[0].includes('ago')`,
+    true,
+    "with its address and when it was last seen",
+  );
+  await eq(`T.q('#peerlist a').getAttribute('href')`, "http://192.0.2.7:3335/", "and a way to its own page");
+});
+
 await step("Settings: theme is light unless chosen, remembered, and never follows the system uninvited", async () => {
   await open("open", "#/settings/themes");
   await b.until(`!!T.q('#themeform')`, "theme choice");
@@ -1365,7 +1387,7 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
 
 await step("Settings: sections in a tab strip, native dropdowns, no horizontal scroll at 360 px", async () => {
   await open("open", "#/settings");
-  await b.until(`T.all('.tabs a').length === 13`, "the section tabs");
+  await b.until(`T.all('.tabs a').length === 14`, "the section tabs");
   await eq(
     `T.all('.tabs a').map((a) => a.textContent)`,
     [
@@ -1380,6 +1402,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
       "Media",
       "Lights",
       "Webhooks",
+      "Speakers",
       "Security",
       "About",
     ],
@@ -1418,6 +1441,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
     "lights",
     "memory",
     "webhooks",
+    "speakers",
     "security",
     "about",
   ])

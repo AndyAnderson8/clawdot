@@ -2180,3 +2180,8 @@ pre.reviewtext {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.idtext {
+  font-family: var(--font-family-code);
+  font-size: 0.875rem;
+}
