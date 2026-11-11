@@ -85,7 +85,11 @@ pub fn classify(model: &str, cpu: &str) -> &'static str {
     let c = cpu.to_lowercase();
     if m.contains("raspberry pi") {
         "raspberry-pi"
-    } else if m.contains("echo") || m.contains("biscuit") || c.contains("mt8163") {
+    } else if m.contains("echo")
+        || m.contains("biscuit")
+        || m.contains("mt8163")
+        || c.contains("mt8163")
+    {
         "echo-dot"
     } else if c.contains("intel") || c.contains("amd") || c.contains("apple") {
         "pc"
@@ -146,8 +150,14 @@ pub fn detect() -> Hardware {
     } else {
         Parts::default()
     };
+    let board = classify(&model, &cpu);
+    let mut parts = parts;
+    if board == "echo-dot" {
+        // The light ring is there, but the device's own voice service drives it, so the kernel lists no LED for it.
+        parts.leds = true;
+    }
     Hardware {
-        board: classify(&model, &cpu).to_owned(),
+        board: board.to_owned(),
         model,
         cpu,
         cores,
@@ -194,6 +204,11 @@ mod tests {
             "raspberry-pi"
         );
         assert_eq!(classify("", "MT8163"), "echo-dot");
+        assert_eq!(
+            classify("MT8163", "ARMv7 Processor rev 3 (v7l)"),
+            "echo-dot",
+            "the Dot names itself only by its chip"
+        );
         assert_eq!(classify("Amazon Echo Dot 2", ""), "echo-dot");
         assert_eq!(classify("", "Intel(R) Core(TM) i7"), "pc");
         assert_eq!(classify("", "something else"), "unknown");
