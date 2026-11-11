@@ -724,7 +724,7 @@ fn apply_live(
         p.clone_into(&mut brain.persona);
     }
     if changed("daily_spend_usd") {
-        let mut l = *brain.usage.limits();
+        let mut l = brain.usage.limits();
         l.daily_spend_cap_usd = live
             .get("daily_spend_usd")
             .and_then(serde_json::Value::as_f64);

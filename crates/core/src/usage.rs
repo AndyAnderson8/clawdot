@@ -8,6 +8,7 @@ use crate::llm::Usage;
 use crate::store::{JsonStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Schema version of the persisted usage counters.
 pub const SCHEMA: u32 = 1;
@@ -80,53 +81,14 @@ struct State {
     history: Vec<PastDay>,
 }
 
-/// Tracks usage against the limits.
-#[derive(Debug, Clone)]
-pub struct UsageTracker {
+/// The limits and the counters they are held against.
+#[derive(Debug)]
+struct Cell {
     limits: UsageLimits,
     state: State,
 }
 
-impl UsageTracker {
-    /// A fresh tracker.
-    #[must_use]
-    pub fn new(limits: UsageLimits) -> Self {
-        Self {
-            limits,
-            state: State::default(),
-        }
-    }
-
-    /// Restore from a store.
-    ///
-    /// # Errors
-    /// Storage errors.
-    pub fn load(store: &JsonStore, limits: UsageLimits) -> Result<Self, StoreError> {
-        Ok(Self {
-            limits,
-            state: store.load()?,
-        })
-    }
-
-    /// Persist.
-    ///
-    /// # Errors
-    /// Storage errors.
-    pub fn save(&self, store: &JsonStore) -> Result<(), StoreError> {
-        store.save(&self.state)
-    }
-
-    /// Replace the limits; the counters for today are kept.
-    pub fn set_limits(&mut self, limits: UsageLimits) {
-        self.limits = limits;
-    }
-
-    /// The configured limits.
-    #[must_use]
-    pub fn limits(&self) -> &UsageLimits {
-        &self.limits
-    }
-
+impl Cell {
     fn roll(&mut self, day: i64) {
         if self.state.day != day {
             let mut history = std::mem::take(&mut self.state.history);
@@ -147,18 +109,73 @@ impl UsageTracker {
             };
         }
     }
+}
+
+/// Tracks usage against the limits.
+///
+/// A clone is another handle on the same counters, not a copy: the main loop and every turn task that runs
+/// beside it count into one place, so the spend cap sees all of them at once (docs/adr/0021). The lock is held
+/// for a few arithmetic operations and never across an await point. The main loop remains the only one that
+/// saves the counters and changes the limits.
+#[derive(Debug, Clone)]
+pub struct UsageTracker(Arc<Mutex<Cell>>);
+
+impl UsageTracker {
+    fn cell(&self) -> std::sync::MutexGuard<'_, Cell> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A fresh tracker.
+    #[must_use]
+    pub fn new(limits: UsageLimits) -> Self {
+        Self(Arc::new(Mutex::new(Cell {
+            limits,
+            state: State::default(),
+        })))
+    }
+
+    /// Restore from a store.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn load(store: &JsonStore, limits: UsageLimits) -> Result<Self, StoreError> {
+        Ok(Self(Arc::new(Mutex::new(Cell {
+            limits,
+            state: store.load()?,
+        }))))
+    }
+
+    /// Persist.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn save(&self, store: &JsonStore) -> Result<(), StoreError> {
+        store.save(&self.cell().state)
+    }
+
+    /// Replace the limits; the counters for today are kept.
+    pub fn set_limits(&mut self, limits: UsageLimits) {
+        self.cell().limits = limits;
+    }
+
+    /// The configured limits.
+    #[must_use]
+    pub fn limits(&self) -> UsageLimits {
+        self.cell().limits
+    }
 
     /// Whether another request is allowed today.
     ///
     /// # Errors
     /// The limit that has been reached.
     pub fn check(&mut self, day: i64) -> Result<(), LimitReached> {
-        self.roll(day);
-        if self.state.requests >= self.limits.max_requests_per_day {
+        let mut c = self.cell();
+        c.roll(day);
+        if c.state.requests >= c.limits.max_requests_per_day {
             return Err(LimitReached::Requests);
         }
-        if let Some(cap) = self.limits.daily_spend_cap_usd {
-            if self.state.micro_usd as f64 / 1_000_000.0 >= cap {
+        if let Some(cap) = c.limits.daily_spend_cap_usd {
+            if c.state.micro_usd as f64 / 1_000_000.0 >= cap {
                 return Err(LimitReached::Spend);
             }
         }
@@ -167,13 +184,14 @@ impl UsageTracker {
 
     /// Record one request and its reported cost.
     pub fn record(&mut self, day: i64, usage: Option<&Usage>) {
-        self.roll(day);
-        self.state.requests = self.state.requests.saturating_add(1);
+        let mut c = self.cell();
+        c.roll(day);
+        c.state.requests = c.state.requests.saturating_add(1);
         if let Some(cost) = usage
             .and_then(|u| u.cost_usd)
-            .filter(|c| c.is_finite() && *c > 0.0)
+            .filter(|cost| cost.is_finite() && *cost > 0.0)
         {
-            self.state.micro_usd = self
+            c.state.micro_usd = c
                 .state
                 .micro_usd
                 .saturating_add((cost * 1_000_000.0).round() as u64);
@@ -183,9 +201,10 @@ impl UsageTracker {
     /// Add spend that is not a model request, such as the audio time of a realtime voice session
     /// (REQ-RTV-004). The request count is not changed; the daily spend cap sees the cost.
     pub fn add_cost(&mut self, day: i64, usd: f64) {
-        self.roll(day);
+        let mut c = self.cell();
+        c.roll(day);
         if usd.is_finite() && usd > 0.0 {
-            self.state.micro_usd = self
+            c.state.micro_usd = c
                 .state
                 .micro_usd
                 .saturating_add((usd * 1_000_000.0).round() as u64);
@@ -195,28 +214,29 @@ impl UsageTracker {
     /// The local day the counters are for, and the requests each recent day made, today last.
     #[must_use]
     pub fn request_days(&self) -> (i64, Vec<(i64, u32)>) {
-        let mut days: Vec<(i64, u32)> = self
+        let c = self.cell();
+        let mut days: Vec<(i64, u32)> = c
             .state
             .history
             .iter()
             .map(|p| (p.day, p.requests))
             .collect();
-        if self.state.day != 0 {
-            days.push((self.state.day, self.state.requests));
+        if c.state.day != 0 {
+            days.push((c.state.day, c.state.requests));
         }
-        (self.state.day, days)
+        (c.state.day, days)
     }
 
     /// Requests made today.
     #[must_use]
     pub fn requests_today(&self) -> u32 {
-        self.state.requests
+        self.cell().state.requests
     }
 
     /// Spend today, in dollars.
     #[must_use]
     pub fn spend_today(&self) -> f64 {
-        self.state.micro_usd as f64 / 1_000_000.0
+        self.cell().state.micro_usd as f64 / 1_000_000.0
     }
 }
 
@@ -307,6 +327,26 @@ mod tests {
         }
         assert_eq!(t.spend_today(), 0.0);
         assert_eq!(t.requests_today(), 3);
+    }
+
+    // REQ-AST-011: turns that run side by side count into the same counters, so the cap sees all of them.
+    #[test]
+    fn clones_count_into_the_same_counters_and_see_the_same_cap() {
+        let mut a = UsageTracker::new(UsageLimits {
+            daily_spend_cap_usd: Some(0.10),
+            ..UsageLimits::default()
+        });
+        let mut b = a.clone();
+        a.record(5, Some(&usage(Some(0.06))));
+        b.record(5, Some(&usage(Some(0.05))));
+        assert_eq!(a.requests_today(), 2);
+        assert_eq!(a.check(5), Err(LimitReached::Spend));
+        assert_eq!(b.check(5), Err(LimitReached::Spend));
+        b.set_limits(UsageLimits::default());
+        assert!(
+            a.check(5).is_ok(),
+            "a change of limits reaches every handle"
+        );
     }
 
     #[test]
