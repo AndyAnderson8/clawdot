@@ -686,7 +686,7 @@ mod tests {
             ("zone", json!("UTC")),
             ("listen", json!(DEFAULT_LISTEN)),
             ("llm_key_env", json!("OPENROUTER_API_KEY")),
-            ("max_requests_per_day", json!(500)),
+            ("max_requests_per_day", json!(1_000_000)),
             ("board", json!("none")),
         ])
     }

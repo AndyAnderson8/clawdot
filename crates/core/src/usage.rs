@@ -27,7 +27,7 @@ impl Default for UsageLimits {
     fn default() -> Self {
         Self {
             max_output_tokens_per_turn: 300,
-            max_requests_per_day: 500,
+            max_requests_per_day: 1_000_000,
             daily_spend_cap_usd: None,
         }
     }

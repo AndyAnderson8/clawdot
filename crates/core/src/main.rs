@@ -76,7 +76,7 @@ LANGUAGE MODEL (optional; without it only the local fast path and fallback summa
     --summary-model NAME       Cheaper model for spoken summaries (default: --llm-model)
     --llm-key-env VAR          Environment variable holding the API key (default: OPENROUTER_API_KEY)
     --persona-file FILE        Replace the default system prompt
-    --max-requests-per-day N   Language model requests per local day (default: 500)
+    --max-requests-per-day N   Language model requests per local day (default: no limit)
     --daily-spend-usd X        Stop calling the model after this much spend per day
     --dry-run                  Describe actions instead of running them (read-only tools still run)
 
