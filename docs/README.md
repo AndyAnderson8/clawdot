@@ -46,6 +46,7 @@
 | Guides | [guides/updates.md](guides/updates.md) | How ClawDot checks for, verifies and installs updates, and how the maintainer signs a release |
 | Guides | [guides/realtime-voice.md](guides/realtime-voice.md) | Optional realtime (speech-to-speech) voice: how to build it in, what it costs, what stays in ClawDot, and what is not yet verified against the real service |
 | Guides | [guides/local-speech.md](guides/local-speech.md) | Free local speech to text (whisper.cpp) and text to speech (Piper) with an OpenAI-compatible URL, for the PC voice loop |
+| Guides | [guides/memory-and-skills.md](guides/memory-and-skills.md) | How memories are kept, selected for each request and searched, and how skills in the open SKILL.md format are imported, reviewed and kept from running anything |
 | Guides | [guides/speech-providers.md](guides/speech-providers.md) | Choose ElevenLabs or Deepgram instead of an OpenAI-style speech server: setup, keys, cloned voices and their consent, and what is not yet verified against the real services |
 | Guides | [guides/forgot-password.md](guides/forgot-password.md) | Forgot the administrator password: the 10 second button hold, the desktop key, the command line, and the Echo Dot |
 | Guides | [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | B0 trial of the TECHO5 Dot base image on the maintainer's unit: backups, install, measurements, rollback, go/no-go |

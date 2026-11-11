@@ -66,6 +66,8 @@ const MAX_BODY: usize = 4096;
 /// A tool description with its parameters, and a skills file.
 const MAX_TOOL_BODY: usize = 16 * 1024;
 const MAX_SKILL_BODY: usize = 64 * 1024;
+/// A folder of skills sent as files to import.
+const MAX_SKILL_IMPORT_BODY: usize = 384 * 1024;
 /// Events shown in the overview, newest first.
 const MAX_EVENTS: usize = 50;
 /// Longest event text sent to the page.
@@ -392,7 +394,10 @@ pub async fn handle(
         (&Method::GET, ["diagnostics"]) => diagnostics(core),
         (&Method::GET, ["logs"]) => logs(query),
         (&Method::GET, ["audit"]) => audit(core, query),
-        (&Method::GET, ["notes"]) => notes_list(core),
+        (&Method::GET, ["notes"]) => match query_param(query, "q") {
+            Some(q) => notes_search(core, &q),
+            None => notes_list(core),
+        },
         (&Method::POST, ["notes"]) => notes_add(core, body).await,
         (&Method::DELETE, ["notes"]) => notes_forget(core, None),
         (&Method::PUT, ["notes", id]) => notes_edit(core, id, body).await,
@@ -868,6 +873,35 @@ fn notes_list(core: &Core) -> Resp {
     )
 }
 
+/// `GET /api/notes?q=words`: the notes that match, best first (REQ-MEM-004). The same ranking the assistant's
+/// `recall` tool uses. Each note carries its `position`, the number voice commands use ("forget note 7").
+fn notes_search(core: &Core, q: &str) -> Resp {
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
+    };
+    let found: Vec<Value> = store
+        .search(q, crate::notes::PORTAL_SEARCH_MAX)
+        .into_iter()
+        .map(
+            |(position, n)| json!({ "id": n.id, "text": n.text, "ts": n.ts, "position": position }),
+        )
+        .collect();
+    json_reply(
+        StatusCode::OK,
+        &json!({
+            "enabled": store.enabled(),
+            "query": q.chars().take(crate::notes::MAX_QUERY_CHARS).collect::<String>(),
+            "notes": found,
+            "limits": {
+                "max_notes": crate::notes::MAX_NOTES,
+                "max_note_chars": crate::notes::MAX_NOTE_CHARS,
+                "max_total_bytes": crate::notes::MAX_TOTAL_BYTES,
+            },
+            "note": "Best matches first. Memories are the user's own words; show their text as text.",
+        }),
+    )
+}
+
 /// `POST /api/notes` with `{"text":..}`: the administrator writes a note. It goes through the same store checks
 /// as a spoken "remember that" (REQ-CFG-061), and the answer is the new list.
 async fn notes_add(core: &Core, body: Incoming) -> Resp {
@@ -1062,7 +1096,12 @@ async fn tier_choice(
 
 /// Skills are addressed in the body, not the path, because their names are free text.
 async fn skill_action(core: &Core, action: &str, body: Incoming) -> Resp {
-    let v = match read_json_limit::<Value>(body, MAX_SKILL_BODY).await {
+    let limit = if action == "import" {
+        MAX_SKILL_IMPORT_BODY
+    } else {
+        MAX_SKILL_BODY
+    };
+    let v = match read_json_limit::<Value>(body, limit).await {
         Ok(v) => v,
         Err((s, m)) => return error(s, m),
     };
@@ -1071,6 +1110,7 @@ async fn skill_action(core: &Core, action: &str, body: Incoming) -> Resp {
         "import" => ext(core, ExtOp::SkillImport(v)).await,
         "edit" => ext(core, ExtOp::SkillEdit(name, v["skill"].clone())).await,
         "delete" => ext(core, ExtOp::SkillDelete(name)).await,
+        "accept" => ext(core, ExtOp::SkillAccept(name)).await,
         "enabled" => match v["enabled"].as_bool() {
             Some(on) => ext(core, ExtOp::SkillEnable(name, on)).await,
             None => error(
