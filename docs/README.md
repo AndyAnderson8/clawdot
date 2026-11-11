@@ -40,6 +40,7 @@
 | Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
 | Recipes | [recipes/README.md](recipes/README.md) | The default toolset as tested configurations: web search, Spotify (with its policy problem), Home Assistant, GitHub, calendar, Claude Code hook |
 | Guides | [guides/announce.md](guides/announce.md) | Make the speaker say something from a script, Home Assistant or CI: `POST /api/announce` and `clawdot say`, with snippets and failure modes |
+| Guides | [guides/hermes-mcp.md](guides/hermes-mcp.md) | Let an agent harness such as Hermes speak and ask you things: the ClawDot MCP server, `announce` and `ask_user` |
 | Bridges | [../bridges/README.md](../bridges/README.md) | ntfy and Discord sidecars that make the speaker say messages, with filters, rate limits and no raw markup |
 | Guides | [guides/quick-start.md](guides/quick-start.md) | Start ClawDot on a computer, choose a language model, hear it answer, and keep it updated |
 | Guides | [guides/updates.md](guides/updates.md) | How ClawDot checks for, verifies and installs updates, and how the maintainer signs a release |

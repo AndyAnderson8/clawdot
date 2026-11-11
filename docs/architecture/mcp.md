@@ -2,7 +2,8 @@
 
 External [Model Context Protocol](https://modelcontextprotocol.io) servers can add tools to the assistant with no
 change to the core (REQ-AST-005): a Home Assistant MCP server, a calendar, a notes app. ClawDot is a client only.
-It does not expose an MCP server of its own (REQ-EXT-006, later).
+The other direction, ClawDot as a server for an agent harness, is described in
+[the ClawDot MCP server](#the-clawdot-mcp-server) at the end of this page.
 
 - **Transport: Streamable HTTP only.** The core never starts a process, so there is no stdio support
   (REQ-EXT-001). Replies may be plain JSON or a server-sent event stream; both work.
@@ -57,3 +58,40 @@ control, and a compromised server could try to steer the model. So:
 - OAuth. Use a static bearer token from the environment, or a small proxy that adds one.
 - Editing an MCP server in place (remove it and add it again). Adding, removing, testing, and switching servers and their tools is in the Connections tab (REQ-CFG-033); see [extensibility.md](extensibility.md).
 - Tested only against a fake server in this repository; no real MCP server has been tried.
+
+## The ClawDot MCP server
+
+An agent harness that is itself an MCP client (Hermes Agent, for example) can speak and ask the person things
+through `POST /mcp` (REQ-EXT-011 to REQ-EXT-018). How to connect one is in the [guide](../guides/hermes-mcp.md).
+The code is `crates/core/src/mcp_server.rs` (protocol and tools) and `crates/core/src/app/ask.rs` (the waiting
+question).
+
+```
+harness (MCP client) --POST /mcp, endpoint token--> mcp_server --announce_as--> inbox --> speaker
+                                                        |                                  |
+                                                        |  ask_user waits on a one-shot    |  the person answers
+                                                        '<------ Core::reply() hands the answer to that waiter
+```
+
+- **Transport.** The same pinned revision as the client (`2025-06-18`), Streamable HTTP in its simplest form:
+  stateless (no `Mcp-Session-Id`), one JSON-RPC message per `POST`, answered with `application/json`, a
+  notification answered `202`. `GET` and `DELETE` are `405`, so a client falls back to plain request and
+  response. Only `initialize`, `ping`, `tools/list` and `tools/call` exist.
+- **Authentication.** An endpoint token only, checked before the body is read, spending the shared
+  failed-authentication budget on a miss. The endpoint it names is the identity of the caller for the filter,
+  the burst limit, the audit trigger `mcp:<endpoint>` and the "one question at a time" rule.
+- **`announce`** is `Core::announce_as`: the same path as `/api/announce`, with the text cleaned (control
+  characters, markup, links, secrets), the source forced to the endpoint's name and a one hour time to live.
+- **`ask_user`** queues a question as an announcement that allows a reply and registers a one-shot channel for
+  the event. When the person answers, `Core::reply` finds the waiting caller for that event and hands it the
+  words instead of queuing a reply for a bridge; the event is acknowledged. The waiter is a ticket whose `Drop`
+  withdraws the question, so a timeout or a closed connection leaves nothing to be spoken late. The question is
+  an ordinary inbox event, so the speaker, mute, quiet hours and the summary rules decide when and how it is
+  spoken; if it is never spoken the call ends as `no_answer`.
+- **The answer is data.** It is returned in the tool result as one cleaned line of at most 500 characters,
+  labelled `untrusted: true`. It never enters the reply queue or the confirmation
+  machinery, so it cannot answer a held action (REQ-EXT-014, threat T18). The words reach the waiting call by the
+  assistant's existing reply route (`inbox_reply`), so a spoken answer is read back and confirmed like any reply
+  to an agent (REQ-SEC-011); that path is covered by core tests, not yet by a voice end-to-end run.
+- **Not implemented, by design.** Resources, prompts, sampling, tool lists that change, OAuth, a server-sent
+  event stream, JSON-RPC batches and anything that reads or writes ClawDot's own state.
