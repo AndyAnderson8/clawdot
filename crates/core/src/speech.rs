@@ -750,12 +750,41 @@ impl Synthesizer for HttpSynthesizer {
     }
 }
 
-static SOURCE: std::sync::OnceLock<(String, String, Dialect)> = std::sync::OnceLock::new();
+/// Which speech server (address, the NAME of the key variable, and its dialect) the portal may ask for its voices.
+/// The owning [`crate::app::Core`] keeps it.
+#[derive(Debug, Clone)]
+pub struct SpeechOrigin {
+    url: String,
+    key_env: String,
+    dialect: Dialect,
+}
 
-/// Remember which speech server (address, the NAME of the key variable, and its dialect) the portal may ask for its
-/// voices.
-pub fn set_source(url: &str, key_env: Option<&str>, dialect: Dialect) {
-    let _ = SOURCE.set((url.to_owned(), key_env.unwrap_or("").to_owned(), dialect));
+impl SpeechOrigin {
+    /// The server at `url`, whose key (when not pasted into the portal) is in the variable `key_env`.
+    #[must_use]
+    pub fn new(url: &str, key_env: Option<&str>, dialect: Dialect) -> Self {
+        Self {
+            url: url.to_owned(),
+            key_env: key_env.unwrap_or("").to_owned(),
+            dialect,
+        }
+    }
+
+    /// The server with the key it would use now.
+    #[must_use]
+    pub fn resolve(&self, secrets: &Secrets) -> SpeechSource {
+        SpeechSource {
+            url: self.url.clone(),
+            key: secrets.get(crate::secrets::SPEECH_KEY).unwrap_or_else(|| {
+                if self.key_env.is_empty() {
+                    String::new()
+                } else {
+                    std::env::var(&self.key_env).unwrap_or_default()
+                }
+            }),
+            dialect: self.dialect,
+        }
+    }
 }
 
 /// The speech server set up at start.
@@ -767,22 +796,6 @@ pub struct SpeechSource {
     pub key: String,
     /// Its wire format.
     pub dialect: Dialect,
-}
-
-/// The speech server set up at start, with the key it would use now.
-#[must_use]
-pub fn source(secrets: &Secrets) -> Option<SpeechSource> {
-    SOURCE.get().map(|(url, var, dialect)| SpeechSource {
-        url: url.clone(),
-        key: secrets.get(crate::secrets::SPEECH_KEY).unwrap_or_else(|| {
-            if var.is_empty() {
-                String::new()
-            } else {
-                std::env::var(var).unwrap_or_default()
-            }
-        }),
-        dialect: *dialect,
-    })
 }
 
 /// Deepgram has no list to ask for; these are its Aura 2 English voices (the model name is the voice).

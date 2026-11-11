@@ -16,7 +16,6 @@ use crate::seed::{agent_from, policy_from, quiet_from};
 use crate::session::Conversation;
 use crate::session::{ToolHost, TurnConfig, TurnCtl};
 use crate::settings::{self, Group};
-use crate::speechio::apply_speech;
 use crate::store::JsonStore;
 use crate::transport::HttpBackend;
 use crate::turns::{self, Event as HubEvent, Hub, Origin, Reply, Request, Submitted, TurnKit};
@@ -161,7 +160,7 @@ pub fn apply_live(
         }
     }
     if settings::group_changed(Group::Speech, live, applied) {
-        apply_speech(live);
+        core.speech_handles().apply(live);
     }
     if settings::group_changed(Group::Realtime, live, applied) {
         brain.rt.set_settings(RtSettings::from_live(live));

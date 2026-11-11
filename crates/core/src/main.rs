@@ -143,11 +143,11 @@ async fn main() -> ExitCode {
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
     if let Some(url) = &args.speech.url {
-        clawdot_core::speech::set_source(
+        core.set_speech_origin(clawdot_core::speech::SpeechOrigin::new(
             url,
             args.speech.key_env.as_deref(),
             args.speech.dialect(),
-        );
+        ));
     }
     #[cfg(feature = "tls")]
     start_updates(&args, &applied);

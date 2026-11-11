@@ -215,7 +215,8 @@ pub async fn start_satellites(
         let addr: SocketAddr = listen
             .parse()
             .map_err(|e| format!("satellite.listen: {e}"))?;
-        let (stt, tts) = build_registered_speech(&args.speech, core.secrets())?;
+        let (stt, tts) =
+            build_registered_speech(&args.speech, core.secrets(), core.speech_handles())?;
         let mut settings = satellite::Settings {
             announcer: announcer.clone(),
             realtime: Some(rt.clone()),
@@ -272,7 +273,8 @@ pub async fn start_satellites(
     // ESPHome voice satellites (optional feature; spec 0004) share the satellite pipeline and announcer.
     #[cfg(feature = "esphome-satellite")]
     if !args.esphome.is_empty() {
-        let (stt, tts) = build_registered_speech(&args.speech, core.secrets())?;
+        let (stt, tts) =
+            build_registered_speech(&args.speech, core.secrets(), core.speech_handles())?;
         let mut settings = satellite::Settings {
             announcer: announcer.clone(),
             realtime: Some(rt.clone()),

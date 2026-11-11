@@ -812,7 +812,7 @@ const OPENAI_VOICES: [&str; 11] = [
 /// `GET /api/voices`: the voices the speech server offers (REQ-CFG-081): its own list when it has one, OpenAI's fixed
 /// set for OpenAI, otherwise a plain statement that the voice has to be typed.
 async fn voices(core: &Core) -> Resp {
-    let Some(src) = crate::speech::source(core.secrets()) else {
+    let Some(src) = core.speech_source() else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
             "No speech provider is set up, so there are no voices to choose from.",

@@ -7,78 +7,84 @@ use crate::secrets::Secrets;
 use crate::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
 use crate::turns::Hub;
 use crate::voice::voice_turn;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-/// Build the speech providers from the `speech` configuration section.
-/// The speech clients that exist, so a change of voice or language in the portal reaches them while running.
 #[derive(Default)]
-struct SpeechHandles {
-    voices: Vec<Arc<std::sync::Mutex<String>>>,
-    languages: Vec<Arc<std::sync::Mutex<Option<String>>>>,
+struct Registered {
+    voices: Vec<Arc<Mutex<String>>>,
+    languages: Vec<Arc<Mutex<Option<String>>>>,
 }
 
-static SPEECH_HANDLES: std::sync::Mutex<SpeechHandles> = std::sync::Mutex::new(SpeechHandles {
-    voices: Vec::new(),
-    languages: Vec::new(),
-});
+/// The speech clients that exist, so a change of voice or language in the portal reaches them while running.
+/// A cheap handle: clones share one registry. Each [`crate::app::Core`] owns one, so two cores in one process
+/// never change each other's voice.
+#[derive(Clone, Default)]
+pub struct SpeechHandles(Arc<Mutex<Registered>>);
 
-/// Build the speech clients and remember how to change their voice and language later.
+impl std::fmt::Debug for SpeechHandles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SpeechHandles")
+    }
+}
+
+impl SpeechHandles {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Registered> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Remember how to change the voice of `tts` and the language of `stt` later.
+    pub fn register(&self, stt: &HttpTranscriber, tts: &HttpSynthesizer) {
+        let mut h = self.lock();
+        h.voices.push(tts.voice_handle());
+        h.languages.push(stt.language_handle());
+    }
+
+    /// Make every speech client use `voice` now, and return the voice they were using (none when there is no
+    /// client).
+    pub fn swap_voice(&self, voice: &str) -> Option<String> {
+        let h = self.lock();
+        let mut old = None;
+        for slot in &h.voices {
+            let mut v = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            old.get_or_insert_with(|| v.clone());
+            *v = voice.to_owned();
+        }
+        old
+    }
+
+    /// Apply the voice and language that are now set to every speech client.
+    pub fn apply(&self, live: &serde_json::Map<String, serde_json::Value>) {
+        let h = self.lock();
+        if let Some(v) = live
+            .get("voice")
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.is_empty())
+        {
+            for slot in &h.voices {
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) = v.to_owned();
+            }
+        }
+        let language = live
+            .get("speech_language")
+            .and_then(serde_json::Value::as_str)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned);
+        for slot in &h.languages {
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) = language.clone();
+        }
+    }
+}
+
+/// Build the speech clients and register them with `handles` so their voice and language can change later.
 pub fn build_registered_speech(
     speech: &SpeechConfig,
     secrets: &Secrets,
+    handles: &SpeechHandles,
 ) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
     let (stt, tts) = build_speech(speech, secrets)?;
-    let mut h = SPEECH_HANDLES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    h.voices.push(tts.voice_handle());
-    h.languages.push(stt.language_handle());
+    handles.register(&stt, &tts);
     Ok((stt, tts))
-}
-
-/// Make every speech client use `voice` now, and return the voice they were using (none when there is no client).
-pub fn swap_live_voice(voice: &str) -> Option<String> {
-    let h = SPEECH_HANDLES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut old = None;
-    for slot in &h.voices {
-        let mut v = slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        old.get_or_insert_with(|| v.clone());
-        *v = voice.to_owned();
-    }
-    old
-}
-
-/// Apply the voice and language that are now set to every speech client.
-pub fn apply_speech(live: &serde_json::Map<String, serde_json::Value>) {
-    let h = SPEECH_HANDLES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(v) = live
-        .get("voice")
-        .and_then(serde_json::Value::as_str)
-        .filter(|v| !v.is_empty())
-    {
-        for slot in &h.voices {
-            *slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = v.to_owned();
-        }
-    }
-    let language = live
-        .get("speech_language")
-        .and_then(serde_json::Value::as_str)
-        .filter(|l| !l.is_empty())
-        .map(str::to_owned);
-    for slot in &h.languages {
-        *slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = language.clone();
-    }
 }
 
 pub fn build_speech(

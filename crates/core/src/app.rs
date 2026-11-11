@@ -220,6 +220,8 @@ pub struct Core {
     notes: std::sync::OnceLock<Arc<crate::notes::NoteStore>>,
     asks: Mutex<Vec<ask::PendingAsk>>,
     secrets: crate::secrets::Secrets,
+    speech_handles: crate::speechio::SpeechHandles,
+    speech_origin: std::sync::OnceLock<crate::speech::SpeechOrigin>,
 }
 
 impl std::fmt::Debug for Core {
@@ -321,7 +323,27 @@ impl Core {
             notes: std::sync::OnceLock::new(),
             asks: Mutex::new(Vec::new()),
             secrets,
+            speech_handles: crate::speechio::SpeechHandles::default(),
+            speech_origin: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The speech clients' voice and language registry, owned by this core.
+    #[must_use]
+    pub fn speech_handles(&self) -> &crate::speechio::SpeechHandles {
+        &self.speech_handles
+    }
+
+    /// Remember which speech server the portal may ask for its voices (set once at start-up; a later call is
+    /// ignored).
+    pub fn set_speech_origin(&self, origin: crate::speech::SpeechOrigin) {
+        let _ = self.speech_origin.set(origin);
+    }
+
+    /// The speech server set up at start, with the key it would use now.
+    #[must_use]
+    pub fn speech_source(&self) -> Option<crate::speech::SpeechSource> {
+        self.speech_origin.get().map(|o| o.resolve(&self.secrets))
     }
 
     /// The keys pasted into the portal, owned by this core.
