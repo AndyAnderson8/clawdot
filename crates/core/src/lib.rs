@@ -16,6 +16,7 @@ pub mod app;
 pub mod assistant;
 pub mod audit;
 pub mod cancel;
+pub mod cli;
 pub mod config;
 pub mod diag;
 #[cfg(feature = "esphome-satellite")]
@@ -43,6 +44,7 @@ pub mod satellite;
 pub mod say;
 pub mod sched;
 pub mod secrets;
+pub mod seed;
 pub mod session;
 pub mod settings;
 pub mod skillfolder;

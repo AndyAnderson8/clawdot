@@ -8,31 +8,29 @@
 use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, describe_fired};
-use clawdot_core::audit::{ActionPolicy, AuditConfig, AuditLog};
-use clawdot_core::config::{AgentConfig, Config, SatelliteConfig, SpeechConfig, UpdatesConfig};
+use clawdot_core::audit::{AuditConfig, AuditLog};
+use clawdot_core::cli::{self, Args};
+use clawdot_core::config::{AgentConfig, SpeechConfig};
 #[cfg(feature = "esphome-satellite")]
 use clawdot_core::esphome_cfg::EsphomeConfig;
 use clawdot_core::extensions::{ExtOp, Extensions, WithPolicy};
 use clawdot_core::http::{ServeOptions, serve};
-use clawdot_core::httptools::{HttpTools, ToolDef, WithHttp};
-use clawdot_core::inbox::endpoint::QuietHours;
+use clawdot_core::httptools::{HttpTools, WithHttp};
 use clawdot_core::inbox::event::Event;
 use clawdot_core::inbox::summary::{
     SummaryConfig, announcement, clamp_for_speech, fallback_summary, short_announcement,
     summary_prompt,
 };
 use clawdot_core::llm::{ChatRequest, Message};
-use clawdot_core::mcp::{McpClient, ServerDef, WithMcp};
-use clawdot_core::media::Station;
+use clawdot_core::mcp::{McpClient, WithMcp};
 use clawdot_core::notes::NoteStore;
 use clawdot_core::rtvoice::{self, Realtime, RtSettings};
 use clawdot_core::satellite::{self, Ask};
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
-use clawdot_core::session::{
-    ChatBackend, Conversation, MAX_CALLS_CEILING, MAX_DEADLINE_CEILING_SECS, MAX_ROUNDS_CEILING,
-    ToolHost, TurnConfig, TurnCtl,
-};
-use clawdot_core::settings::{self, Group, Layer, SettingsState, public_url_from_listen};
+use clawdot_core::seed;
+use clawdot_core::seed::{agent_from, policy_from, quiet_from};
+use clawdot_core::session::{ChatBackend, Conversation, ToolHost, TurnConfig, TurnCtl};
+use clawdot_core::settings::{self, Group, public_url_from_listen};
 use clawdot_core::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
 use clawdot_core::store::JsonStore;
 use clawdot_core::transport::HttpBackend;
@@ -42,434 +40,12 @@ use clawdot_core::turns::{
 use clawdot_core::usage::{UsageLimits, UsageTracker};
 use clawdot_core::voice::voice_turn;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-
-const HELP: &str = "\
-clawdot: ClawDot core with a text console (pre-alpha; no audio yet)
-
-USAGE:
-    clawdot [options]
-    clawdot say TEXT [options]   Speak a message on a running ClawDot (see: clawdot say --help)
-
-OPTIONS:
-    --config FILE              JSON configuration file (flags override it); see docs/architecture/configuration.md
-    --data-dir DIR             Where state is kept (default: ./clawdot-data)
-    --listen ADDR              Address for the HTTP server (default: 127.0.0.1:3335)
-    --public-url URL           How agents reach this device, used in printed snippets (default: from --listen)
-    --zone NAME                IANA time zone, for example America/New_York (default: UTC)
-    --name NAME                Device name shown in the web UI header (default: the host name)
-    --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once and exits
-    --rotate-endpoint NAME     Issue a new token for an endpoint, print it once, and exit
-    --reset-admin              Clear the web UI administrator setting and exit, so first-run setup shows again
-                               (run on the device with the server stopped)
-    --voice-in FILE            Answer one recorded utterance (WAV, mono 16-bit 16 kHz) and exit; needs a `speech` config
-    --voice-out FILE           With --voice-in, write the spoken reply to this WAV file
-    --no-console               Do not read the console (run as a server only)
-    --echo-speech              With --no-console, still print what the speaker says to stdout (diagnosis;
-                               stdout may be kept by a service manager, so leave it off in production)
-    --hive-discovery MODE      Hive (builds with the `hive` feature only): off, native, avahi or avahi:PATH. Makes the
-                               speaker's identity available and, for native or avahi, announces it on the home network
-                               and lists other speakers (docs/guides/hive.md). Default: not started.
-    --hive-publish-name        Include the device name in the announcement (default: only an id label is public)
-
-LANGUAGE MODEL (optional; without it only the local fast path and fallback summaries work):
-    --llm-url URL              OpenAI-compatible base URL, for example https://openrouter.ai/api/v1
-    --llm-model NAME           Model for conversation and tool calls
-    --llm-key-env VAR          Environment variable holding the API key (default: OPENROUTER_API_KEY)
-    --persona-file FILE        Replace the default system prompt
-    --daily-spend-usd X        Stop calling the model after this much spend per day
-    --dry-run                  Describe actions instead of running them (read-only tools still run)
-
-    -h, --help                 Show this help
-";
-
-use clawdot_core::assistant::DEFAULT_PERSONA;
-
-struct Args {
-    /// Values from the configuration file and from flags, kept apart so saved settings can sit between them
-    /// (REQ-CFG-038).
-    file_layer: Layer,
-    flag_layer: Layer,
-    /// The persona file came from a flag, not the configuration file.
-    persona_flag: bool,
-    /// The system prompt in effect.
-    persona: String,
-    data_dir: PathBuf,
-    listen: SocketAddr,
-    public_url: Option<String>,
-    zone: Option<String>,
-    create: Vec<String>,
-    rotate: Vec<String>,
-    reset_admin: bool,
-    /// An endpoint command was given on the command line: print and exit instead of serving.
-    manage: bool,
-    console: bool,
-    /// Echo spoken text to stdout even without the console (diagnosis only).
-    echo_speech: bool,
-    llm_url: Option<String>,
-    llm_model: Option<String>,
-    key_env: String,
-    persona_file: Option<PathBuf>,
-    tools: Vec<ToolDef>,
-    mcp: Vec<ServerDef>,
-    stations: Vec<Station>,
-    speech: SpeechConfig,
-    satellite: SatelliteConfig,
-    updates: UpdatesConfig,
-    #[cfg(feature = "esphome-satellite")]
-    esphome: EsphomeConfig,
-    /// Hive discovery mode (`--hive-discovery`); `None` leaves the hive unstarted.
-    #[cfg(feature = "hive")]
-    hive: Option<clawdot_core::hive::Mode>,
-    #[cfg(feature = "hive")]
-    hive_publish_name: bool,
-    voice_in: Option<PathBuf>,
-    voice_out: Option<PathBuf>,
-    daily_spend: Option<f64>,
-    /// Daily action caps and the dry-run switch (REQ-SEC-015, REQ-SEC-016); the effective settings (REQ-CFG-062).
-    actions: ActionPolicy,
-    /// Turn limits, speech while working and notes (REQ-AST-019..025); the effective settings (REQ-CFG-062).
-    agent: AgentConfig,
-    /// The device-wide quiet-hours window (REQ-INB-040).
-    quiet: Option<QuietHours>,
-}
-
-fn parse() -> Result<Args, String> {
-    let mut a = Args {
-        file_layer: Layer::new(),
-        flag_layer: Layer::new(),
-        persona_flag: false,
-        persona: DEFAULT_PERSONA.to_owned(),
-        data_dir: PathBuf::from("clawdot-data"),
-        listen: "127.0.0.1:3335"
-            .parse()
-            .map_err(|_| "internal: bad default address".to_owned())?,
-        public_url: None,
-        zone: None,
-        create: Vec::new(),
-        rotate: Vec::new(),
-        reset_admin: false,
-        manage: false,
-        console: true,
-        echo_speech: false,
-        llm_url: None,
-        llm_model: None,
-        key_env: "OPENROUTER_API_KEY".into(),
-        persona_file: None,
-        tools: Vec::new(),
-        mcp: Vec::new(),
-        stations: Vec::new(),
-        speech: SpeechConfig::default(),
-        satellite: SatelliteConfig::default(),
-        updates: UpdatesConfig::default(),
-        #[cfg(feature = "esphome-satellite")]
-        esphome: EsphomeConfig::default(),
-        #[cfg(feature = "hive")]
-        hive: None,
-        #[cfg(feature = "hive")]
-        hive_publish_name: false,
-        voice_in: None,
-        voice_out: None,
-        quiet: None,
-        daily_spend: None,
-        actions: ActionPolicy::default(),
-        agent: AgentConfig::default(),
-    };
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(i) = argv.iter().position(|x| x == "--config") {
-        let path = argv.get(i + 1).ok_or("--config needs a value")?;
-        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        seed_from_config(&mut a, &Config::parse(&text)?)?;
-    }
-    let mut it = argv.into_iter();
-    while let Some(flag) = it.next() {
-        let mut value = |n: &str| it.next().ok_or_else(|| format!("{n} needs a value"));
-        match flag.as_str() {
-            "-h" | "--help" => return Err(String::new()),
-            "--config" => {
-                value("--config")?;
-            }
-            "--data-dir" => a.data_dir = PathBuf::from(value("--data-dir")?),
-            #[cfg(feature = "hive")]
-            "--hive-discovery" => {
-                a.hive = Some(
-                    clawdot_core::hive::Mode::parse(&value("--hive-discovery")?)
-                        .map_err(|e| format!("bad --hive-discovery: {e}"))?,
-                );
-            }
-            #[cfg(feature = "hive")]
-            "--hive-publish-name" => a.hive_publish_name = true,
-            "--listen" => {
-                a.listen = value("--listen")?
-                    .parse()
-                    .map_err(|e| format!("bad --listen: {e}"))?;
-                a.flag_layer
-                    .insert("listen".into(), a.listen.to_string().into());
-            }
-            "--public-url" => {
-                a.flag_layer
-                    .insert("public_url".into(), value("--public-url")?.into());
-            }
-            "--zone" => {
-                a.flag_layer.insert("zone".into(), value("--zone")?.into());
-            }
-            "--name" => {
-                a.flag_layer
-                    .insert("device_name".into(), value("--name")?.into());
-            }
-            "--create-endpoint" => {
-                a.create.push(value("--create-endpoint")?);
-                a.manage = true;
-            }
-            "--rotate-endpoint" => {
-                a.rotate.push(value("--rotate-endpoint")?);
-                a.manage = true;
-            }
-            "--reset-admin" => a.reset_admin = true,
-            "--rotate-admin-token" => {
-                return Err(
-                    "--rotate-admin-token was removed: the web UI now asks for a password on first run; \n                     use --reset-admin to start setup again"
-                        .into(),
-                );
-            }
-            "--voice-in" => a.voice_in = Some(PathBuf::from(value("--voice-in")?)),
-            "--voice-out" => a.voice_out = Some(PathBuf::from(value("--voice-out")?)),
-            "--no-console" => a.console = false,
-            "--echo-speech" => a.echo_speech = true,
-            "--llm-url" => {
-                a.flag_layer
-                    .insert("llm_url".into(), value("--llm-url")?.into());
-            }
-            "--llm-model" => {
-                a.flag_layer
-                    .insert("llm_model".into(), value("--llm-model")?.into());
-            }
-            "--llm-key-env" => {
-                a.flag_layer
-                    .insert("llm_key_env".into(), value("--llm-key-env")?.into());
-            }
-            "--persona-file" => {
-                a.persona_file = Some(PathBuf::from(value("--persona-file")?));
-                a.persona_flag = true;
-            }
-            "--dry-run" => {
-                a.flag_layer.insert("dry_run".into(), true.into());
-            }
-            "--daily-spend-usd" => {
-                let x: f64 = value("--daily-spend-usd")?
-                    .parse()
-                    .map_err(|e| format!("bad number: {e}"))?;
-                a.flag_layer.insert("daily_spend_usd".into(), x.into());
-            }
-            other => return Err(format!("unknown option `{other}`")),
-        }
-    }
-    Ok(a)
-}
-
-fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
-    if let Some(d) = &c.data_dir {
-        a.data_dir.clone_from(d);
-    }
-    if let Some(l) = c.listen_addr()? {
-        a.listen = l;
-    }
-    a.persona_file.clone_from(&c.persona_file);
-    a.tools.clone_from(&c.tools);
-    a.mcp.clone_from(&c.mcp);
-    a.stations.clone_from(&c.stations);
-    a.speech.clone_from(&c.speech);
-    a.satellite.clone_from(&c.satellite);
-    a.updates.clone_from(&c.updates);
-    #[cfg(feature = "esphome-satellite")]
-    a.esphome.clone_from(&c.esphome);
-    a.create.extend(c.endpoints.iter().cloned());
-    let mut put = |k: &str, v: Option<serde_json::Value>| {
-        if let Some(v) = v {
-            a.file_layer.insert(k.to_owned(), v);
-        }
-    };
-    put("device_name", c.name.clone().map(Into::into));
-    put("zone", c.zone.clone().map(Into::into));
-    put("listen", c.listen.clone().map(Into::into));
-    put("public_url", c.public_url.clone().map(Into::into));
-    put("llm_url", c.llm.url.clone().map(Into::into));
-    put("llm_model", c.llm.model.clone().map(Into::into));
-    put("llm_key_env", c.llm.key_env.clone().map(Into::into));
-    put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
-    put("voice", c.speech.voice.clone().map(Into::into));
-    put("speech_provider", c.speech.provider.clone().map(Into::into));
-    put("speech_language", c.speech.language.clone().map(Into::into));
-    a.agent = c.agent.clone();
-    // The agent and limit settings join the layers so the portal can show and change them (REQ-CFG-062).
-    // A value above its ceiling is shown at the ceiling it will be held to.
-    let ceil =
-        |v: Option<u64>, lo: u64, hi: u64| v.map(|n| serde_json::Value::from(n.clamp(lo, hi)));
-    put(
-        "agent_max_rounds",
-        ceil(
-            c.agent.max_rounds.map(|n| n as u64),
-            1,
-            MAX_ROUNDS_CEILING as u64,
-        ),
-    );
-    put(
-        "agent_max_tool_calls",
-        ceil(
-            c.agent.max_tool_calls.map(|n| n as u64),
-            1,
-            MAX_CALLS_CEILING as u64,
-        ),
-    );
-    put(
-        "agent_deadline_secs",
-        ceil(c.agent.deadline_secs, 5, MAX_DEADLINE_CEILING_SECS),
-    );
-    put(
-        "agent_tool_timeout_secs",
-        ceil(c.agent.tool_timeout_secs, 1, 120),
-    );
-    put("plan_speech", c.agent.plan_speech.map(Into::into));
-    put("progress_speech", c.agent.progress_speech.map(Into::into));
-    put("notes", c.agent.notes.map(Into::into));
-    put("update_check", c.updates.check.map(Into::into));
-    put(
-        "max_actions_per_day",
-        c.limits.max_actions_per_day.map(Into::into),
-    );
-    put(
-        "max_costly_per_day",
-        c.limits.max_costly_per_day.map(Into::into),
-    );
-    put("dry_run", c.limits.dry_run.map(Into::into));
-    let r = &c.voice.realtime;
-    put("realtime_enabled", r.enabled.map(Into::into));
-    put("realtime_url", r.url.clone().map(Into::into));
-    put("realtime_model", r.model.clone().map(Into::into));
-    put("realtime_voice", r.voice.clone().map(Into::into));
-    put("realtime_key_env", r.key_env.clone().map(Into::into));
-    put(
-        "realtime_transcription_model",
-        r.transcription_model.clone().map(Into::into),
-    );
-    put("realtime_usd_per_min_in", r.usd_per_min_in.map(Into::into));
-    put(
-        "realtime_usd_per_min_out",
-        r.usd_per_min_out.map(Into::into),
-    );
-    put(
-        "realtime_max_session_secs",
-        r.max_session_secs.map(Into::into),
-    );
-    Ok(())
-}
-
-/// Combine defaults, the configuration file, saved settings, and flags (REQ-CFG-038), then copy the
-/// effective values into `args`. Returns the state the portal edits and any warnings.
-fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), String> {
-    if let Some(p) = &args.persona_file {
-        let text = std::fs::read_to_string(p)
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| format!("cannot use persona file {}", p.display()))?;
-        let layer = if args.persona_flag {
-            &mut args.flag_layer
-        } else {
-            &mut args.file_layer
-        };
-        layer.insert("persona".into(), text.into());
-    }
-    let defaults: Layer = settings::built_in_defaults();
-    let (state, warnings) = SettingsState::open(
-        Some(&args.data_dir),
-        defaults,
-        std::mem::take(&mut args.file_layer),
-        std::mem::take(&mut args.flag_layer),
-        args.speech.url.is_some(),
-        Box::new(|n| std::env::var(n).ok()),
-    )?;
-    let text = |k: &str| state.get(k).as_str().map(str::to_owned);
-    args.listen = text("listen")
-        .and_then(|l| l.parse().ok())
-        .ok_or("internal: bad listen address")?;
-    args.public_url = text("public_url");
-    args.zone = text("zone").filter(|z| z != "UTC");
-    args.persona = text("persona").unwrap_or_default();
-    args.llm_url = text("llm_url");
-    args.llm_model = text("llm_model");
-    args.key_env = text("llm_key_env").unwrap_or_default();
-    args.daily_spend = state.get("daily_spend_usd").as_f64();
-    if let Some(v) = text("voice") {
-        args.speech.voice = Some(v);
-    }
-    // The language is empty when detected, which is not the same as unset in the configuration file.
-    args.speech.language = text("speech_language").filter(|l| !l.is_empty());
-    // ElevenLabs and Deepgram bring their own address, models and voice (REQ-VOI-021).
-    args.speech.provider = text("speech_provider");
-    args.speech.apply_provider_defaults();
-    let live = state.live_values();
-    args.agent = agent_from(&live, args.agent.summarize_over_chars);
-    args.actions = policy_from(&live);
-    args.quiet = quiet_from(&live);
-    Ok((state, warnings))
-}
-
-/// The agent settings among the live values (REQ-CFG-062).
-fn agent_from(
-    live: &serde_json::Map<String, serde_json::Value>,
-    summarize: Option<usize>,
-) -> AgentConfig {
-    let num = |k: &str| live.get(k).and_then(serde_json::Value::as_u64);
-    let flag = |k: &str| live.get(k).and_then(serde_json::Value::as_bool);
-    AgentConfig {
-        max_rounds: num("agent_max_rounds").and_then(|n| usize::try_from(n).ok()),
-        max_tool_calls: num("agent_max_tool_calls").and_then(|n| usize::try_from(n).ok()),
-        deadline_secs: num("agent_deadline_secs"),
-        tool_timeout_secs: num("agent_tool_timeout_secs"),
-        plan_speech: flag("plan_speech"),
-        progress_speech: flag("progress_speech"),
-        summarize_over_chars: summarize,
-        notes: flag("notes"),
-    }
-}
-
-/// The daily caps and the dry-run switch among the live values.
-fn policy_from(live: &serde_json::Map<String, serde_json::Value>) -> ActionPolicy {
-    let d = ActionPolicy::default();
-    let num = |k: &str, or: u32| {
-        live.get(k)
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok())
-            .unwrap_or(or)
-    };
-    ActionPolicy {
-        dry_run: live
-            .get("dry_run")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(d.dry_run),
-        max_actions_per_day: num("max_actions_per_day", d.max_actions_per_day),
-        max_costly_per_day: num("max_costly_per_day", d.max_costly_per_day),
-    }
-}
-
-/// The quiet-hours window among the live values, when both ends are set (REQ-INB-040).
-fn quiet_from(live: &serde_json::Map<String, serde_json::Value>) -> Option<QuietHours> {
-    let at = |k: &str| {
-        live.get(k)
-            .and_then(serde_json::Value::as_str)
-            .and_then(settings::minute_of_day)
-    };
-    Some(QuietHours {
-        start: at("quiet_start")?,
-        end: at("quiet_end")?,
-    })
-}
 
 /// `--reset-admin`: forget the administrator setting so first-run setup shows again (REQ-CFG-022).
 fn reset_admin(dir: &std::path::Path) -> ExitCode {
@@ -1419,21 +995,21 @@ async fn main() -> ExitCode {
     if argv.first().map(String::as_str) == Some("say") {
         return say_command(&argv[1..]).await;
     }
-    let mut args = match parse() {
+    let mut args = match cli::parse(&argv) {
         Ok(a) => a,
         Err(m) if m.is_empty() => {
-            print!("{HELP}");
+            print!("{}", cli::HELP);
             return ExitCode::SUCCESS;
         }
         Err(m) => {
-            eprintln!("clawdot: {m}\n\n{HELP}");
+            eprintln!("clawdot: {m}\n\n{}", cli::HELP);
             return ExitCode::from(2);
         }
     };
     if args.reset_admin {
         return reset_admin(&args.data_dir);
     }
-    let (mut settings_state, warnings) = match resolve_settings(&mut args) {
+    let (mut settings_state, warnings) = match seed::resolve_settings(&mut args) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("clawdot: {e}");
