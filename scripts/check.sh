@@ -71,18 +71,19 @@ else
   skipped+=("shell checks")
 fi
 
-# The policy tests spin up scratch repositories and are slow (hundreds of process spawns). Locally they
-# run only when the policy tooling itself changed (staged, or on this branch relative to dev). CI always
-# runs them, which is the authoritative check. Never at commit time.
+# The policy tests spin up scratch repositories and are slow (hundreds of process spawns; a quarter of an hour on
+# Windows). Locally they run only when the policy tooling itself changed (staged, or on this branch relative to dev):
+# the top-level scripts, hooks and agent guard. Helpers under scripts/dev/ are not policy tooling and do not set them
+# off. CI always runs them, which is the authoritative check. Never at commit time.
 policy_relevant() {
   [ -n "${CI:-}" ] && return 0
   { git diff --cached --name-only; git diff --name-only dev...HEAD 2>/dev/null; } |
-    grep -qE '^(scripts/|\.githooks/|\.claude/|\.shellcheckrc)'
+    grep -qE '^(scripts/[^/]+$|\.githooks/|\.claude/|\.shellcheckrc)'
 }
 if [ "$fast" -eq 0 ] && [ -f scripts/test-policy.sh ] && policy_relevant; then
   step "policy tooling: commit-message rules, agent guard, landing and release flow"
   run scripts/test-policy.sh
-elif [ "$fast" -eq 1 ] && [ "$tests" -eq 1 ] && [ -f scripts/test-policy.sh ] && changed_matches '^(scripts/|\.githooks/|\.claude/|\.shellcheckrc)'; then
+elif [ "$fast" -eq 1 ] && [ "$tests" -eq 1 ] && [ -f scripts/test-policy.sh ] && changed_matches '^(scripts/[^/]+$|\.githooks/|\.claude/|\.shellcheckrc)'; then
   # Scoped landing (integration batching, stabilization): the policy tests run only for a change to the tooling.
   step "policy tooling (scripts changed): commit-message rules, agent guard, landing and release flow"
   run scripts/test-policy.sh
