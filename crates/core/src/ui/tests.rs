@@ -37,7 +37,6 @@ async fn start(with_main_loop: bool) -> Portal {
         ("zone", json!("UTC")),
         ("listen", json!("127.0.0.1:3335")),
         ("llm_key_env", json!("OPENROUTER_API_KEY")),
-        ("max_requests_per_day", json!(1_000_000)),
         ("board", json!("none")),
     ]
     .into_iter()
@@ -386,7 +385,7 @@ async fn settings_are_saved_validated_and_need_the_administrator() {
     let setup = r#"{"mode":"password","password":"correct horse"}"#;
     let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
     let session = format!("Bearer {}", v["token"].as_str().unwrap());
-    let change = r#"{"zone":"Europe/Berlin","max_requests_per_day":20}"#;
+    let change = r#"{"zone":"Europe/Berlin","daily_spend_usd":5}"#;
     // Not signed in, or signed in with a wrong token: refused, and nothing changes.
     for auth in ["", "Bearer wrong"] {
         let s = call(&p, "PUT", "/api/settings", auth, change).await.0;

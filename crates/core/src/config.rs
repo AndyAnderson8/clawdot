@@ -28,7 +28,7 @@ pub struct LlmConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
-    /// Requests per local day; must be at least 1.
+    /// Retired: there is no cap on the number of requests any more. Still accepted so an older file loads, and ignored.
     pub max_requests_per_day: Option<u32>,
     /// Spend per local day in US dollars; must not be negative.
     pub daily_spend_usd: Option<f64>,
@@ -212,9 +212,6 @@ impl Config {
         {
             return Err("config: `llm.fallback_model` and `llm.summary_model` need `llm.url` and `llm.model`".into());
         }
-        if self.limits.max_requests_per_day == Some(0) {
-            return Err("config: `limits.max_requests_per_day` must be at least 1".into());
-        }
         for (name, v) in [
             ("max_rounds", self.agent.max_rounds.map(|n| n as u64)),
             (
@@ -323,13 +320,12 @@ mod tests {
               "endpoints": ["claude-code", "ci:generic"],
               "llm": {"url": "https://openrouter.ai/api/v1", "model": "a/b", "fallback_model": "c/d",
                       "summary_model": "e/f", "key_env": "MY_KEY"},
-              "limits": {"max_requests_per_day": 200, "daily_spend_usd": 1.5}
+              "limits": {"daily_spend_usd": 1.5}
             }"#,
         )
         .unwrap();
         assert_eq!(c.listen_addr().unwrap().unwrap().port(), 8080);
         assert_eq!(c.endpoints.len(), 2);
-        assert_eq!(c.limits.max_requests_per_day, Some(200));
     }
 
     // REQ-SEC-015, REQ-SEC-016
@@ -389,7 +385,6 @@ mod tests {
             (r#"{"llm": {"model": "m"}}"#, "together"),
             (r#"{"llm": {"url": "ftp://x", "model": "m"}}"#, "http"),
             (r#"{"llm": {"summary_model": "m"}}"#, "need"),
-            (r#"{"limits": {"max_requests_per_day": 0}}"#, "at least 1"),
             (r#"{"limits": {"daily_spend_usd": -1}}"#, "zero or more"),
             (r#"{"satellite": {"listen": "127.0.0.1:1"}}"#, "speech"),
             (r#"{"satellite": {"listen": "x"}}"#, "address"),

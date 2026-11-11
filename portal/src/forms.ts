@@ -128,7 +128,6 @@ export const LABEL: Record<string, string> = {
   voice: "Voice",
   listen: "Portal address",
   public_url: "Address other programs use",
-  max_requests_per_day: "Requests per day",
   daily_spend_usd: "Most to spend per day",
   board: "Board",
   agent_max_rounds: "Rounds per request",

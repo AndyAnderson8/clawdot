@@ -76,7 +76,6 @@ LANGUAGE MODEL (optional; without it only the local fast path and fallback summa
     --summary-model NAME       Cheaper model for spoken summaries (default: --llm-model)
     --llm-key-env VAR          Environment variable holding the API key (default: OPENROUTER_API_KEY)
     --persona-file FILE        Replace the default system prompt
-    --max-requests-per-day N   Language model requests per local day (default: no limit)
     --daily-spend-usd X        Stop calling the model after this much spend per day
     --dry-run                  Describe actions instead of running them (read-only tools still run)
 
@@ -122,7 +121,6 @@ struct Args {
     esphome: EsphomeConfig,
     voice_in: Option<PathBuf>,
     voice_out: Option<PathBuf>,
-    max_requests: u32,
     daily_spend: Option<f64>,
     /// Daily action caps and the dry-run switch (REQ-SEC-015, REQ-SEC-016); the effective settings (REQ-CFG-062).
     actions: ActionPolicy,
@@ -167,7 +165,6 @@ fn parse() -> Result<Args, String> {
         voice_in: None,
         voice_out: None,
         quiet: None,
-        max_requests: UsageLimits::default().max_requests_per_day,
         daily_spend: None,
         actions: ActionPolicy::default(),
         agent: AgentConfig::default(),
@@ -250,12 +247,6 @@ fn parse() -> Result<Args, String> {
                 a.persona_file = Some(PathBuf::from(value("--persona-file")?));
                 a.persona_flag = true;
             }
-            "--max-requests-per-day" => {
-                let n: u32 = value("--max-requests-per-day")?
-                    .parse()
-                    .map_err(|e| format!("bad number: {e}"))?;
-                a.flag_layer.insert("max_requests_per_day".into(), n.into());
-            }
             "--dry-run" => {
                 a.flag_layer.insert("dry_run".into(), true.into());
             }
@@ -305,10 +296,6 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     );
     put("summary_model", c.llm.summary_model.clone().map(Into::into));
     put("llm_key_env", c.llm.key_env.clone().map(Into::into));
-    put(
-        "max_requests_per_day",
-        c.limits.max_requests_per_day.map(Into::into),
-    );
     put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
     put("voice", c.speech.voice.clone().map(Into::into));
     put("speech_language", c.speech.language.clone().map(Into::into));
@@ -380,10 +367,6 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
         ("persona", DEFAULT_PERSONA.into()),
         ("listen", settings::DEFAULT_LISTEN.into()),
         ("llm_key_env", "OPENROUTER_API_KEY".into()),
-        (
-            "max_requests_per_day",
-            UsageLimits::default().max_requests_per_day.into(),
-        ),
         ("board", "none".into()),
         ("agent_max_rounds", turn.max_tool_loops.into()),
         ("agent_max_tool_calls", turn.max_tool_calls.into()),
@@ -423,11 +406,6 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
     args.llm_fallback = text("llm_fallback_model");
     args.summary_model = text("summary_model");
     args.key_env = text("llm_key_env").unwrap_or_default();
-    args.max_requests = state
-        .get("max_requests_per_day")
-        .as_u64()
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(UsageLimits::default().max_requests_per_day);
     args.daily_spend = state.get("daily_spend_usd").as_f64();
     if let Some(v) = text("voice") {
         args.speech.voice = Some(v);
@@ -706,15 +684,8 @@ fn apply_live(
     {
         p.clone_into(&mut brain.persona);
     }
-    if changed("max_requests_per_day") || changed("daily_spend_usd") {
+    if changed("daily_spend_usd") {
         let mut l = *brain.usage.limits();
-        if let Some(n) = live
-            .get("max_requests_per_day")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok())
-        {
-            l.max_requests_per_day = n;
-        }
         l.daily_spend_cap_usd = live
             .get("daily_spend_usd")
             .and_then(serde_json::Value::as_f64);
@@ -928,8 +899,8 @@ impl Brain {
             "usage": {
                 "day": self.usage.request_days().0,
                 "history": self.usage.request_days().1.iter().map(|(d, n)| serde_json::json!({ "day": d, "requests": n })).collect::<Vec<_>>(),
+                "daily_spend_cap_usd": self.usage.limits().daily_spend_cap_usd,
                 "requests_today": self.usage.requests_today(),
-                "max_requests_per_day": self.usage.limits().max_requests_per_day,
                 "spend_today": self.usage.spend_today(),
             },
             "clock_valid": self.clock.wall_clock_valid(),
@@ -1341,7 +1312,6 @@ async fn main() -> ExitCode {
     }
 
     let limits = UsageLimits {
-        max_requests_per_day: args.max_requests,
         daily_spend_cap_usd: args.daily_spend,
         ..UsageLimits::default()
     };

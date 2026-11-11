@@ -63,7 +63,7 @@ pub struct Field {
 }
 
 /// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039).
-pub const FIELDS: [Field; 28] = [
+pub const FIELDS: [Field; 27] = [
     Field {
         key: "device_name",
         live: true,
@@ -111,10 +111,6 @@ pub const FIELDS: [Field; 28] = [
     Field {
         key: "public_url",
         live: false,
-    },
-    Field {
-        key: "max_requests_per_day",
-        live: true,
     },
     Field {
         key: "daily_spend_usd",
@@ -191,6 +187,9 @@ pub fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
         (format!("http://{listen}"), false)
     }
 }
+
+/// Settings that were removed. A file saved by an older version may still hold one, and it is skipped quietly.
+const RETIRED: [&str; 1] = ["max_requests_per_day"];
 
 fn is_field(key: &str) -> bool {
     FIELDS.iter().any(|f| f.key == key)
@@ -349,13 +348,6 @@ fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Resu
             }
             json!(u.trim_end_matches('/'))
         }
-        "max_requests_per_day" => {
-            let n = v
-                .as_u64()
-                .filter(|n| (1..=1_000_000).contains(n))
-                .ok_or("Requests per day must be a whole number from 1 to 1000000.")?;
-            json!(n)
-        }
         "daily_spend_usd" => {
             let n = v.as_f64().filter(|n| n.is_finite() && (0.0..=100_000.0).contains(n)).ok_or(
                 "The daily spend limit must be a number of dollars, zero or more. Leave it empty for no limit.",
@@ -465,6 +457,10 @@ impl SettingsState {
                 .load()
                 .map_err(|e| format!("{}: {e}. Fix or remove the file.", s.path().display()))?;
             for (k, v) in raw {
+                // A setting that was removed: a file saved by an older version may still hold it, and that is no reason to refuse to start.
+                if RETIRED.contains(&k.as_str()) {
+                    continue;
+                }
                 if !is_field(&k) {
                     return Err(format!(
                         "{} has an unknown setting `{k}`. Remove that line, or restore a copy of the file.",
@@ -686,7 +682,6 @@ mod tests {
             ("zone", json!("UTC")),
             ("listen", json!(DEFAULT_LISTEN)),
             ("llm_key_env", json!("OPENROUTER_API_KEY")),
-            ("max_requests_per_day", json!(1_000_000)),
             ("board", json!("none")),
         ])
     }
@@ -725,19 +720,16 @@ mod tests {
             (st.get("zone"), source(&st, "zone")),
             (json!("America/Chicago"), "file".into())
         );
-        assert_eq!(source(&st, "max_requests_per_day"), "default");
-        st.change(&json!({"zone": "Europe/Berlin", "max_requests_per_day": 40}))
+        assert_eq!(source(&st, "public_url"), "default");
+        st.change(&json!({"zone": "Europe/Berlin", "public_url": "http://dot.local:3335"}))
             .unwrap();
         assert_eq!(
             (st.get("zone"), source(&st, "zone")),
             (json!("Europe/Berlin"), "saved".into())
         );
         assert_eq!(
-            (
-                st.get("max_requests_per_day"),
-                source(&st, "max_requests_per_day")
-            ),
-            (json!(40), "saved".into())
+            (st.get("public_url"), source(&st, "public_url")),
+            (json!("http://dot.local:3335"), "saved".into())
         );
         // A flag beats a saved value, and the page is told the saved value is ignored.
         st.change(&json!({"device_name": "Saved name"})).unwrap();
@@ -751,8 +743,21 @@ mod tests {
             (st.get("zone"), source(&st, "zone")),
             (json!("America/Chicago"), "file".into())
         );
-        st.change(&json!({"max_requests_per_day": ""})).unwrap();
-        assert_eq!(source(&st, "max_requests_per_day"), "default");
+        st.change(&json!({"public_url": ""})).unwrap();
+        assert_eq!(source(&st, "public_url"), "default");
+    }
+
+    // A file saved before the request cap was removed still starts, and the old value is dropped.
+    #[test]
+    fn a_retired_setting_in_an_old_file_is_skipped() {
+        let dir = TempDir::new("retired");
+        std::fs::write(
+            dir.0.join("settings.json"),
+            r#"{"schema":1,"data":{"max_requests_per_day":40,"zone":"Europe/Berlin"}}"#,
+        )
+        .unwrap();
+        let st = open_in(&dir.0, Layer::new(), Layer::new());
+        assert_eq!(st.get("zone"), "Europe/Berlin");
     }
 
     // REQ-CFG-038
@@ -828,8 +833,6 @@ mod tests {
             (json!({"zone": 5}), "text"),
             (json!({"listen": "everywhere"}), "127.0.0.1:3335"),
             (json!({"public_url": "dot.local"}), "http://"),
-            (json!({"max_requests_per_day": 0}), "1 to 1000000"),
-            (json!({"max_requests_per_day": "many"}), "whole number"),
             (json!({"daily_spend_usd": -1}), "zero or more"),
             (json!({"board": "rpi"}), "auto"),
             (json!({"device_name": "a\nb"}), "control"),

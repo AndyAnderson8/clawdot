@@ -5,7 +5,7 @@
     "model": "openai/gpt-4o-mini",
     "key_env": "OPENROUTER_API_KEY"
   },
-  "limits": { "max_requests_per_day": 50, "daily_spend_usd": 1 },
+  "limits": { "daily_spend_usd": 1 },
   "speech": {
     "url": "http://127.0.0.1:8082/v1",
     "stt_model": "whisper-1",

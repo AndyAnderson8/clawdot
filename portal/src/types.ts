@@ -20,7 +20,6 @@ export interface Status {
   llm?: { configured?: boolean; model?: string | null };
   usage?: {
     requests_today: number;
-    max_requests_per_day: number;
     spend_today: number;
     /** The local day number today is, and the requests each recent day made. */
     day?: number;

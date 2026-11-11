@@ -129,24 +129,24 @@ const settings: Settings = {
   fields: {
     device_name: { value: "Kitchen", source: "saved" },
     zone: { value: null, source: "default" },
-    max_requests_per_day: { value: 100, source: "file" },
+    daily_spend_usd: { value: 100, source: "file" },
     voice: { value: "x", source: "file" },
   },
 };
 const specs: SettingSpec[] = [
   { key: "device_name", kind: "text" },
   { key: "zone", kind: "zone" },
-  { key: "max_requests_per_day", kind: "number" },
+  { key: "daily_spend_usd", kind: "number" },
   { key: "voice", kind: "text", off: true },
 ];
 
 test("settings patch sends only what changed", () => {
   const cur = Object.fromEntries(specs.map((s) => [s.key, currentText(settings, s.key)]));
-  assert.deepEqual(cur, { device_name: "Kitchen", zone: "", max_requests_per_day: "100", voice: "x" });
+  assert.deepEqual(cur, { device_name: "Kitchen", zone: "", daily_spend_usd: "100", voice: "x" });
   assert.deepEqual(settingsPatch(specs, cur, cur), {});
-  assert.deepEqual(settingsPatch(specs, cur, { ...cur, device_name: " Den ", max_requests_per_day: "250" }), {
+  assert.deepEqual(settingsPatch(specs, cur, { ...cur, device_name: " Den ", daily_spend_usd: "250" }), {
     device_name: "Den",
-    max_requests_per_day: 250,
+    daily_spend_usd: 250,
   });
   assert.deepEqual(settingsPatch(specs, cur, { ...cur, device_name: "" }), { device_name: null });
   assert.deepEqual(settingsPatch(specs, cur, { ...cur, zone: "UTC" }), { zone: "UTC" });
