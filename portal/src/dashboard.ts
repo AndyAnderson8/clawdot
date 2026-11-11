@@ -124,7 +124,7 @@ export function attention(st: Status | null, mode: string, update?: UpdateStatus
     out.push({
       id: "quiet",
       title: "Quiet hours are on",
-      why: "Messages from your senders wait until the quiet window ends. Alarms and timers still ring.",
+      why: "Messages from your webhooks wait until the quiet window ends. Alarms and timers still ring.",
       to: "#/settings/assistant",
       label: "Change quiet hours",
     });

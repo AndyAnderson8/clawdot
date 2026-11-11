@@ -156,7 +156,7 @@ export function Setup(): JSX.Element {
         />
         <PasswordField id="pw2" label="Repeat the password" autoComplete="new-password" value={pw2} onInput={setPw2} />
         <p class="authhint" role="status" id="pwhint">
-          {pw1 || pw2 ? pairHint(pw1, pw2) : "Senders have their own tokens; this password is only for this page."}
+          {pw1 || pw2 ? pairHint(pw1, pw2) : "Webhooks have their own tokens; this password is only for this page."}
         </p>
         <button class="authgo">Create password</button>
       </form>
@@ -170,7 +170,7 @@ export function Setup(): JSX.Element {
       >
         <p class="mut">
           Prefer no password? You can leave it open on this network, but anyone here could then use this page and see
-          what your senders send.
+          what your webhooks receive.
         </p>
         <button class="plain small" id="openbtn" disabled={!s.openAllowed || !s.peerPrivate}>
           Leave it open

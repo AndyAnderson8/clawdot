@@ -14,7 +14,20 @@ export interface AuthState {
 
 /** What the speaker is doing, when the device says (older cores do not). */
 export type SpeakerState = "idle" | "listening" | "thinking" | "speaking" | "muted";
+/** What the device is and which parts it has, found by looking at it (the core's hardware module). */
+export interface HardwareInfo {
+  board: string;
+  model: string;
+  cpu: string;
+  cores: number;
+  ram_mb: number;
+  arch: string;
+  os: string;
+  parts: { leds: boolean; bluetooth: boolean; wifi: boolean; screen: boolean; usb_serial: boolean };
+}
+
 export interface Status {
+  hardware?: HardwareInfo;
   clock_valid?: boolean;
   satellites?: number;
   llm?: { configured?: boolean; model?: string | null };

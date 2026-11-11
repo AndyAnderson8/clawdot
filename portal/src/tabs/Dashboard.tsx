@@ -297,7 +297,7 @@ export function Dashboard(): JSX.Element {
           <ul class="rows">
             {records && !recent.length ? (
               <li class="empty">
-                Nothing yet. When the assistant does something, or a sender sends a message, it shows here.
+                Nothing yet. When the assistant does something, or a webhook sends a message, it shows here.
               </li>
             ) : null}
             {recent.map((r) => (

@@ -1,11 +1,11 @@
-import type { JSX } from "preact";
+import { Fragment, type JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, keep } from "../api.ts";
 import { restartText, type SettingSpec } from "../forms.ts";
 import { fail, say, signedOut, start, sv, useApp } from "../store.ts";
 import { setThemePref, themePref, type ThemePref } from "../theme.ts";
 import { zoneName } from "../time.ts";
-import type { Settings as SettingsData } from "../types.ts";
+import type { HardwareInfo, Settings as SettingsData } from "../types.ts";
 import { About } from "./About.tsx";
 import { Sources } from "./Connections.tsx";
 import { Notes } from "./Notes.tsx";
@@ -15,7 +15,9 @@ import { PROVIDERS, providerFor } from "../providers.ts";
 import { TestSpeaker } from "./TestSpeaker.tsx";
 import { FeaturesSection } from "./Features.tsx";
 import { Skills } from "./Skills.tsx";
+import { HardwareCard } from "./HardwareCard.tsx";
 import { Lights } from "./Lights.tsx";
+import { Planned } from "./Planned.tsx";
 import { MediaSettings } from "./Media.tsx";
 import { Tools } from "./Tools.tsx";
 import { Webhooks } from "./Webhooks.tsx";
@@ -67,6 +69,15 @@ const LIMITS: Spec = [
   },
 ];
 
+function ThemesSection(): JSX.Element {
+  return (
+    <section class="card sgroup">
+      <h3>Theme</h3>
+      <ThemeChoice />
+    </section>
+  );
+}
+
 function ThemeChoice(): JSX.Element {
   const [pref, setPref] = useState<ThemePref>(themePref());
   const choose = (p: ThemePref) => {
@@ -107,10 +118,19 @@ function General(props: { s: SettingsData }): JSX.Element {
           { key: "zone", kind: "zone", hint: "Reminders and alarms use this time." },
         ]}
       />
-      <section class="card sgroup">
-        <h3>Appearance</h3>
-        <ThemeChoice />
-      </section>
+      <HardwareCard />
+      <Group
+        title="Hardware support"
+        settings={props.s}
+        intro="How ClawDot reaches this device's own parts, such as its lights."
+        specs={[
+          {
+            key: "board",
+            kind: "board",
+            hint: "Not used yet: the hardware layer is not built. The choice is saved for when it is. Choose None for a device ClawDot does not know.",
+          },
+        ]}
+      />
     </>
   );
 }
@@ -312,7 +332,7 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
         title="Quiet hours"
         settings={s}
         intro={
-          "From the first time to the second, messages from your senders wait unless they are urgent. Alarms, timers, and reminders you set still ring. Leave both empty for no quiet hours. Times are in " +
+          "From the first time to the second, messages from your webhooks wait unless they are urgent. Alarms, timers, and reminders you set still ring. Leave both empty for no quiet hours. Times are in " +
           zoneName(String(sv("zone") || "UTC")) +
           "."
         }
@@ -390,9 +410,13 @@ function Notifications(props: { s: SettingsData }): JSX.Element {
           {
             key: "listen",
             kind: "text",
-            hint: "Where ClawDot serves this page and listens for senders. For example 0.0.0.0:3335 lets your whole network reach it.",
+            hint: "Where ClawDot serves this page and listens for webhooks. For example 0.0.0.0:3335 lets your whole network reach it.",
           },
-          { key: "public_url", kind: "text", hint: "The address a sender posts to. It appears in the setup snippets." },
+          {
+            key: "public_url",
+            kind: "text",
+            hint: "The address other programs post webhook messages to. It appears in the setup snippets.",
+          },
         ]}
       />
     </>
@@ -492,22 +516,10 @@ function Security(): JSX.Element {
   );
 }
 
-function AboutSection(props: { s: SettingsData }): JSX.Element {
-  const s = props.s;
+function AboutSection(): JSX.Element {
   return (
     <>
       <About />
-      <Group
-        title="Hardware"
-        settings={s}
-        specs={[
-          {
-            key: "board",
-            kind: "board",
-            hint: "Nothing uses this yet: the hardware layer is not built. The choice is saved for when it is.",
-          },
-        ]}
-      />
     </>
   );
 }
@@ -515,30 +527,109 @@ function AboutSection(props: { s: SettingsData }): JSX.Element {
 interface Section {
   id: string;
   label: string;
+  group: string;
   view: (p: { s: SettingsData }) => JSX.Element;
+  /** The device must have this for the section to be useful; otherwise it is listed only when asked for. */
+  needs?: (hw: HardwareInfo) => boolean;
+  /** What to say when the device lacks what it needs. */
+  why?: string;
+  /** Not built yet: shown (as a plan) only when asked for. */
+  planned?: boolean;
 }
+const GROUPS = ["Basics", "Assistant", "Integrations", "System"] as const;
 export const SECTIONS: [Section, ...Section[]] = [
-  { id: "general", label: "General", view: General },
-  { id: "features", label: "Features", view: FeaturesSection },
-  { id: "assistant", label: "Assistant", view: Assistant },
-  { id: "voice", label: "Voice", view: VoiceSection },
-  { id: "tools", label: "Tools", view: ToolsSection },
-  { id: "skills", label: "Skills", view: SkillsSection },
-  { id: "media", label: "Media", view: MediaSettings },
-  { id: "lights", label: "Lights", view: Lights },
-  { id: "memory", label: "Memory", view: MemorySection },
-  { id: "notifications", label: "Notifications", view: Notifications },
-  { id: "security", label: "Security", view: Security },
-  { id: "about", label: "About", view: AboutSection },
+  { id: "general", label: "General", group: "Basics", view: General },
+  { id: "themes", label: "Themes", group: "Basics", view: ThemesSection },
+  { id: "features", label: "Features", group: "Basics", view: FeaturesSection },
+  { id: "assistant", label: "Assistant", group: "Assistant", view: Assistant },
+  { id: "voice", label: "Voice", group: "Assistant", view: VoiceSection },
+  { id: "tools", label: "Tools", group: "Assistant", view: ToolsSection },
+  { id: "skills", label: "Skills", group: "Assistant", view: SkillsSection },
+  { id: "memory", label: "Memory", group: "Assistant", view: MemorySection },
+  { id: "media", label: "Media", group: "Integrations", view: MediaSettings },
+  {
+    id: "lights",
+    label: "Lights",
+    group: "Integrations",
+    view: Lights,
+    needs: (hw) => hw.parts.leds,
+    why: "No light ring was found on this device, so these settings would do nothing here.",
+  },
+  { id: "webhooks", label: "Webhooks", group: "Integrations", view: Notifications },
+  {
+    id: "homeassistant",
+    label: "Home Assistant",
+    group: "Integrations",
+    view: () => (
+      <Planned
+        title="Home Assistant"
+        text="Use your Home Assistant devices and automations from the assistant. Until this is built in, add Home Assistant as a tool source on the Tools page."
+      />
+    ),
+    planned: true,
+  },
+  {
+    id: "zigbee",
+    label: "Zigbee",
+    group: "Integrations",
+    view: () => (
+      <Planned
+        title="Zigbee"
+        text="Pair and control Zigbee lights, plugs and sensors directly, with no hub. It needs a Zigbee adapter, such as a USB stick."
+      />
+    ),
+    needs: (hw) => hw.parts.usb_serial,
+    why: "No USB serial adapter was found, so there is no Zigbee adapter to use.",
+    planned: true,
+  },
+  {
+    id: "intercom",
+    label: "Intercom",
+    group: "Integrations",
+    view: () => <Planned title="Intercom" text="Talk between the speakers in your home." />,
+    planned: true,
+  },
+  { id: "security", label: "Security", group: "System", view: Security },
+  { id: "about", label: "About", group: "System", view: AboutSection },
 ];
 
-/** Everything you set once, in sections along the top. */
+/** The sections to list: those the device can use, and the rest only when asked for. */
+export function visibleSections(hw: HardwareInfo | undefined, showAll: boolean): Section[] {
+  return SECTIONS.filter((x) => showAll || (!x.planned && (!hw || !x.needs || x.needs(hw))));
+}
+
+const SHOW_ALL = "clawdot-show-unavailable";
+function showAllPref(): boolean {
+  try {
+    return localStorage.getItem(SHOW_ALL) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Everything you set once: a list of sections down the side, in groups, and the chosen one beside it. */
 export function SettingsPage(props: { sub: string }): JSX.Element {
   const s = useApp();
-  const sub = props.sub === "inputs" ? "notifications" : props.sub === "safety" ? "assistant" : props.sub;
+  const [showAll, setShowAll] = useState(showAllPref());
+  const alias: Record<string, string> = { inputs: "webhooks", notifications: "webhooks", safety: "assistant" };
+  const sub = alias[props.sub] ?? props.sub;
   const active = SECTIONS.find((x) => x.id === sub) ?? SECTIONS[0];
   const need = s.settings?.restart_needed ?? [];
   const View = active.view;
+  const hw = s.status?.hardware;
+  // The open section is always in the list, even if the device cannot use it.
+  const shown = new Set(visibleSections(hw, showAll));
+  shown.add(active);
+  const list = SECTIONS.filter((x) => shown.has(x));
+  const lacking = hw && active.needs && !active.needs(hw) ? (active.why ?? "This device lacks a part this needs.") : "";
+  const toggle = (on: boolean) => {
+    setShowAll(on);
+    try {
+      localStorage.setItem(SHOW_ALL, on ? "1" : "0");
+    } catch {
+      /* the choice lasts until the page is closed */
+    }
+  };
   return (
     <div class="page">
       <header class="pagehead">
@@ -547,11 +638,23 @@ export function SettingsPage(props: { sub: string }): JSX.Element {
       </header>
       <div class="settings">
         <nav aria-label="Settings sections" class="tabs">
-          {SECTIONS.map((x) => (
-            <a key={x.id} href={"#/settings/" + x.id} aria-current={x.id === active.id ? "page" : undefined}>
-              {x.label}
-            </a>
-          ))}
+          {GROUPS.map((g) => {
+            const items = list.filter((x) => x.group === g);
+            return items.length ? (
+              <Fragment key={g}>
+                <span class="navhead">{g}</span>
+                {items.map((x) => (
+                  <a key={x.id} href={"#/settings/" + x.id} aria-current={x.id === active.id ? "page" : undefined}>
+                    {x.label}
+                  </a>
+                ))}
+              </Fragment>
+            ) : null;
+          })}
+          <label class="showall">
+            <input id="showall" type="checkbox" checked={showAll} onChange={(e) => toggle(e.currentTarget.checked)} />
+            Show settings this device cannot use
+          </label>
         </nav>
         <section class="pane stack" id="pane" aria-label={active.label}>
           {need.length ? (
@@ -562,6 +665,11 @@ export function SettingsPage(props: { sub: string }): JSX.Element {
                 ClawDot cannot restart itself safely from this page. Restart it on the device: for example run sudo
                 systemctl restart clawdot if it runs as a service, or stop the program and start it again.
               </p>
+            </div>
+          ) : null}
+          {lacking ? (
+            <div class="soon" role="status" id="lacking">
+              <p>{lacking}</p>
             </div>
           ) : null}
           {s.settings ? <View key={s.settingsRev} s={s.settings} /> : <p class="empty">Loading the settings.</p>}

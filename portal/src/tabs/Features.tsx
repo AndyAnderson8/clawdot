@@ -13,7 +13,7 @@ interface Feature {
   more?: { href: string; label: string };
 }
 
-/** Abilities you can switch on and off at any time. Things you set once (the model, the voice, the senders) are in
+/** Abilities you can switch on and off at any time. Things you set once (the model, the voice, the webhooks) are in
  *  Settings; these are choices about how the assistant behaves. */
 const FEATURES: Feature[] = [
   {
