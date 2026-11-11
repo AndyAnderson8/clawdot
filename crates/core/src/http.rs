@@ -6,6 +6,7 @@
 //! * `GET  /healthz`
 //! * `POST /hook/{endpoint}`                      an agent posts its native hook payload
 //! * `POST /api/announce`                         a script says something (REQ-INB-021); endpoint token or admin
+//! * `POST /mcp`                                 the ClawDot MCP server (REQ-EXT-011); endpoint token only
 //! * `GET  /bridge/{endpoint}/replies`            SSE stream of replies for the agent bridge
 //! * `POST /bridge/{endpoint}/replies/{id}/ack`   the bridge confirms it handled a reply
 //!
@@ -223,6 +224,12 @@ async fn route(
             Method::POST => {
                 crate::announce_api::handle(&core, &parts.headers, peer, body, opts.body_timeout)
                     .await
+            }
+            _ => method_not_allowed(),
+        },
+        ["mcp"] => match parts.method {
+            Method::POST => {
+                crate::mcp_server::handle(&core, &parts.headers, body, opts.body_timeout).await
             }
             _ => method_not_allowed(),
         },
