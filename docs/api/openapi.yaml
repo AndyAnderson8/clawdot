@@ -1113,8 +1113,17 @@ paths:
     get:
       tags: [Activity]
       summary: Notes (memories) the user asked to keep
-      description: Written only when the user asks, by voice or in the portal. Show the text as text.
+      description: |
+        Written only when the user asks, by voice or in the portal. Show the text as text. Up to 500 notes of 300
+        characters are kept. With `q`, only the notes that share a word with it are returned, best first (the same
+        ranking the assistant's `recall` tool uses), each with its `position` in the full list, the number
+        voice commands use. Without `q`, every note, oldest first.
       operationId: listNotes
+      parameters:
+        - name: q
+          in: query
+          description: A few words to search for. Up to 200 characters are used. Words of one or two letters and common words are ignored.
+          schema: { type: string }
       responses:
         "200":
           description: The notes.
@@ -1883,11 +1892,13 @@ components:
         id: { type: integer }
         text: { type: string }
         ts: { type: integer }
+        position: { type: integer, description: "1-based place in the full list. Only in search results (`q`)." }
     NotesList:
       type: object
       required: [enabled, notes, limits]
       properties:
         enabled: { type: boolean }
+        query: { type: string, description: "The search text used. Only when `q` was given." }
         notes:
           type: array
           items: { $ref: "#/components/schemas/Note" }
