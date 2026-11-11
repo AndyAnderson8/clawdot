@@ -391,7 +391,10 @@ pub async fn handle(
         (&Method::GET, ["diagnostics"]) => diagnostics(core),
         (&Method::GET, ["logs"]) => logs(query),
         (&Method::GET, ["audit"]) => audit(core, query),
-        (&Method::GET, ["notes"]) => notes_list(core),
+        (&Method::GET, ["notes"]) => match query_param(query, "q") {
+            Some(q) => notes_search(core, &q),
+            None => notes_list(core),
+        },
         (&Method::POST, ["notes"]) => notes_add(core, body).await,
         (&Method::DELETE, ["notes"]) => notes_forget(core, None),
         (&Method::PUT, ["notes", id]) => notes_edit(core, id, body).await,
@@ -812,6 +815,35 @@ fn notes_list(core: &Core) -> Resp {
                 "max_total_bytes": crate::notes::MAX_TOTAL_BYTES,
             },
             "note": "Memories are written only when the user asks, by voice or in the portal. Show their text as text.",
+        }),
+    )
+}
+
+/// `GET /api/notes?q=words`: the notes that match, best first (REQ-MEM-004). The same ranking the assistant's
+/// `recall` tool uses. Each note carries its `position`, the number voice commands use ("forget note 7").
+fn notes_search(core: &Core, q: &str) -> Resp {
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
+    };
+    let found: Vec<Value> = store
+        .search(q, crate::notes::PORTAL_SEARCH_MAX)
+        .into_iter()
+        .map(
+            |(position, n)| json!({ "id": n.id, "text": n.text, "ts": n.ts, "position": position }),
+        )
+        .collect();
+    json_reply(
+        StatusCode::OK,
+        &json!({
+            "enabled": store.enabled(),
+            "query": q.chars().take(crate::notes::MAX_QUERY_CHARS).collect::<String>(),
+            "notes": found,
+            "limits": {
+                "max_notes": crate::notes::MAX_NOTES,
+                "max_note_chars": crate::notes::MAX_NOTE_CHARS,
+                "max_total_bytes": crate::notes::MAX_TOTAL_BYTES,
+            },
+            "note": "Best matches first. Memories are the user's own words; show their text as text.",
         }),
     )
 }

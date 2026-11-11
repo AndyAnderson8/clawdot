@@ -593,7 +593,21 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     assert_eq!(v["enabled"], true);
     assert_eq!(v["notes"].as_array().unwrap().len(), 2);
     assert_eq!(v["notes"][0]["text"], "my printer is called Pixel");
-    assert_eq!(v["limits"]["max_notes"], 50);
+    assert_eq!(v["limits"]["max_notes"], crate::notes::MAX_NOTES);
+    // REQ-MEM-004: search, best first, with the place voice commands use
+    let (s, v) = call(&p, "GET", "/api/notes?q=spare+KEY", &session, "").await;
+    assert_eq!(s, 200);
+    assert_eq!(v["query"], "spare KEY");
+    assert_eq!(v["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(v["notes"][0]["position"], 2);
+    assert_eq!(v["notes"][0]["id"], second.id);
+    let (s, v) = call(&p, "GET", "/api/notes?q=zzzz", &session, "").await;
+    assert_eq!((s, v["notes"].as_array().unwrap().len()), (200, 0));
+    assert_eq!(
+        call(&p, "GET", "/api/notes?q=key", "", "").await.0,
+        401,
+        "search needs the administrator"
+    );
     // change one in place: the list comes back, a duplicate or a missing one is refused
     let edit_path = format!("/api/notes/{}", second.id);
     let (s, v) = call(
