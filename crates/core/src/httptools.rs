@@ -275,7 +275,7 @@ fn check_args(def: &ToolDef, args: &Value) -> Result<Map<String, Value>, String>
 }
 
 /// The HTTP tools that are configured, with the means to call them.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HttpTools {
     defs: Vec<ToolDef>,
     connector: Connector,

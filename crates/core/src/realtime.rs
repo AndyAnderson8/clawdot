@@ -4,8 +4,8 @@
 //! reply back, replacing the separate listen, think and speak steps. Everything that decides what ClawDot
 //! *does* stays in ClawDot:
 //!
-//! * The model only proposes function calls. [`run`] hands each batch to [`session::run_turn`] through a
-//!   scripted backend, so risk tiers, host-held confirmation, the taint rule, dry-run, caps, limits and the
+//! * The model only proposes function calls. [`run`] hands each batch straight to the gate
+//!   ([`session::run_proposed_calls`], no second model request), so risk tiers, host-held confirmation, the taint rule, dry-run, caps, limits and the
 //!   audit log apply exactly as in a cascaded turn. A held action is released only by the user's own next
 //!   words, read by the host (REQ-RTV-003).
 //! * The audio the engine sends and receives is measured here, priced with configured rates and added to
@@ -22,15 +22,15 @@ mod b64;
 pub mod serve;
 pub mod ws;
 
-use crate::llm::{ChatRequest, Completion, LlmError, Role, ToolCall, ToolSpec};
+use crate::llm::{Role, ToolCall, ToolSpec};
 use crate::sched::Ts;
 use crate::session::{
-    ChatBackend, Conversation, ToolHost, TurnConfig, TurnEnd, is_no, is_yes, run_turn, tools_for,
+    Conversation, ToolHost, TurnConfig, TurnEnd, answer_held_action, is_no, is_yes,
+    run_proposed_calls, tools_for,
 };
 use crate::usage::{LimitReached, UsageTracker};
 use serde_json::{Value, json};
 use std::fmt;
-use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -456,25 +456,6 @@ pub async fn connect<D: Dialect>(
 
 pub use crate::rtvoice::resample;
 
-/// Serve the model's function calls from a script: the first model "round" is the calls the realtime
-/// model made, and later rounds are empty. This is how the realtime model's calls enter `run_turn`.
-struct Replay(Mutex<Option<Vec<ToolCall>>>);
-
-impl ChatBackend for Replay {
-    fn complete(
-        &self,
-        _req: &ChatRequest,
-    ) -> impl std::future::Future<Output = Result<Completion, LlmError>> + Send {
-        let calls = self.0.lock().map(|mut g| g.take()).unwrap_or(None);
-        async move {
-            Ok(Completion {
-                tool_calls: calls.unwrap_or_default(),
-                ..Completion::default()
-            })
-        }
-    }
-}
-
 struct State {
     /// The last utterance heard, not yet used by a tool turn. Memory only (REQ-RTV-005).
     last_user: Option<String>,
@@ -710,11 +691,10 @@ where
     };
     let answered = is_yes(text) || is_no(text);
     let (day, now) = (env.clock)();
-    let res = run_turn(
-        &Replay(Mutex::new(None)),
+    let res = answer_held_action(
         &mut *env.host,
         &mut *env.conv,
-        &no_summaries(env.turn_cfg),
+        env.turn_cfg,
         &mut *env.usage,
         day,
         now,
@@ -766,14 +746,6 @@ async fn say<S: AsyncRead + AsyncWrite + Unpin, D: Dialect>(
     }
 }
 
-fn no_summaries(cfg: &TurnConfig) -> TurnConfig {
-    // Summaries would call the scripted backend as if it were a summary model.
-    TurnConfig {
-        summarize_over: 0,
-        ..cfg.clone()
-    }
-}
-
 fn last_tool_text(conv: &Conversation, id: Option<&str>) -> Option<String> {
     conv.history()
         .iter()
@@ -805,15 +777,15 @@ where
             arguments: c.arguments.clone(),
         })
         .collect();
-    let res = run_turn(
-        &Replay(Mutex::new(Some(script))),
+    let res = run_proposed_calls(
         &mut *env.host,
         &mut *env.conv,
-        &no_summaries(env.turn_cfg),
+        env.turn_cfg,
         &mut *env.usage,
         day,
         now,
         &user_text,
+        &script,
     )
     .await;
     if env.conv.pending().is_some() {

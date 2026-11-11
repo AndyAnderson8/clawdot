@@ -17,6 +17,8 @@ mod schedule_api;
 mod stopwatch;
 mod tools;
 
+pub use tools::{builtin_describe_action, builtin_returns_untrusted_text, builtin_risk};
+
 /// The system prompt used when none is configured. The evaluation harness runs the same text, so a change
 /// here is measured like any other change to the agent loop.
 pub const DEFAULT_PERSONA: &str = "You are ClawDot, a voice assistant on a small smart speaker. Your replies are spoken aloud: \

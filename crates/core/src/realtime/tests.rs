@@ -266,6 +266,48 @@ async fn outside_text_in_a_tool_result_is_labelled_and_cannot_call_anything() {
     assert_eq!(r.host.ran.len(), 1, "only the web call ran");
 }
 
+// REQ-RTV-003, REQ-AST-011: the model's function calls go through the gate and cost no model request of
+// ClawDot's own. A session counts as one request however many calls its model makes, and a held action
+// answered by a yes adds none.
+#[tokio::test(flavor = "current_thread")]
+async fn function_calls_and_a_yes_cost_no_extra_model_requests() {
+    let r = session(
+        cfg(),
+        UsageLimits::default(),
+        vec![],
+        false,
+        move |mut s| async move {
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, calls_done(&[("c1", "get_time", "{}")])).await;
+            next(&mut s).await;
+            next(&mut s).await;
+            put(&mut s, said("what time is it")).await;
+            put(&mut s, spoke()).await;
+            put(
+                &mut s,
+                calls_done(&[("c2", "send_money", r#"{"to":"sam"}"#)]),
+            )
+            .await;
+            next(&mut s).await;
+            next(&mut s).await;
+            put(&mut s, said("send sam some money")).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, said("yes")).await;
+            next(&mut s).await;
+            s.send_close().await.unwrap();
+        },
+    )
+    .await;
+    assert_eq!(r.result, Ok(SessionEnd::Closed));
+    assert_eq!(r.host.ran.len(), 2, "the read and the released action ran");
+    assert_eq!(
+        r.usage.requests_today(),
+        1,
+        "only the session itself is counted"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_costly_call_is_held_asked_out_loud_and_released_only_by_the_users_yes() {
     let args = r#"{"to":"sam","amount":5,"confirmed":true}"#;

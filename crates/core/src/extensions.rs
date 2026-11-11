@@ -236,6 +236,25 @@ impl Extensions {
         }
     }
 
+    /// A read-only copy for a turn that runs beside the main loop (ADR-0021): what is turned off, the tiers
+    /// the administrator chose and the skills' tool lists, as they are now. It has no files to write, so it
+    /// cannot change anything, and a portal change made while the turn runs reaches the next turn instead.
+    #[must_use]
+    pub fn snapshot(&self) -> Self {
+        Self {
+            tools_store: None,
+            conn_store: None,
+            skills_store: None,
+            tools: self.tools.clone(),
+            conns: self.conns.clone(),
+            skills: self.skills.clone(),
+            config_tools: self.config_tools.clone(),
+            config_servers: self.config_servers.clone(),
+            inactive: Vec::new(),
+            import_report: None,
+        }
+    }
+
     /// Load what the portal saved in `dir`.
     ///
     /// # Errors

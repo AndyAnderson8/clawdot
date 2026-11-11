@@ -170,56 +170,73 @@ impl ToolHost for Assistant {
         tools
     }
 
-    /// The built-in tools declare their own tiers (REQ-SEC-010). Forwarding text to an outside agent is
-    /// costly, so the host holds it for the user's yes (REQ-AST-015, REQ-SEC-011). A name this table does
-    /// not know is costly.
     fn risk(&self, name: &str, args: &Value) -> Risk {
-        Risk::fixed(match name {
-            "current_time" | "list_timers" | "inbox_status" | "inbox_details" => Tier::ReadOnly,
-            "stopwatch" if opt_text(args, "action") == "read" => Tier::ReadOnly,
-            "stopwatch" => Tier::Reversible,
-            "set_timer" | "cancel_timers" | "set_alarm" | "cancel_alarms" | "set_reminder"
-            | "set_reminder_at" | "play_music" | "music_control" | "inbox_snooze"
-            | "inbox_dismiss" => Tier::Reversible,
-            "inbox_reply" if opt_text(args, "kind") == "instruct" => Tier::Costly,
-            "inbox_reply" => Tier::Reversible,
-            _ => Tier::Costly,
-        })
+        builtin_risk(name, args)
     }
 
-    /// Only the inbox reads return text that someone else wrote; the timers and the clock return words the
-    /// core made up itself.
     fn returns_untrusted_text(&self, name: &str) -> bool {
-        !matches!(
-            name,
-            "set_timer"
-                | "list_timers"
-                | "cancel_timers"
-                | "stopwatch"
-                | "set_alarm"
-                | "cancel_alarms"
-                | "set_reminder"
-                | "set_reminder_at"
-                | "current_time"
-                | "play_music"
-                | "music_control"
-                | "inbox_reply"
-                | "inbox_snooze"
-                | "inbox_dismiss"
-        )
+        builtin_returns_untrusted_text(name)
     }
 
     fn describe_action(&self, name: &str, args: &Value) -> String {
-        if name == "inbox_reply" {
-            let text = opt_text(args, "text").replace('"', "'");
-            return format!("I will send this to the agent, word for word: \"{text}\"");
-        }
-        format!("I will run {name}")
+        builtin_describe_action(name, args)
     }
 
     async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         self.run_tool(name, args)
     }
+}
+
+/// The built-in tools declare their own tiers (REQ-SEC-010). Forwarding text to an outside agent is
+/// costly, so the host holds it for the user's yes (REQ-AST-015, REQ-SEC-011). A name this table does
+/// not know is costly. It needs no `Assistant`, so a turn that runs beside the main loop can ask it.
+#[must_use]
+pub fn builtin_risk(name: &str, args: &Value) -> Risk {
+    Risk::fixed(match name {
+        "current_time" | "list_timers" | "inbox_status" | "inbox_details" => Tier::ReadOnly,
+        "stopwatch" if opt_text(args, "action") == "read" => Tier::ReadOnly,
+        "stopwatch" => Tier::Reversible,
+        "set_timer" | "cancel_timers" | "set_alarm" | "cancel_alarms" | "set_reminder"
+        | "set_reminder_at" | "play_music" | "music_control" | "inbox_snooze" | "inbox_dismiss" => {
+            Tier::Reversible
+        }
+        "inbox_reply" if opt_text(args, "kind") == "instruct" => Tier::Costly,
+        "inbox_reply" => Tier::Reversible,
+        _ => Tier::Costly,
+    })
+}
+
+/// Only the inbox reads return text that someone else wrote; the timers and the clock return words the
+/// core made up itself.
+#[must_use]
+pub fn builtin_returns_untrusted_text(name: &str) -> bool {
+    !matches!(
+        name,
+        "set_timer"
+            | "list_timers"
+            | "cancel_timers"
+            | "stopwatch"
+            | "set_alarm"
+            | "cancel_alarms"
+            | "set_reminder"
+            | "set_reminder_at"
+            | "current_time"
+            | "play_music"
+            | "music_control"
+            | "inbox_reply"
+            | "inbox_snooze"
+            | "inbox_dismiss"
+    )
+}
+
+/// What the host says when it holds a built-in call.
+#[must_use]
+pub fn builtin_describe_action(name: &str, args: &Value) -> String {
+    if name == "inbox_reply" {
+        let text = opt_text(args, "text").replace('"', "'");
+        return format!("I will send this to the agent, word for word: \"{text}\"");
+    }
+    format!("I will run {name}")
 }
 
 impl Assistant {

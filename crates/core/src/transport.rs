@@ -236,6 +236,7 @@ impl HttpBackend {
 }
 
 /// Opens a connection (with TLS when the URL asks for it) and performs one HTTP/1.1 request.
+#[derive(Clone)]
 pub struct Connector {
     #[cfg(feature = "tls")]
     tls: tokio_rustls::TlsConnector,

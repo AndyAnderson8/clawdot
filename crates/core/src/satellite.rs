@@ -37,6 +37,8 @@ use tokio::sync::{Semaphore, mpsc, oneshot};
 /// A question for the assistant, with a place to send the answer.
 #[derive(Debug)]
 pub struct Ask {
+    /// Which speaker said it: one connection, one conversation (REQ-AST-026).
+    pub speaker: String,
     /// What the user said.
     pub text: String,
     /// Where the answer goes.
@@ -289,7 +291,12 @@ enum RtEv {
 
 /// Start a session for a speaker that is idle, unmuted and not in its cool-down, or `None` to use the normal
 /// path. The claim makes sure only one session runs at a time.
-fn rt_start(settings: &Settings, quiet: bool, blocked_until: Option<Instant>) -> Option<RtLive> {
+fn rt_start(
+    settings: &Settings,
+    speaker_id: &str,
+    quiet: bool,
+    blocked_until: Option<Instant>,
+) -> Option<RtLive> {
     if !quiet || blocked_until.is_some_and(|t| Instant::now() < t) {
         return None;
     }
@@ -298,6 +305,7 @@ fn rt_start(settings: &Settings, quiet: bool, blocked_until: Option<Instant>) ->
     let (speaker_tx, speaker) = mpsc::channel(256);
     let (done_tx, done) = oneshot::channel();
     if !claim.submit(Job {
+        speaker_id: speaker_id.to_owned(),
         mic,
         speaker: speaker_tx,
         done: done_tx,
@@ -520,6 +528,9 @@ where
             return Ok(());
         }
     }
+    // The connection's own random identifier. It names this speaker's conversation and held confirmation in the
+    // core, so one speaker's "yes" can never answer another's question; a new connection starts fresh.
+    let speaker_id = format!("sat:{}", new_session_id());
     send(
         &mut wr,
         &Message::Welcome(Welcome {
@@ -805,7 +816,7 @@ where
                     && work.is_none()
                     && ready.is_none()
                     && !playing;
-                match rt_start(&settings, quiet, rt_blocked_until) {
+                match rt_start(&settings, &speaker_id, quiet, rt_blocked_until) {
                     Some(live) => {
                         send(&mut wr, &Message::SetIndicator(Indicator::Listening)).await?;
                         send(&mut wr, &Message::StreamStart).await?;
@@ -934,6 +945,7 @@ where
                     send(&mut wr, &Message::StreamStop).await?;
                     send(&mut wr, &Message::SetIndicator(Indicator::Thinking)).await?;
                     let (stt, tts, asks) = (Arc::clone(&stt), Arc::clone(&tts), asks.clone());
+                    let speaker = speaker_id.clone();
                     let cancel = CancelToken::new();
                     turn_cancel = Some(cancel.clone());
                     let (progress_tx, rx) = mpsc::unbounded_channel();
@@ -947,6 +959,7 @@ where
                             let (tx, rx) = oneshot::channel();
                             if asks
                                 .send(Ask {
+                                    speaker,
                                     text,
                                     reply: tx,
                                     progress: Some(progress_tx),
