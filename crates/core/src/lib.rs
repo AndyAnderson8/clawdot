@@ -19,6 +19,7 @@ pub mod cancel;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod connects;
 pub mod diag;
 #[cfg(feature = "esphome-satellite")]
 pub mod esphome;

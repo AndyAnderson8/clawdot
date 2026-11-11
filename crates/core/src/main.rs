@@ -14,7 +14,8 @@ use clawdot_core::commands::{
 };
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::runtime::{
-    SpeakerView, deliver, dispatch, drain, on_hub_event, portal_op, settings_extra, zone_for,
+    SpeakerView, deliver, dispatch, drain, mcp_connected, on_hub_event, portal_op, settings_extra,
+    zone_for,
 };
 use clawdot_core::satellite::{self, Ask};
 use clawdot_core::sched::{Clock, SystemClock};
@@ -139,6 +140,7 @@ async fn main() -> ExitCode {
         }
     };
     let mut rt_rx = brain.rt.attach();
+    let mut mcp_rx = brain.connects.attach();
 
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
@@ -240,8 +242,10 @@ async fn main() -> ExitCode {
     loop {
         tokio::select! {
             Some(job) = portal_rx.recv() => {
-                let answer = portal_op(&mut brain, &core, &mut applied, job.op).await;
-                let _ = job.reply.send(answer);
+                portal_op(&mut brain, &core, &mut applied, job).await;
+            }
+            Some(done) = mcp_rx.recv() => {
+                mcp_connected(&mut brain, &core, done);
             }
             line = line_rx.recv(), if args.console => {
                 let Some(line) = line else {

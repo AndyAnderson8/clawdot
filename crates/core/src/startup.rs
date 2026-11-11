@@ -173,6 +173,7 @@ pub async fn build_brain(
         agent: args.agent.clone(),
         voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
         rt: Realtime::with_secrets(RtSettings::from_live(live), core.secrets().clone()),
+        connects: crate::connects::Connects::new(),
     };
     if brain.rt.settings().enabled && !RtSettings::built() {
         brain.rt.set_error(Some(
