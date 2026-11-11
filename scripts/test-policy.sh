@@ -7,7 +7,23 @@
 set -u
 # When run from a git hook, git exports variables that would point scratch-repo commands at the real repository.
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
-root=$(git rev-parse --show-toplevel)
+# The repository root comes from this file's location, not from git: that also works when the checkout is read from
+# another environment (a Windows worktree seen from WSL has a .git file git there cannot follow).
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# On Windows every process spawn is slow, and this script spawns thousands (about a quarter of an hour in Git Bash).
+# Inside WSL, with the scratch repositories on the Linux disk, the same cases take well under a minute. So under Git
+# Bash, run the whole script in WSL when it is usable. Behaviour is the same; set CLAWDOT_POLICY_NATIVE=1 to stay native.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*)
+    if [ -z "${CLAWDOT_POLICY_NATIVE:-}" ] && command -v wsl.exe >/dev/null 2>&1 &&
+      (cd "$root" && scripts/in-wsl.sh bash -c 'command -v git >/dev/null && command -v mktemp >/dev/null') >/dev/null 2>&1; then
+      echo "policy tests: running inside WSL (fast); CLAWDOT_POLICY_NATIVE=1 runs them natively"
+      cd "$root" && exec scripts/in-wsl.sh bash scripts/test-policy.sh
+    fi
+    echo "policy tests: running natively on Windows; this is slow (WSL not usable)" >&2
+    ;;
+esac
 # A landing into an integration branch sets CHECK_BASE for its own checks; the scratch repositories below have their own
 # `dev` and must measure against it.
 unset CHECK_BASE
