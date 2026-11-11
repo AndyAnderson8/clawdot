@@ -50,6 +50,7 @@ pub mod seed;
 pub mod session;
 pub mod settings;
 pub mod skillfolder;
+pub mod speaker;
 pub mod speakers;
 pub mod speech;
 pub mod speechio;

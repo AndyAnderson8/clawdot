@@ -13,34 +13,27 @@ use clawdot_core::cli;
 use clawdot_core::commands::{
     announce_admin, bind_error, is_quit, print_snippet, reset_admin, say_command,
 };
-use clawdot_core::config::SpeechConfig;
 use clawdot_core::extensions::Extensions;
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::httptools::HttpTools;
-use clawdot_core::inbox::event::Event;
-use clawdot_core::inbox::summary::{
-    SummaryConfig, announcement, clamp_for_speech, fallback_summary, short_announcement,
-    summary_prompt,
-};
-use clawdot_core::llm::{ChatRequest, Message};
 use clawdot_core::mcp::McpClient;
 use clawdot_core::notes::NoteStore;
 use clawdot_core::rtvoice::{Realtime, RtSettings};
 use clawdot_core::runtime::{
-    Brain, Llm, SpeakerView, apply_live, build_llm, deliver, dispatch, drain, on_hub_event,
-    respond_inline, settings_extra, zone_for,
+    Brain, SpeakerView, apply_live, build_llm, deliver, dispatch, drain, on_hub_event,
+    settings_extra, zone_for,
 };
 use clawdot_core::satellite::{self, Ask};
 use clawdot_core::sched::{Clock, Scheduler, SystemClock};
 use clawdot_core::seed;
-use clawdot_core::session::{ChatBackend, Conversation, ToolHost, TurnCtl};
+use clawdot_core::session::{Conversation, ToolHost, TurnCtl};
 use clawdot_core::settings::public_url_from_listen;
-use clawdot_core::speech::{parse_wav, wav};
-use clawdot_core::speechio::{build_registered_speech, build_speech, swap_live_voice};
+use clawdot_core::speaker::{Say, Voice, speak};
+use clawdot_core::speechio::build_registered_speech;
+use clawdot_core::speechio::voice_once;
 use clawdot_core::store::JsonStore;
 use clawdot_core::turns::{Hub, Origin, Request};
 use clawdot_core::usage::{UsageLimits, UsageTracker};
-use clawdot_core::voice::voice_turn;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -48,183 +41,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-
-/// Something for the speaker task to say, handled in the order it was sent (ADR-0021).
-enum Say {
-    /// A phrase from the portal; a voice being tried is used for this phrase only.
-    Phrase {
-        text: String,
-        preview: Option<String>,
-    },
-    /// A timer, alarm or reminder that rang.
-    Line(String),
-    /// Look for an agent event worth announcing now, and say it.
-    Poll {
-        minute: u16,
-        day: i64,
-        llm: Option<Llm>,
-    },
-}
-
-/// What the speaker task needs.
-struct Voice {
-    announcer: satellite::Announcer,
-    core: Arc<Core>,
-    usage: UsageTracker,
-    usage_store: JsonStore,
-    /// Spoken text is echoed only to an interactive console: in server mode stdout goes to a journal or
-    /// container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
-    echo: bool,
-    /// Some satellite could speak right now, as of the last poll (read by the loop for the portal).
-    available: AtomicBool,
-    /// A poll is queued or running; the loop sends another only when this is false.
-    polling: AtomicBool,
-}
-
-/// Say what the loop hands over, one thing at a time. A satellite that is busy or muted simply does not
-/// speak a timer's line (best effort); an agent event stays queued until one can.
-async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
-    let v = &*voice;
-    while let Some(job) = rx.recv().await {
-        match job {
-            Say::Phrase { text, preview } => {
-                if v.echo {
-                    println!("speaker> {text}");
-                }
-                if v.announcer.connected() > 0 {
-                    let before = preview.as_deref().and_then(swap_live_voice);
-                    v.announcer.announce(&text).await;
-                    if let Some(old) = before {
-                        swap_live_voice(&old);
-                    }
-                }
-            }
-            Say::Line(line) => {
-                if v.echo {
-                    println!("speaker> {line}");
-                }
-                if v.announcer.connected() > 0 {
-                    v.announcer.announce(&line).await;
-                }
-            }
-            Say::Poll { minute, day, llm } => {
-                let connected = v.announcer.connected() > 0;
-                let free = connected && v.announcer.is_available().await;
-                v.available.store(free, Ordering::Relaxed);
-                // A satellite that is connected but busy or muted: keep the event queued and try again.
-                if (!connected || free)
-                    && let Some(next) = v.core.next_announcement(true, minute)
-                {
-                    let spoken = match &llm {
-                        Some(l) => {
-                            let mut usage = v.usage.clone();
-                            let s = summarise(l, &mut usage, day, &next.event).await;
-                            if let Err(e) = usage.save(&v.usage_store) {
-                                clawdot_core::diag::error(&format!(
-                                    "could not save usage counters: {e}"
-                                ));
-                            }
-                            s
-                        }
-                        // No model: say only the headline and outcome, never raw agent text.
-                        None => short_announcement(&next.event)
-                            .unwrap_or_else(|| fallback_summary(&next.event)),
-                    };
-                    let line = announcement(&next.event, &spoken, next.more_waiting);
-                    if v.echo {
-                        println!("speaker> {line}");
-                    }
-                    let delivered = !connected || v.announcer.announce(&line).await;
-                    if delivered {
-                        v.core.mark_announced(&[next.event.id]);
-                    }
-                }
-                v.polling.store(false, Ordering::Relaxed);
-            }
-        }
-    }
-}
-
-/// A spoken summary: from the summary model if possible, else the headline and outcome only.
-async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Event) -> String {
-    let cfg = SummaryConfig::default();
-    if let Some(spoken) = short_announcement(event) {
-        return spoken;
-    }
-    if usage.check(day).is_ok() {
-        let (system, user) = summary_prompt(event, &cfg);
-        let req = ChatRequest {
-            model: llm
-                .cfg
-                .summary_model
-                .clone()
-                .unwrap_or_else(|| llm.cfg.model.clone()),
-            messages: vec![Message::system(system), Message::user(user)],
-            tools: Vec::new(),
-            max_tokens: 120,
-        };
-        let outcome = llm.backend.complete(&req).await;
-        usage.record(day, outcome.as_ref().ok().and_then(|c| c.usage.as_ref()));
-        if let Ok(c) = outcome {
-            let spoken = clamp_for_speech(&c.text, &cfg);
-            if !spoken.is_empty() {
-                return spoken;
-            }
-        }
-    }
-    fallback_summary(event)
-}
-
-/// Answer one recorded utterance: transcribe the WAV, respond, speak the reply into a WAV.
-async fn voice_once(
-    brain: &mut Brain,
-    hub: &mut Hub,
-    speech: &SpeechConfig,
-    input: &std::path::Path,
-    output: Option<&std::path::Path>,
-) -> Result<(), String> {
-    let (stt, tts) = build_speech(speech)?;
-    let bytes =
-        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    let pcm = parse_wav(&bytes).map_err(|e| format!("{}: {e}", input.display()))?;
-
-    let effects = std::cell::RefCell::new(Vec::new());
-    let out = voice_turn(&stt, &tts, &pcm, |text| {
-        let brain = &mut *brain;
-        let hub = &mut *hub;
-        let effects = &effects;
-        async move {
-            let r = respond_inline(brain, hub, &text).await;
-            effects.borrow_mut().extend(r.effects);
-            r.say
-        }
-    })
-    .await;
-    match &out.transcript {
-        Some(t) => println!("heard> {t}"),
-        None => println!("heard> (nothing understood)"),
-    }
-    if !out.reply.is_empty() {
-        println!("speaker> {}", out.reply);
-    }
-    for e in effects.into_inner() {
-        println!("satellite> {e:?}");
-    }
-    for p in &out.problems {
-        eprintln!("clawdot: {p}");
-    }
-    if let Some(path) = output {
-        let audio: Vec<i16> = out.audio.concat();
-        std::fs::write(path, wav(&audio))
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        println!(
-            "clawdot: wrote {} sample(s) of speech to {}",
-            audio.len(),
-            path.display()
-        );
-    }
-    Ok(())
-}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {

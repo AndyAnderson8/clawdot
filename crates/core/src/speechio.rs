@@ -2,7 +2,10 @@
 //! the registry that lets a change of voice or language in the portal reach them while running.
 
 use crate::config::SpeechConfig;
-use crate::speech::{HttpSynthesizer, HttpTranscriber};
+use crate::runtime::{Brain, respond_inline};
+use crate::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
+use crate::turns::Hub;
+use crate::voice::voice_turn;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -113,4 +116,55 @@ pub fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynth
     .with_dialect(dialect)?
     .with_stored_key();
     Ok((stt, tts))
+}
+
+/// Answer one recorded utterance: transcribe the WAV, respond, speak the reply into a WAV.
+pub async fn voice_once(
+    brain: &mut Brain,
+    hub: &mut Hub,
+    speech: &SpeechConfig,
+    input: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let (stt, tts) = build_speech(speech)?;
+    let bytes =
+        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    let pcm = parse_wav(&bytes).map_err(|e| format!("{}: {e}", input.display()))?;
+
+    let effects = std::cell::RefCell::new(Vec::new());
+    let out = voice_turn(&stt, &tts, &pcm, |text| {
+        let brain = &mut *brain;
+        let hub = &mut *hub;
+        let effects = &effects;
+        async move {
+            let r = respond_inline(brain, hub, &text).await;
+            effects.borrow_mut().extend(r.effects);
+            r.say
+        }
+    })
+    .await;
+    match &out.transcript {
+        Some(t) => println!("heard> {t}"),
+        None => println!("heard> (nothing understood)"),
+    }
+    if !out.reply.is_empty() {
+        println!("speaker> {}", out.reply);
+    }
+    for e in effects.into_inner() {
+        println!("satellite> {e:?}");
+    }
+    for p in &out.problems {
+        eprintln!("clawdot: {p}");
+    }
+    if let Some(path) = output {
+        let audio: Vec<i16> = out.audio.concat();
+        std::fs::write(path, wav(&audio))
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        println!(
+            "clawdot: wrote {} sample(s) of speech to {}",
+            audio.len(),
+            path.display()
+        );
+    }
+    Ok(())
 }
