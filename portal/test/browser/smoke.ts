@@ -1128,6 +1128,8 @@ await step(
       voice: "nova",
     });
     await eq(`T.q('#sayform') !== null`, true, "the speaker test is on this page, not among the settings");
+    // Saving reloads the settings and the list of voices with them, so wait for the list to be back.
+    await b.until(`!!T.q('#f-voice option[value="nova"]')`, "the voices are listed again after the save");
     await eq(`T.q('#f-voice option[value="nova"]').textContent`, "Nova (my voice)", "its id is what is sent");
 
     // The speech service is a choice, and its key is pasted once and shown only as its ends.
