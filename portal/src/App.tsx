@@ -1,6 +1,6 @@
 import type { ComponentType, JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { Activity } from "./tabs/Activity.tsx";
+import { Logs } from "./tabs/Logs.tsx";
 import { Dashboard } from "./tabs/Dashboard.tsx";
 import { Clock } from "./tabs/Reminders.tsx";
 import { Media } from "./tabs/Media.tsx";
@@ -23,24 +23,30 @@ export const TABS: [Tab, ...Tab[]] = [
   { id: "dashboard", label: "Home", view: Dashboard },
   { id: "clock", label: "Clock", view: Clock },
   { id: "media", label: "Media", view: Media },
+  { id: "logs", label: "Logs", view: Logs },
   { id: "settings", label: "Settings", view: SettingsPage },
 ];
-/** Reachable from Home (Recent, the chart) but not in the menu. */
-const HIDDEN: Tab[] = [{ id: "activity", label: "Activity", view: Activity }];
 
 /** The destination and sub-page named in the address fragment (`#/settings/assistant`), or the first. */
 export function routeFromHash(hash: string): { tab: Tab; sub: string } {
   const [name0 = "", sub0 = ""] = hash.replace(/^#\/?/, "").split("/");
   // Features used to be a destination of its own.
   const [name, sub] =
-    name0 === "features" ? ["settings", "features"] : name0 === "bluetooth" ? ["media", ""] : [name0, sub0];
-  return { tab: [...TABS, ...HIDDEN].find((t) => t.id === name) ?? TABS[0], sub };
+    name0 === "features"
+      ? ["settings", "features"]
+      : name0 === "bluetooth"
+        ? ["media", ""]
+        : name0 === "activity"
+          ? ["logs", "activity"]
+          : [name0, sub0];
+  return { tab: TABS.find((t) => t.id === name) ?? TABS[0], sub };
 }
 
 const ICONS: Record<string, string> = {
   dashboard: "M3 11.5 12 4l9 7.500V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z",
   clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 5v4.500l3 2",
   media: "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm12-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
+  logs: "M5 5h14M5 10h14M5 15h9M5 20h6",
   features:
     "M12 3v4m0 10v4M3 12h4m10 0h4M5.600 5.600l2.800 2.800m7.200 7.200 2.800 2.800m0-12.800-2.800 2.800m-7.200 7.200-2.800 2.800",
   settings:

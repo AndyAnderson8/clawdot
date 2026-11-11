@@ -104,7 +104,7 @@ function Row(props: { r: AuditRecord; now: number }): JSX.Element {
   );
 }
 
-export function Activity(): JSX.Element {
+export function Activity(props: { embedded?: boolean } = {}): JSX.Element {
   const s = useApp();
   const [filters, setFilters] = useState<AuditFilters>(NO_FILTERS);
   const [rows, setRows] = useState<AuditRecord[] | null>(null);
@@ -150,11 +150,13 @@ export function Activity(): JSX.Element {
   const now = s.overview?.now ?? Math.floor(Date.now() / 1000);
 
   return (
-    <div class="page">
-      <header class="pagehead">
-        <h2>Activity</h2>
-        <p>What came in and what the assistant did, newest first. You can read these lists but not change them.</p>
-      </header>
+    <div class={props.embedded ? "stack" : "page"}>
+      {props.embedded ? null : (
+        <header class="pagehead">
+          <h2>Activity</h2>
+          <p>What came in and what the assistant did, newest first. You can read these lists but not change them.</p>
+        </header>
+      )}
       <div class="stack">
         <section class="card">
           <h3>
@@ -164,7 +166,7 @@ export function Activity(): JSX.Element {
             {s.overview && !s.overview.events.length ? (
               <li class="empty">
                 Nothing has arrived yet. Messages from other programs show up here once you add a webhook in
-                <a href="#/settings/notifications">Settings</a>.
+                <a href="#/settings/webhooks">Settings</a>.
               </li>
             ) : null}
             {s.overview?.events.map((e) => (
