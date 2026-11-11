@@ -4,9 +4,8 @@ import { api, ApiError } from "../api.ts";
 import { parseSettingsFile, settingsChanges, type SettingChange } from "../forms.ts";
 import { saveFile } from "../parts.tsx";
 import { Updates } from "./Updates.tsx";
-import { fail, get, say, set, useApp, zone } from "../store.ts";
-import { fmt } from "../time.ts";
-import type { About as AboutData, LogList, Settings } from "../types.ts";
+import { fail, get, say, set, useApp } from "../store.ts";
+import type { About as AboutData, Settings } from "../types.ts";
 
 function buildText(a: AboutData): string {
   const b = a.build;
@@ -19,7 +18,6 @@ function buildText(a: AboutData): string {
 export function About(): JSX.Element {
   const s = useApp();
   const [about, setAbout] = useState<AboutData | null>(null);
-  const [logs, setLogs] = useState<LogList | null>(null);
   const [picked, setPicked] = useState<{ settings: Record<string, unknown>; changes: SettingChange[] } | null>(null);
   const [importErr, setImportErr] = useState("");
 
@@ -27,22 +25,6 @@ export function About(): JSX.Element {
     api<AboutData>("GET", "/api/about").then(setAbout).catch(fail);
   }, []);
 
-  const loadLogs = async () => {
-    try {
-      setLogs(await api<LogList>("GET", "/api/logs?limit=100"));
-    } catch (x) {
-      fail(x);
-    }
-  };
-  const diagnostics = async () => {
-    try {
-      const doc = await api<unknown>("GET", "/api/diagnostics");
-      saveFile("clawdot-diagnostics.json", JSON.stringify(doc, null, 2));
-      say("Saved the diagnostics file. It holds no passwords, keys, or tokens.");
-    } catch (x) {
-      fail(x);
-    }
-  };
   const exportSettings = async () => {
     try {
       const doc = await api<unknown>("GET", "/api/settings/export");
@@ -141,46 +123,14 @@ export function About(): JSX.Element {
       <section class="card">
         <h3>Troubleshooting</h3>
         <p class="mut">
-          If something is not working, download a diagnostics file and send it with your bug report. It has the version,
-          your settings without any password or key, the names of your webhooks, how many tools and records there are,
-          and the latest problems. It never has audio, anything you said, what it remembers, or a webhook token.
+          Warnings and errors, what the assistant did, and a diagnostics file to send with a bug report are on the Logs
+          page.
         </p>
         <div class="row">
-          <button type="button" id="diagdl" onClick={diagnostics}>
-            Download diagnostics
-          </button>
+          <a class="btn" id="tologs" href="#/logs/problems">
+            Open the logs
+          </a>
         </div>
-        <details
-          id="logs"
-          onToggle={(ev) => {
-            if (ev.currentTarget.open && !logs) void loadLogs();
-          }}
-        >
-          <summary>Recent problems</summary>
-          {logs ? (
-            logs.lines.length ? (
-              <pre id="loglines" class="pre">
-                {logs.lines
-                  .map(
-                    (l) =>
-                      fmt(l.ts, zone(), { dateStyle: "short", timeStyle: "medium" }) + "  " + l.level + "  " + l.text,
-                  )
-                  .join("\n")}
-              </pre>
-            ) : (
-              <p id="lognone">No problems since ClawDot started.</p>
-            )
-          ) : null}
-          <div class="row">
-            <button class="plain small" type="button" onClick={loadLogs}>
-              Refresh
-            </button>
-          </div>
-          <p class="mut">
-            Only ClawDot's own messages are listed, from memory since it started. The newest {logs?.max_lines ?? 200}{" "}
-            are kept.
-          </p>
-        </details>
       </section>
 
       <section class="card sgroup">

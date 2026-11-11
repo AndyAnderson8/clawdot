@@ -271,15 +271,15 @@ await step("an expired session sends you back to sign in", async () => {
 });
 
 // ---------------------------------------------------------------- the shell
-await step("shell: four destinations, titles, current page, home link, unknown address", async () => {
+await step("shell: five destinations, titles, current page, home link, unknown address", async () => {
   await open("open");
   await b.until(`!!T.q('#band') && !!T.q('#statusline')`, "the dashboard");
   await eq(`T.text('#devname')`, "Kitchen Dot", "the speaker's name is on Home");
   await eq(`T.q('#home').getAttribute('aria-label')`, "ClawDot, go to Home", "the logo is the way home");
   await eq(
     `T.all('#tabs a').map((a) => a.textContent)`,
-    ["Home", "Clock", "Media", "Settings"],
-    "four destinations, Home first",
+    ["Home", "Clock", "Media", "Logs", "Settings"],
+    "five destinations, Home first",
   );
   await eq(`T.all('#tabs a[aria-current="page"]').map((a) => a.id)`, ["tab-dashboard"], "home is current first");
   await b.until(`document.title === "Home - ClawDot"`, "the Home title");
@@ -1288,7 +1288,9 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
     "#/clock/reminders",
     "#/clock/stopwatch",
     "#/media",
-    "#/activity",
+    "#/logs/activity",
+    "#/logs/problems",
+    "#/logs/conversations",
   ];
   for (const id of [
     "general",
@@ -1334,7 +1336,16 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
 });
 
 await step("every page uses the same card pattern: titles, rows, one width for inputs and text areas", async () => {
-  const pages = ["#/clock", "#/clock/timers", "#/clock/reminders", "#/clock/stopwatch", "#/media", "#/activity"];
+  const pages = [
+    "#/clock",
+    "#/clock/timers",
+    "#/clock/reminders",
+    "#/clock/stopwatch",
+    "#/media",
+    "#/logs/activity",
+    "#/logs/problems",
+    "#/logs/conversations",
+  ];
   for (const id of ["general", "features", "assistant", "voice", "tools", "memory", "webhooks", "security", "about"])
     pages.push("#/settings/" + id);
   for (const hash of pages) {
@@ -1364,7 +1375,9 @@ await step("every page fits a 360 px and a 320 px phone with long content and a 
     "#/clock/reminders",
     "#/clock/stopwatch",
     "#/media",
-    "#/activity",
+    "#/logs/activity",
+    "#/logs/problems",
+    "#/logs/conversations",
   ];
   for (const id of ["general", "features", "assistant", "voice", "tools", "memory", "webhooks", "security", "about"])
     pages.push("#/settings/" + id);
@@ -1476,7 +1489,7 @@ await step("Settings: numbers show their source and range, save only what change
   });
 });
 
-await step("About: what it is, version, diagnostics, settings export and import, reset all", async () => {
+await step("About: what it is, version, settings backup and restore, reset all", async () => {
   await open("open", "#/settings/about");
   await b.until(`!!T.q('#buildinfo')`, "build information");
   await shot("settings-about");
@@ -1494,23 +1507,12 @@ await step("About: what it is, version, diagnostics, settings export and import,
     URL.createObjectURL = (blob) => { window.__files.push(blob); return 'blob:test'; };
     HTMLAnchorElement.prototype.click = function () { window.__names = (window.__names || []).concat(this.download); };
   })()`);
-  await T(`click('#diagdl')`);
-  await b.until(`window.__files.length === 1`, "diagnostics offered as a file");
-  await eq(`window.__names[0]`, "clawdot-diagnostics.json", "file name");
-  await eq(`(async () => JSON.parse(await window.__files[0].text()).format)()`, "clawdot-diagnostics", "file content");
-  // recent problems load when the section opens, as text
-  await T(`click('#logs summary')`);
-  await b.until(`!!T.q('#loglines')`, "log lines");
-  await eq(
-    `T.text('#loglines').includes('<b>disk full</b>') && T.all('#loglines b').length === 0`,
-    true,
-    "shown as text",
-  );
+  await eq(`T.q('#tologs').getAttribute('href')`, "#/logs/problems", "troubleshooting points to the logs");
   // export what is saved here
   await T(`click('#exportdl')`);
-  await b.until(`window.__files.length === 2`, "settings offered as a file");
+  await b.until(`window.__files.length === 1`, "settings offered as a file");
   await eq(
-    `(async () => JSON.parse(await window.__files[1].text()).settings.device_name)()`,
+    `(async () => JSON.parse(await window.__files[0].text()).settings.device_name)()`,
     "Kitchen Dot",
     "only saved values",
   );
@@ -1570,6 +1572,50 @@ const NEWER = {
     published: "2026-11-10T00:00:00Z",
   },
 };
+
+await step(
+  "Logs: activity, problems with search and a diagnostics file, and conversations that are not kept",
+  async () => {
+    await open("open", "#/logs");
+    await b.until(`!!T.q('#logtabs')`, "the logs page");
+    await eq(`T.all('#logtabs a').map((a) => a.textContent)`, ["Activity", "Problems", "Conversations"], "three pages");
+    await eq(`T.text('#panel h2')`, "Logs", "one title");
+    await T(`click('#logtabs a[href="#/logs/problems"]')`);
+    await b.until(`!!T.q('#loglines')`, "the problems");
+    await eq(
+      `T.text('#loglines').includes('<b>disk full</b>') && T.all('#loglines b').length === 0`,
+      true,
+      "shown as text",
+    );
+    await T(`set('#logsearch', 'nothing like this')`);
+    await b.until(`!!T.q('#lognone')`, "a search that matches nothing says so");
+    await T(`set('#logsearch', '')`);
+    await T(`set('#loglevel', 'warn')`);
+    await b.until(`!!T.q('#lognone')`, "no warnings among the errors");
+    await T(`set('#loglevel', '')`);
+    await b.ev(`(() => {
+    window.__files = [];
+    URL.createObjectURL = (blob) => { window.__files.push(blob); return 'blob:test'; };
+    HTMLAnchorElement.prototype.click = function () { window.__names = (window.__names || []).concat(this.download); };
+  })()`);
+    await T(`click('#diagdl')`);
+    await b.until(`window.__files.length === 1`, "diagnostics offered as a file");
+    await eq(`window.__names[0]`, "clawdot-diagnostics.json", "file name");
+    await eq(
+      `(async () => JSON.parse(await window.__files[0].text()).format)()`,
+      "clawdot-diagnostics",
+      "file content",
+    );
+    await b.ev(`location.hash = '#/logs/conversations'`);
+    await b.until(`!!T.q('#convcard')`, "conversations");
+    await eq(`T.text('#convcard .blank h3')`, "Not recorded", "says plainly that nothing is kept");
+    await b.ev(`location.hash = '#/activity'`);
+    await b.until(
+      `T.q('#logtabs a[aria-current="page"]')?.textContent === 'Activity'`,
+      "the old Activity address lands on Logs",
+    );
+  },
+);
 
 await step("Updates: found, read as text, confirmed, watched, and checked by hand", async () => {
   await open("open", "#/settings/about", { update: { ...NEWER, can_apply: true } });
