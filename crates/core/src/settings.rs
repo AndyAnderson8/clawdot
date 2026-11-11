@@ -63,7 +63,7 @@ pub struct Field {
 }
 
 /// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039).
-pub const FIELDS: [Field; 27] = [
+pub const FIELDS: [Field; 25] = [
     Field {
         key: "device_name",
         live: true,
@@ -82,14 +82,6 @@ pub const FIELDS: [Field; 27] = [
     },
     Field {
         key: "llm_model",
-        live: true,
-    },
-    Field {
-        key: "llm_fallback_model",
-        live: true,
-    },
-    Field {
-        key: "summary_model",
         live: true,
     },
     Field {
@@ -189,7 +181,11 @@ pub fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
 }
 
 /// Settings that were removed. A file saved by an older version may still hold one, and it is skipped quietly.
-const RETIRED: [&str; 1] = ["max_requests_per_day"];
+const RETIRED: [&str; 3] = [
+    "max_requests_per_day",
+    "llm_fallback_model",
+    "summary_model",
+];
 
 fn is_field(key: &str) -> bool {
     FIELDS.iter().any(|f| f.key == key)
@@ -289,12 +285,8 @@ fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Resu
             crate::transport::HttpBackend::new(&u, "", std::time::Duration::from_secs(1))?;
             json!(u)
         }
-        "llm_model" | "llm_fallback_model" | "summary_model" => {
-            let what = match key {
-                "llm_model" => "The model name",
-                "llm_fallback_model" => "The backup model name",
-                _ => "The summary model name",
-            };
+        "llm_model" => {
+            let what = "The model name";
             let s = string(what, 200)?;
             if s.contains(char::is_whitespace) {
                 return Err(format!("{what} cannot contain spaces."));
@@ -313,7 +305,10 @@ fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Resu
                     "Enter the NAME of an environment variable (letters, digits, and underscores), not the key itself.".into(),
                 );
             }
-            if env(&n).is_none_or(|v| v.is_empty()) {
+            // A key pasted into the page needs no variable at all.
+            if crate::secrets::get(crate::secrets::LLM_KEY).is_none()
+                && env(&n).is_none_or(|v| v.is_empty())
+            {
                 return Err(format!(
                     "The environment variable {n} is not set where ClawDot runs. Set it there (for example in the service's environment file), restart ClawDot, then save this again."
                 ));
@@ -389,11 +384,6 @@ fn check(
     if has("llm_url") != has("llm_model") {
         return Err(
             "Set both the language model address and the model name, or clear both.".into(),
-        );
-    }
-    if !has("llm_url") && (has("llm_fallback_model") || has("summary_model")) {
-        return Err(
-            "The backup and summary models need a language model address and model name. Set those first, or clear these.".into(),
         );
     }
     if has("quiet_start") != has("quiet_end") {
@@ -648,7 +638,10 @@ impl SettingsState {
             "speech_configured": self.speech_configured,
             "llm": {
                 "configured": !eff["llm_url"].0.is_null() && !eff["llm_model"].0.is_null(),
-                "key_present": (self.env)(key_env).is_some_and(|v| !v.is_empty()),
+                "key_present": crate::secrets::get(crate::secrets::LLM_KEY).is_some()
+                    || (self.env)(key_env).is_some_and(|v| !v.is_empty()),
+                // The first and last few characters of the key pasted into the page, never the key.
+                "key_hint": crate::secrets::hint(crate::secrets::LLM_KEY),
             },
         });
         if let (Some(o), Some(e)) = (out.as_object_mut(), self.extra.as_object()) {
@@ -842,7 +835,6 @@ mod tests {
                 "unencrypted",
             ),
             (json!({"llm_url": "https://x.example/v1"}), "both"),
-            (json!({"llm_fallback_model": "b"}), "need"),
             (json!({"llm_key_env": "sk-abc def"}), "NAME"),
             (
                 json!({"llm_key_env": "NOT_SET_ANYWHERE"}),
@@ -877,7 +869,7 @@ mod tests {
         let mut st = open_in(&dir.0, Layer::new(), Layer::new());
         st.change(&json!({
             "llm_url": "https://openrouter.ai/api/v1", "llm_model": "a/b",
-            "llm_fallback_model": "c/d", "summary_model": "e/f", "llm_key_env": "MY_KEY"
+            "llm_key_env": "MY_KEY"
         }))
         .unwrap();
         let j = st.json();
@@ -889,7 +881,7 @@ mod tests {
                 .unwrap_err()
                 .contains("both")
         );
-        st.change(&json!({"llm_url": null, "llm_model": null, "llm_fallback_model": null, "summary_model": null}))
+        st.change(&json!({"llm_url": null, "llm_model": null}))
             .unwrap();
         assert_eq!(st.json()["llm"]["configured"], false);
     }

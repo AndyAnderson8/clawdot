@@ -132,7 +132,7 @@ export interface SettingField {
 export interface Settings {
   fields: Record<string, SettingField>;
   restart_needed?: string[];
-  llm?: { key_present?: boolean };
+  llm?: { key_present?: boolean; key_hint?: string | null };
   voice_info?: { language?: string; stt_model?: string; tts_model?: string; provider?: string | null };
   speech_configured?: boolean;
   speakers_listen?: string;

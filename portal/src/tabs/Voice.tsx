@@ -78,13 +78,12 @@ export function VoiceControl(props: {
 
 const known = new Map<string, Promise<string[]>>();
 
-/** The models a service offers, asked once per address and key variable. */
-function loadModels(url: string, keyEnv: string): Promise<string[]> {
-  const k = url + "|" + keyEnv;
+/** The models a service offers, asked with the key kept on the device, once per address and key. */
+function loadModels(url: string, rev: string): Promise<string[]> {
+  const k = url + "|" + rev;
   let p = known.get(k);
   if (!p) {
-    const q = "?url=" + encodeURIComponent(url) + (keyEnv ? "&key_env=" + encodeURIComponent(keyEnv) : "");
-    p = api<{ models: string[] }>("GET", "/api/models" + q).then((r) => r.models);
+    p = api<{ models: string[] }>("POST", "/api/models", { url }).then((r) => r.models);
     known.set(k, p);
     p.catch(() => known.delete(k));
   }
@@ -96,7 +95,10 @@ export function ModelSelect(props: {
   id: string;
   value: string;
   url: string;
-  keyEnv: string;
+  /** Changes when the key does, so the list is asked for again. */
+  rev: string;
+  /** Why the list cannot be asked for yet (no key), or empty. */
+  blocked: string;
   onInput: (v: string) => void;
 }): JSX.Element {
   const [models, setModels] = useState<string[] | null>(null);
@@ -107,10 +109,10 @@ export function ModelSelect(props: {
   useEffect(() => {
     setModels(null);
     setWhy("");
-    if (!askable) return;
+    if (!askable || props.blocked) return;
     let live = true;
     setBusy(true);
-    loadModels(props.url, props.keyEnv)
+    loadModels(props.url, props.rev)
       .then((m) => {
         if (live) setModels(m);
       })
@@ -123,7 +125,14 @@ export function ModelSelect(props: {
     return () => {
       live = false;
     };
-  }, [props.url, props.keyEnv, askable, again]);
+  }, [props.url, props.rev, props.blocked, askable, again]);
+  if (props.blocked) {
+    return (
+      <select id={props.id} disabled>
+        <option>{props.value || props.blocked}</option>
+      </select>
+    );
+  }
   if (busy) {
     return (
       <select id={props.id} disabled aria-busy="true">

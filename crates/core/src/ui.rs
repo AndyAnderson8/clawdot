@@ -316,6 +316,7 @@ pub async fn handle(
             | ["update", "check"]
             | ["update", "apply"]
             | ["models"]
+            | ["llm", "key"]
             | ["voices"]
     );
     if !known {
@@ -393,11 +394,15 @@ pub async fn handle(
         (&Method::GET, ["notes"]) => notes_list(core),
         (&Method::POST, ["notes"]) => notes_add(core, body).await,
         (&Method::DELETE, ["notes"]) => notes_forget(core, None),
+        (&Method::PUT, ["notes", id]) => notes_edit(core, id, body).await,
         (&Method::DELETE, ["notes", id]) => match id.parse::<u64>() {
             Ok(id) => notes_forget(core, Some(id)),
-            Err(_) => error(StatusCode::NOT_FOUND, "no such note"),
+            Err(_) => error(StatusCode::NOT_FOUND, "no such memory"),
         },
         (&Method::GET, ["models"]) => models(core, query).await,
+        (&Method::POST, ["models"]) => models_with_key(core, body).await,
+        (&Method::PUT, ["llm", "key"]) => llm_key_set(core, body).await,
+        (&Method::DELETE, ["llm", "key"]) => llm_key_clear(core).await,
         (&Method::GET, ["voices"]) => voices().await,
         (&Method::GET, ["update"]) => update_status(),
         (&Method::POST, ["update", "check"]) => update_check().await,
@@ -451,13 +456,88 @@ async fn models(core: &Core, query: Option<&str>) -> Resp {
     } else {
         std::env::var(&var).unwrap_or_default()
     };
-    match crate::speech::list_models(&url, &key).await {
+    fetch_models(&url, &key).await
+}
+
+/// Ask a language-model service for its models with `key`, and say in plain words why it could not.
+async fn fetch_models(url: &str, key: &str) -> Resp {
+    match crate::speech::list_models(url, key).await {
         Ok(models) => json_reply(StatusCode::OK, &json!({ "models": models })),
+        Err(e) if e.contains("401") || e.contains("403") => error(
+            StatusCode::UNAUTHORIZED,
+            "The service did not accept that key. Check that it is the whole key and that it is for this service.",
+        ),
         Err(e) => error(
             StatusCode::BAD_GATEWAY,
             &format!("Could not get the list of models: {e}."),
         ),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelsAsk {
+    url: String,
+    /// A key to try. Left out, the stored key (or the one in the named environment variable) is used.
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// `POST /api/models`: the same list, asking with a key typed on the page, so the key is checked before it is kept and
+/// never travels in a web address.
+async fn models_with_key(core: &Core, body: Incoming) -> Resp {
+    let ask = match read_json::<ModelsAsk>(body).await {
+        Ok(a) => a,
+        Err((s, m)) => return error(s, m),
+    };
+    let url = ask.url.trim();
+    if url.is_empty() {
+        return error(StatusCode::CONFLICT, "Choose a provider first.");
+    }
+    let key = match ask.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        Some(k) => k.to_owned(),
+        None => crate::secrets::get(crate::secrets::LLM_KEY).unwrap_or_else(|| {
+            let s = core.ui_settings();
+            let var = s["fields"]["llm_key_env"]["value"].as_str().unwrap_or("");
+            std::env::var(var).unwrap_or_default()
+        }),
+    };
+    fetch_models(url, &key).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyBody {
+    key: String,
+}
+
+/// `PUT /api/llm/key`: keep the key pasted on the page and use it from now on.
+async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
+    let k = match read_json::<KeyBody>(body).await {
+        Ok(k) => k,
+        Err((s, m)) => return error(s, m),
+    };
+    if let Err(m) = crate::secrets::set(crate::secrets::LLM_KEY, &k.key) {
+        return error(StatusCode::BAD_REQUEST, &m);
+    }
+    rekeyed(core).await
+}
+
+/// `DELETE /api/llm/key`: forget the stored key.
+async fn llm_key_clear(core: &Core) -> Resp {
+    if let Err(m) = crate::secrets::clear(crate::secrets::LLM_KEY) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
+    }
+    rekeyed(core).await
+}
+
+/// Tell the running assistant about the new key and answer with what the page may know of it: the masked hint.
+async fn rekeyed(core: &Core) -> Resp {
+    let _ = core.portal_call(Op::Rekey).await;
+    json_reply(
+        StatusCode::OK,
+        &json!({ "hint": crate::secrets::hint(crate::secrets::LLM_KEY) }),
+    )
 }
 
 /// The value of `key` in a query string, with percent-escapes and `+` decoded; `None` if absent or not text.
@@ -719,7 +799,7 @@ fn audit(core: &Core, query: Option<&str>) -> Resp {
 /// `GET /api/notes`: the notes the user asked the assistant to keep (REQ-AST-023, REQ-CFG-044).
 fn notes_list(core: &Core) -> Resp {
     let Some(store) = core.notes() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
     };
     json_reply(
         StatusCode::OK,
@@ -731,7 +811,7 @@ fn notes_list(core: &Core) -> Resp {
                 "max_note_chars": crate::notes::MAX_NOTE_CHARS,
                 "max_total_bytes": crate::notes::MAX_TOTAL_BYTES,
             },
-            "note": "Notes are written only when the user asks, by voice. Show their text as text.",
+            "note": "Memories are written only when the user asks, by voice or in the portal. Show their text as text.",
         }),
     )
 }
@@ -745,7 +825,7 @@ async fn notes_add(core: &Core, body: Incoming) -> Resp {
         text: String,
     }
     let Some(store) = core.notes() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
     };
     let req = match read_json::<NewNote>(body).await {
         Ok(r) => r,
@@ -765,10 +845,42 @@ async fn notes_add(core: &Core, body: Incoming) -> Resp {
     }
 }
 
+/// `PUT /api/notes/{id}` with `{"text":..}`: change what one memory says. The answer is the new list.
+async fn notes_edit(core: &Core, id: &str, body: Incoming) -> Resp {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Change {
+        text: String,
+    }
+    let Ok(id) = id.parse::<u64>() else {
+        return error(StatusCode::NOT_FOUND, "no such memory");
+    };
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
+    };
+    let req = match read_json::<Change>(body).await {
+        Ok(r) => r,
+        Err((s, _)) => return error(s, "expected {\"text\":..} with what to remember"),
+    };
+    match store.edit(id, &req.text) {
+        Ok(_) => notes_list(core),
+        Err(e) => {
+            use crate::notes::NoteError::{Duplicate, Full, Missing, Off, Storage};
+            let status = match e {
+                Missing => StatusCode::NOT_FOUND,
+                Off | Duplicate | Full => StatusCode::CONFLICT,
+                Storage => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            error(status, &e.plain())
+        }
+    }
+}
+
 /// `DELETE /api/notes/{id}` forgets one note, `DELETE /api/notes` forgets all of them.
 fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     let Some(store) = core.notes() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
     };
     let done = match id {
         Some(id) => store.forget(id).map(|()| 1),
@@ -776,7 +888,7 @@ fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     };
     match done {
         Ok(n) => json_reply(StatusCode::OK, &json!({ "forgotten": n })),
-        Err(crate::notes::NoteError::Missing) => error(StatusCode::NOT_FOUND, "no such note"),
+        Err(crate::notes::NoteError::Missing) => error(StatusCode::NOT_FOUND, "no such memory"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.plain()),
     }
 }

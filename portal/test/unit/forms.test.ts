@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  cents,
   connectionDefinition,
   currentText,
   labelOf,
@@ -154,7 +155,7 @@ test("settings patch sends only what changed", () => {
 });
 
 test("labels", () => {
-  assert.equal(labelOf("llm_key_env"), "API key");
+  assert.equal(labelOf("llm_key_env"), "Key variable");
   assert.equal(labelOf("unknown_key"), "unknown_key");
   assert.equal(restartText(["listen", "public_url"]), "portal address, address other programs use");
 });
@@ -281,4 +282,14 @@ test("a search keeps rows that contain every word, in the name or the text", () 
   assert.deepEqual(find("NIGHT"), ["Good night"]);
   assert.deepEqual(find("the weather"), ["Morning"]);
   assert.deepEqual(find("night weather"), []);
+});
+
+test("a dollar amount keeps digits and a point, with at most two decimals", () => {
+  assert.equal(cents("12"), "12");
+  assert.equal(cents("12.5"), "12.5");
+  assert.equal(cents("12.567"), "12.56");
+  assert.equal(cents("$ 1,2.3.4"), "12.34");
+  assert.equal(cents("abc"), "");
+  assert.equal(cents("007.50"), "7.50");
+  assert.equal(cents(""), "");
 });
