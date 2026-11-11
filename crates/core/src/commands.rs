@@ -131,6 +131,56 @@ pub async fn say_command(rest: &[String]) -> ExitCode {
         }
     }
 }
+
+/// Create (`create`, each `NAME` or `NAME:ADAPTER`) and rotate (`rotate`) endpoints named on the command
+/// line, printing each token once. Returns true if any failed.
+pub fn run_endpoint_commands(
+    core: &Core,
+    create: &[String],
+    rotate: &[String],
+    public: &str,
+) -> bool {
+    let mut failed = false;
+    for spec in create {
+        let (name, adapter) = spec.split_once(':').unwrap_or((spec, spec));
+        let adapter = if matches!(adapter, "claude-code" | "generic") {
+            adapter
+        } else {
+            "generic"
+        };
+        match core.create_endpoint(name, adapter) {
+            Ok((_, token)) => print_snippet(public, name, adapter, &token),
+            Err(e) => {
+                eprintln!("clawdot: endpoint `{name}`: {e}");
+                failed = true;
+            }
+        }
+    }
+    for name in rotate {
+        match core.rotate_endpoint(name) {
+            Ok(token) => println!("New token for `{name}` (shown once): {token}"),
+            Err(e) => {
+                eprintln!("clawdot: endpoint `{name}`: {e}");
+                failed = true;
+            }
+        }
+    }
+    failed
+}
+
+/// Read console lines on a thread of their own and send each, trimmed, to `tx` until input ends.
+pub fn spawn_console(tx: tokio::sync::mpsc::Sender<String>) {
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        while std::io::stdin().read_line(&mut buf).is_ok_and(|n| n > 0) {
+            if tx.blocking_send(buf.trim().to_owned()).is_err() {
+                break;
+            }
+            buf.clear();
+        }
+    });
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

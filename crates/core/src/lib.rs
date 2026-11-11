@@ -54,6 +54,7 @@ pub mod speaker;
 pub mod speakers;
 pub mod speech;
 pub mod speechio;
+pub mod startup;
 pub mod stopwatch;
 pub mod store;
 pub mod transport;

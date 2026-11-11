@@ -2,7 +2,7 @@
 //! tools and usage counters), live settings (`apply_live`), the status snapshot for the web UI, and turn
 //! dispatch (`dispatch`, `finish_turn`, `on_hub_event`). The binary's `main` wires these to its channels.
 
-use crate::app::Core;
+use crate::app::{Core, Op};
 use crate::assistant::Assistant;
 use crate::cli::Args;
 use crate::config::AgentConfig;
@@ -547,6 +547,36 @@ pub async fn respond_inline(brain: &mut Brain, hub: &mut Hub, line: &str) -> Rep
                 };
             }
             HubEvent::Other(_) => {}
+        }
+    }
+}
+
+/// Carry out one change the portal asked for and return the answer to send back.
+pub async fn portal_op(
+    brain: &mut Brain,
+    core: &Core,
+    applied: &mut serde_json::Map<String, serde_json::Value>,
+    op: Op,
+) -> Result<serde_json::Value, crate::app::Fail> {
+    match op {
+        Op::Sched(op) => brain.assistant.admin_sched(op),
+        Op::Settings(live) => {
+            apply_live(brain, core, &live, applied);
+            Ok(serde_json::json!({ "applied": true }))
+        }
+        Op::Rekey => {
+            // Make the next comparison see a change, so the client is built again with the new key.
+            let live = applied.clone();
+            applied.insert("llm_key_env".into(), serde_json::Value::Null);
+            apply_live(brain, core, &live, applied);
+            Ok(serde_json::json!({ "applied": true }))
+        }
+        Op::Ext(op) => {
+            let r = brain.ext_apply(op).await;
+            if let Ok(listing) = &r {
+                core.set_ui_tools(listing.clone());
+            }
+            r
         }
     }
 }
