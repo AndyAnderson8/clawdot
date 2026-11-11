@@ -122,6 +122,13 @@ pub enum Caller<'a> {
     Admin,
 }
 
+/// The trigger and tool names an announcement is audited under when it does not arrive by `/api/announce`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AuditAs<'a> {
+    pub trigger: &'a str,
+    pub tool: &'a str,
+}
+
 /// Why an announcement was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnnounceError {
@@ -141,7 +148,7 @@ fn title_from(text: &str) -> String {
     truncate_chars(first[..end].trim(), TITLE_FROM_TEXT)
 }
 
-fn filter_label(r: FilterReason) -> &'static str {
+pub(super) fn filter_label(r: FilterReason) -> &'static str {
     match r {
         FilterReason::Muted => "muted",
         FilterReason::BelowPriority => "below_priority",
@@ -180,6 +187,15 @@ impl Core {
         self.lock().endpoints.authenticate_token(token).is_some()
     }
 
+    /// The name of the enabled endpoint that owns `token`. Spends nothing.
+    #[must_use]
+    pub fn endpoint_name(&self, token: &str) -> Option<String> {
+        self.lock()
+            .endpoints
+            .authenticate_token(token)
+            .map(|e| e.name.clone())
+    }
+
     /// Whether `token` belongs to an enabled endpoint; a miss spends from the failed-authentication budget.
     ///
     /// # Errors
@@ -199,6 +215,20 @@ impl Core {
         caller: Caller<'_>,
         a: &Announcement,
     ) -> Result<HookOutcome, AnnounceError> {
+        self.announce_as(caller, a, None).map(|(o, _)| o)
+    }
+
+    /// Like [`Core::announce`], for a caller that audits under its own trigger and tool name (the MCP
+    /// server, REQ-EXT-011). Also returns the endpoint the message was queued on.
+    ///
+    /// # Errors
+    /// [`AnnounceError`].
+    pub(crate) fn announce_as(
+        &self,
+        caller: Caller<'_>,
+        a: &Announcement,
+        audit_as: Option<AuditAs<'_>>,
+    ) -> Result<(HookOutcome, String), AnnounceError> {
         let now = self.clock.now();
         let mut g = self.lock();
         let ep = match caller {
@@ -256,8 +286,8 @@ impl Core {
             self.notify.notify_waiters();
         }
         drop(g);
-        self.audit_announcement(now, &ep.name, &source, a, outcome);
-        Ok(outcome)
+        self.audit_announcement(now, &ep.name, &source, a, outcome, audit_as);
+        Ok((outcome, ep.name))
     }
 
     /// Write the audit record. It carries no tier, so it never counts against the action caps (REQ-INB-024).
@@ -268,8 +298,13 @@ impl Core {
         source: &str,
         a: &Announcement,
         outcome: HookOutcome,
+        audit_as: Option<AuditAs<'_>>,
     ) {
         let Some(log) = self.audit() else { return };
+        let default_trigger = format!("announce:{source}");
+        let (trigger, tool) = audit_as.map_or((default_trigger.as_str(), "announce"), |x| {
+            (x.trigger, x.tool)
+        });
         let args = json!({
             "endpoint": endpoint,
             "priority": format!("{:?}", a.priority).to_ascii_lowercase(),
@@ -285,10 +320,10 @@ impl Core {
             now,
             now.div_euclid(86_400),
             turn,
-            &format!("announce:{source}"),
+            trigger,
             None,
             &Act {
-                tool: "announce",
+                tool,
                 tier: None,
                 args: &args,
                 decision,

@@ -299,6 +299,7 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     put("llm_key_env", c.llm.key_env.clone().map(Into::into));
     put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
     put("voice", c.speech.voice.clone().map(Into::into));
+    put("speech_provider", c.speech.provider.clone().map(Into::into));
     put("speech_language", c.speech.language.clone().map(Into::into));
     a.agent = c.agent.clone();
     // The agent and limit settings join the layers so the portal can show and change them (REQ-CFG-062).
@@ -368,6 +369,7 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
         ("persona", DEFAULT_PERSONA.into()),
         ("listen", settings::DEFAULT_LISTEN.into()),
         ("llm_key_env", "OPENROUTER_API_KEY".into()),
+        ("speech_provider", "openai".into()),
         ("board", "none".into()),
         ("agent_max_rounds", turn.max_tool_loops.into()),
         ("agent_max_tool_calls", turn.max_tool_calls.into()),
@@ -411,6 +413,9 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
     }
     // The language is empty when detected, which is not the same as unset in the configuration file.
     args.speech.language = text("speech_language").filter(|l| !l.is_empty());
+    // ElevenLabs and Deepgram bring their own address, models and voice (REQ-VOI-021).
+    args.speech.provider = text("speech_provider");
+    args.speech.apply_provider_defaults();
     let live = state.live_values();
     args.agent = agent_from(&live, args.agent.summarize_over_chars);
     args.actions = policy_from(&live);
@@ -592,7 +597,9 @@ fn settings_extra(args: &Args) -> serde_json::Value {
                 .map(|e| e.host),
             "stt_model": args.speech.stt_model,
             "tts_model": args.speech.tts_model,
+            "dialect": args.speech.dialect().name(),
         },
+        "speech_key_env": args.speech.key_env,
         "speakers_listen": args.satellite.listen,
     })
 }
@@ -1056,6 +1063,7 @@ fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynthesiz
         .map(|v| std::env::var(v).unwrap_or_default())
         .unwrap_or_default();
     let deadline = Duration::from_secs(30);
+    let dialect = speech.dialect();
     let stt = HttpTranscriber::new(
         url,
         &key,
@@ -1065,7 +1073,9 @@ fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynthesiz
             .ok_or_else(|| missing("stt_model"))?,
         speech.language.as_deref(),
         deadline,
-    )?;
+    )?
+    .with_dialect(dialect)
+    .with_stored_key();
     let tts = HttpSynthesizer::new(
         url,
         &key,
@@ -1076,7 +1086,9 @@ fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynthesiz
         speech.voice.as_deref().ok_or_else(|| missing("voice"))?,
         speech.tts_sample_rate.unwrap_or(24_000),
         deadline,
-    )?;
+    )?
+    .with_dialect(dialect)?
+    .with_stored_key();
     Ok((stt, tts))
 }
 
@@ -1087,36 +1099,7 @@ async fn voice_once(
     input: &std::path::Path,
     output: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let missing =
-        |k: &str| format!("speech.{k} is not configured (see docs/architecture/voice-pipeline.md)");
-    let url = speech.url.as_deref().ok_or_else(|| missing("url"))?;
-    let key = speech
-        .key_env
-        .as_deref()
-        .map(|v| std::env::var(v).unwrap_or_default())
-        .unwrap_or_default();
-    let deadline = Duration::from_secs(30);
-    let stt = HttpTranscriber::new(
-        url,
-        &key,
-        speech
-            .stt_model
-            .as_deref()
-            .ok_or_else(|| missing("stt_model"))?,
-        speech.language.as_deref(),
-        deadline,
-    )?;
-    let tts = HttpSynthesizer::new(
-        url,
-        &key,
-        speech
-            .tts_model
-            .as_deref()
-            .ok_or_else(|| missing("tts_model"))?,
-        speech.voice.as_deref().ok_or_else(|| missing("voice"))?,
-        speech.tts_sample_rate.unwrap_or(24_000),
-        deadline,
-    )?;
+    let (stt, tts) = build_speech(speech)?;
     let bytes =
         std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let pcm = parse_wav(&bytes).map_err(|e| format!("{}: {e}", input.display()))?;
@@ -1457,7 +1440,11 @@ async fn main() -> ExitCode {
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
     if let Some(url) = &args.speech.url {
-        clawdot_core::speech::set_source(url, args.speech.key_env.as_deref());
+        clawdot_core::speech::set_source(
+            url,
+            args.speech.key_env.as_deref(),
+            args.speech.dialect(),
+        );
     }
     #[cfg(feature = "tls")]
     match clawdot_core::update::UpdateConfig::new(

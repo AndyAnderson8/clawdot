@@ -33,6 +33,7 @@ pub mod inbox;
 pub mod limit;
 pub mod llm;
 pub mod mcp;
+mod mcp_server;
 pub mod media;
 pub mod notes;
 #[cfg(feature = "realtime")]
@@ -43,6 +44,7 @@ pub mod sched;
 pub mod secrets;
 pub mod session;
 pub mod settings;
+pub mod skillfolder;
 pub mod speech;
 pub mod stopwatch;
 pub mod store;

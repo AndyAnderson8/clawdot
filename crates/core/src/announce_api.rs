@@ -18,12 +18,12 @@ use std::convert::Infallible;
 use std::net::IpAddr;
 use std::time::Duration;
 
-type Resp = Response<BoxBody<Bytes, Infallible>>;
+pub(crate) type Resp = Response<BoxBody<Bytes, Infallible>>;
 
 /// A text of 2,000 characters in JSON escapes stays well under this.
 const MAX_BODY: usize = 32 * 1024;
 
-fn reply(status: StatusCode, v: &Value) -> Resp {
+pub(crate) fn reply(status: StatusCode, v: &Value) -> Resp {
     let mut r = Response::new(Full::new(Bytes::from(v.to_string())).boxed());
     *r.status_mut() = status;
     r.headers_mut()
@@ -37,18 +37,18 @@ fn reply(status: StatusCode, v: &Value) -> Resp {
     r
 }
 
-fn fail(status: StatusCode, msg: &str) -> Resp {
+pub(crate) fn fail(status: StatusCode, msg: &str) -> Resp {
     reply(status, &json!({ "error": msg }))
 }
 
-fn unauthorized() -> Resp {
+pub(crate) fn unauthorized() -> Resp {
     let mut r = fail(StatusCode::UNAUTHORIZED, "unauthorized");
     r.headers_mut()
         .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
     r
 }
 
-fn limited() -> Resp {
+pub(crate) fn limited() -> Resp {
     let mut r = fail(StatusCode::TOO_MANY_REQUESTS, "rate limited");
     r.headers_mut()
         .insert(RETRY_AFTER, HeaderValue::from_static("1"));

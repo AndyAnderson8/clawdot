@@ -66,6 +66,8 @@ const MAX_BODY: usize = 4096;
 /// A tool description with its parameters, and a skills file.
 const MAX_TOOL_BODY: usize = 16 * 1024;
 const MAX_SKILL_BODY: usize = 64 * 1024;
+/// A folder of skills sent as files to import.
+const MAX_SKILL_IMPORT_BODY: usize = 384 * 1024;
 /// Events shown in the overview, newest first.
 const MAX_EVENTS: usize = 50;
 /// Longest event text sent to the page.
@@ -334,6 +336,7 @@ pub async fn handle(
             | ["update", "apply"]
             | ["models"]
             | ["llm", "key"]
+            | ["speech", "key"]
             | ["voices"]
             | ["hive", "peers"]
     );
@@ -409,7 +412,10 @@ pub async fn handle(
         (&Method::GET, ["diagnostics"]) => diagnostics(core),
         (&Method::GET, ["logs"]) => logs(query),
         (&Method::GET, ["audit"]) => audit(core, query),
-        (&Method::GET, ["notes"]) => notes_list(core),
+        (&Method::GET, ["notes"]) => match query_param(query, "q") {
+            Some(q) => notes_search(core, &q),
+            None => notes_list(core),
+        },
         (&Method::POST, ["notes"]) => notes_add(core, body).await,
         (&Method::DELETE, ["notes"]) => notes_forget(core, None),
         (&Method::PUT, ["notes", id]) => notes_edit(core, id, body).await,
@@ -421,6 +427,8 @@ pub async fn handle(
         (&Method::POST, ["models"]) => models_with_key(core, body).await,
         (&Method::PUT, ["llm", "key"]) => llm_key_set(core, body).await,
         (&Method::DELETE, ["llm", "key"]) => llm_key_clear(core).await,
+        (&Method::PUT, ["speech", "key"]) => speech_key_set(body).await,
+        (&Method::DELETE, ["speech", "key"]) => speech_key_clear(),
         (&Method::GET, ["voices"]) => voices().await,
         (&Method::GET, ["hive", "peers"]) => hive_peers(core),
         (&Method::GET, ["update"]) => update_status(),
@@ -559,6 +567,30 @@ async fn rekeyed(core: &Core) -> Resp {
     )
 }
 
+/// `PUT /api/speech/key`: keep the speech-service key pasted on the page. It is read on every request, so it applies at
+/// once (REQ-VOI-023). Only the masked hint comes back.
+async fn speech_key_set(body: Incoming) -> Resp {
+    let k = match read_json::<KeyBody>(body).await {
+        Ok(k) => k,
+        Err((s, m)) => return error(s, m),
+    };
+    if let Err(m) = crate::secrets::set(crate::secrets::SPEECH_KEY, &k.key) {
+        return error(StatusCode::BAD_REQUEST, &m);
+    }
+    json_reply(
+        StatusCode::OK,
+        &json!({ "hint": crate::secrets::hint(crate::secrets::SPEECH_KEY) }),
+    )
+}
+
+/// `DELETE /api/speech/key`: forget the stored speech key (an environment variable, if named, applies again).
+fn speech_key_clear() -> Resp {
+    if let Err(m) = crate::secrets::clear(crate::secrets::SPEECH_KEY) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
+    }
+    json_reply(StatusCode::OK, &json!({ "hint": null }))
+}
+
 /// The value of `key` in a query string, with percent-escapes and `+` decoded; `None` if absent or not text.
 fn query_param(query: Option<&str>, key: &str) -> Option<String> {
     let raw = query?
@@ -590,18 +622,43 @@ const OPENAI_VOICES: [&str; 11] = [
 /// `GET /api/voices`: the voices the speech server offers (REQ-CFG-081): its own list when it has one, OpenAI's fixed
 /// set for OpenAI, otherwise a plain statement that the voice has to be typed.
 async fn voices() -> Resp {
-    let Some((url, key)) = crate::speech::source() else {
+    let Some(src) = crate::speech::source() else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
             "No speech provider is set up, so there are no voices to choose from.",
         );
     };
-    match crate::speech::list_voices(&url, &key).await {
-        Ok(v) => json_reply(StatusCode::OK, &json!({ "voices": v, "source": "server" })),
+    let (url, dialect) = (src.url.as_str(), src.dialect);
+    match crate::speech::list_voice_details(dialect, url, &src.key).await {
+        Ok((v, source)) => {
+            // `voices` stays the plain list of values to send; `details` adds the name to show and the category, so a
+            // cloned voice can be shown by its name while its id is sent (REQ-VOI-022).
+            let ids: Vec<&str> = v.iter().map(|x| x.id.as_str()).collect();
+            let details: Vec<Value> = v
+                .iter()
+                .map(|x| json!({ "id": x.id, "label": x.label, "category": x.category }))
+                .collect();
+            json_reply(
+                StatusCode::OK,
+                &json!({ "voices": ids, "details": details, "source": source }),
+            )
+        }
         Err(_) if url.contains("api.openai.com") => json_reply(
             StatusCode::OK,
-            &json!({ "voices": OPENAI_VOICES, "source": "builtin" }),
+            &json!({
+                "voices": OPENAI_VOICES,
+                "details": OPENAI_VOICES.iter().map(|n| json!({ "id": n, "label": n, "category": null })).collect::<Vec<_>>(),
+                "source": "builtin",
+            }),
         ),
+        Err(e) if dialect != crate::speech::Dialect::OpenAi => {
+            let status = if e.contains("401") || e.contains("403") || e.contains("No key is set") {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            error(status, &format!("Could not get the list of voices: {e}."))
+        }
         Err(e) => error(
             StatusCode::BAD_GATEWAY,
             &format!(
@@ -835,6 +892,35 @@ fn notes_list(core: &Core) -> Resp {
     )
 }
 
+/// `GET /api/notes?q=words`: the notes that match, best first (REQ-MEM-004). The same ranking the assistant's
+/// `recall` tool uses. Each note carries its `position`, the number voice commands use ("forget note 7").
+fn notes_search(core: &Core, q: &str) -> Resp {
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
+    };
+    let found: Vec<Value> = store
+        .search(q, crate::notes::PORTAL_SEARCH_MAX)
+        .into_iter()
+        .map(
+            |(position, n)| json!({ "id": n.id, "text": n.text, "ts": n.ts, "position": position }),
+        )
+        .collect();
+    json_reply(
+        StatusCode::OK,
+        &json!({
+            "enabled": store.enabled(),
+            "query": q.chars().take(crate::notes::MAX_QUERY_CHARS).collect::<String>(),
+            "notes": found,
+            "limits": {
+                "max_notes": crate::notes::MAX_NOTES,
+                "max_note_chars": crate::notes::MAX_NOTE_CHARS,
+                "max_total_bytes": crate::notes::MAX_TOTAL_BYTES,
+            },
+            "note": "Best matches first. Memories are the user's own words; show their text as text.",
+        }),
+    )
+}
+
 /// `POST /api/notes` with `{"text":..}`: the administrator writes a note. It goes through the same store checks
 /// as a spoken "remember that" (REQ-CFG-061), and the answer is the new list.
 async fn notes_add(core: &Core, body: Incoming) -> Resp {
@@ -1029,7 +1115,12 @@ async fn tier_choice(
 
 /// Skills are addressed in the body, not the path, because their names are free text.
 async fn skill_action(core: &Core, action: &str, body: Incoming) -> Resp {
-    let v = match read_json_limit::<Value>(body, MAX_SKILL_BODY).await {
+    let limit = if action == "import" {
+        MAX_SKILL_IMPORT_BODY
+    } else {
+        MAX_SKILL_BODY
+    };
+    let v = match read_json_limit::<Value>(body, limit).await {
         Ok(v) => v,
         Err((s, m)) => return error(s, m),
     };
@@ -1038,6 +1129,7 @@ async fn skill_action(core: &Core, action: &str, body: Incoming) -> Resp {
         "import" => ext(core, ExtOp::SkillImport(v)).await,
         "edit" => ext(core, ExtOp::SkillEdit(name, v["skill"].clone())).await,
         "delete" => ext(core, ExtOp::SkillDelete(name)).await,
+        "accept" => ext(core, ExtOp::SkillAccept(name)).await,
         "enabled" => match v["enabled"].as_bool() {
             Some(on) => ext(core, ExtOp::SkillEnable(name, on)).await,
             None => error(
