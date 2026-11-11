@@ -385,6 +385,16 @@ REQ-NFR-004, 010, 108; opt-in REQ-VOI-005, REQ-VOI-011, REQ-NFR-002 tuning
 
 *Status: not started* (no soak, ratchet, fuzzing, or release signing; the budget job and the cross-armv7 build are still a `TODO(TASK-003)` in `.github/workflows/ci.yml`). Quick start and upgrade guides do not exist; the protocol guide for porters exists as [architecture/porting-a-satellite.md](architecture/porting-a-satellite.md).
 
+## Next up (decided 2026-11-11)
+
+What to do first after the portal work, in order. The first is chosen because it is small and adds one kind of provider, not a new subsystem.
+
+1. **Realtime voice providers (item 14 below).** A speech-to-speech provider as an optional choice on the Voice page. Start with an OpenAI-style realtime protocol. Tool calls go back through ClawDot's own tools and ask-first checks. Runs where ClawDot runs on a PC or Pi (or through a small relay), not inside the Dot's memory budget; the spend cap must count its audio time.
+2. **Push updates and files over SSH (item 17).** Turn on the opt-in, key-only SSH the Dot image already has (ADR-0019), so a build can be copied over the network instead of by USB.
+3. **Voice providers beyond the OpenAI style (item 15).** An adapter for services with cloned voices and their own voice lists.
+4. **Board files (item 19)**, so lights and Bluetooth can be described for hardware ClawDot does not know, and the Lights and Bluetooth pages can work for real.
+5. **Zigbee, then screens (items 11 and 12).**
+
 ## Beyond v1.0 (planned, in rough priority order)
 Release early and often: tag `v0.x` releases as steps land, so the differentiator ships long before v1.0. Items below are *planned for*, meaning v1.0 designs must not preclude them (see [future-scope.md](future-scope.md) for conditions). The board layer and the Echo Dot target, listed here before, are now Phase B.
 
@@ -406,6 +416,9 @@ Release early and often: tag `v0.x` releases as steps land, so the differentiato
 | 13 | **Media page in the portal**: music, podcasts and radio providers chosen in one place, with Bluetooth on or off beside them (the page exists as a stub; providers are built later, with items 9 and 10) | One place for everything that plays | Media-source interface (MUS-003/005) |
 | 14 | **Realtime voice (optional)**: a speech-to-speech service (a provider's realtime API) as an alternative to the separate listen, think and speak steps, for lower delay. Tools, skills, memory and the ask-first checks stay in ClawDot (the service calls them). Best where ClawDot runs on a PC or Pi, or through a small relay, because the Dot's memory budget is a poor place to hold a streaming connection; billed by audio time, so the spend cap must cover it | Faster, more natural turns | Speech provider abstraction; the portal's Voice page; off unless chosen, never required |
 | 15 | **Your own voice (optional, through a provider)**: a voice made from a short recording by a service that offers voice cloning, picked from the voice list like any other (an adapter for services whose list is not OpenAI-style). Training or serving a voice model locally is not planned; it is too rare a case to carry | A voice that is yours or a family member's, with their consent | Voice is already a setting and a list from the speech server |
+| 17 | **SSH to the device for updates and files**: turn on the opt-in, key-only SSH user the image already has (ADR-0019), so a new build is copied over the network. The portal's own signed updater stays the way a person updates; SSH is for the person building it | No USB cable for each build | ADR-0019; the update marker and `.prev` rollback |
+| 18 | **Keep conversation text (opt-in)**: on the Logs page, off unless turned on, bounded and deletable; never audio | A real transcript for troubleshooting | The Logs page already has a Conversations tab that says nothing is kept |
+| 19 | **Board files**: a small file that says which lights, Bluetooth adapter and buttons a device has and how to reach them, so unknown hardware can be described instead of coded | Lights, Bluetooth and the rest work on more than one device | The hardware detection in the status; the Hardware support setting |
 | 16 | ESP32-S3 satellite (a satellite only, never the brain); scheduled routines such as a morning briefing; rules that act | Platform and feature breadth | Protocol; scheduler; bounded stores |
 
 Moved into Phase A on 2026-11-09: standing "do X when Y" rules (first version tell-me and remind-me only) and opt-in bounded notes are in A5b. Item 2 (the ClawDot MCP server) follows the rules work, because it needs the no-act and scope machinery first.
