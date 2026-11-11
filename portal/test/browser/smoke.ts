@@ -540,7 +540,7 @@ await step("Media: nothing to play yet, points to Settings; Bluetooth is off and
   await shot("settings-lights");
 });
 
-await step("Activity: messages from senders are shown as text", async () => {
+await step("Activity: messages from webhooks are shown as text", async () => {
   await open("open", "#/activity");
   await b.until(`T.rows('#eventlist > li').length === 1`, "one event");
   await eq(
@@ -555,7 +555,7 @@ await step("Activity: messages from senders are shown as text", async () => {
   );
   await eq(`T.all('#eventlist img, #eventlist script').length`, 0, "no elements were created from it");
   await eq(`T.text('#eventlist .badge')`, "Waiting to be read out", "state wording");
-  await eq(`T.text('#eventlist .mut').includes('sender')`, true, "says senders, not agents");
+  await eq(`T.text('#eventlist .mut').includes('webhook')`, true, "says webhooks, not agents");
 });
 
 await step(
@@ -906,21 +906,21 @@ await step("Skills: search, select all or none, add, edit in place, folder impor
   await b.until(`T.rows('${rows}').length === 2`, "deleted");
 });
 
-await step("Notifications: add a sender in a dialog, token shown once, new token, remove", async () => {
-  await open("open", "#/settings/notifications");
-  await b.until(`T.rows().length === 1`, "one sender");
-  await eq(`T.q('#senderdialog').open`, false, "the add form is not in the way");
+await step("Webhooks: add a webhook in a dialog, token shown once, new token, remove", async () => {
+  await open("open", "#/settings/webhooks");
+  await b.until(`T.rows().length === 1`, "one webhook");
+  await eq(`T.q('#webhookdialog').open`, false, "the add form is not in the way");
   await shot("settings-notifications");
   await eq(`T.q('#snip-claude-code').open`, false, "snippets closed");
   await eq(`T.text('#panel li code')`, mock.url + "/hook/claude-code", "address");
-  await T(`click('#addsender')`);
-  await b.until(`T.q('#senderdialog').open === true`, "the dialog opens");
-  await eq(`T.text('#senderdialog h3')`, "Add a sender", "and says what it adds");
+  await T(`click('#addwebhook')`);
+  await b.until(`T.q('#webhookdialog').open === true`, "the dialog opens");
+  await eq(`T.text('#webhookdialog h3')`, "Add a webhook", "and says what it adds");
   await T(`set('#wname', 'ci')`);
   await T(`set('#wadapter', 'generic')`);
-  await T(`submit('#senderdialog form')`);
+  await T(`submit('#webhookdialog form')`);
   await b.until(`T.q('#snip-ci')?.open === true && T.q('#snip-ci code.token')`, "token shown");
-  await eq(`T.q('#senderdialog').open`, false, "the dialog closes once the sender is added");
+  await eq(`T.q('#webhookdialog').open`, false, "the dialog closes once the webhook is added");
   await eq(`T.text('#snip-ci code.token')`, "tok-ci-1", "token");
   await eq(
     `T.all('#snip-ci pre').some((p) => p.textContent.includes('Bearer tok-ci-1'))`,
@@ -1129,8 +1129,55 @@ await step(
   },
 );
 
-await step("Settings: theme is light unless chosen, remembered, and never follows the system uninvited", async () => {
+await step("Settings: General says what the device is; settings it cannot use are hidden until asked for", async () => {
   await open("open", "#/settings/general");
+  await b.until(`!!T.q('#hardwarecard dd')`, "the device card");
+  await eq(
+    `T.all('#panel .card h3').map((h) => h.textContent).slice(0, 2)`,
+    ["Device", "This device"],
+    "it is the second card of General",
+  );
+  await eq(`T.text('#hwboard')`, "Echo Dot class speaker", "the kind of device");
+  await eq(`T.text('#hardwarecard').includes('486 MB')`, true, "its memory");
+  await eq(
+    `T.all('#hwparts li').map((l) => l.textContent.slice(0, 5) + ' ' + (l.querySelector('.badge')?.textContent ?? '')).length`,
+    5,
+    "each part is listed",
+  );
+  await eq(
+    `T.all('.tabs a').some((a) => a.textContent === 'Lights')`,
+    true,
+    "a device with lights lists the Lights page",
+  );
+  // a device with no lights does not list them, unless asked
+  mock.state["hwLeds"] = false;
+  await b.goto(mock.url + "/api/auth");
+  await b.goto(mock.url + "/#/settings/general");
+  await b.ev(HELPERS);
+  await b.until(`!!T.q('#hardwarecard dd')`, "the device card");
+  await b.until(`!T.all('.tabs a').some((a) => a.textContent === 'Lights')`, "no Lights page without lights");
+  await eq(
+    `T.all('.tabs a').some((a) => a.textContent === 'Zigbee' || a.textContent === 'Intercom')`,
+    false,
+    "and nothing that is only planned",
+  );
+  await T(`click('#showall')`);
+  await b.until(
+    `T.all('.tabs a').some((a) => a.textContent === 'Lights') && T.all('.tabs a').some((a) => a.textContent === 'Intercom')`,
+    "everything, once asked",
+  );
+  await T(`click('.tabs a[href="#/settings/lights"]')`);
+  await b.until(`!!T.q('#lacking')`, "the page says why it cannot be used");
+  await eq(`T.text('#lacking').includes('No light ring')`, true, "in words");
+  await T(`click('.tabs a[href="#/settings/intercom"]')`);
+  await b.until(`!!T.q('#planned')`, "a planned page says it is not built");
+  await T(`click('#showall')`);
+  await b.ev(`localStorage.removeItem('clawdot-show-unavailable')`);
+  mock.state["hwLeds"] = true;
+});
+
+await step("Settings: theme is light unless chosen, remembered, and never follows the system uninvited", async () => {
+  await open("open", "#/settings/themes");
   await b.until(`!!T.q('#themeform')`, "theme choice");
   await eq(`document.documentElement.dataset.theme`, "light", "light by default");
   // The system prefers dark, and the page stays light.
@@ -1153,7 +1200,7 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
   await eq(`getComputedStyle(document.body).backgroundColor`, "rgb(11, 26, 31)", "dark by explicit choice");
   await eq(`localStorage.getItem('clawdot-theme')`, "dark", "remembered by this browser");
   await shot("settings-general-dark", { dark: true });
-  await b.goto(mock.url + "/#/settings/general");
+  await b.goto(mock.url + "/#/settings/themes");
   await eq(`document.documentElement.dataset.theme`, "dark", "applied again on load");
   await T(`click('#themeform input[value="light"]')`);
   await b.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
@@ -1161,24 +1208,30 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
 
 await step("Settings: sections in a tab strip, native dropdowns, no horizontal scroll at 360 px", async () => {
   await open("open", "#/settings");
-  await b.until(`T.all('.tabs a').length === 12`, "the section tabs");
+  await b.until(`T.all('.tabs a').length === 13`, "the section tabs");
   await eq(
     `T.all('.tabs a').map((a) => a.textContent)`,
     [
       "General",
+      "Themes",
       "Features",
       "Assistant",
       "Voice",
       "Tools",
       "Skills",
+      "Memory",
       "Media",
       "Lights",
-      "Memory",
-      "Notifications",
+      "Webhooks",
       "Security",
       "About",
     ],
     "every kind of configuration has a named section",
+  );
+  await eq(
+    `T.all('.tabs .navhead').map((a) => a.textContent)`,
+    ["Basics", "Assistant", "Integrations", "System"],
+    "in groups",
   );
   await eq(`T.all('.tabs a[aria-current="page"]').map((a) => a.textContent)`, ["General"], "the first is shown");
   await T(`click('.tabs a[href="#/settings/security"]')`);
@@ -1196,6 +1249,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
   ];
   for (const id of [
     "general",
+    "themes",
     "features",
     "assistant",
     "voice",
@@ -1204,7 +1258,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
     "media",
     "lights",
     "memory",
-    "notifications",
+    "webhooks",
     "security",
     "about",
   ])
@@ -1238,17 +1292,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
 
 await step("every page uses the same card pattern: titles, rows, one width for inputs and text areas", async () => {
   const pages = ["#/clock", "#/clock/timers", "#/clock/reminders", "#/clock/stopwatch", "#/media", "#/activity"];
-  for (const id of [
-    "general",
-    "features",
-    "assistant",
-    "voice",
-    "tools",
-    "memory",
-    "notifications",
-    "security",
-    "about",
-  ])
+  for (const id of ["general", "features", "assistant", "voice", "tools", "memory", "webhooks", "security", "about"])
     pages.push("#/settings/" + id);
   for (const hash of pages) {
     await open("open", hash);
@@ -1279,17 +1323,7 @@ await step("every page fits a 360 px and a 320 px phone with long content and a 
     "#/media",
     "#/activity",
   ];
-  for (const id of [
-    "general",
-    "features",
-    "assistant",
-    "voice",
-    "tools",
-    "memory",
-    "notifications",
-    "security",
-    "about",
-  ])
+  for (const id of ["general", "features", "assistant", "voice", "tools", "memory", "webhooks", "security", "about"])
     pages.push("#/settings/" + id);
   const bad: string[] = [];
   for (const [content, fixture] of [

@@ -872,6 +872,7 @@ impl Brain {
                 "requests_today": self.usage.requests_today(),
                 "spend_today": self.usage.spend_today(),
             },
+            "hardware": clawdot_core::hardware::detected(),
             "clock_valid": self.clock.wall_clock_valid(),
             "satellites": satellites,
             "speaker": who,

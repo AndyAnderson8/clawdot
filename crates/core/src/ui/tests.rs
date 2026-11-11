@@ -137,7 +137,7 @@ fn the_page_uses_plain_names() {
             "missing destination {tab}"
         );
     }
-    for gone in ["\"Agents\"", "\"Webhooks\"", "#/agents"] {
+    for gone in ["\"Agents\"", "#/agents"] {
         assert!(!PAGE.contains(gone), "the Agents tab is gone: {gone}");
     }
     // The page is built from TypeScript (portal/), so the markup lives in the script.

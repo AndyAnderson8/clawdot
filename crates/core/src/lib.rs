@@ -24,6 +24,7 @@ pub mod esphome;
 pub mod esphome_cfg;
 pub mod extensions;
 pub mod fastpath;
+pub mod hardware;
 pub mod http;
 pub mod httptools;
 pub mod inbox;

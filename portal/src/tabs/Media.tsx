@@ -1,4 +1,5 @@
 import type { JSX } from "preact";
+import { useApp } from "../store.ts";
 
 /** What a media source is for, shown on both the Media page and in its settings. */
 const KINDS: { id: string; name: string; what: string }[] = [
@@ -10,6 +11,8 @@ const KINDS: { id: string; name: string; what: string }[] = [
 /** Playing music, podcasts and radio, and the Bluetooth connection. Nothing here can play yet, and the page says so
  *  instead of showing controls that would do nothing (the device layer has no Bluetooth interface yet, spec 0006). */
 export function Media(): JSX.Element {
+  const hw = useApp().status?.hardware;
+  const missing = hw !== undefined && !hw.parts.bluetooth;
   return (
     <div class="page">
       <header class="pagehead">
@@ -44,6 +47,7 @@ export function Media(): JSX.Element {
           </div>
           <div class="soon" role="status">
             <p>
+              {missing ? "No Bluetooth adapter was found on this device. " : ""}
               Bluetooth is not available on this device yet. The device software has no Bluetooth connection, so the
               controls below are shown but cannot be used.
             </p>

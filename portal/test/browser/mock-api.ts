@@ -357,6 +357,16 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         return send(200, {
           now: now(),
           status: {
+            hardware: {
+              board: "echo-dot",
+              model: "Test Echo Dot",
+              cpu: "MT8163",
+              cores: 4,
+              ram_mb: 486,
+              arch: "arm",
+              os: "linux",
+              parts: { leds: st["hwLeds"] !== false, bluetooth: false, wifi: true, screen: false, usb_serial: false },
+            },
             clock_valid: true,
             satellites: 1,
             llm: { configured: true, model: "test-model" },

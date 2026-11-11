@@ -29,7 +29,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     }
   };
   const remove = async () => {
-    if (!confirm("Remove the sender " + e.name + "? Anything sending to it will be turned away.")) return;
+    if (!confirm("Remove the webhook " + e.name + "? Anything sending to it will be turned away.")) return;
     try {
       await api("DELETE", "/api/endpoints/" + e.name);
       const { [e.name]: _gone, ...rest } = get().fresh;
@@ -110,21 +110,21 @@ export function Webhooks(): JSX.Element {
   return (
     <>
       <p class="lead">
-        Let other programs speak through your speaker: a build server that has finished, a home automation hub, a
-        script. Each sender gets its own address and token, which works like a password. When a sender posts a message,
-        the speaker reads it out as soon as it is idle.
+        A webhook is an address other programs post a message to, so they can speak through your speaker: a build server
+        that has finished, a home automation hub, a script. Each webhook gets its own address and token, which works
+        like a password. When a message arrives, the speaker reads it out as soon as it is idle.
       </p>
       <section class="card" id="inputlist">
         <div class="head">
           <h3>
-            Senders<span class="count">{ov?.endpoints.length ?? 0}</span>
+            Webhooks<span class="count">{ov?.endpoints.length ?? 0}</span>
           </h3>
-          <AddButton label="Add a sender" id="addsender" onClick={() => setAdding(true)} />
+          <AddButton label="Add a webhook" id="addwebhook" onClick={() => setAdding(true)} />
         </div>
         <ul class="rows">
           {ov && !ov.endpoints.length ? (
             <li class="empty">
-              No senders yet. Add one, then paste its address and token into the program that should send messages.
+              No webhooks yet. Add one, then paste its address and token into the program that should send messages.
             </li>
           ) : null}
           {ov?.endpoints.map((e) => (
@@ -137,11 +137,11 @@ export function Webhooks(): JSX.Element {
           ))}
         </ul>
       </section>
-      <Dialog id="senderdialog" title="Add a sender" open={adding} onClose={() => setAdding(false)}>
+      <Dialog id="webhookdialog" title="Add a webhook" open={adding} onClose={() => setAdding(false)}>
         <form class="dlgform" onSubmit={create}>
           <p class="mut">
-            Give each program its own sender, so you can turn one off without touching the rest. Use letters, numbers, -
-            and _.
+            Give each program its own webhook, so you can turn one off without touching the rest. Use letters, numbers,
+            - and _.
           </p>
           <Field id="wname" label="Name">
             <input
@@ -165,7 +165,7 @@ export function Webhooks(): JSX.Element {
             </select>
           </Field>
           <div class="row">
-            <button>Add sender</button>
+            <button>Add webhook</button>
           </div>
         </form>
       </Dialog>
