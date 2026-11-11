@@ -214,7 +214,7 @@ async fn every_portal_listing_needs_a_sign_in() {
     let guarded: Vec<_> = ROUTES.iter().filter(|r| r.auth == SignedIn).collect();
     assert!(guarded.len() > 40, "only {} guarded routes", guarded.len());
     for route in guarded {
-        let path = format!("/api{}", sample_path(route.path));
+        let path = crate::routes::sample_path(route.path);
         // Refused either way; after about 20 failures the rate limit answers 429 instead of 401.
         let s = call(&p, route.method, &path, "", "{}").await.0;
         assert!(s == 401 || s == 429, "{} {path}: {s}", route.method);
@@ -1203,51 +1203,16 @@ async fn a_pasted_key_is_kept_masked_and_never_returned_whole() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A real-looking path for a table pattern: every `{parameter}` segment becomes `1`.
-fn sample_path(pattern: &str) -> String {
-    pattern
-        .split('/')
-        .map(|s| if s.starts_with('{') { "1" } else { s })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 // The table is the one list of routes (architecture review C4).
 #[test]
 fn the_route_table_is_well_formed_and_no_row_hides_another() {
-    let mut seen = std::collections::BTreeSet::new();
+    crate::routes::assert_well_formed(ROUTES);
     for route in ROUTES {
+        assert!(route.path.starts_with("/api/"), "{}", route.path);
         assert!(
-            matches!(route.method, "GET" | "POST" | "PUT" | "DELETE"),
-            "{}",
+            matches!(route.auth, Auth::Open | Auth::SignedIn),
+            "{}: the portal's table has only the sign-in classes",
             route.path
-        );
-        assert!(route.path.starts_with('/'), "{}", route.path);
-        for seg in route.path.split('/').skip(1) {
-            assert!(!seg.is_empty(), "{}", route.path);
-            assert!(
-                !seg.contains(['{', '}']) || (seg.starts_with('{') && seg.ends_with('}')),
-                "{}",
-                route.path
-            );
-        }
-        assert!(
-            seen.insert((route.method, route.path)),
-            "twice: {} {}",
-            route.method,
-            route.path
-        );
-        // Looking the row up by its own sample path must find that row, not an earlier one that covers it.
-        let sample = sample_path(route.path);
-        let segs: Vec<&str> = sample.trim_matches('/').split('/').collect();
-        let (hit, _) = find(&Method::from_bytes(route.method.as_bytes()).unwrap(), &segs)
-            .unwrap_or_else(|| panic!("{} {} is not found", route.method, route.path));
-        assert!(
-            hit.path == route.path,
-            "{} {} is hidden by {}",
-            route.method,
-            route.path,
-            hit.path
         );
     }
 }
@@ -1262,26 +1227,13 @@ fn only_the_sign_in_routes_are_open() {
     assert_eq!(
         open,
         [
-            "GET /auth",
-            "POST /setup",
-            "POST /login",
-            "POST /recover/window",
-            "POST /logout"
+            "GET /api/auth",
+            "POST /api/setup",
+            "POST /api/login",
+            "POST /api/recover/window",
+            "POST /api/logout"
         ]
     );
-}
-
-#[test]
-fn a_path_parameter_is_the_segment_in_its_place() {
-    assert_eq!(
-        fit("/tools/{name}/tier", &["tools", "a b", "tier"]),
-        Some("a b")
-    );
-    assert_eq!(fit("/tools/{name}/tier", &["tools", "x", "other"]), None);
-    assert_eq!(fit("/tools/{name}", &["tools", "x", "tier"]), None);
-    assert_eq!(fit("/tools", &["tools"]), Some(""));
-    assert_eq!(fit("/tools/{name}", &["tools", ""]), Some(""));
-    assert_eq!(fit("/tools", &[]), None);
 }
 
 // REQ-CFG-005: a path that exists answers 405 for a wrong method, an unknown path 404, and the open routes 404.
