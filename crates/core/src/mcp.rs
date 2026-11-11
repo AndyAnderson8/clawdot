@@ -238,6 +238,36 @@ fn find_response(content_type: &str, body: &str, want: u64) -> Result<Value, Str
     Err("the server sent no reply to the request".into())
 }
 
+/// Why one MCP request failed. The retry in [`McpClient::call`] depends on the kind, never on the wording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RpcError {
+    /// The server answered 404 to a request in a session: it forgot the session, so a new handshake can help.
+    SessionLost,
+    /// Anything else, with the message to show.
+    Other(String),
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionLost => f.write_str("the server no longer knows this session; try again"),
+            Self::Other(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<String> for RpcError {
+    fn from(m: String) -> Self {
+        Self::Other(m)
+    }
+}
+
+impl From<RpcError> for String {
+    fn from(e: RpcError) -> Self {
+        e.to_string()
+    }
+}
+
 impl McpClient {
     /// Validate the definitions, connect to each server, and list its tools.
     ///
@@ -314,7 +344,7 @@ impl McpClient {
         id: Option<u64>,
         method: &str,
         params: Value,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, RpcError> {
         let s = &self.servers[i];
         let mut msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         if let Some(id) = id {
@@ -393,13 +423,13 @@ impl McpClient {
         if status.as_u16() == 404 && method != "initialize" {
             // The session expired; forget it so the next call starts a new one.
             *s.session.lock().unwrap_or_else(PoisonError::into_inner) = None;
-            return Err("the server no longer knows this session; try again".into());
+            return Err(RpcError::SessionLost);
         }
         if !status.is_success() {
-            return Err(format!("HTTP {}", status.as_u16()));
+            return Err(RpcError::Other(format!("HTTP {}", status.as_u16())));
         }
         match id {
-            Some(id) => find_response(&ctype, &body, id),
+            Some(id) => find_response(&ctype, &body, id).map_err(RpcError::Other),
             None => Ok(Value::Null),
         }
     }
@@ -615,11 +645,7 @@ impl McpClient {
         let mut result = self
             .rpc(t.server, Some(3), "tools/call", params.clone())
             .await;
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.contains("no longer knows this session"))
-        {
+        if result.as_ref().err() == Some(&RpcError::SessionLost) {
             self.handshake(t.server).await?;
             result = self.rpc(t.server, Some(3), "tools/call", params).await;
         }
@@ -869,6 +895,22 @@ mod tests {
         tokened.auth_env = Some("NOPE_TOKEN".into());
         let e = c.add_server(tokened, &[], |_| None).await.unwrap_err();
         assert!(e.contains("NOPE_TOKEN"), "{e}");
+    }
+
+    #[test]
+    fn rpc_errors_read_as_before_and_only_a_lost_session_asks_for_a_retry() {
+        assert_eq!(
+            RpcError::SessionLost.to_string(),
+            "the server no longer knows this session; try again"
+        );
+        assert_eq!(RpcError::Other("HTTP 500".into()).to_string(), "HTTP 500");
+        // A message that merely says the same words is not the typed condition.
+        let imposter = RpcError::Other(RpcError::SessionLost.to_string());
+        assert_ne!(imposter, RpcError::SessionLost);
+        assert_eq!(
+            String::from(RpcError::SessionLost),
+            RpcError::SessionLost.to_string()
+        );
     }
 
     #[test]
