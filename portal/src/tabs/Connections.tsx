@@ -7,11 +7,12 @@ import { Field } from "../parts.tsx";
 import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { ConnectionTest, McpServer } from "../types.ts";
 import { Problems } from "./Tools.tsx";
+import { ask } from "../confirm.tsx";
 
 function Source(props: { s: McpServer }) {
   const s = props.s;
-  const remove = () => {
-    if (confirm("Remove the source " + s.name + "? Its tools will disappear."))
+  const remove = async () => {
+    if (await ask("Remove the source " + s.name + "? Its tools will disappear.", "Remove"))
       void change("DELETE", "/api/connections/" + s.name, undefined, "Removed.");
   };
   const n = s.tools.length;

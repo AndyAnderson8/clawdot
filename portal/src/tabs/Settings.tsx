@@ -9,6 +9,7 @@ import { zoneName, zoneOptions } from "../time.ts";
 import type { Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
 import { ModelSelect, VoiceControl } from "./Voice.tsx";
+import { ask } from "../confirm.tsx";
 
 function browserZone(): string {
   try {
@@ -94,7 +95,11 @@ export function Group(props: {
 
   const saved = specs.filter((sp) => settings.fields[sp.key]?.saved);
   const reset = async () => {
-    if (!confirm("Put " + title.toLowerCase() + " back to the defaults? Values saved here are removed.")) return;
+    const sure = await ask(
+      "Put " + title.toLowerCase() + " back to the defaults? Values saved here are removed.",
+      "Reset them",
+    );
+    if (!sure) return;
     try {
       const next = await api<SettingsData>(
         "PUT",

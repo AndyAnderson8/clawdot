@@ -6,6 +6,7 @@ import { Field } from "../parts.tsx";
 import { change, loadExt, say, useApp, usePolled } from "../store.ts";
 import { matching, toolDefinition, type ParamForm } from "../forms.ts";
 import type { Extensions, Tool } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 /** The "Saved, but not running" box for tools or sources that failed to load. */
 export function Problems(props: { ext: Extensions; kind: string }): JSX.Element | null {
@@ -41,9 +42,9 @@ function whenWords(tier: string): string {
 function WhenItRuns(props: { t: Tool }): JSX.Element {
   const { t } = props;
   const id = "tier-" + t.name;
-  const pick = (to: string) => {
+  const pick = async (to: string) => {
     const warn = relaxWarning(t.name, t.tier ?? "costly", to);
-    if (warn && !confirm(warn)) return;
+    if (warn && !(await ask(warn, "Change it"))) return;
     void change(
       "POST",
       "/api/tools/" + t.name + "/tier",
@@ -92,8 +93,8 @@ function origin(t: Tool): string {
 
 function ToolRow(props: { t: Tool }) {
   const t = props.t;
-  const remove = () => {
-    if (confirm("Delete the tool " + t.name + "? The assistant will stop being able to use it."))
+  const remove = async () => {
+    if (await ask("Delete the tool " + t.name + "? The assistant will stop being able to use it.", "Delete"))
       void change("DELETE", "/api/tools/" + t.name, undefined, "Deleted.");
   };
   return (

@@ -7,6 +7,7 @@ import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
 import { CopyButton } from "../parts.tsx";
 import { fail, get, load, say, set, sv, useApp } from "../store.ts";
 import type { Endpoint, WebhookToken } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 const base = () => String(sv("public_url") || location.origin);
 
@@ -16,8 +17,11 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
   const url = base() + "/hook/" + e.name;
 
   const rotate = async () => {
-    if (!confirm("Make a new token for " + e.name + "? The old one stops working, so update the program that uses it."))
-      return;
+    const sure = await ask(
+      "Make a new token for " + e.name + "? The old one stops working, so update the program that uses it.",
+      "Make a new token",
+    );
+    if (!sure) return;
     try {
       const r = await api<WebhookToken>("POST", "/api/endpoints/" + e.name + "/rotate");
       set({ fresh: { ...get().fresh, [e.name]: r.token } });
@@ -29,7 +33,8 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     }
   };
   const remove = async () => {
-    if (!confirm("Remove the webhook " + e.name + "? Anything sending to it will be turned away.")) return;
+    if (!(await ask("Remove the webhook " + e.name + "? Anything sending to it will be turned away.", "Remove")))
+      return;
     try {
       await api("DELETE", "/api/endpoints/" + e.name);
       const { [e.name]: _gone, ...rest } = get().fresh;

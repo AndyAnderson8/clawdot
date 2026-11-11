@@ -7,6 +7,7 @@ import { TimeField } from "../timefield.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { DAYS, fmt, hhmm, parts, repeatText, span, whenText, zoneName } from "../time.ts";
 import type { ScheduleItem, ScheduleKind, ScheduleList } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 export const NAMES: Record<ScheduleKind, string> = { timer: "Timer", alarm: "Alarm", reminder: "Reminder" };
 const PLACEHOLDER: Record<ScheduleKind, string> = {
@@ -104,7 +105,8 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   };
 
   const cancel = async (i: ScheduleItem) => {
-    if (!confirm("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?")) return;
+    if (!(await ask("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?", "Cancel it", "Keep it")))
+      return;
     try {
       setData(await api<ScheduleList>("DELETE", "/api/schedule/" + i.id));
       say("Cancelled.");

@@ -83,7 +83,17 @@ const HELPERS = `(() => {
     },
     rows: (s) => [...document.querySelectorAll(s ?? '#panel ul.rows > li')].map((li) => li.textContent),
   };
-  window.confirm = () => true;
+  // "Are you sure?" is the page's own dialog. The suite answers it as a person would, by pressing one of its two
+  // buttons: __answer is true, false, or a function of the question's text.
+  window.__answer = () => true;
+  new MutationObserver(() => {
+    const yes = document.getElementById('confirmyes');
+    if (!yes || yes.dataset.pressed) return;
+    yes.dataset.pressed = '1';
+    const a = typeof window.__answer === 'function' ? window.__answer(document.getElementById('confirmtext').textContent) : window.__answer;
+    document.getElementById(a ? 'confirmyes' : 'confirmno').click();
+  }).observe(document.documentElement, { childList: true, subtree: true });
+  window.confirm = () => { throw new Error('the browser confirm box was used'); };
   return true;
 })()`;
 
@@ -658,10 +668,10 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
   await section("memory", "Memory");
   await b.until(`T.rows("#notelist > li").length === 2`, "back to two");
   // forgetting asks first: declining does nothing
-  await b.ev(`window.confirm = () => false`);
+  await b.ev(`window.__answer = () => false`);
   await T(`click("#notelist > li:nth-child(1) button[title='Forget this memory']")`);
   await eq(`T.rows("#notelist > li").length`, 2, "declined confirmation keeps the memory");
-  await b.ev(`window.confirm = () => true`);
+  await b.ev(`window.__answer = () => true`);
   await T(`click("#notelist > li:nth-child(1) button[title='Forget this memory']")`);
   await b.until(`T.rows("#notelist > li").length === 1`, "one forgotten");
   assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/notes/1"));
@@ -769,10 +779,10 @@ await step("Tools: one list, search, how each runs, turn off, add a tool in a di
   );
   await eq(`T.q('#tier-set_light option[value="costly"]').textContent`, "Asks you first", "in short words");
   await eq(`T.q('#tier-set_light option[value="destructive"]').disabled`, true, "destructive is never offered");
-  await b.ev(`window.confirm = () => false`);
+  await b.ev(`window.__answer = () => false`);
   await T(`set('#tier-set_light', 'read_only')`);
   assert.ok(!mock.log.some((l) => l.path === "/api/tools/set_light/tier"), "declining the warning sends nothing");
-  await b.ev(`window.confirm = () => true`);
+  await b.ev(`window.__answer = () => true`);
   await T(`set('#tier-set_light', 'reversible')`);
   await b.until(
     `T.q('#tier-set_light').value === 'reversible' && T.text('#toolcard').includes('Changed by you')`,
@@ -964,7 +974,7 @@ await step("Skills: search, select all or none, add, edit in place, folder impor
   );
   await eq(`T.rows('${rows}')[2].includes('Needs review')`, false, "no longer waiting");
   // delete from the editor
-  await b.ev(`window.confirm = () => true`);
+  await b.ev(`window.__answer = () => true`);
   await T(`clickText('${rows}:nth-child(3)', 'Edit')`);
   await T(`click('#skill-delete')`);
   await b.until(`T.rows('${rows}').length === 2`, "deleted");
@@ -1214,7 +1224,7 @@ await step(
     await T(`set('#provider', 'openrouter')`);
     await b.until(`!!T.q('#keyhint')`, "the saved key is shown");
     await eq(`T.text('#keyhint')`, "sk-or-…c9f2", "as its ends only");
-    await b.ev(`window.confirm = () => true`);
+    await b.ev(`window.__answer = () => true`);
     await T(`click('#keyremove')`);
     await b.until(`!!T.q('#apikey')`, "removed: a box to paste a key appears");
     await eq(`T.q('#f-llm_model').disabled`, true, "and the models wait for a key");
@@ -1769,7 +1779,7 @@ await step("Updates: found, read as text, confirmed, watched, and checked by han
   );
   await eq(`T.q('#installupdate').disabled`, false, "it can be installed");
   // Declining the confirmation sends nothing.
-  await b.ev(`window.confirm = (m) => { window.__asked = m; return false; }`);
+  await b.ev(`window.__answer = (m) => { window.__asked = m; return false; }`);
   await T(`click('#installupdate')`);
   assert.ok(!mock.log.some((l) => l.path === "/api/update/apply"), "declined: nothing was sent");
   await eq(
@@ -1777,7 +1787,7 @@ await step("Updates: found, read as text, confirmed, watched, and checked by han
     true,
     "the question says what will happen",
   );
-  await b.ev(`window.confirm = () => true`);
+  await b.ev(`window.__answer = () => true`);
   await T(`click('#installupdate')`);
   await b.until(`T.text('#updatephase') === 'Installing.'`, "progress shown");
   assert.deepEqual(mock.log.find((l) => l.path === "/api/update/apply")!.body, { version: "0.2.0" });
