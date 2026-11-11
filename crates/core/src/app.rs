@@ -735,6 +735,15 @@ impl Core {
             .clone()
     }
 
+    /// Replace one top-level field of the published snapshot, so a change that happens while the main loop is busy
+    /// (a realtime conversation) shows at once. Does nothing before the first snapshot.
+    pub fn patch_ui_status(&self, key: &str, value: serde_json::Value) {
+        let mut g = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(o) = g.as_object_mut() {
+            o.insert(key.to_owned(), value);
+        }
+    }
+
     /// Ask the speaker to say `text` (the UI's "test speak"). At most [`MAX_PENDING_SPEECH`] requests wait, each
     /// up to [`MAX_SPEECH_CHARS`] characters. Returns false if refused.
     pub fn queue_speech(&self, text: &str) -> bool {
