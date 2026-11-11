@@ -357,14 +357,7 @@ impl SessionEnd {
     }
 }
 
-/// What the engine sends to the speaker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Speaker {
-    /// Audio to play (PCM16, 24 kHz).
-    Audio(Vec<u8>),
-    /// Drop what is queued: the user began speaking over the model.
-    Flush,
-}
+pub use crate::rtvoice::Speaker;
 
 /// The audio ends of a session.
 #[derive(Debug)]
@@ -460,23 +453,7 @@ pub async fn connect<D: Dialect>(
         .unwrap_or_else(|_| Err(RealtimeError::Unreachable("timed out".into())))
 }
 
-/// Linear resampling of 16-bit mono PCM, for example a 16 kHz microphone to [`SAMPLE_RATE`].
-#[must_use]
-pub fn resample(pcm: &[i16], from: u32, to: u32) -> Vec<i16> {
-    if from == to || pcm.is_empty() || from == 0 || to == 0 {
-        return pcm.to_vec();
-    }
-    let n = (pcm.len() as u64 * u64::from(to) / u64::from(from)) as usize;
-    (0..n)
-        .map(|i| {
-            let pos = i as f64 * f64::from(from) / f64::from(to);
-            let i0 = (pos as usize).min(pcm.len() - 1);
-            let i1 = (i0 + 1).min(pcm.len() - 1);
-            let frac = pos - i0 as f64;
-            (f64::from(pcm[i0]) * (1.0 - frac) + f64::from(pcm[i1]) * frac).round() as i16
-        })
-        .collect()
-}
+pub use crate::rtvoice::resample;
 
 /// Serve the model's function calls from a script: the first model "round" is the calls the realtime
 /// model made, and later rounds are empty. This is how the realtime model's calls enter `run_turn`.
