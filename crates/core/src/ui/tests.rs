@@ -231,6 +231,8 @@ async fn every_portal_listing_needs_a_sign_in() {
         ("GET", "/api/hive/peers"),
         ("PUT", "/api/speech/key"),
         ("DELETE", "/api/speech/key"),
+        ("PUT", "/api/realtime/key"),
+        ("DELETE", "/api/realtime/key"),
     ] {
         // Refused either way; after about 20 failures the rate limit answers 429 instead of 401.
         let s = call(&p, m, path, "", "{}").await.0;
