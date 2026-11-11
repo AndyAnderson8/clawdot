@@ -190,6 +190,8 @@ pub struct Done {
 /// One realtime session for the core to run on a speaker's behalf. Closing `mic` ends it.
 #[derive(Debug)]
 pub struct Job {
+    /// The speaker's connection, which names its conversation (REQ-AST-026).
+    pub speaker_id: String,
     /// Microphone audio from the speaker, PCM16 at 24 kHz.
     pub mic: mpsc::Receiver<Vec<u8>>,
     /// Where the model's audio goes.

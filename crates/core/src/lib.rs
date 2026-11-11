@@ -46,6 +46,7 @@ pub mod secrets;
 pub mod session;
 pub mod settings;
 pub mod skillfolder;
+pub mod speakers;
 pub mod speech;
 pub mod stopwatch;
 pub mod store;
