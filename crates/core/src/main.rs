@@ -7,7 +7,7 @@
 
 use clawdot_core::app::Op;
 use clawdot_core::app::{Adapters, Core, Limits, Stores};
-use clawdot_core::assistant::{Assistant, Effect, describe_fired};
+use clawdot_core::assistant::{Assistant, describe_fired};
 use clawdot_core::audit::{ActionPolicy, AuditConfig, AuditLog};
 use clawdot_core::config::{AgentConfig, Config, SatelliteConfig, SpeechConfig, UpdatesConfig};
 #[cfg(feature = "esphome-satellite")]
@@ -26,22 +26,26 @@ use clawdot_core::mcp::{McpClient, ServerDef, WithMcp};
 use clawdot_core::media::Station;
 use clawdot_core::notes::NoteStore;
 use clawdot_core::rtvoice::{self, Realtime, RtSettings};
-use clawdot_core::satellite::{self, Answer, Ask};
+use clawdot_core::satellite::{self, Ask};
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
 use clawdot_core::session::{
     ChatBackend, Conversation, MAX_CALLS_CEILING, MAX_DEADLINE_CEILING_SECS, MAX_ROUNDS_CEILING,
-    ToolHost, TurnConfig, TurnCtl, TurnEnd, run_turn_ctl,
+    ToolHost, TurnConfig, TurnCtl,
 };
 use clawdot_core::settings::{self, Layer, SettingsState, public_url_from_listen};
 use clawdot_core::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
 use clawdot_core::store::JsonStore;
 use clawdot_core::transport::HttpBackend;
+use clawdot_core::turns::{
+    self, Event as HubEvent, Hub, Origin, Reply, Request, Submitted, TurnKit,
+};
 use clawdot_core::usage::{UsageLimits, UsageTracker};
 use clawdot_core::voice::voice_turn;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -637,9 +641,106 @@ fn settings_extra(args: &Args) -> serde_json::Value {
     })
 }
 
+/// Something for the speaker task to say, handled in the order it was sent (ADR-0021).
+enum Say {
+    /// A phrase from the portal; a voice being tried is used for this phrase only.
+    Phrase {
+        text: String,
+        preview: Option<String>,
+    },
+    /// A timer, alarm or reminder that rang.
+    Line(String),
+    /// Look for an agent event worth announcing now, and say it.
+    Poll {
+        minute: u16,
+        day: i64,
+        llm: Option<Llm>,
+    },
+}
+
+/// What the speaker task needs.
+struct Voice {
+    announcer: satellite::Announcer,
+    core: Arc<Core>,
+    usage: UsageTracker,
+    usage_store: JsonStore,
+    /// Spoken text is echoed only to an interactive console: in server mode stdout goes to a journal or
+    /// container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
+    echo: bool,
+    /// Some satellite could speak right now, as of the last poll (read by the loop for the portal).
+    available: AtomicBool,
+    /// A poll is queued or running; the loop sends another only when this is false.
+    polling: AtomicBool,
+}
+
+/// Say what the loop hands over, one thing at a time. A satellite that is busy or muted simply does not
+/// speak a timer's line (best effort); an agent event stays queued until one can.
+async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
+    let v = &*voice;
+    while let Some(job) = rx.recv().await {
+        match job {
+            Say::Phrase { text, preview } => {
+                if v.echo {
+                    println!("speaker> {text}");
+                }
+                if v.announcer.connected() > 0 {
+                    let before = preview.as_deref().and_then(swap_live_voice);
+                    v.announcer.announce(&text).await;
+                    if let Some(old) = before {
+                        swap_live_voice(&old);
+                    }
+                }
+            }
+            Say::Line(line) => {
+                if v.echo {
+                    println!("speaker> {line}");
+                }
+                if v.announcer.connected() > 0 {
+                    v.announcer.announce(&line).await;
+                }
+            }
+            Say::Poll { minute, day, llm } => {
+                let connected = v.announcer.connected() > 0;
+                let free = connected && v.announcer.is_available().await;
+                v.available.store(free, Ordering::Relaxed);
+                // A satellite that is connected but busy or muted: keep the event queued and try again.
+                if (!connected || free)
+                    && let Some(next) = v.core.next_announcement(true, minute)
+                {
+                    let spoken = match &llm {
+                        Some(l) => {
+                            let mut usage = v.usage.clone();
+                            let s = summarise(l, &mut usage, day, &next.event).await;
+                            if let Err(e) = usage.save(&v.usage_store) {
+                                clawdot_core::diag::error(&format!(
+                                    "could not save usage counters: {e}"
+                                ));
+                            }
+                            s
+                        }
+                        // No model: say only the headline and outcome, never raw agent text.
+                        None => short_announcement(&next.event)
+                            .unwrap_or_else(|| fallback_summary(&next.event)),
+                    };
+                    let line = announcement(&next.event, &spoken, next.more_waiting);
+                    if v.echo {
+                        println!("speaker> {line}");
+                    }
+                    let delivered = !connected || v.announcer.announce(&line).await;
+                    if delivered {
+                        v.core.mark_announced(&[next.event.id]);
+                    }
+                }
+                v.polling.store(false, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 /// The language model and everything needed to use it.
+#[derive(Clone)]
 struct Llm {
-    backend: HttpBackend,
+    backend: Arc<HttpBackend>,
     cfg: TurnConfig,
 }
 
@@ -694,7 +795,7 @@ fn build_llm(
     // A key pasted into the portal wins; otherwise the environment variable that was named.
     let key = clawdot_core::secrets::get(clawdot_core::secrets::LLM_KEY)
         .unwrap_or_else(|| std::env::var(key_env).unwrap_or_default());
-    let backend = HttpBackend::new(url, &key, Duration::from_secs(30))?;
+    let backend = Arc::new(HttpBackend::new(url, &key, Duration::from_secs(30))?);
     Ok(Some(Llm {
         backend,
         cfg: agent_turn_config(model, None, None, max_tokens, agent),
@@ -835,14 +936,17 @@ async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Event)
 struct Brain {
     assistant: Assistant,
     llm: Option<Llm>,
-    conversation: Conversation,
+    /// The daily counters. Turns hold handles on the same ones; only this loop saves them.
     usage: UsageTracker,
     usage_store: JsonStore,
-    http_tools: HttpTools,
-    mcp: McpClient,
+    /// The HTTP and MCP clients. A turn takes a clone of the `Arc` when it starts and calls the tools itself.
+    http_tools: Arc<HttpTools>,
+    mcp: Arc<McpClient>,
     clock: Arc<dyn Clock + Send + Sync>,
     /// Tools, connections, and skills managed from the portal.
     ext: Extensions,
+    /// A read-only copy of `ext` for the turns, replaced whenever `ext` changes.
+    ext_view: Arc<Extensions>,
     /// Names of the built-in tools.
     builtin: Vec<String>,
     /// The system prompt without skills.
@@ -862,14 +966,6 @@ struct SpeakerView {
     /// Speech is printed to the terminal, which counts as a speaker and needs no voice.
     console: bool,
     quiet: Option<clawdot_core::inbox::endpoint::QuietHours>,
-}
-
-/// What to say and which effects the satellite should carry out.
-struct Reply {
-    say: String,
-    effects: Vec<Effect>,
-    /// The reply ends with a question, so the follow-up window should be longer (REQ-AST-021).
-    expects_reply: bool,
 }
 
 impl Brain {
@@ -892,15 +988,20 @@ impl Brain {
 
     /// Carry out a change from the portal and refresh what the page shows.
     async fn ext_apply(&mut self, op: ExtOp) -> Result<serde_json::Value, clawdot_core::app::Fail> {
-        self.ext
+        // A turn that is running holds its own copies of the clients; `make_mut` gives this loop a private
+        // one to change, and the turn keeps what it began with.
+        let applied = self
+            .ext
             .apply(
                 op,
-                &mut self.http_tools,
-                &mut self.mcp,
+                Arc::make_mut(&mut self.http_tools),
+                Arc::make_mut(&mut self.mcp),
                 &self.builtin,
                 |v| std::env::var(v).ok(),
             )
-            .await?;
+            .await;
+        self.ext_view = Arc::new(self.ext.snapshot());
+        applied?;
         Ok(self.listing())
     }
 
@@ -957,19 +1058,14 @@ impl Brain {
         })
     }
 
-    /// Run one realtime voice session for a speaker (REQ-RTV-009). The tools run through the same host stack,
-    /// audit log and notes as any turn; the cap is checked before the connection opens and audio cost is added
-    /// while it runs. This loop is busy until the session ends, which is at most `max_session_secs`.
+    /// Start a realtime voice session for a speaker (REQ-RTV-009) as a task beside this loop (ADR-0021). The
+    /// tools run through the same gate, audit log and notes as any turn; the cap is checked before the
+    /// connection opens and audio cost is added while it runs. The session lasts at most `max_session_secs`
+    /// and nothing else waits for it.
     #[cfg(feature = "realtime")]
-    async fn run_realtime(&mut self, job: rtvoice::Job, core: &Core) {
-        use clawdot_core::realtime::{Env, Io, serve::serve};
-        let settings = self.rt.settings();
+    fn start_realtime(&mut self, job: rtvoice::Job, core: &Core, hub: &mut Hub) {
         self.rt.set_error(None);
         core.patch_ui_status("realtime", self.rt.status());
-        let day = self.assistant.local_day();
-        let clock_src = Arc::clone(&self.clock);
-        let clock = move || (day, clock_src.now());
-        let turn_cfg = self.llm.as_ref().map(|l| l.cfg.clone()).unwrap_or_default();
         // A fresh conversation per session: it holds the transcript and any held action in memory only.
         let mut conv = Conversation::new(self.persona.clone(), 20, 24_000, 600);
         if let Some(a) = core.audit() {
@@ -978,58 +1074,27 @@ impl Brain {
         if let Some(n) = core.notes() {
             conv.set_notes(n);
         }
-        let io = Io {
-            mic: job.mic,
-            speaker: job.speaker,
+        let kit = turns::RtKit {
+            settings: self.rt.settings(),
+            key: self.rt.key(),
+            persona: self.persona.clone(),
+            cfg: self.llm.as_ref().map(|l| l.cfg.clone()).unwrap_or_default(),
+            usage: self.usage.clone(),
+            http: Arc::clone(&self.http_tools),
+            mcp: Arc::clone(&self.mcp),
+            ext: Arc::clone(&self.ext_view),
+            builtin: ToolHost::tool_specs(&self.assistant),
+            day: self.assistant.local_day(),
+            clock: Arc::clone(&self.clock),
+            conv,
+            rt: self.rt.clone(),
         };
-        let finish = {
-            let mut host = WithPolicy {
-                inner: &mut WithMcp {
-                    inner: &mut WithHttp {
-                        inner: &mut self.assistant,
-                        http: &self.http_tools,
-                    },
-                    mcp: &self.mcp,
-                },
-                ext: &self.ext,
-                mcp: &self.mcp,
-                scope: None,
-            };
-            let mut env = Env {
-                host: &mut host,
-                conv: &mut conv,
-                turn_cfg: &turn_cfg,
-                usage: &mut self.usage,
-                clock: &clock,
-            };
-            serve(
-                &settings,
-                self.rt.key().as_deref(),
-                &self.persona,
-                io,
-                &mut env,
-            )
-            .await
-        };
-        if let Err(e) = self.usage.save(&self.usage_store) {
-            clawdot_core::diag::error(&format!("could not save usage counters: {e}"));
-        }
-        if let Some(e) = &finish.error {
-            clawdot_core::diag::error(&format!("realtime voice: {e}"));
-        }
-        self.rt.set_error(finish.error.clone());
-        let effects = self.assistant.take_effects();
-        let _ = job.done.send(rtvoice::Done {
-            speak: finish.speak,
-            failed: finish.failed,
-            effects,
-        });
-        core.patch_ui_status("realtime", self.rt.status());
+        hub.spawn_realtime(kit, job);
     }
 
     /// Without the `realtime` feature no session can be configured; a stray job is answered at once.
     #[cfg(not(feature = "realtime"))]
-    async fn run_realtime(&mut self, job: rtvoice::Job, _core: &Core) {
+    fn start_realtime(&mut self, job: rtvoice::Job, _core: &Core, _hub: &mut Hub) {
         let _ = job.done.send(rtvoice::Done {
             speak: Some("This build has no realtime voice.".into()),
             failed: true,
@@ -1037,24 +1102,21 @@ impl Brain {
         });
     }
 
-    /// Answer locally if the fast path can, otherwise ask the language model.
-    async fn respond(&mut self, line: &str, ctl: &TurnCtl) -> Reply {
-        if let Some(out) = self.assistant.handle(line) {
-            return Reply {
-                say: out.say,
-                effects: out.effects,
-                expects_reply: false,
-            };
-        }
-        let Some(l) = &self.llm else {
-            return Reply {
-                say: "(that needs a language model; start with --llm-url and --llm-model)".into(),
-                effects: Vec::new(),
-                expects_reply: false,
-            };
-        };
-        let (day, now) = (self.assistant.local_day(), self.clock.now());
-        let mut host = WithPolicy {
+    /// Answer locally if the fast path can (timers, alarms, music). `None` means the model is needed.
+    fn fast(&mut self, line: &str) -> Option<Reply> {
+        self.assistant.handle(line).map(|out| Reply {
+            say: out.say,
+            effects: out.effects,
+            expects_reply: false,
+        })
+    }
+
+    /// What a model turn starts from, copied or shared now: the prompt, the tools, the policy and the limits
+    /// (ADR-0021). A change made in the portal while the turn runs reaches the next turn. `None` without a
+    /// language model.
+    fn kit(&mut self) -> Option<TurnKit<HttpBackend>> {
+        let l = self.llm.as_ref()?;
+        let host = WithPolicy {
             inner: &mut WithMcp {
                 inner: &mut WithHttp {
                     inner: &mut self.assistant,
@@ -1068,39 +1130,148 @@ impl Brain {
         };
         // The enabled skills ride along in the system prompt, after the persona (REQ-CFG-036).
         let available: Vec<String> = host.tool_specs().into_iter().map(|t| t.name).collect();
-        self.conversation.set_system(format!(
-            "{}{}",
-            self.persona,
-            self.ext.skills_prompt(&available)
-        ));
-        let r = run_turn_ctl(
-            ctl,
-            &l.backend,
-            &mut host,
-            &mut self.conversation,
-            &l.cfg,
-            &mut self.usage,
-            day,
-            now,
-            line,
-        )
-        .await;
+        let system = format!("{}{}", self.persona, self.ext.skills_prompt(&available));
+        Some(TurnKit {
+            backend: Arc::clone(&l.backend),
+            cfg: l.cfg.clone(),
+            usage: self.usage.clone(),
+            http: Arc::clone(&self.http_tools),
+            mcp: Arc::clone(&self.mcp),
+            ext: Arc::clone(&self.ext_view),
+            builtin: ToolHost::tool_specs(&self.assistant),
+            system,
+            day: self.assistant.local_day(),
+            now: self.clock.now(),
+        })
+    }
+
+    /// Save the usage counters. The loop is their only writer to disk.
+    fn save_usage(&self) {
         if let Err(e) = self.usage.save(&self.usage_store) {
             clawdot_core::diag::error(&format!("could not save usage counters: {e}"));
         }
-        if let TurnEnd::Failed(e) = &r.end {
-            clawdot_core::diag::error(&format!("language model error: {e}"));
-        }
-        // Without a speech sink (the console, a recorded utterance) plan and progress phrases come first.
-        let say = if ctl.speak.is_some() || r.early.is_empty() {
-            r.speech
+    }
+}
+
+const NO_LLM: &str = "(that needs a language model; start with --llm-url and --llm-model)";
+const TOO_BUSY: &str = "I'm still working on your last requests. Ask again in a moment.";
+
+/// Show a reply: to the terminal for the console, or back to the satellite that asked.
+fn deliver(origin: Origin, reply: Reply) {
+    if let Some(reply) = origin.deliver(reply) {
+        if reply.say.is_empty() {
+            println!("speaker> (done)");
         } else {
-            format!("{} {}", r.early.join(" "), r.speech)
-        };
-        Reply {
-            say,
-            effects: self.assistant.take_effects(),
-            expects_reply: r.expects_reply,
+            println!("speaker> {}", reply.say);
+        }
+        for e in &reply.effects {
+            println!("satellite> {e:?}");
+        }
+    }
+}
+
+/// Handle something a speaker said: the fast path answers at once; anything else becomes a turn beside the
+/// loop (or waits for the same speaker's running turn). Returns the reply when there is one already.
+fn dispatch(brain: &mut Brain, hub: &mut Hub, req: Request) -> Option<(Origin, Reply)> {
+    if let Some(reply) = brain.fast(&req.line) {
+        return Some((req.origin, reply));
+    }
+    let Some(kit) = brain.kit() else {
+        return Some((
+            req.origin,
+            Reply {
+                say: NO_LLM.into(),
+                ..Reply::default()
+            },
+        ));
+    };
+    let now = brain.clock.now();
+    match hub.submit(req, now, || kit) {
+        Submitted::Started | Submitted::Queued => None,
+        Submitted::Refused(req) => Some((
+            req.origin,
+            Reply {
+                say: TOO_BUSY.into(),
+                ..Reply::default()
+            },
+        )),
+    }
+}
+
+/// A turn is over: put the speaker's conversation back, save the counters, start what was waiting for the
+/// same speaker, and return the reply to deliver.
+fn finish_turn(brain: &mut Brain, hub: &mut Hub, f: turns::Finished) -> (Origin, Reply) {
+    brain.save_usage();
+    if let Some(e) = &f.failed {
+        clawdot_core::diag::error(&format!("language model error: {e}"));
+    }
+    let now = brain.clock.now();
+    let (origin, reply, next) = hub.finish(f, now);
+    if let Some(next) = next
+        && let Some((o, r)) = dispatch(brain, hub, next)
+    {
+        deliver(o, r);
+    }
+    (origin, reply)
+}
+
+/// Act on something a turn task reported.
+async fn on_hub_event(brain: &mut Brain, hub: &mut Hub, core: &Core, ev: HubEvent) {
+    match ev {
+        HubEvent::Tool(req) => req.serve(&mut brain.assistant).await,
+        HubEvent::Turn(f) => {
+            let (origin, reply) = finish_turn(brain, hub, *f);
+            deliver(origin, reply);
+        }
+        HubEvent::Other(_) => {
+            // A realtime session ended: its audio cost is in the counters; show how it went.
+            brain.save_usage();
+            core.patch_ui_status("realtime", brain.rt.status());
+        }
+        HubEvent::Lost(speaker) => {
+            // The satellite waiting for this answer sees its channel close and says it cannot answer.
+            clawdot_core::diag::error("a turn ended without an answer");
+            let now = brain.clock.now();
+            if let Some(next) = hub.lost(&speaker, now)
+                && let Some((origin, reply)) = dispatch(brain, hub, next)
+            {
+                deliver(origin, reply);
+            }
+        }
+    }
+}
+
+/// Let the turns that are running finish and show their replies (the console was closed).
+async fn drain(brain: &mut Brain, hub: &mut Hub, core: &Core) {
+    while hub.active() > 0 {
+        let ev = hub.next().await;
+        on_hub_event(brain, hub, core, ev).await;
+    }
+}
+
+/// Answer one thing and wait for it, serving the turn's tool calls meanwhile. For one-shot use before the
+/// main loop runs (a recorded utterance).
+async fn respond_inline(brain: &mut Brain, hub: &mut Hub, line: &str) -> Reply {
+    let req = Request {
+        speaker: "console".into(),
+        line: line.to_owned(),
+        ctl: TurnCtl::default(),
+        origin: Origin::Console,
+    };
+    if let Some((_, reply)) = dispatch(brain, hub, req) {
+        return reply;
+    }
+    loop {
+        match hub.next().await {
+            HubEvent::Tool(req) => req.serve(&mut brain.assistant).await,
+            HubEvent::Turn(f) => return finish_turn(brain, hub, *f).1,
+            HubEvent::Lost(_) => {
+                return Reply {
+                    say: "Sorry, I can't answer right now.".into(),
+                    ..Reply::default()
+                };
+            }
+            HubEvent::Other(_) => {}
         }
     }
 }
@@ -1217,6 +1388,7 @@ fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynthesiz
 /// Answer one recorded utterance: transcribe the WAV, respond, speak the reply into a WAV.
 async fn voice_once(
     brain: &mut Brain,
+    hub: &mut Hub,
     speech: &SpeechConfig,
     input: &std::path::Path,
     output: Option<&std::path::Path>,
@@ -1229,9 +1401,10 @@ async fn voice_once(
     let effects = std::cell::RefCell::new(Vec::new());
     let out = voice_turn(&stt, &tts, &pcm, |text| {
         let brain = &mut *brain;
+        let hub = &mut *hub;
         let effects = &effects;
         async move {
-            let r = brain.respond(&text, &TurnCtl::default()).await;
+            let r = respond_inline(brain, hub, &text).await;
             effects.borrow_mut().extend(r.effects);
             r.say
         }
@@ -1439,7 +1612,6 @@ async fn main() -> ExitCode {
         }
     };
     let persona = args.persona.clone();
-    let mut conversation = Conversation::new(persona.clone(), 20, 24_000, 600);
     // Every action is recorded in the data directory and held to the daily caps (REQ-SEC-014..016).
     let audit = match AuditLog::open(
         &args.data_dir,
@@ -1457,7 +1629,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    conversation.set_audit(Arc::clone(&audit));
+    let audit_for_conv = Arc::clone(&audit);
     core.set_audit(audit);
     core.set_quiet_hours(args.quiet);
     // Notes the user asks for (REQ-AST-023); off unless the `agent` section turns them on.
@@ -1471,7 +1643,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    conversation.set_notes(Arc::clone(&notes));
+    let notes_for_conv = Arc::clone(&notes);
     core.set_notes(notes);
     if args.actions.dry_run {
         eprintln!("clawdot: dry-run mode: actions are described and recorded, not run");
@@ -1543,16 +1715,28 @@ async fn main() -> ExitCode {
         }
     };
 
+    // One conversation for each speaker, made on first use (REQ-AST-026): its own history, its own held
+    // confirmation, the same audit log and notes.
+    let mut hub = Hub::new({
+        let persona = persona.clone();
+        move || {
+            let mut c = Conversation::new(persona.clone(), 20, 24_000, 600);
+            c.set_audit(Arc::clone(&audit_for_conv));
+            c.set_notes(Arc::clone(&notes_for_conv));
+            c
+        }
+    });
+    let ext_view = Arc::new(ext.snapshot());
     let mut brain = Brain {
         assistant,
         llm,
-        conversation,
         usage,
         usage_store,
-        http_tools,
-        mcp,
+        http_tools: Arc::new(http_tools),
+        mcp: Arc::new(mcp),
         clock: clock.clone(),
         ext,
+        ext_view,
         builtin: builtin.clone(),
         persona,
         agent: args.agent.clone(),
@@ -1594,7 +1778,15 @@ async fn main() -> ExitCode {
     settings_state.set_extra(settings_extra(&args));
     core.set_settings(settings_state);
     if let Some(input) = args.voice_in.clone() {
-        return match voice_once(&mut brain, &args.speech, &input, args.voice_out.as_deref()).await {
+        return match voice_once(
+            &mut brain,
+            &mut hub,
+            &args.speech,
+            &input,
+            args.voice_out.as_deref(),
+        )
+        .await
+        {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("clawdot: {e}");
@@ -1773,6 +1965,17 @@ async fn main() -> ExitCode {
 
     let mut portal_rx = core.attach_portal();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let voice = Arc::new(Voice {
+        announcer: announcer.clone(),
+        core: Arc::clone(&core),
+        usage: brain.usage.clone(),
+        usage_store: brain.usage_store.clone(),
+        echo: args.console || args.echo_speech,
+        available: AtomicBool::new(false),
+        polling: AtomicBool::new(false),
+    });
+    let (say_tx, say_rx) = mpsc::unbounded_channel::<Say>();
+    tokio::spawn(speak(Arc::clone(&voice), say_rx));
     loop {
         tokio::select! {
             Some(job) = portal_rx.recv() => {
@@ -1800,21 +2003,24 @@ async fn main() -> ExitCode {
                 let _ = job.reply.send(answer);
             }
             line = line_rx.recv(), if args.console => {
-                let Some(line) = line else { return ExitCode::SUCCESS };
+                let Some(line) = line else {
+                    drain(&mut brain, &mut hub, &core).await;
+                    return ExitCode::SUCCESS;
+                };
                 if line.is_empty() { continue; }
                 if is_quit(&line) { return ExitCode::SUCCESS; }
-                let reply = brain.respond(&line, &TurnCtl::default()).await;
-                if reply.say.is_empty() {
-                    println!("speaker> (done)");
-                } else {
-                    println!("speaker> {}", reply.say);
-                }
-                for e in &reply.effects {
-                    println!("satellite> {e:?}");
+                let req = Request {
+                    speaker: "console".into(),
+                    line,
+                    ctl: TurnCtl::default(),
+                    origin: Origin::Console,
+                };
+                if let Some((origin, reply)) = dispatch(&mut brain, &mut hub, req) {
+                    deliver(origin, reply);
                 }
             }
             Some(job) = rt_rx.recv() => {
-                brain.run_realtime(job, &core).await;
+                brain.start_realtime(job, &core, &mut hub);
             }
             Some(ask) = ask_rx.recv() => {
                 let ctl = TurnCtl {
@@ -1822,66 +2028,42 @@ async fn main() -> ExitCode {
                     speak: ask.progress.clone(),
                     clock: None,
                 };
-                let r = brain.respond(&ask.text, &ctl).await;
-                let _ = ask.reply.send(Answer { say: r.say, effects: r.effects, expects_reply: r.expects_reply });
+                let req = Request {
+                    speaker: ask.speaker,
+                    line: ask.text,
+                    ctl,
+                    origin: Origin::Ask(ask.reply),
+                };
+                if let Some((origin, reply)) = dispatch(&mut brain, &mut hub, req) {
+                    deliver(origin, reply);
+                }
+            }
+            ev = hub.next() => {
+                on_hub_event(&mut brain, &mut hub, &core, ev).await;
             }
             _ = tick.tick() => {
+                hub.sweep(brain.clock.now());
                 let tool_counts = serde_json::json!({ "builtin": builtin.len(), "http": brain.http_tools.specs().len(), "mcp": brain.mcp.tools().len() });
                 let view = SpeakerView {
-                    available: announcer.connected() > 0 && announcer.is_available().await,
+                    available: announcer.connected() > 0 && voice.available.load(Ordering::Relaxed),
                     console: args.console || args.echo_speech,
                     quiet: core.quiet_hours(),
                 };
                 core.set_ui_status(brain.status_json(announcer.connected(), &view, &station_names, &tool_counts));
-                // Spoken text is echoed only to an interactive console: in server mode stdout goes to a
-                // journal or container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
-                while let Some((phrase, preview)) = core.take_speech_as() {
-                    if args.console || args.echo_speech {
-                        println!("speaker> {phrase}");
-                    }
-                    if announcer.connected() > 0 {
-                        // A voice being tried is used for this phrase only; the voice in use comes back after.
-                        let before = preview.as_deref().and_then(swap_live_voice);
-                        announcer.announce(&phrase).await;
-                        if let Some(old) = before {
-                            swap_live_voice(&old);
-                        }
-                    }
+                // Everything that speaks is handed to the speaker task, which says it in order, so the wait for
+                // a voice or a summary never holds this loop (ADR-0021).
+                while let Some((text, preview)) = core.take_speech_as() {
+                    let _ = say_tx.send(Say::Phrase { text, preview });
                 }
                 for fired in brain.assistant.tick() {
-                    let line = describe_fired(&fired);
-                    if args.console || args.echo_speech {
-                        println!("speaker> {line}");
-                    }
-                    if announcer.connected() > 0 {
-                        // Best effort: a satellite that is busy or muted simply does not speak it.
-                        announcer.announce(&line).await;
-                    }
+                    let _ = say_tx.send(Say::Line(describe_fired(&fired)));
                 }
-                let ready = announcer.connected() == 0 || announcer.is_available().await;
-                if !ready {
-                    // A satellite is connected but busy or muted: keep the event queued and try again.
-                } else if let Some(next) = core.next_announcement(true, brain.assistant.minute_of_day()) {
-                    let spoken = match &brain.llm {
-                        Some(l) => {
-                            let s = summarise(l, &mut brain.usage, brain.assistant.local_day(), &next.event).await;
-                            if let Err(e) = brain.usage.save(&brain.usage_store) {
-                                clawdot_core::diag::error(&format!("could not save usage counters: {e}"));
-                            }
-                            s
-                        }
-                        // No model: say only the headline and outcome, never raw agent text.
-                        None => short_announcement(&next.event)
-                            .unwrap_or_else(|| fallback_summary(&next.event)),
-                    };
-                    let line = announcement(&next.event, &spoken, next.more_waiting);
-                    if args.console || args.echo_speech {
-                        println!("speaker> {line}");
-                    }
-                    let delivered = announcer.connected() == 0 || announcer.announce(&line).await;
-                    if delivered {
-                        core.mark_announced(&[next.event.id]);
-                    }
+                if !voice.polling.swap(true, Ordering::Relaxed) {
+                    let _ = say_tx.send(Say::Poll {
+                        minute: brain.assistant.minute_of_day(),
+                        day: brain.assistant.local_day(),
+                        llm: brain.llm.clone(),
+                    });
                 }
                 core.maintain();
             }
