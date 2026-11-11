@@ -135,17 +135,15 @@ pub async fn build_brain(
     let http_tools =
         HttpTools::new(tool_defs, &builtin, |v| core.env().get(v)).map_err(|e| fail(1, e))?;
 
-    let mut reserved = builtin.clone();
-    reserved.extend(http_tools.specs().into_iter().map(|t| t.name));
-    let mcp = match McpClient::connect(server_defs, &reserved, |v| core.env().get(v)).await {
-        Ok((client, warnings)) => {
-            for w in warnings {
-                eprintln!("clawdot: {w}");
-            }
-            client
-        }
-        Err(e) => return Err(fail(1, e)),
-    };
+    // Saved and configured MCP sources are declared here and connected in tasks once the loop runs
+    // (ADR-0021): a dead server delays only itself, never the start of the speaker. Bad definitions still
+    // stop start-up.
+    let (mcp, pending) =
+        McpClient::declare(server_defs, |v| core.env().get(v)).map_err(|e| fail(1, e))?;
+    let mut connects = crate::connects::Connects::new();
+    for p in pending {
+        connects.start_saved(p);
+    }
 
     // One conversation for each speaker, made on first use (REQ-AST-026): its own history, its own held
     // confirmation, the same audit log and notes.
@@ -179,7 +177,7 @@ pub async fn build_brain(
             core.secrets().clone(),
         ),
         env: core.env().clone(),
-        connects: crate::connects::Connects::new(),
+        connects,
     };
     if brain.rt.settings().enabled && !RtSettings::built() {
         brain.rt.set_error(Some(

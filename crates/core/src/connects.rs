@@ -15,11 +15,13 @@
 //! * dropping the book (shutdown) aborts the tasks and tells each waiting request that ClawDot is stopping.
 
 use crate::app::Fail;
+use crate::extensions::MAX_PORTAL_SERVERS;
 use crate::mcp::{McpTool, PendingServer};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::AbortHandle;
 
 /// The longest a connection may take altogether (a handshake and a listing, each bounded by the server's own
@@ -40,10 +42,20 @@ pub struct Done {
     pub pending: PendingServer,
 }
 
+/// Who is waiting for a connection.
+#[derive(Debug)]
+pub enum Source {
+    /// A portal request that adds the server; the loop answers it when the result is applied.
+    Portal(Reply),
+    /// A source already saved (or defined in the configuration file), connected at start-up. Nobody waits; a
+    /// failure leaves it listed and reported.
+    Saved,
+}
+
 struct Flight {
     generation: u64,
     task: AbortHandle,
-    reply: Reply,
+    source: Source,
 }
 
 /// The connections in flight and the channel their results come back on. Owned by the loop.
@@ -52,6 +64,9 @@ pub struct Connects {
     rx: Option<mpsc::Receiver<Done>>,
     next: u64,
     open: BTreeMap<String, Flight>,
+    /// How many saved sources connect at the same time; the others wait their turn. Portal requests are
+    /// counted against the same limit by the extensions, not here.
+    slots: Arc<Semaphore>,
 }
 
 impl Default for Connects {
@@ -69,6 +84,7 @@ impl Connects {
             rx: Some(rx),
             next: 0,
             open: BTreeMap::new(),
+            slots: Arc::new(Semaphore::new(MAX_PORTAL_SERVERS)),
         }
     }
 
@@ -89,6 +105,16 @@ impl Connects {
         self.open.is_empty()
     }
 
+    /// How many connections are being made for portal requests. Saved sources are already counted among the
+    /// extensions' own, so the portal's limit adds only these.
+    #[must_use]
+    pub fn portal_len(&self) -> usize {
+        self.open
+            .values()
+            .filter(|f| matches!(f.source, Source::Portal(_)))
+            .count()
+    }
+
     /// Whether this name is being connected now.
     #[must_use]
     pub fn is_connecting(&self, name: &str) -> bool {
@@ -105,15 +131,42 @@ impl Connects {
             ))));
             return;
         }
+        self.spawn(name, pending, Source::Portal(reply), None);
+    }
+
+    /// Start connecting a source that was saved or defined in the configuration, at start-up. At most
+    /// [`MAX_PORTAL_SERVERS`] saved sources connect at once; the rest wait for a free place. The time a source
+    /// waits for its turn does not count against its own time limit.
+    pub fn start_saved(&mut self, pending: PendingServer) {
+        let name = pending.name().to_owned();
+        if !self.open.contains_key(&name) {
+            let slots = Arc::clone(&self.slots);
+            self.spawn(name, pending, Source::Saved, Some(slots));
+        }
+    }
+
+    fn spawn(
+        &mut self,
+        name: String,
+        pending: PendingServer,
+        source: Source,
+        slots: Option<Arc<Semaphore>>,
+    ) {
         self.next += 1;
         let generation = self.next;
         let tx = self.tx.clone();
         let task_name = name.clone();
         let task = tokio::spawn(async move {
+            // Held while connecting, and given back before the result waits for the loop.
+            let slot = match slots {
+                Some(s) => s.acquire_owned().await.ok(),
+                None => None,
+            };
             let tools = match tokio::time::timeout(CONNECT_LIMIT, pending.load()).await {
                 Ok(r) => r,
                 Err(_) => Err(format!("no answer within {} s", CONNECT_LIMIT.as_secs())),
             };
+            drop(slot);
             let _ = tx
                 .send(Done {
                     name: task_name,
@@ -129,32 +182,61 @@ impl Connects {
             Flight {
                 generation,
                 task,
-                reply,
+                source,
             },
         );
     }
 
-    /// A task reported. Returns the request to answer when this is the connection now on the book, and `None`
-    /// for a result whose connection was cancelled or replaced meanwhile (it is dropped).
-    pub fn finish(&mut self, done: &Done) -> Option<Reply> {
+    /// A task reported. Returns who was waiting when this is the connection now on the book, and `None` for a
+    /// result whose connection was cancelled or replaced meanwhile (it is dropped).
+    pub fn finish(&mut self, done: &Done) -> Option<Source> {
         match self.open.get(&done.name) {
             Some(f) if f.generation == done.generation => {
-                self.open.remove(&done.name).map(|f| f.reply)
+                self.open.remove(&done.name).map(|f| f.source)
             }
             _ => None,
         }
     }
 
-    /// Stop connecting this name and answer the request that started it. False if it was not connecting.
+    /// Stop connecting this name and answer the portal request that started it. False if it was not connecting
+    /// for a portal request (a saved source is left to [`Connects::forget_saved`]).
     pub fn cancel(&mut self, name: &str) -> bool {
-        let Some(f) = self.open.remove(name) else {
+        if !matches!(
+            self.open.get(name),
+            Some(Flight {
+                source: Source::Portal(_),
+                ..
+            })
+        ) {
+            return false;
+        }
+        let Some(Flight {
+            task,
+            source: Source::Portal(reply),
+            ..
+        }) = self.open.remove(name)
+        else {
             return false;
         };
-        f.task.abort();
-        let _ = f.reply.send(Err(Fail::Invalid(format!(
+        task.abort();
+        let _ = reply.send(Err(Fail::Invalid(format!(
             "The connection {name} was removed before it finished connecting."
         ))));
         true
+    }
+
+    /// The saved source of this name was removed: stop connecting it and drop its result.
+    pub fn forget_saved(&mut self, name: &str) {
+        if matches!(
+            self.open.get(name),
+            Some(Flight {
+                source: Source::Saved,
+                ..
+            })
+        ) && let Some(f) = self.open.remove(name)
+        {
+            f.task.abort();
+        }
     }
 }
 
@@ -162,9 +244,11 @@ impl Drop for Connects {
     fn drop(&mut self) {
         for (_, f) in std::mem::take(&mut self.open) {
             f.task.abort();
-            let _ = f.reply.send(Err(Fail::Unavailable(
-                "ClawDot is stopping, so the connection was not made.".into(),
-            )));
+            if let Source::Portal(reply) = f.source {
+                let _ = reply.send(Err(Fail::Unavailable(
+                    "ClawDot is stopping, so the connection was not made.".into(),
+                )));
+            }
         }
     }
 }
@@ -306,6 +390,83 @@ mod tests {
         assert!(matches!(a2.await.unwrap(), Err(Fail::Invalid(m)) if m.contains("already")));
         assert_eq!(c.len(), 1);
         assert!(a1.try_recv().is_err(), "the first is still waiting");
+    }
+
+    // Saved sources connect together but never more than the connection limit at once; the rest wait their
+    // turn and all of them finish.
+    #[tokio::test(flavor = "current_thread")]
+    async fn saved_sources_connect_concurrently_up_to_the_limit() {
+        let (open_tx, open) = watch::channel(false);
+        let port = gated_server(open).await;
+        let mut c = Connects::new();
+        let mut rx = c.attach();
+        let total = MAX_PORTAL_SERVERS + 3;
+        for i in 0..total {
+            c.start_saved(pending(port, &format!("s{i}")).await);
+        }
+        assert_eq!((c.len(), c.portal_len()), (total, 0));
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(c.slots.available_permits(), 0, "the limit is in use");
+        assert!(rx.try_recv().is_err(), "nobody has answered yet");
+
+        open_tx.send_replace(true);
+        for _ in 0..total {
+            let done = rx.recv().await.unwrap();
+            assert!(done.tools.is_ok());
+            assert!(matches!(c.finish(&done), Some(Source::Saved)));
+        }
+        assert!(c.is_empty());
+        assert_eq!(c.slots.available_permits(), MAX_PORTAL_SERVERS);
+    }
+
+    // `declare` lists every server as connecting, without touching the network; `settle` records each result
+    // and keeps a failed server listed with its reason.
+    #[tokio::test(flavor = "current_thread")]
+    async fn declared_servers_are_connecting_until_settled_and_a_failed_one_stays_listed() {
+        let (_open_tx, open) = watch::channel(true);
+        let port = gated_server(open).await;
+        let def = |name: &str, port: u16| -> crate::mcp::ServerDef {
+            serde_json::from_value(
+                json!({"name": name, "url": format!("http://127.0.0.1:{port}/mcp"), "timeout_secs": 1}),
+            )
+            .unwrap()
+        };
+        let (mut client, pending) =
+            McpClient::declare(vec![def("up", port), def("down", 9)], |_| None).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(client.is_connecting("up") && client.is_connecting("down"));
+        assert_eq!(client.report()[0]["connecting"], true);
+        assert_eq!(client.report()[0]["connected"], false);
+        assert!(client.tools().is_empty());
+
+        let up = pending[0].load().await;
+        assert!(client.settle("up", up, &[]).is_empty());
+        let down = pending[1].load().await;
+        let warnings = client.settle("down", down, &[]);
+        assert!(
+            warnings[0].contains("`down` is unavailable"),
+            "{warnings:?}"
+        );
+        assert!(!client.is_connecting("up") && !client.is_connecting("down"));
+        let r = client.report();
+        assert_eq!(
+            (r[0]["connected"].clone(), r[0]["connecting"].clone()),
+            (true.into(), false.into())
+        );
+        assert_eq!(
+            (r[1]["connected"].clone(), r[1]["connecting"].clone()),
+            (false.into(), false.into())
+        );
+        assert!(r[1]["error"].is_string());
+        assert!(client.owns("up__ping") && !client.owns("down__ping"));
+        // A name that is gone is ignored; a clash with a reserved name is skipped with a warning.
+        assert!(client.settle("gone", Ok(Vec::new()), &[]).is_empty());
+        let (mut other, p) = McpClient::declare(vec![def("up", port)], |_| None).unwrap();
+        let warnings = other.settle("up", p[0].load().await, &["up__ping".to_owned()]);
+        assert!(warnings[0].contains("clashes"), "{warnings:?}");
+        assert!(other.tools().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

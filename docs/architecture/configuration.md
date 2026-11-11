@@ -87,7 +87,8 @@ mutating endpoint.
 - **Secrets are never in the file, and never in `settings.json`.** The API key comes from the environment variable
   named by `llm.key_env` (or the portal's "Key variable" setting, which holds the NAME). Naming a variable that is not
   set is refused with that name. There is no stored-key option (see docs/open-questions.md).
-- **Validated at startup**, before anything is bound or written.
+- **The environment is read once**, at the start of `main` (`env::Env::from_process`), and a lookup is passed down; nothing else in the core reads the process environment. A setting that names a variable (`llm_key_env`, `realtime_key_env`, `speech.key_env`, a connection's `auth_env`) resolves the name chosen at that time, in that start-up snapshot. A variable exported after ClawDot started is therefore not seen until it restarts, which was already true of a running process.
+- **Validated at startup**, before anything is bound or written. (MCP sources are only declared and checked then; they connect after the listener and the loop start, and a source that cannot be reached is reported, not fatal.)
 - **Hot reload** of the configuration file (a SHOULD in the spec) is not implemented: restart to apply file changes.
   Settings saved from the portal apply live where the table above says so. Rotating an endpoint token
   already works without a restart via the HTTP API.

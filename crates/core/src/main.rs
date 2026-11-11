@@ -158,6 +158,14 @@ async fn main() -> ExitCode {
     settings_state.set_extra(settings_extra(&args));
     core.set_settings(settings_state);
     if let Some(input) = args.voice_in.clone() {
+        // One utterance and out: there is no loop to serve meanwhile, so wait for the sources to answer, as
+        // the single turn should have their tools.
+        while !brain.connects.is_empty() {
+            let Some(done) = mcp_rx.recv().await else {
+                break;
+            };
+            mcp_connected(&mut brain, &core, done);
+        }
         return match voice_once(
             &mut brain,
             &mut hub,

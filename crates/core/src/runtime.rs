@@ -6,7 +6,7 @@ use crate::app::{Core, Job, Op};
 use crate::assistant::Assistant;
 use crate::cli::Args;
 use crate::config::AgentConfig;
-use crate::connects::{Connects, Done};
+use crate::connects::{Connects, Done, Source};
 use crate::extensions::{ExtOp, Extensions, WithPolicy};
 use crate::httptools::{HttpTools, WithHttp};
 use crate::mcp::{McpClient, WithMcp};
@@ -576,8 +576,9 @@ pub async fn portal_op(
         Op::Ext(ExtOp::McpAdd(v)) => {
             match brain
                 .ext
-                .mcp_prepare(&v, &brain.mcp, brain.connects.len(), |v| brain.env.get(v))
-            {
+                .mcp_prepare(&v, &brain.mcp, brain.connects.portal_len(), |v| {
+                    brain.env.get(v)
+                }) {
                 Ok(pending) => {
                     brain.connects.start(pending, reply);
                     return;
@@ -587,16 +588,46 @@ pub async fn portal_op(
         }
         // Removing a connection that is still connecting stops it; that is the whole removal.
         Op::Ext(ExtOp::McpDelete(name)) if brain.connects.cancel(&name) => Ok(brain.listing()),
+        // A saved source that is still connecting is removed like any other; its connection stops with it.
+        Op::Ext(ExtOp::McpDelete(name)) => {
+            let removed = sync_op(
+                brain,
+                core,
+                applied,
+                Op::Ext(ExtOp::McpDelete(name.clone())),
+            )
+            .await;
+            if removed.is_ok() {
+                brain.connects.forget_saved(&name);
+            }
+            removed
+        }
         op => sync_op(brain, core, applied, op).await,
     };
     let _ = reply.send(answer);
 }
 
-/// A connection task reported: add the server if it is still wanted, and answer the request that asked for it.
-/// A result whose connection was cancelled or replaced meanwhile is dropped (see `connects`).
+/// A connection task reported. For a portal request: add the server if it is still wanted, and answer the
+/// request. For a source saved earlier (connected at start-up): record how it went; it stays in the list either
+/// way, and a failure is printed and shown as the source's error. A result whose connection was cancelled or
+/// replaced meanwhile is dropped (see `connects`).
 pub fn mcp_connected(brain: &mut Brain, core: &Core, done: Done) {
-    let Some(reply) = brain.connects.finish(&done) else {
+    let Some(source) = brain.connects.finish(&done) else {
         return;
+    };
+    let reply = match source {
+        Source::Portal(reply) => reply,
+        Source::Saved => {
+            let mut reserved = brain.builtin.clone();
+            reserved.extend(brain.http_tools.specs().into_iter().map(|t| t.name));
+            let warnings =
+                Arc::make_mut(&mut brain.mcp).settle(done.pending.name(), done.tools, &reserved);
+            for w in warnings {
+                eprintln!("clawdot: {w}");
+            }
+            core.set_ui_tools(brain.listing());
+            return;
+        }
     };
     let answer = match done.tools {
         Err(why) => Err(crate::app::Fail::Invalid(why)),
@@ -888,6 +919,154 @@ mod tests {
         mcp_connected(&mut brain, &core, done);
         assert!(again.await.unwrap().is_ok());
         assert!(brain.mcp.has_server("home"));
+    }
+
+    /// Save two connections in `dir` the way the portal would: `stuck` (answers only when told to, gives up
+    /// after 2 s) and `good`.
+    fn save_sources(dir: &TempDir, stuck_port: u16, good_port: u16) {
+        crate::store::JsonStore::new(dir.0.join("connections.json"), crate::extensions::SCHEMA)
+            .save(&serde_json::json!({ "servers": [
+                { "name": "stuck", "url": format!("http://127.0.0.1:{stuck_port}/mcp"), "timeout_secs": 2 },
+                { "name": "good", "url": format!("http://127.0.0.1:{good_port}/mcp") },
+            ]}))
+            .unwrap();
+    }
+
+    fn source<'a>(listing: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        listing["mcp"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("no source {name} in {listing}"))
+    }
+
+    // ADR-0021, REQ-AST-027: saved sources connect after the loop is running. One that never answers does not
+    // hold up start-up: the loop rings a timer and answers a portal request while it is still connecting, the
+    // good source's tools appear as soon as it answers, and the stalled one ends as failed after its own
+    // timeout, still saved and listed with its reason.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stalled_saved_source_does_not_hold_up_start_and_ends_failed_after_its_timeout() {
+        let dir = TempDir::new("mcp-startup");
+        let (_hold, closed) = tokio::sync::watch::channel(false);
+        let (_open_tx, open) = tokio::sync::watch::channel(true);
+        let stuck = crate::connects::testutil::gated_server(closed).await;
+        let good = crate::connects::testutil::gated_server(open).await;
+        save_sources(&dir, stuck, good);
+
+        // Building the brain returns at once although one source will never answer.
+        let began = std::time::Instant::now();
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        assert!(
+            began.elapsed() < Duration::from_millis(1500),
+            "start-up did not wait for the sources"
+        );
+        let mut applied = live.clone();
+        let mut done_rx = brain.connects.attach();
+        assert!(brain.mcp.is_connecting("stuck") && brain.mcp.is_connecting("good"));
+        assert_eq!(brain.connects.len(), 2);
+        assert_eq!(
+            brain.connects.portal_len(),
+            0,
+            "saved sources are not portal requests"
+        );
+        let listing = brain.listing();
+        assert_eq!(source(&listing, "stuck")["connecting"], true);
+        assert_eq!(source(&listing, "stuck")["connected"], false);
+
+        brain
+            .assistant
+            .call_tool("set_timer", &serde_json::json!({"seconds": 1}))
+            .await
+            .unwrap();
+
+        // The loop: a portal request is answered at once, the good source is applied when it reports, and the
+        // timer rings, all while the stalled source is still connecting.
+        let next = with(&live, &[("persona", "You are terse.".into())]);
+        let (job, settings) = ask(Op::Settings(next));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(settings.await.unwrap().is_ok());
+        assert_eq!(brain.persona, "You are terse.");
+
+        let mut tick = tokio::time::interval(Duration::from_millis(20));
+        let (mut rang, mut good_in) = (false, false);
+        while !(rang && good_in) {
+            tokio::select! {
+                _ = tick.tick() => {
+                    rang |= !brain.assistant.tick().is_empty();
+                }
+                Some(done) = done_rx.recv() => {
+                    assert_eq!(done.pending.name(), "good", "the stalled source cannot report first");
+                    mcp_connected(&mut brain, &core, done);
+                    good_in = true;
+                }
+            }
+        }
+        assert!(
+            brain.mcp.owns("good__ping"),
+            "the good source's tools appear"
+        );
+        let listing = brain.listing();
+        assert_eq!(source(&listing, "good")["connected"], true);
+        assert_eq!(source(&listing, "good")["connecting"], false);
+        assert!(brain.mcp.is_connecting("stuck"), "still connecting");
+        assert_eq!(source(&listing, "stuck")["connecting"], true);
+        assert_eq!(core.ui_tools(), listing, "the portal's copy is refreshed");
+
+        // Its own timeout ends the stalled one: failed, with the reason, and still saved.
+        let done = done_rx.recv().await.unwrap();
+        assert_eq!(done.pending.name(), "stuck");
+        mcp_connected(&mut brain, &core, done);
+        let listing = brain.listing();
+        let s = source(&listing, "stuck");
+        assert_eq!(s["connected"], false);
+        assert_eq!(s["connecting"], false);
+        assert!(s["error"].as_str().is_some_and(|e| !e.is_empty()), "{s}");
+        assert!(!brain.mcp.owns("stuck__ping") && brain.connects.is_empty());
+        assert_eq!(listing["mcp"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            brain
+                .ext
+                .snapshot()
+                .listing(&[], &brain.http_tools, &brain.mcp)["mcp"]
+                .as_array()
+                .map(Vec::len),
+            Some(2),
+            "both stay saved"
+        );
+    }
+
+    // Removing a saved source that is still connecting removes it and stops its connection; its late result
+    // is not applied.
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_a_saved_source_while_it_connects_stops_it() {
+        let dir = TempDir::new("mcp-startup-remove");
+        let (open_tx, closed) = tokio::sync::watch::channel(false);
+        let (_g, open) = tokio::sync::watch::channel(true);
+        let stuck = crate::connects::testutil::gated_server(closed).await;
+        let good = crate::connects::testutil::gated_server(open).await;
+        save_sources(&dir, stuck, good);
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let mut done_rx = brain.connects.attach();
+        assert!(brain.connects.is_connecting("stuck"));
+
+        let (job, removed) = ask(Op::Ext(ExtOp::McpDelete("stuck".into())));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(removed.await.unwrap().is_ok());
+        assert!(!brain.connects.is_connecting("stuck") && !brain.mcp.has_server("stuck"));
+
+        // Even if the server answers now, nothing arrives for the removed name.
+        open_tx.send_replace(true);
+        let done = done_rx.recv().await.unwrap();
+        assert_eq!(done.pending.name(), "good");
+        mcp_connected(&mut brain, &core, done);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), done_rx.recv())
+                .await
+                .is_err()
+        );
+        assert!(!brain.mcp.has_server("stuck") && brain.mcp.owns("good__ping"));
     }
 
     // A server that cannot be used is reported to the request and leaves nothing behind.

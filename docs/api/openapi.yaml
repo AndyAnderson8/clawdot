@@ -1947,7 +1947,8 @@ components:
         name: { type: string }
         url: { type: string }
         enabled: { type: boolean }
-        connected: { type: boolean }
+        connected: { type: boolean, description: "Reached and its tools listed. False while `connecting` and when it failed (then `error` says why)." }
+        connecting: { type: boolean, description: "Saved sources connect in the background after start-up; true until this one has answered or failed. Absent in older versions, read as false." }
         deletable: { type: boolean }
         origin: { type: string }
         error: { type: string }

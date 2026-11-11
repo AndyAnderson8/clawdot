@@ -48,7 +48,7 @@ control, and a compromised server could try to steer the model. So:
   flag and an undeclared one is dropped, so the server never sees it.
 - Results are cut to 1000 characters; images and other non-text content become a placeholder such as
   `[image content omitted]`. A result is data for the model, never an instruction to it.
-- Startup is not blocked by a broken server: it is skipped with a warning and the rest keep working. An expired
+- Startup is not blocked by a broken or slow server: servers connect in the background once the speaker is running (ADR-0021), a failed one is reported with a warning and shown as failed in the portal, and the rest keep working. An expired
   session is renewed once automatically.
 
 ## Not built yet

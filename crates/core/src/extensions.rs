@@ -937,7 +937,7 @@ impl Extensions {
             servers.push(json!({
                 "name": name, "url": s["url"], "connected": s["connected"], "error": s["error"],
                 "confirm": s["confirm"], "token_env": s["token_env"], "tools": listed,
-                "enabled": server_on, "deletable": !config, "origin": if config { "config" } else { "portal" },
+                "connecting": s["connecting"], "enabled": server_on, "deletable": !config, "origin": if config { "config" } else { "portal" },
             }));
         }
         let problems: Vec<Value> = self
