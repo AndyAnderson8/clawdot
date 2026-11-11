@@ -631,6 +631,32 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
     "/api/notes/2",
   );
   await eq(`T.all("#notelist > li button").length`, 4, "each memory has two buttons: a pencil and an X");
+  // with more than a few memories there is a search, answered by the device
+  for (const t of [
+    "the bins go out on Thursday",
+    "mom's birthday is June 3",
+    "the router is in the hall",
+    "I like oolong tea",
+  ])
+    (mock.state["notes"] as { id: number; text: string; ts: number }[]).push({ id: 50 + t.length, text: t, ts: 1 });
+  await b.ev(`location.hash = '#/dashboard'`);
+  await section("memory", "Memory");
+  await b.until(`!!T.q('#notesearch')`, "a search box once there are many");
+  await T(`set('#notesearch', 'birthday')`);
+  await b.until(`T.rows("#notelist > li").length === 1 && T.rows("#notelist > li")[0].includes("June 3")`, "the match");
+  await eq(`T.text('#notehits')`, "1 of 6 match", "and how many matched");
+  assert.ok(
+    mock.log.some((l) => l.method === "GET" && l.path === "/api/notes"),
+    "the device was asked",
+  );
+  await T(`set('#notesearch', 'zzzz')`);
+  await b.until(`!!T.q('#notenone')`, "nothing matches, and it says so");
+  await T(`set('#notesearch', '')`);
+  await b.until(`T.rows("#notelist > li").length === 6`, "all again");
+  (mock.state["notes"] as unknown[]).splice(2);
+  await b.ev(`location.hash = '#/dashboard'`);
+  await section("memory", "Memory");
+  await b.until(`T.rows("#notelist > li").length === 2`, "back to two");
   // forgetting asks first: declining does nothing
   await b.ev(`window.confirm = () => false`);
   await T(`click("#notelist > li:nth-child(1) button[title='Forget this memory']")`);

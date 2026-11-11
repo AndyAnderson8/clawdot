@@ -504,7 +504,18 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           notes,
           limits: { max_notes: 50, max_note_chars: 200, max_total_bytes: 8192 },
         });
-        if (m === "GET") return send(200, list());
+        if (m === "GET") {
+          const q = (new URL(req.url ?? "", "http://x").searchParams.get("q") ?? "").toLowerCase().trim();
+          if (!q) return send(200, list());
+          const words = q.split(/\s+/);
+          return send(200, {
+            ...list(),
+            query: q,
+            notes: notes
+              .map((n, i): Json => ({ ...n, position: i + 1 }))
+              .filter((n) => words.some((w) => String(n["text"]).toLowerCase().includes(w))),
+          });
+        }
         if (m === "POST") {
           if (!st["notesOn"]) return err(409, "Memory is turned off. Turn it on in Settings, under Features.");
           if (/sk-/.test(body.text)) return err(400, "That looks like a password or a key, so it is not saved.");
