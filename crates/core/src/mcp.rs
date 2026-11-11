@@ -155,6 +155,37 @@ pub struct McpClient {
     errors: Vec<Option<String>>,
 }
 
+/// A server that is being added: checked, not yet part of the client. It owns everything the network half
+/// needs, so [`PendingServer::load`] can run in a task beside the main loop.
+#[derive(Debug)]
+pub struct PendingServer {
+    server: Arc<Server>,
+    probe: McpClient,
+}
+
+impl PendingServer {
+    /// The server's name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.server.def.name
+    }
+
+    /// The definition as the administrator gave it.
+    #[must_use]
+    pub fn def(&self) -> &ServerDef {
+        &self.server.def
+    }
+
+    /// Handshake and list the tools. This is the slow part (the network, up to the server's timeout for each
+    /// request).
+    ///
+    /// # Errors
+    /// Why the server cannot be used, clipped to 200 characters.
+    pub async fn load(&self) -> Result<Vec<McpTool>, String> {
+        self.probe.load(0).await.map_err(|e| clip(&e, 200))
+    }
+}
+
 /// A server's address without credentials, query, or fragment, safe to show.
 #[must_use]
 pub fn display_url(url: &str) -> String {
@@ -536,6 +567,22 @@ impl McpClient {
         reserved: &[String],
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<usize, String> {
+        let pending = self.prepare_server(def, env)?;
+        let tools = pending.load().await?;
+        self.install_server(&pending, tools, reserved)
+    }
+
+    /// The quick, local first half of adding a server: check the definition and the name, read the credential.
+    /// Nothing is added and nothing touches the network. The network half is [`PendingServer::load`], which
+    /// owns what it needs and can run in a task; [`McpClient::install_server`] finishes the job (ADR-0021).
+    ///
+    /// # Errors
+    /// An invalid or duplicate definition, or a credential variable that is not set.
+    pub fn prepare_server(
+        &self,
+        def: ServerDef,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<PendingServer, String> {
         def.validate()?;
         if self.has_server(&def.name) {
             return Err(format!("mcp server `{}` is listed twice", def.name));
@@ -549,30 +596,50 @@ impl McpClient {
             })?),
             None => None,
         };
-        self.servers.push(Arc::new(Server {
+        let server = Arc::new(Server {
             endpoint: Endpoint::parse(&def.url)?,
             def,
             secret,
             session: Mutex::new(None),
-        }));
+        });
+        // A client of one server, so the same code that loads at startup loads this one without `&self`.
+        let probe = Self {
+            servers: vec![Arc::clone(&server)],
+            tools: Vec::new(),
+            connector: self.connector.clone(),
+            errors: vec![None],
+        };
+        Ok(PendingServer { server, probe })
+    }
+
+    /// The quick, local second half: add a server whose tools were listed. Checked again here, because the
+    /// client may have changed while the connection was made. Tools that clash with `reserved` or with tools
+    /// already on offer are left out. Returns how many were kept.
+    ///
+    /// # Errors
+    /// A server of that name was added in the meantime.
+    pub fn install_server(
+        &mut self,
+        pending: &PendingServer,
+        mut tools: Vec<McpTool>,
+        reserved: &[String],
+    ) -> Result<usize, String> {
+        let name = &pending.server.def.name;
+        if self.has_server(name) {
+            return Err(format!("mcp server `{name}` is listed twice"));
+        }
+        self.servers.push(Arc::clone(&pending.server));
         self.errors.push(None);
         let i = self.servers.len() - 1;
-        match self.load(i).await {
-            Ok(mut tools) => {
-                tools.retain(|t| {
-                    !reserved.contains(&t.exposed)
-                        && !self.tools.iter().any(|o| o.exposed == t.exposed)
-                });
-                let n = tools.len();
-                self.tools.extend(tools);
-                Ok(n)
-            }
-            Err(e) => {
-                self.servers.pop();
-                self.errors.pop();
-                Err(clip(&e, 200))
-            }
+        tools.retain(|t| {
+            !reserved.contains(&t.exposed) && !self.tools.iter().any(|o| o.exposed == t.exposed)
+        });
+        for t in &mut tools {
+            t.server = i;
         }
+        let n = tools.len();
+        self.tools.extend(tools);
+        Ok(n)
     }
 
     /// Forget a server and its tools; false if there is none.

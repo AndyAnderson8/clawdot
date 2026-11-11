@@ -2,10 +2,11 @@
 //! tools and usage counters), live settings (`apply_live`), the status snapshot for the web UI, and turn
 //! dispatch (`dispatch`, `finish_turn`, `on_hub_event`). The binary's `main` wires these to its channels.
 
-use crate::app::{Core, Op};
+use crate::app::{Core, Job, Op};
 use crate::assistant::Assistant;
 use crate::cli::Args;
 use crate::config::AgentConfig;
+use crate::connects::{Connects, Done};
 use crate::extensions::{ExtOp, Extensions, WithPolicy};
 use crate::httptools::{HttpTools, WithHttp};
 use crate::mcp::{McpClient, WithMcp};
@@ -234,6 +235,8 @@ pub struct Brain {
     pub voice_configured: bool,
     /// The optional realtime voice: its settings, status and the way sessions reach this loop.
     pub rt: Realtime,
+    /// MCP connections being made beside the loop, for servers added in the portal.
+    pub connects: Connects,
 }
 
 /// What the portal is told about the speaker (REQ-CFG-070).
@@ -555,8 +558,66 @@ pub async fn respond_inline(brain: &mut Brain, hub: &mut Hub, line: &str) -> Rep
     }
 }
 
-/// Carry out one change the portal asked for and return the answer to send back.
+/// Carry out one change the portal asked for and answer it. Everything here is quick and local except adding
+/// an MCP connection: the loop checks the request and starts a task for the network half, and the answer
+/// is sent when that task's result comes back through [`mcp_connected`] (ADR-0021).
 pub async fn portal_op(
+    brain: &mut Brain,
+    core: &Core,
+    applied: &mut serde_json::Map<String, serde_json::Value>,
+    job: Job,
+) {
+    let Job { op, reply } = job;
+    let answer = match op {
+        Op::Ext(ExtOp::McpAdd(v)) => {
+            match brain
+                .ext
+                .mcp_prepare(&v, &brain.mcp, brain.connects.len(), |v| {
+                    std::env::var(v).ok()
+                }) {
+                Ok(pending) => {
+                    brain.connects.start(pending, reply);
+                    return;
+                }
+                Err(f) => Err(f),
+            }
+        }
+        // Removing a connection that is still connecting stops it; that is the whole removal.
+        Op::Ext(ExtOp::McpDelete(name)) if brain.connects.cancel(&name) => Ok(brain.listing()),
+        op => sync_op(brain, core, applied, op).await,
+    };
+    let _ = reply.send(answer);
+}
+
+/// A connection task reported: add the server if it is still wanted, and answer the request that asked for it.
+/// A result whose connection was cancelled or replaced meanwhile is dropped (see `connects`).
+pub fn mcp_connected(brain: &mut Brain, core: &Core, done: Done) {
+    let Some(reply) = brain.connects.finish(&done) else {
+        return;
+    };
+    let answer = match done.tools {
+        Err(why) => Err(crate::app::Fail::Invalid(why)),
+        Ok(tools) => {
+            let applied = brain.ext.mcp_commit(
+                &done.pending,
+                tools,
+                &brain.http_tools,
+                Arc::make_mut(&mut brain.mcp),
+                &brain.builtin,
+            );
+            brain.ext_view = Arc::new(brain.ext.snapshot());
+            applied.map(|()| {
+                let listing = brain.listing();
+                core.set_ui_tools(listing.clone());
+                listing
+            })
+        }
+    };
+    let _ = reply.send(answer);
+}
+
+/// The changes that need no network: done on the spot.
+async fn sync_op(
     brain: &mut Brain,
     core: &Core,
     applied: &mut serde_json::Map<String, serde_json::Value>,
@@ -605,7 +666,7 @@ impl std::fmt::Debug for Brain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Adapters, Limits, Stores};
+    use crate::app::{Adapters, Fail, Limits, Stores};
     use crate::sched::SystemClock;
     use crate::session::Conversation;
     use crate::startup::build_brain;
@@ -706,6 +767,146 @@ mod tests {
         apply_live(&mut brain, &core, &next, &mut applied);
         assert_eq!(brain.usage.limits().daily_spend_cap_usd, Some(2.5));
         assert!(core.notes().unwrap().enabled());
+    }
+
+    fn ask(
+        op: Op,
+    ) -> (
+        Job,
+        tokio::sync::oneshot::Receiver<Result<serde_json::Value, Fail>>,
+    ) {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        (Job { op, reply }, answer)
+    }
+
+    fn add_home(port: u16) -> Op {
+        Op::Ext(ExtOp::McpAdd(serde_json::json!({
+            "name": "home", "url": format!("http://127.0.0.1:{port}/mcp"),
+        })))
+    }
+
+    // REQ-AST-027, REQ-CFG-033: while the portal's new MCP server is still connecting, the loop rings a timer
+    // and applies a settings change; the server is added only when its result comes back. The server holds
+    // its reply until the test opens it, so nothing here depends on a sleep being long enough.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_timer_rings_and_a_setting_applies_while_an_mcp_connect_is_in_flight() {
+        let dir = TempDir::new("mcp-in-flight");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let mut done_rx = brain.connects.attach();
+        let (open_tx, open) = tokio::sync::watch::channel(false);
+        let port = crate::connects::testutil::gated_server(open).await;
+        brain
+            .assistant
+            .call_tool("set_timer", &serde_json::json!({"seconds": 1}))
+            .await
+            .unwrap();
+
+        let (job, mut added) = ask(add_home(port));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(brain.connects.is_connecting("home"));
+        assert!(
+            added.try_recv().is_err(),
+            "the request waits for the server"
+        );
+
+        // The settings change goes through and is answered at once.
+        let next = with(&live, &[("persona", "You are terse.".into())]);
+        let (job, settings) = ask(Op::Settings(next));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(settings.await.unwrap().is_ok());
+        assert_eq!(brain.persona, "You are terse.");
+
+        // The loop's tick rings the timer although the server has not answered.
+        let mut tick = tokio::time::interval(Duration::from_millis(20));
+        let rang = loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    if !brain.assistant.tick().is_empty() { break true; }
+                }
+                Some(done) = done_rx.recv() => {
+                    mcp_connected(&mut brain, &core, done);
+                    break false;
+                }
+            }
+        };
+        assert!(rang, "the timer rang first");
+        assert!(brain.connects.is_connecting("home"), "still connecting");
+        assert!(!brain.mcp.has_server("home"), "nothing added yet");
+        assert!(added.try_recv().is_err());
+
+        // The server answers; the loop applies the result and answers the request.
+        open_tx.send_replace(true);
+        let done = done_rx.recv().await.unwrap();
+        mcp_connected(&mut brain, &core, done);
+        let listing = added.await.unwrap().unwrap();
+        assert!(brain.mcp.has_server("home") && brain.mcp.owns("home__ping"));
+        assert!(!brain.connects.is_connecting("home"));
+        assert!(listing.to_string().contains("home__ping"), "{listing}");
+        assert_eq!(core.ui_tools(), listing);
+    }
+
+    // Removing a source that is still connecting stops it: the server never appears, not even when the server
+    // answers later, and the request that asked for it is told. The name can then be added again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_a_source_while_it_connects_cancels_it_and_it_can_be_added_again() {
+        let dir = TempDir::new("mcp-cancel");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let mut done_rx = brain.connects.attach();
+        let (open_tx, open) = tokio::sync::watch::channel(false);
+        let port = crate::connects::testutil::gated_server(open).await;
+
+        let (job, first) = ask(add_home(port));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        let (job, twin) = ask(add_home(port));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(
+            matches!(twin.await.unwrap(), Err(Fail::Invalid(m)) if m.contains("already")),
+            "a second connect for the name is refused"
+        );
+
+        let (job, removed) = ask(Op::Ext(ExtOp::McpDelete("home".into())));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(removed.await.unwrap().is_ok());
+        assert!(matches!(first.await.unwrap(), Err(Fail::Invalid(m)) if m.contains("removed")));
+        assert!(!brain.connects.is_connecting("home"));
+
+        // The server answers after the removal: nothing arrives, nothing is added.
+        open_tx.send_replace(true);
+        let late = tokio::time::timeout(Duration::from_millis(300), done_rx.recv()).await;
+        assert!(late.is_err(), "the cancelled task sent nothing");
+        assert!(!brain.mcp.has_server("home"));
+
+        // And the name is free again.
+        let (job, again) = ask(add_home(port));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        let done = done_rx.recv().await.unwrap();
+        mcp_connected(&mut brain, &core, done);
+        assert!(again.await.unwrap().is_ok());
+        assert!(brain.mcp.has_server("home"));
+    }
+
+    // A server that cannot be used is reported to the request and leaves nothing behind.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_connect_that_fails_answers_the_request_and_adds_nothing() {
+        let dir = TempDir::new("mcp-fail");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let mut done_rx = brain.connects.attach();
+        let (job, answer) = ask(add_home(9));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        let done = done_rx.recv().await.unwrap();
+        mcp_connected(&mut brain, &core, done);
+        assert!(matches!(answer.await.unwrap(), Err(Fail::Invalid(_))));
+        assert!(!brain.mcp.has_server("home") && brain.connects.is_empty());
+        // A bad request is refused on the spot, without a task.
+        let (job, bad) = ask(Op::Ext(ExtOp::McpAdd(
+            serde_json::json!({"name": "Bad Name", "url": "http://h/mcp"}),
+        )));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(matches!(bad.await.unwrap(), Err(Fail::Invalid(_))));
+        assert!(brain.connects.is_empty());
     }
 
     #[tokio::test]

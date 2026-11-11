@@ -54,6 +54,19 @@ pub enum Op {
     Rekey,
 }
 
+impl Op {
+    /// How long the page waits for the answer. The loop answers almost at once, except for a new MCP
+    /// connection, which is made beside the loop and answers when the server has (`connects::CONNECT_LIMIT`).
+    fn wait(&self) -> Duration {
+        match self {
+            Self::Ext(crate::extensions::ExtOp::McpAdd(_)) => {
+                crate::connects::CONNECT_LIMIT + CALL_TIMEOUT
+            }
+            _ => CALL_TIMEOUT,
+        }
+    }
+}
+
 /// One request and where to send the answer.
 #[derive(Debug)]
 pub struct Job {
@@ -174,10 +187,11 @@ impl Core {
             .clone()
             .ok_or_else(|| Fail::Unavailable("The assistant is not running yet.".into()))?;
         let (reply, answer) = oneshot::channel();
+        let wait = op.wait();
         tx.send(Job { op, reply })
             .await
             .map_err(|_| Fail::Unavailable("The assistant is not running.".into()))?;
-        match tokio::time::timeout(CALL_TIMEOUT, answer).await {
+        match tokio::time::timeout(wait, answer).await {
             Ok(Ok(r)) => r,
             _ => Err(Fail::Unavailable(
                 "The assistant is busy with a conversation. Try again in a few seconds.".into(),
