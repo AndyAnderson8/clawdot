@@ -230,6 +230,23 @@ fn overview(core: &Core) -> Resp {
     )
 }
 
+/// `GET /api/hive/peers`: this speaker's identity and the speakers found on the network (hive milestone H0).
+/// 404 when the build has no hive support or it was not started. Nothing secret is in the answer.
+fn hive_peers(core: &Core) -> Resp {
+    #[cfg(feature = "hive")]
+    {
+        let name = core.setting("device_name");
+        if let Some(v) = crate::hive::peers_json(name.as_str().unwrap_or("ClawDot")) {
+            return json_reply(StatusCode::OK, &v);
+        }
+    }
+    let _ = core;
+    error(
+        StatusCode::NOT_FOUND,
+        "the hive is not enabled on this speaker",
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewEndpoint {
@@ -321,6 +338,7 @@ pub async fn handle(
             | ["llm", "key"]
             | ["speech", "key"]
             | ["voices"]
+            | ["hive", "peers"]
     );
     if !known {
         return Some(error(StatusCode::NOT_FOUND, "not found"));
@@ -412,6 +430,7 @@ pub async fn handle(
         (&Method::PUT, ["speech", "key"]) => speech_key_set(body).await,
         (&Method::DELETE, ["speech", "key"]) => speech_key_clear(),
         (&Method::GET, ["voices"]) => voices().await,
+        (&Method::GET, ["hive", "peers"]) => hive_peers(core),
         (&Method::GET, ["update"]) => update_status(),
         (&Method::POST, ["update", "check"]) => update_check().await,
         (&Method::POST, ["update", "apply"]) => update_apply(body).await,

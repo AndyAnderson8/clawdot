@@ -68,6 +68,10 @@ OPTIONS:
     --no-console               Do not read the console (run as a server only)
     --echo-speech              With --no-console, still print what the speaker says to stdout (diagnosis;
                                stdout may be kept by a service manager, so leave it off in production)
+    --hive-discovery MODE      Hive (builds with the `hive` feature only): off, native, avahi or avahi:PATH. Makes the
+                               speaker's identity available and, for native or avahi, announces it on the home network
+                               and lists other speakers (docs/guides/hive.md). Default: not started.
+    --hive-publish-name        Include the device name in the announcement (default: only an id label is public)
 
 LANGUAGE MODEL (optional; without it only the local fast path and fallback summaries work):
     --llm-url URL              OpenAI-compatible base URL, for example https://openrouter.ai/api/v1
@@ -115,6 +119,11 @@ struct Args {
     updates: UpdatesConfig,
     #[cfg(feature = "esphome-satellite")]
     esphome: EsphomeConfig,
+    /// Hive discovery mode (`--hive-discovery`); `None` leaves the hive unstarted.
+    #[cfg(feature = "hive")]
+    hive: Option<clawdot_core::hive::Mode>,
+    #[cfg(feature = "hive")]
+    hive_publish_name: bool,
     voice_in: Option<PathBuf>,
     voice_out: Option<PathBuf>,
     daily_spend: Option<f64>,
@@ -156,6 +165,10 @@ fn parse() -> Result<Args, String> {
         updates: UpdatesConfig::default(),
         #[cfg(feature = "esphome-satellite")]
         esphome: EsphomeConfig::default(),
+        #[cfg(feature = "hive")]
+        hive: None,
+        #[cfg(feature = "hive")]
+        hive_publish_name: false,
         voice_in: None,
         voice_out: None,
         quiet: None,
@@ -178,6 +191,15 @@ fn parse() -> Result<Args, String> {
                 value("--config")?;
             }
             "--data-dir" => a.data_dir = PathBuf::from(value("--data-dir")?),
+            #[cfg(feature = "hive")]
+            "--hive-discovery" => {
+                a.hive = Some(
+                    clawdot_core::hive::Mode::parse(&value("--hive-discovery")?)
+                        .map_err(|e| format!("bad --hive-discovery: {e}"))?,
+                );
+            }
+            #[cfg(feature = "hive")]
+            "--hive-publish-name" => a.hive_publish_name = true,
             "--listen" => {
                 a.listen = value("--listen")?
                     .parse()
@@ -1553,6 +1575,28 @@ async fn main() -> ExitCode {
         if let Err(e) = started.await {
             eprintln!("clawdot: {e}");
             return ExitCode::from(1);
+        }
+    }
+
+    // Hive milestone H0: identity and discovery. A failure is reported and the speaker carries on without it.
+    #[cfg(feature = "hive")]
+    if let Some(mode) = args.hive.clone() {
+        let opts = clawdot_core::hive::Options {
+            mode,
+            port: args.listen.port(),
+            addr: match args.listen.ip() {
+                std::net::IpAddr::V4(a) if !a.is_unspecified() => Some(a),
+                _ => None,
+            },
+            publish_name: args.hive_publish_name,
+            name: core
+                .setting("device_name")
+                .as_str()
+                .unwrap_or("ClawDot")
+                .to_owned(),
+        };
+        if let Err(e) = clawdot_core::hive::start(&args.data_dir, &opts) {
+            eprintln!("clawdot: hive: {e}");
         }
     }
 

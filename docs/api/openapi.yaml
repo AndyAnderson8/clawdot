@@ -1179,6 +1179,52 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "502": { $ref: "#/components/responses/BadGateway" }
         "503": { $ref: "#/components/responses/Unavailable" }
+  /api/hive/peers:
+    get:
+      tags: [Status]
+      summary: This speaker's identity and the other speakers found on the network
+      description: |
+        Hive milestone H0 (see docs/guides/hive.md). Administrator only. `self.id` is the hex SHA-256 of the
+        speaker's Ed25519 public key; the private key never leaves the device. `peers` is what mDNS discovery
+        heard and is in memory only: it is advisory and unauthenticated, and entries expire when their records
+        run out or the peer says goodbye. `name` is the device name only if that peer chose to publish it,
+        otherwise an instance label. `404` when the build has no `hive` feature or `--hive-discovery` was not given.
+      operationId: getHivePeers
+      responses:
+        "200":
+          description: The identity and the peers.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [self, discovery, peers]
+                properties:
+                  self:
+                    type: object
+                    required: [id, name, public_key, port]
+                    properties:
+                      id: { type: string, description: "64 hex characters." }
+                      name: { type: string }
+                      public_key: { type: string, description: "Ed25519 public key, 64 hex characters." }
+                      port: { type: integer, description: "The portal port announced to others." }
+                  discovery:
+                    type: string
+                    enum: [off, native, avahi]
+                  peers:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, address, port, last_seen_secs]
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        address: { type: string, description: "The address the announcement came from." }
+                        port: { type: integer }
+                        last_seen_secs: { type: integer, description: "Seconds since it last announced." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /api/audit:
     get:
       tags: [Activity]

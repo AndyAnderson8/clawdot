@@ -115,6 +115,16 @@ impl Core {
             .map_or(Value::Null, crate::settings::SettingsState::json)
     }
 
+    /// The effective value of one setting (`null` when unset or before the settings are handed over).
+    #[must_use]
+    pub fn setting(&self, key: &str) -> Value {
+        self.settings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map_or(Value::Null, |s| s.get(key))
+    }
+
     /// The saved settings as an export file (`null` before the settings are handed over).
     #[must_use]
     pub fn export_settings(&self) -> Value {

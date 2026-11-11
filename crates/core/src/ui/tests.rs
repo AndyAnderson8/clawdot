@@ -228,6 +228,7 @@ async fn every_portal_listing_needs_a_sign_in() {
         ("POST", "/api/update/apply"),
         ("GET", "/api/models"),
         ("GET", "/api/voices"),
+        ("GET", "/api/hive/peers"),
         ("PUT", "/api/speech/key"),
         ("DELETE", "/api/speech/key"),
     ] {
@@ -1033,6 +1034,46 @@ async fn model_and_voice_lists_need_the_administrator_and_explain_what_is_missin
         v["error"].as_str().unwrap().contains("speech provider"),
         "{v}"
     );
+}
+
+// REQ-HIV-002. The hive state is process-wide, so this is the only test that starts it.
+#[tokio::test]
+async fn hive_peers_is_administrator_only_and_holds_no_secret() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    assert_eq!(call(&p, "GET", "/api/hive/peers", "", "").await.0, 401);
+    // Not started (or not built): a plain 404, not a crash.
+    assert_eq!(
+        call(&p, "GET", "/api/hive/peers", &session, "").await.0,
+        404
+    );
+    #[cfg(feature = "hive")]
+    {
+        let dir = crate::store::testutil::TempDir::new("hive-api");
+        let opts = crate::hive::Options {
+            mode: crate::hive::Mode::Off,
+            port: 3335,
+            addr: None,
+            publish_name: false,
+            name: String::new(),
+        };
+        crate::hive::start(&dir.0, &opts).unwrap();
+        let (s, v) = call(&p, "GET", "/api/hive/peers", &session, "").await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["self"]["name"], "Test Dot");
+        assert_eq!(v["self"]["id"].as_str().unwrap().len(), 64);
+        assert_eq!(v["self"]["port"], 3335);
+        assert_eq!(v["discovery"], "off");
+        assert_eq!(v["peers"], json!([]));
+        let text = v.to_string();
+        assert!(
+            !text.contains("pkcs8") && !text.contains("private"),
+            "{text}"
+        );
+        assert_ne!(v["self"]["id"], v["self"]["public_key"]);
+    }
 }
 
 // REQ-CFG-081
