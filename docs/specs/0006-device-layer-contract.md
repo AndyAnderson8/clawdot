@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.4 |
+| **Version** | 0.5 |
 | **Author(s)** | Maintainer direction, drafted by an agent |
 | **Created** | 2026-11-09 |
 | **Related** | [ADR-0015](../adr/0015-own-the-device-layer.md) (Proposed), [ADR-0012](../adr/0012-board-support-layer.md), [0001](0001-product-requirements.md) (REQ-BRD, REQ-VOI-013..019), [0002](0002-resource-budget.md), [0003](0003-satellite-protocol.md), [R-11](../research/11-wake-word-spike.md), [R-07](../research/07-echo-dot-gen2-hardware.md) |
@@ -38,7 +38,7 @@ The layer is **one portable daemon** (the same code on every board) plus, per de
 
 ## 4. Requirements
 
-IDs are stable. Priorities are MoSCoW; "Ver" is Test, Inspection, Analysis or Demonstration. "M" is the roadmap step (B2 = daemon on PC and Pi, B3 = Dot spike, B5 = image and updates, B6 = Dot device features).
+IDs are stable. Priorities are MoSCoW; "Ver" is Test, Inspection, Analysis or Demonstration. "M" is the roadmap step (B2 = daemon on PC and Pi, B3 = Dot spike, B4b = ClawDot's own Linux layer and installer, B5 = image and updates, B6 = Dot device features).
 
 | ID | Requirement | Pri | M | Ver |
 |---|---|---|---|---|
@@ -71,6 +71,12 @@ IDs are stable. Priorities are MoSCoW; "Ver" is Test, Inspection, Analysis or De
 | REQ-DEV-029 | **Wake word configuration.** The desktop daemon MUST load each wake model from a path given by the operator, with its manifest beside it (same name, `.json`), a recorded licence (default `Apache-2.0`, valid only for the official microWakeWord models), one sensitivity per word (default 0.5) and a refractory period (default 2000 ms). Push-to-talk MUST keep working whether or not an engine is loaded. A model that fails to load MUST stop startup with a message naming the file. The daemon MUST print the loaded words with their model hash and licence at start. | Must | A3 | T |
 | REQ-DEV-030 | **Status lines.** In verbose mode the daemon MUST print one short line per state change that a person needs (ready and how to talk, wake word heard, listening, thinking, speaking, muted, microphone fault and recovery), and MUST NOT print audio or transcripts of the user's speech. | Should | A3 | T |
 | REQ-DEV-031 | **Administrator reset gesture.** On a board with an `action` button, holding it for 10 seconds (a fixed time, not a board-file setting, so a stray press cannot reach it) MUST ask the core to open the local administrator reset window (REQ-CFG-069) with `clawdot.admin-reset`. The daemon MUST show that the request is being made and that the answer arrived: the core's `clawdot.admin-reset-window` with `open_secs > 0` is answered with the notification tone and the `inbox` LED state, a refusal with the error tone, so a person without a screen knows what happened. The hold works only while the daemon has a session with the core; it never opens the window by itself and never acts on its own, because the core decides (a loopback peer, or a satellite that presented a valid token, REQ-SAT-020). A board without the button offers the same through the portal-free equivalents: on the desktop board the key line `admin` in the device console; on a board with no button and no console the window cannot be opened from the device and the command line (REQ-CFG-022) is the way, which the guide says. A normal press or long press MUST keep its mapped action; the hold adds, it does not replace. | Should | A4 | T |
+| REQ-DEV-032 | The image recipe repository MUST NOT contain, and its releases MUST NOT ship, any file that is Amazon's or the chip vendor's (bootloader and TrustZone partitions, Wi-Fi and Bluetooth firmware, audio tuning files, `audio_device.xml`, unit calibration data) or a boot image built from a unit's own header. A CI check MUST reject such files by name, size or hash, and a test MUST show that it catches a planted example. | Must | B4b | T/I |
+| REQ-DEV-033 | Proprietary files the board needs MUST be read from the user's own unit at install or first boot and kept on the unit and in the user's backup. The installer MUST stop with a clear message if it cannot read them, and MUST NOT download them from the project. | Must | B4b | T/D |
+| REQ-DEV-034 | The installer MUST verify, by checksum against the device, a backup of every boot-critical partition before its first write; MUST offer a dry run that writes nothing; MUST read back every partition it writes; and MUST NOT write the preloader, bootloader or TrustZone partitions. | Must | B4b | T/D |
+| REQ-DEV-035 | A kernel or boot-image update MUST be written and verified so that a failed or truncated write leaves a documented recovery path, preferably an automatic return to the previous image. A recipe that cannot offer an automatic return MUST declare kernel updates `manual`, and the guide MUST state the rescue steps. | Must | B4b | T/D |
+| REQ-DEV-036 | For every GPL component in a release (kernel, busybox and the like) the project MUST publish the complete corresponding source and the build recipe with that release, name it in `NOTICE`, and keep the notices of MIT, BSD and Apache-2.0 components that were copied or ported. | Must | B4b | I |
+| REQ-DEV-037 | Each release SHOULD carry a licence manifest listing every package and binary in the image with its licence, upstream source, version and provenance; a component with no recorded licence MUST NOT be included (REQ-VOI-009 for wake-word models). | Should | B4b | I |
 | REQ-DEV-023 | Bluetooth speaker mode (A2DP sink and source) MAY be offered, with arbitration against announcements defined: an announcement ducks or pauses the Bluetooth source and restores it. | May | B6 | T/D |
 | REQ-DEV-024 | A Spotify Connect receiver MAY be offered. It MUST be off by default, MUST show the terms-of-service notice of section 5.4 when enabled, and MUST NOT be a dependency of any other feature. Spotify control through the brain is a software feature and identical on every board. | May | B6 | I/D |
 
@@ -230,3 +236,4 @@ The format is defined by [`schemas/board/board-1.schema.json`](../../schemas/boa
 | 0.2 | 2026-11-09 | Section 7 points at spec 0007 for the first engine (REQ-DEV-017 is unchanged); the engine is a feature-gated adapter, not part of the default build. |
 | 0.3 | 2026-11-09 | REQ-DEV-025..030: always-on capture, half-duplex hold-off, mute, microphone faults, wake word configuration and status lines, for the PC voice loop. |
 | 0.4 | 2026-11-09 | REQ-DEV-031: the administrator reset gesture (hold the action button for 10 seconds, or `admin` in the desktop console), with the wire messages of spec 0003 0.3.3. |
+| 0.5 | 2026-11-11 | REQ-DEV-032..037: the image recipe and installer (no Amazon or vendor files, proprietary files read from the unit, verified backups and dry run, safe kernel and boot-image updates, GPL source and licence manifest), from [R-12](../research/12-own-linux-layer.md). |
