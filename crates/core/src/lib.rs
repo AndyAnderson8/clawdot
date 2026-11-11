@@ -31,6 +31,7 @@ pub mod inbox;
 pub mod limit;
 pub mod llm;
 pub mod mcp;
+mod mcp_server;
 pub mod media;
 pub mod notes;
 #[cfg(feature = "realtime")]
