@@ -89,8 +89,8 @@ impl Default for ActionPolicy {
     fn default() -> Self {
         Self {
             dry_run: false,
-            max_actions_per_day: 100,
-            max_costly_per_day: 20,
+            max_actions_per_day: 100_000,
+            max_costly_per_day: 100_000,
         }
     }
 }

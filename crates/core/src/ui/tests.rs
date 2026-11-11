@@ -37,7 +37,7 @@ async fn start(with_main_loop: bool) -> Portal {
         ("zone", json!("UTC")),
         ("listen", json!("127.0.0.1:3335")),
         ("llm_key_env", json!("OPENROUTER_API_KEY")),
-        ("max_requests_per_day", json!(500)),
+        ("max_requests_per_day", json!(1_000_000)),
         ("board", json!("none")),
     ]
     .into_iter()
