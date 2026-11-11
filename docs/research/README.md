@@ -19,8 +19,9 @@ Short, dated notes that capture what we learned from external sources and what i
 | [R-06](06-naming.md) | Name collision check | Public release |
 | [R-07](07-echo-dot-gen2-hardware.md) | Echo Dot Gen 2 hands-on hardware findings (buttons, LED ring, audio, Wi-Fi, clock, services) | ADR-0012, spec 0001 §4.10, board support |
 | [R-11](11-wake-word-spike.md) | SPIKE-002 PC finding: wake-word engines, licences, custom-word training, measurements, the engine seam | roadmap A3, ADR-0002, REQ-VOI-001/009 |
+| [R-12](12-own-linux-layer.md) | ClawDot's own Linux layer for the Dot: inventory of the TECHO5 image, options, milestones, risks, install and update experience | roadmap B4b, ADR-0015, spec 0006 (REQ-DEV-032..037) |
 | [R-08](08-existing-echo-dot-projects.md) | Prior art for the Dot: EchoMuse, TECHO5 Dot, NEO (hardware drive, ESPHome link, licences, Phase B recommendation) | roadmap Phase B, ADR-0012, spec 0003 |
-| [R-12](12-hive.md) | The hive: several speakers sharing memories, skills, settings and a spend cap with no server; discovery, pairing, trust, offline behaviour, who answers; options and milestones | roadmap item 20, future scope, a future `HIV` spec and ADR |
+| [R-14](14-hive.md) | The hive: several speakers sharing memories, skills, settings and a spend cap with no server; discovery, pairing, trust, offline behaviour, who answers; options and milestones | roadmap item 20, future scope, a future `HIV` spec and ADR |
 
 An earlier survey of two reference repositories and the wider landscape (make-a-smart-speaker, chatgpt-openai-smart-speaker, Home Assistant, OpenVoiceOS, Willow, Pipecat, LiveKit) was done in conversation; its conclusions are the eight "ideas to add" reflected below.
 

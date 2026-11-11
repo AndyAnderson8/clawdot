@@ -45,7 +45,7 @@ Open an issue labelled `type:feature` + `scope:proposal` → write or amend a sp
 | **Routines** (e.g. morning briefing on an alarm) | Assistant | Triggers + actions; scheduler exists. | v1.0 shipped |
 | **Ebooks read aloud** | Media | Cloud TTS for long text is costly; revisit with a cost model. | Cost controls proven |
 | **Multi-language** | Voice | English-first for v1.0 (wake word, grammar, prompts). | Wake-word and fast-path grammar localisation plan exists |
-| **Multi-room / announcements between satellites** | Audio | Synchronised audio and announcements between rooms are out of scope. Sharing memories, skills and settings between speakers, and choosing which speaker answers, are planned as the **hive** (roadmap item 20, [R-12](research/12-hive.md)). | Not planned for audio |
+| **Multi-room / announcements between satellites** | Audio | Synchronised audio and announcements between rooms are out of scope. Sharing memories, skills and settings between speakers, and choosing which speaker answers, are planned as the **hive** (roadmap item 25, [R-14](research/14-hive.md)). | Not planned for audio |
 | **Display satellites / status screens** | Hardware | Capability model already allows a display. | Real use case |
 | **Realtime voice API** | Voice | Optional speech-to-speech provider for lower delay; tools and safety checks stay in ClawDot. | ClawDot running off the Dot (PC, Pi or relay), and a budget that allows it |
 | **Cloned voice through a provider** | Voice | A voice made from a short recording by a provider, picked from the voice list. Local training is not planned. | Consent rules for whose voice it is |

@@ -109,6 +109,7 @@ Spec [0006](../specs/0006-device-layer-contract.md); the daemon is `crates/devic
 | DEV-021 no C in the default build | Done | manifest | inspection |
 | DEV-022 resource profile | Binary size measured (649 KiB armv7); RSS and CPU not measured | | |
 | DEV-023, 024 Bluetooth, Spotify Connect | Not started (optional) | | |
+| DEV-032..037 image recipe, installer, kernel update safety, GPL source, licence manifest | Not started (B4b; the image repository does not exist) | | |
 
 ## Wake-word runtime (WAK)
 

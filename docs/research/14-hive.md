@@ -1,4 +1,4 @@
-# R-12: The hive: several ClawDot speakers sharing one knowledge base, with no server
+# R-14: The hive: several ClawDot speakers sharing one knowledge base, with no server
 
 Date: 2026-11-11 · Feeds: roadmap Beyond v1.0 item 20, [future scope](../future-scope.md) (multi-room and where-to-speak rows), a future spec (area code `HIV`, proposed below), a future ADR for the sync design · Builds on: [spec 0002](../specs/0002-resource-budget.md), [spec 0003](../specs/0003-satellite-protocol.md), [ADR-0015](../adr/0015-own-the-device-layer.md), [ADR-0019](../adr/0019-updates-and-remote-access.md), [R-07](07-echo-dot-gen2-hardware.md), [R-11](11-open-source-echo-feature-landscape.md)
 
