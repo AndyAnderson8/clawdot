@@ -134,7 +134,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
           </h3>
           <AddButton
             label={ADD[kind]}
-            id="addschedule"
+            id="addclock"
             onClick={() => {
               reset();
               setOpen(true);
@@ -164,7 +164,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
         {note ? <p class="mut chartnote">{note}</p> : null}
       </section>
 
-      <Dialog id="scheduledialog" title={editing ? "Change this " + noun : ADD[kind]} open={open} onClose={reset}>
+      <Dialog id="clockdialog" title={editing ? "Change this " + noun : ADD[kind]} open={open} onClose={reset}>
         <form class="dlgform" onSubmit={submit}>
           {kind === "timer" ? (
             <div class="srow" id="rtimer">
