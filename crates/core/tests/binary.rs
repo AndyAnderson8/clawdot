@@ -1270,14 +1270,14 @@ fn saved_settings_layer_under_flags_and_apply_live() {
         "PUT",
         "/api/settings",
         &admin,
-        r#"{"max_requests_per_day":7}"#,
+        r#"{"daily_spend_usd":7}"#,
     );
     assert_eq!(s, 200, "{b}");
     let mut seen = false;
     let end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < end && !seen {
         let (_, b) = http(port, "GET", "/api/status", &admin, "");
-        seen = b.contains(r#""max_requests_per_day":7"#);
+        seen = b.contains(r#""daily_spend_cap_usd":7.0"#);
         std::thread::sleep(Duration::from_millis(200));
     }
     let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
@@ -1286,7 +1286,7 @@ fn saved_settings_layer_under_flags_and_apply_live() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(seen, "the new limit should reach the running assistant");
     assert!(
-        saved.contains("max_requests_per_day") && saved.contains("Den"),
+        saved.contains("daily_spend_usd") && saved.contains("Den"),
         "{saved}"
     );
 }

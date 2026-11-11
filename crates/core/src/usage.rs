@@ -17,7 +17,8 @@ pub const SCHEMA: u32 = 1;
 pub struct UsageLimits {
     /// Cap on generated tokens per response.
     pub max_output_tokens_per_turn: u32,
-    /// Model requests allowed per local day.
+    /// Model requests allowed per local day. Never limited for a person (it is not a setting); the evaluation
+    /// harness sets it to bound its own run.
     pub max_requests_per_day: u32,
     /// Spend allowed per local day, in US dollars, if set.
     pub daily_spend_cap_usd: Option<f64>,
@@ -27,7 +28,7 @@ impl Default for UsageLimits {
     fn default() -> Self {
         Self {
             max_output_tokens_per_turn: 300,
-            max_requests_per_day: 1_000_000,
+            max_requests_per_day: u32::MAX,
             daily_spend_cap_usd: None,
         }
     }

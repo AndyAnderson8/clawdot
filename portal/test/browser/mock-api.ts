@@ -115,7 +115,6 @@ function seed(mode: string): Json {
       speech_language: { value: null, source: "default", live: true },
       listen: { value: "0.0.0.0:3335", source: "flag", live: false, ignored: true },
       public_url: { value: null, source: "default", live: true },
-      max_requests_per_day: { value: 100, source: "default", live: true },
       daily_spend_usd: { value: null, source: "default", live: true },
       board: { value: "none", source: "default", live: false },
       agent_max_rounds: { value: 8, source: "default", live: true },
@@ -364,7 +363,6 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             llm: { configured: true, model: "test-model" },
             usage: {
               requests_today: 3,
-              max_requests_per_day: 100,
               spend_today: 0.0123,
               day: Math.floor(Date.now() / 86400000),
               history: [{ day: Math.floor(Date.now() / 86400000) - 1, requests: 5 }],

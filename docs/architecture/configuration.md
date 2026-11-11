@@ -19,7 +19,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
     "summary_model": "provider/cheap-model",
     "key_env": "OPENROUTER_API_KEY"
   },
-  "limits": { "max_requests_per_day": 500, "daily_spend_usd": 2.0 }
+  "limits": { "daily_spend_usd": 2.0 }
 }
 ```
 
@@ -35,7 +35,6 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `llm.url`, `llm.model` | Language model; set together or not at all. `https://` is required unless the host is localhost, `.local` or a private-network address (REQ-SEC-001) | none (fast path only) |
 | `llm.fallback_model`, `llm.summary_model` | Optional; need `llm.url` and `llm.model` | none |
 | `llm.key_env` | Name of the environment variable holding the key | `OPENROUTER_API_KEY` |
-| `limits.max_requests_per_day` | Model requests per local day, at least 1 | 500 |
 | `limits.daily_spend_usd` | Stop calling the model after this much spend | none |
 | `limits.max_actions_per_day` | Calls that are not read-only allowed per local day; 0 stops all actions (REQ-SEC-015) | 100 |
 | `limits.max_costly_per_day` | Costly and destructive calls allowed per local day (REQ-SEC-015) | 20 |
@@ -69,7 +68,7 @@ warning so a headless device still starts.
 |---|---|---|
 | Device name, time zone, personality (the text itself) | `device_name`, `zone`, `persona` | right away |
 | Language model address, model, backup model, summary model, key variable name | `llm_url`, `llm_model`, `llm_fallback_model`, `summary_model`, `llm_key_env` | right away (the model client is rebuilt) |
-| Requests per day, daily spend | `max_requests_per_day`, `daily_spend_usd` | right away |
+| Daily spend | `daily_spend_usd` | right away |
 | Voice | `voice` | after a restart (needs the `speech` section of the configuration file) |
 | Listen address, public address | `listen`, `public_url` | after a restart |
 | Board | `board` (`auto` or `none`) | after a restart; nothing reads it yet |
