@@ -5,7 +5,6 @@ use crate::audit::ActionPolicy;
 use crate::cli::Args;
 use crate::config::{AgentConfig, Config};
 use crate::inbox::endpoint::QuietHours;
-use crate::session::{MAX_CALLS_CEILING, MAX_DEADLINE_CEILING_SECS, MAX_ROUNDS_CEILING};
 use crate::settings::{self, Layer, SettingsState};
 
 pub fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
@@ -44,31 +43,31 @@ pub fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.agent = c.agent.clone();
     // The agent and limit settings join the layers so the portal can show and change them (REQ-CFG-062).
     // A value above its ceiling is shown at the ceiling it will be held to.
-    let ceil =
-        |v: Option<u64>, lo: u64, hi: u64| v.map(|n| serde_json::Value::from(n.clamp(lo, hi)));
+    // The range is the one on the setting's table row, so the two cannot drift apart.
+    let ceil = |key: &str, v: Option<u64>| {
+        v.map(|n| {
+            let (lo, hi) = settings::whole_range(key).unwrap_or((0, u64::MAX));
+            serde_json::Value::from(n.clamp(lo, hi))
+        })
+    };
     put(
         "agent_max_rounds",
-        ceil(
-            c.agent.max_rounds.map(|n| n as u64),
-            1,
-            MAX_ROUNDS_CEILING as u64,
-        ),
+        ceil("agent_max_rounds", c.agent.max_rounds.map(|n| n as u64)),
     );
     put(
         "agent_max_tool_calls",
         ceil(
+            "agent_max_tool_calls",
             c.agent.max_tool_calls.map(|n| n as u64),
-            1,
-            MAX_CALLS_CEILING as u64,
         ),
     );
     put(
         "agent_deadline_secs",
-        ceil(c.agent.deadline_secs, 5, MAX_DEADLINE_CEILING_SECS),
+        ceil("agent_deadline_secs", c.agent.deadline_secs),
     );
     put(
         "agent_tool_timeout_secs",
-        ceil(c.agent.tool_timeout_secs, 1, 120),
+        ceil("agent_tool_timeout_secs", c.agent.tool_timeout_secs),
     );
     put("plan_speech", c.agent.plan_speech.map(Into::into));
     put("progress_speech", c.agent.progress_speech.map(Into::into));
