@@ -16,7 +16,6 @@ use crate::seed::{agent_from, policy_from, quiet_from};
 use crate::session::Conversation;
 use crate::session::{ToolHost, TurnConfig, TurnCtl};
 use crate::settings::{self, Group};
-use crate::speechio::apply_speech;
 use crate::store::JsonStore;
 use crate::transport::HttpBackend;
 use crate::turns::{self, Event as HubEvent, Hub, Origin, Reply, Request, Submitted, TurnKit};
@@ -106,6 +105,7 @@ pub fn with_agent(cfg: TurnConfig, agent: &AgentConfig) -> TurnConfig {
 pub fn build_llm(
     url: Option<&str>,
     model: Option<&str>,
+    secrets: &crate::secrets::Secrets,
     key_env: &str,
     max_tokens: u32,
     agent: &AgentConfig,
@@ -114,7 +114,8 @@ pub fn build_llm(
         return Ok(None);
     };
     // A key pasted into the portal wins; otherwise the environment variable that was named.
-    let key = crate::secrets::get(crate::secrets::LLM_KEY)
+    let key = secrets
+        .get(crate::secrets::LLM_KEY)
         .unwrap_or_else(|| std::env::var(key_env).unwrap_or_default());
     let backend = Arc::new(HttpBackend::new(url, &key, Duration::from_secs(30))?);
     Ok(Some(Llm {
@@ -159,14 +160,16 @@ pub fn apply_live(
         }
     }
     if settings::group_changed(Group::Speech, live, applied) {
-        apply_speech(live);
+        core.speech_handles().apply(live);
     }
     if settings::group_changed(Group::Realtime, live, applied) {
         brain.rt.set_settings(RtSettings::from_live(live));
     }
     #[cfg(feature = "tls")]
-    if changed("update_check") {
-        crate::update::set_enabled(
+    if changed("update_check")
+        && let Some(u) = core.updater()
+    {
+        u.set_enabled(
             live.get("update_check")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
@@ -194,6 +197,7 @@ pub fn apply_live(
         match build_llm(
             text("llm_url"),
             text("llm_model"),
+            core.secrets(),
             text("llm_key_env").unwrap_or("OPENROUTER_API_KEY"),
             max_tokens,
             &brain.agent,

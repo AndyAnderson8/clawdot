@@ -55,6 +55,7 @@ pub async fn build_brain(
     let llm = build_llm(
         args.llm_url.as_deref(),
         args.llm_model.as_deref(),
+        core.secrets(),
         &args.key_env,
         limits.max_output_tokens_per_turn,
         &args.agent,
@@ -171,7 +172,7 @@ pub async fn build_brain(
         persona,
         agent: args.agent.clone(),
         voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
-        rt: Realtime::new(RtSettings::from_live(live)),
+        rt: Realtime::with_secrets(RtSettings::from_live(live), core.secrets().clone()),
     };
     if brain.rt.settings().enabled && !RtSettings::built() {
         brain.rt.set_error(Some(
@@ -183,7 +184,7 @@ pub async fn build_brain(
 
 /// Start the optional update check (`tls` builds only); a failure is reported and the speaker carries on.
 #[cfg(feature = "tls")]
-pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Value>) {
+pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Value>, core: &Core) {
     match crate::update::UpdateConfig::new(
         args.updates.url.as_deref(),
         args.updates.public_key.as_deref(),
@@ -193,8 +194,9 @@ pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Val
                 .get("update_check")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true);
-            if let Err(e) = crate::update::start(cfg, on, Some(args.data_dir.clone())) {
-                crate::diag::error(&format!("updates are not available: {e}"));
+            match crate::update::start(cfg, on, Some(args.data_dir.clone())) {
+                Ok(u) => core.set_updater(u),
+                Err(e) => crate::diag::error(&format!("updates are not available: {e}")),
             }
         }
         Err(e) => crate::diag::error(&format!("updates are not available: {e}")),
@@ -214,7 +216,8 @@ pub async fn start_satellites(
         let addr: SocketAddr = listen
             .parse()
             .map_err(|e| format!("satellite.listen: {e}"))?;
-        let (stt, tts) = build_registered_speech(&args.speech)?;
+        let (stt, tts) =
+            build_registered_speech(&args.speech, core.secrets(), core.speech_handles())?;
         let mut settings = satellite::Settings {
             announcer: announcer.clone(),
             realtime: Some(rt.clone()),
@@ -271,7 +274,8 @@ pub async fn start_satellites(
     // ESPHome voice satellites (optional feature; spec 0004) share the satellite pipeline and announcer.
     #[cfg(feature = "esphome-satellite")]
     if !args.esphome.is_empty() {
-        let (stt, tts) = build_registered_speech(&args.speech)?;
+        let (stt, tts) =
+            build_registered_speech(&args.speech, core.secrets(), core.speech_handles())?;
         let mut settings = satellite::Settings {
             announcer: announcer.clone(),
             realtime: Some(rt.clone()),
@@ -310,8 +314,12 @@ pub fn start_hive(args: &Args, core: &Core) {
                 .unwrap_or("ClawDot")
                 .to_owned(),
         };
-        if let Err(e) = crate::hive::start(&args.data_dir, &opts) {
+        let started = crate::hive::start(&args.data_dir, &opts);
+        if let Some(e) = started.problem {
             eprintln!("clawdot: hive: {e}");
+        }
+        if let Some(h) = started.hive {
+            core.set_hive(h);
         }
     }
 }

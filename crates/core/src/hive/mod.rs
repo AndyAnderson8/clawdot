@@ -16,7 +16,7 @@ pub use identity::Identity;
 use serde_json::{Value, json};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
 use std::time::Instant;
 
 /// How this speaker is made findable.
@@ -79,11 +79,9 @@ pub struct Hive {
     mode: Mode,
     port: u16,
     discovery: Option<Discovery>,
+    /// The Avahi service file, kept for as long as the hive lives.
+    _avahi: Option<AvahiFile>,
 }
-
-static HIVE: OnceLock<Arc<Hive>> = OnceLock::new();
-// Keeps the announcer alive for the life of the process.
-static AVAHI: Mutex<Option<AvahiFile>> = Mutex::new(None);
 
 /// The advertisement for `id`. The TXT set is exactly `v`, `id`, `p`, plus `n` only if the owner opted in.
 #[must_use]
@@ -107,16 +105,36 @@ pub fn advert_for(id: &str, port: u16, name: Option<&str>, addr: Option<Ipv4Addr
     }
 }
 
+/// What [`start`] made: the hive, if there is one to use, and a plain message about anything that went wrong.
+#[derive(Debug)]
+pub struct Started {
+    /// The hive. `None` only when the identity could not be opened. A failed socket still leaves one, so the
+    /// API works.
+    pub hive: Option<Hive>,
+    /// What failed, in a plain sentence.
+    pub problem: Option<String>,
+}
+
 /// Open the identity in `dir` and, if `opts.mode` asks for it, start discovery. Call once, inside the runtime.
+/// The caller owns the result (the core keeps it for the life of the process); nothing is global.
 ///
-/// # Errors
-/// A plain message when the identity cannot be opened or the network socket cannot be set up. A failed
-/// socket is not fatal to the caller: the identity is still registered so the API works.
-pub fn start(dir: &Path, opts: &Options) -> Result<(), String> {
-    let identity = Identity::open(dir).map_err(|e| format!("hive identity: {e}"))?;
+/// A failed socket is not fatal: the identity is still returned so the API works, and `problem` says why
+/// discovery is not running.
+#[must_use]
+pub fn start(dir: &Path, opts: &Options) -> Started {
+    let identity = match Identity::open(dir) {
+        Ok(i) => i,
+        Err(e) => {
+            return Started {
+                hive: None,
+                problem: Some(format!("hive identity: {e}")),
+            };
+        }
+    };
     let name = opts.publish_name.then_some(opts.name.as_str());
     let advert = advert_for(identity.id(), opts.port, name, opts.addr);
     let mut problem = None;
+    let mut avahi = None;
     let discovery = match &opts.mode {
         Mode::Off => None,
         Mode::Native => match bind_multicast() {
@@ -134,7 +152,7 @@ pub fn start(dir: &Path, opts: &Options) -> Result<(), String> {
             if let Err(e) = file.announce(&advert) {
                 problem = Some(format!("cannot write {}: {e}", path.display()));
             } else {
-                *AVAHI.lock().unwrap_or_else(PoisonError::into_inner) = Some(file);
+                avahi = Some(file);
             }
             // Browsing shares the port with Avahi. If that is refused, the list stays empty.
             match bind_multicast() {
@@ -149,48 +167,51 @@ pub fn start(dir: &Path, opts: &Options) -> Result<(), String> {
             }
         }
     };
-    let hive = Hive {
-        identity,
-        mode: opts.mode.clone(),
-        port: opts.port,
-        discovery,
-    };
-    let _ = HIVE.set(Arc::new(hive));
-    problem.map_or(Ok(()), Err)
+    Started {
+        hive: Some(Hive {
+            identity,
+            mode: opts.mode.clone(),
+            port: opts.port,
+            discovery,
+            _avahi: avahi,
+        }),
+        problem,
+    }
 }
 
-/// The body of `GET /api/hive/peers`, or `None` when the hive was not started. No secret is in it: the
-/// private key never leaves `identity`, and the public key and id are public by design.
-#[must_use]
-pub fn peers_json(device_name: &str) -> Option<Value> {
-    let h = HIVE.get()?;
-    let now = Instant::now();
-    let peers: Vec<Value> = h
-        .discovery
-        .as_ref()
-        .map(Discovery::peers)
-        .unwrap_or_default()
-        .iter()
-        .map(|p| {
-            json!({
-                "id": p.id,
-                "name": p.name,
-                "address": p.address.to_string(),
-                "port": p.port,
-                "last_seen_secs": now.saturating_duration_since(p.last_seen).as_secs(),
+impl Hive {
+    /// The body of `GET /api/hive/peers`. No secret is in it: the private key never leaves `identity`, and the
+    /// public key and id are public by design.
+    #[must_use]
+    pub fn peers_json(&self, device_name: &str) -> Value {
+        let now = Instant::now();
+        let peers: Vec<Value> = self
+            .discovery
+            .as_ref()
+            .map(Discovery::peers)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| {
+                json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "address": p.address.to_string(),
+                    "port": p.port,
+                    "last_seen_secs": now.saturating_duration_since(p.last_seen).as_secs(),
+                })
             })
+            .collect();
+        json!({
+            "self": {
+                "id": self.identity.id(),
+                "name": device_name,
+                "public_key": self.identity.public_key_hex(),
+                "port": self.port,
+            },
+            "discovery": self.mode.label(),
+            "peers": peers,
         })
-        .collect();
-    Some(json!({
-        "self": {
-            "id": h.identity.id(),
-            "name": device_name,
-            "public_key": h.identity.public_key_hex(),
-            "port": h.port,
-        },
-        "discovery": h.mode.label(),
-        "peers": peers,
-    }))
+    }
 }
 
 #[cfg(test)]

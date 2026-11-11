@@ -11,7 +11,6 @@ use crate::llm::{ChatRequest, Message};
 use crate::runtime::Llm;
 use crate::satellite;
 use crate::session::ChatBackend;
-use crate::speechio::swap_live_voice;
 use crate::store::JsonStore;
 use crate::usage::UsageTracker;
 use std::sync::Arc;
@@ -62,10 +61,12 @@ pub async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
                     println!("speaker> {text}");
                 }
                 if v.announcer.connected() > 0 {
-                    let before = preview.as_deref().and_then(swap_live_voice);
+                    let before = preview
+                        .as_deref()
+                        .and_then(|p| v.core.speech_handles().swap_voice(p));
                     v.announcer.announce(&text).await;
                     if let Some(old) = before {
-                        swap_live_voice(&old);
+                        v.core.speech_handles().swap_voice(&old);
                     }
                 }
             }

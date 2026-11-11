@@ -97,6 +97,8 @@ pub struct Stores {
     pub replies: JsonStore,
     /// The web UI administrator setting (password hash or open mode).
     pub admin: JsonStore,
+    /// The keys pasted into the portal (see [`crate::secrets`]).
+    pub secrets: JsonStore,
 }
 
 impl Stores {
@@ -108,6 +110,7 @@ impl Stores {
             inbox: JsonStore::new(dir.join("inbox.json"), crate::inbox::queue::SCHEMA),
             replies: JsonStore::new(dir.join("replies.json"), reply::SCHEMA),
             admin: JsonStore::new(dir.join("admin.json"), crate::admin::SCHEMA),
+            secrets: JsonStore::new(dir.join("secrets.json"), crate::secrets::SCHEMA),
         }
     }
 }
@@ -216,6 +219,13 @@ pub struct Core {
     audit: std::sync::OnceLock<Arc<crate::audit::AuditLog>>,
     notes: std::sync::OnceLock<Arc<crate::notes::NoteStore>>,
     asks: Mutex<Vec<ask::PendingAsk>>,
+    secrets: crate::secrets::Secrets,
+    speech_handles: crate::speechio::SpeechHandles,
+    speech_origin: std::sync::OnceLock<crate::speech::SpeechOrigin>,
+    #[cfg(feature = "hive")]
+    hive: std::sync::OnceLock<crate::hive::Hive>,
+    #[cfg(feature = "tls")]
+    updater: std::sync::OnceLock<Arc<crate::update::Updater>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -286,6 +296,11 @@ impl Core {
         replies: ReplyQueue,
     ) -> Self {
         let now = clock.now();
+        let secrets = stores
+            .as_ref()
+            .map_or_else(crate::secrets::Secrets::none, |s| {
+                crate::secrets::Secrets::at(s.secrets.clone())
+            });
         Self {
             clock,
             adapters,
@@ -311,7 +326,64 @@ impl Core {
             audit: std::sync::OnceLock::new(),
             notes: std::sync::OnceLock::new(),
             asks: Mutex::new(Vec::new()),
+            secrets,
+            speech_handles: crate::speechio::SpeechHandles::default(),
+            speech_origin: std::sync::OnceLock::new(),
+            #[cfg(feature = "hive")]
+            hive: std::sync::OnceLock::new(),
+            #[cfg(feature = "tls")]
+            updater: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Keep the started hive for the life of this core (set once; a later call is ignored).
+    #[cfg(feature = "hive")]
+    pub fn set_hive(&self, hive: crate::hive::Hive) {
+        let _ = self.hive.set(hive);
+    }
+
+    /// The hive, when it was started.
+    #[cfg(feature = "hive")]
+    #[must_use]
+    pub fn hive(&self) -> Option<&crate::hive::Hive> {
+        self.hive.get()
+    }
+
+    /// Keep the running updater for the life of this core (set once; a later call is ignored).
+    #[cfg(feature = "tls")]
+    pub fn set_updater(&self, updater: Arc<crate::update::Updater>) {
+        let _ = self.updater.set(updater);
+    }
+
+    /// The updater, when updates are running on this device.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn updater(&self) -> Option<&Arc<crate::update::Updater>> {
+        self.updater.get()
+    }
+
+    /// The speech clients' voice and language registry, owned by this core.
+    #[must_use]
+    pub fn speech_handles(&self) -> &crate::speechio::SpeechHandles {
+        &self.speech_handles
+    }
+
+    /// Remember which speech server the portal may ask for its voices (set once at start-up; a later call is
+    /// ignored).
+    pub fn set_speech_origin(&self, origin: crate::speech::SpeechOrigin) {
+        let _ = self.speech_origin.set(origin);
+    }
+
+    /// The speech server set up at start, with the key it would use now.
+    #[must_use]
+    pub fn speech_source(&self) -> Option<crate::speech::SpeechSource> {
+        self.speech_origin.get().map(|o| o.resolve(&self.secrets))
+    }
+
+    /// The keys pasted into the portal, owned by this core.
+    #[must_use]
+    pub fn secrets(&self) -> &crate::secrets::Secrets {
+        &self.secrets
     }
 
     /// The current time.

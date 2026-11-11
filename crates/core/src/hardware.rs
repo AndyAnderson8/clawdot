@@ -175,6 +175,7 @@ pub fn detect() -> Hardware {
 /// The hardware, found once.
 #[must_use]
 pub fn detected() -> &'static Hardware {
+    // Deliberately process-wide: a fact about the machine, the same for every core in the process.
     static HW: OnceLock<Hardware> = OnceLock::new();
     HW.get_or_init(detect)
 }

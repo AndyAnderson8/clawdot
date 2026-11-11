@@ -27,6 +27,8 @@ pub struct Line {
     pub text: String,
 }
 
+// Deliberately process-wide: this is the log, like stderr. Anything in the process may write a line without being
+// handed a core, and the lines are redacted before they get here. It holds no secret and no per-core state.
 static RING: Mutex<VecDeque<Line>> = Mutex::new(VecDeque::new());
 
 fn push(level: &'static str, msg: &str) {

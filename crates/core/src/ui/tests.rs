@@ -27,11 +27,21 @@ struct Portal {
 
 /// A core plus, optionally, a stand-in for the main loop answering portal requests.
 async fn start(with_main_loop: bool) -> Portal {
-    let core = Arc::new(Core::in_memory(
-        Arc::new(Noon),
-        Adapters::builtin(),
-        Limits::default(),
-    ));
+    start_in(None, with_main_loop).await
+}
+
+/// Like [`start`], with the core's files in `dir` when given (so a pasted key has somewhere to be kept).
+async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool) -> Portal {
+    let core = Arc::new(match dir {
+        None => Core::in_memory(Arc::new(Noon), Adapters::builtin(), Limits::default()),
+        Some(d) => Core::open(
+            Arc::new(Noon),
+            Adapters::builtin(),
+            Limits::default(),
+            crate::app::Stores::in_dir(d),
+        )
+        .unwrap(),
+    });
     let defaults = [
         ("device_name", json!("Test Dot")),
         ("zone", json!("UTC")),
@@ -1050,7 +1060,9 @@ async fn hive_peers_is_administrator_only_and_holds_no_secret() {
             publish_name: false,
             name: String::new(),
         };
-        crate::hive::start(&dir.0, &opts).unwrap();
+        let started = crate::hive::start(&dir.0, &opts);
+        assert_eq!(started.problem, None);
+        p.core.set_hive(started.hive.unwrap());
         let (s, v) = call(&p, "GET", "/api/hive/peers", &session, "").await;
         assert_eq!(s, 200, "{v}");
         assert_eq!(v["self"]["name"], "Test Dot");
@@ -1104,10 +1116,10 @@ fn a_query_value_is_decoded_and_a_missing_or_broken_one_is_none() {
 // REQ-CFG-082
 #[tokio::test]
 async fn a_pasted_key_is_kept_masked_and_never_returned_whole() {
-    let p = start(true).await;
     let dir = std::env::temp_dir().join(format!("clawdot-key-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    crate::secrets::init(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = start_in(Some(&dir), true).await;
     let setup = r#"{"mode":"password","password":"correct horse"}"#;
     let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
     let session = format!("Bearer {}", v["token"].as_str().unwrap());
@@ -1177,7 +1189,7 @@ async fn a_pasted_key_is_kept_masked_and_never_returned_whole() {
     assert_eq!(v["speech"]["key_present"], true);
     assert!(v["llm"]["key_hint"].is_null(), "the two keys are separate");
     assert!(!v.to_string().contains("0123456789abcdef"));
-    assert_eq!(crate::secrets::get(crate::secrets::LLM_KEY), None);
+    assert_eq!(p.core.secrets().get(crate::secrets::LLM_KEY), None);
     for bad in [r#"{"key":"two words"}"#, r#"{"key":""}"#] {
         assert_eq!(
             call(&p, "PUT", "/api/speech/key", &session, bad).await.0,

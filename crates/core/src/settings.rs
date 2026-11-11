@@ -9,6 +9,7 @@
 //!
 //! Secrets are not settings. A key is named by the environment variable that holds it (REQ-CFG-042).
 
+use crate::secrets::Secrets;
 use crate::store::JsonStore;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -56,9 +57,21 @@ impl Source {
 /// The environment lookup a validator may use to check that a key variable exists.
 type EnvRef<'a> = &'a dyn Fn(&str) -> Option<String>;
 
+/// What a validator may look at besides the value: the environment, and the keys pasted into the portal.
+pub struct Lookup<'a> {
+    env: EnvRef<'a>,
+    secrets: &'a Secrets,
+}
+
+impl std::fmt::Debug for Lookup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lookup").finish_non_exhaustive()
+    }
+}
+
 /// A validator that needs more than a range or a length: it gets the value and the environment lookup, and
 /// returns the value in the form that is stored.
-pub type Validator = fn(&Value, EnvRef<'_>) -> Result<Value, String>;
+pub type Validator = fn(&Value, &Lookup<'_>) -> Result<Value, String>;
 
 /// How a value is checked. Every row names one; the error texts are what the portal shows.
 #[derive(Debug, Clone, Copy)]
@@ -104,7 +117,7 @@ pub enum Check {
 }
 
 impl Check {
-    fn run(self, key: &str, v: &Value, env: EnvRef<'_>) -> Result<Value, String> {
+    fn run(self, key: &str, v: &Value, lk: &Lookup<'_>) -> Result<Value, String> {
         match self {
             Self::Text { what, max } => string(v, what, max).map(Value::from),
             Self::Whole { what, lo, hi } => whole(v, what, lo, hi),
@@ -124,7 +137,7 @@ impl Check {
                     .then(|| json!(t))
                     .ok_or_else(|| err.to_owned())
             }
-            Self::Custom(f) => f(v, env),
+            Self::Custom(f) => f(v, lk),
         }
     }
 }
@@ -554,10 +567,10 @@ pub fn minute_of_day(hhmm: &str) -> Option<u16> {
 
 /// Check one value and return it in the form that is stored. Empty text counts as "clear" and is
 /// handled by the caller before this is reached.
-fn normalize(key: &str, v: &Value, env: EnvRef<'_>) -> Result<Value, String> {
+fn normalize(key: &str, v: &Value, lk: &Lookup<'_>) -> Result<Value, String> {
     field(key).map_or_else(
         || Err(format!("`{key}` is not a setting.")),
-        |f| f.check.run(key, v, env),
+        |f| f.check.run(key, v, lk),
     )
 }
 
@@ -565,13 +578,13 @@ fn string(v: &Value, what: &str, max: usize) -> Result<String, String> {
     plain(&text(v, what)?, what, max)
 }
 
-fn zone_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn zone_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let z = string(v, "The time zone", 64)?;
     check_zone(&z)?;
     Ok(json!(z))
 }
 
-fn persona_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn persona_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let s = text(v, "The persona")?;
     if s.chars().count() > 4000 {
         return Err("The persona is too long: use at most 4000 characters.".into());
@@ -582,7 +595,7 @@ fn persona_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
     Ok(json!(s))
 }
 
-fn llm_url_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn llm_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let u = string(v, "The language model address", 300)?;
     if u.contains(char::is_whitespace) {
         return Err("The language model address cannot contain spaces.".into());
@@ -597,7 +610,7 @@ fn llm_url_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
     Ok(json!(u))
 }
 
-fn llm_model_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn llm_model_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let what = "The model name";
     let s = string(v, what, 200)?;
     if s.contains(char::is_whitespace) {
@@ -623,23 +636,23 @@ fn key_env_name(v: &Value, env: EnvRef<'_>, what: &str, pasted: bool) -> Result<
     Ok(json!(n))
 }
 
-fn llm_key_env_value(v: &Value, env: EnvRef<'_>) -> Result<Value, String> {
-    let pasted = crate::secrets::get(crate::secrets::LLM_KEY).is_some();
-    key_env_name(v, env, "The key variable name", pasted)
+fn llm_key_env_value(v: &Value, lk: &Lookup<'_>) -> Result<Value, String> {
+    let pasted = lk.secrets.get(crate::secrets::LLM_KEY).is_some();
+    key_env_name(v, lk.env, "The key variable name", pasted)
 }
 
-fn realtime_key_env_value(v: &Value, env: EnvRef<'_>) -> Result<Value, String> {
-    let pasted = crate::secrets::get(crate::secrets::REALTIME_KEY).is_some();
-    key_env_name(v, env, "The realtime key variable name", pasted)
+fn realtime_key_env_value(v: &Value, lk: &Lookup<'_>) -> Result<Value, String> {
+    let pasted = lk.secrets.get(crate::secrets::REALTIME_KEY).is_some();
+    key_env_name(v, lk.env, "The realtime key variable name", pasted)
 }
 
-fn realtime_enabled_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn realtime_enabled_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     Ok(json!(v.as_bool().ok_or(
         "Realtime voice must be on or off (true or false)."
     )?))
 }
 
-fn realtime_url_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn realtime_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let u = string(v, "The realtime voice address", 300)?;
     if u.contains(char::is_whitespace) || !(u.starts_with("wss://") || u.starts_with("ws://")) {
         return Err("The realtime voice address must start with wss:// (or ws:// on your own network), for example wss://api.openai.com/v1/realtime.".into());
@@ -647,7 +660,7 @@ fn realtime_url_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
     Ok(json!(u))
 }
 
-fn realtime_model_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn realtime_model_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let s = string(v, "The realtime model name", 100)?;
     if s.is_empty()
         || !s
@@ -659,12 +672,12 @@ fn realtime_model_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
     Ok(json!(s))
 }
 
-fn speech_provider_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn speech_provider_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let t = string(v, "The speech provider", 20)?;
     Ok(json!(crate::speech::Dialect::parse(&t)?.name()))
 }
 
-fn speech_language_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn speech_language_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let t = string(v, "The speech language", 12)?;
     if !t.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
         return Err("The speech language is a language code such as en, de or pt-BR.".into());
@@ -672,7 +685,7 @@ fn speech_language_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
     Ok(json!(t))
 }
 
-fn listen_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn listen_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let l = string(v, "The listen address", 64)?;
     let a: SocketAddr = l.parse().map_err(|_| {
         "The listen address must look like 127.0.0.1:3335 or 0.0.0.0:3335 (an IP address, a colon, and a port).".to_owned()
@@ -680,7 +693,7 @@ fn listen_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
     Ok(json!(a.to_string()))
 }
 
-fn public_url_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn public_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let u = string(v, "The public address", 200)?;
     if u.contains(char::is_whitespace) || !(u.starts_with("http://") || u.starts_with("https://")) {
         return Err(
@@ -690,7 +703,7 @@ fn public_url_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
     Ok(json!(u.trim_end_matches('/')))
 }
 
-fn quiet_time_value(v: &Value, _: EnvRef<'_>) -> Result<Value, String> {
+fn quiet_time_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let t = string(v, "The quiet hours time", 5)?;
     minute_of_day(&t).ok_or("Quiet hours times look like 22:00 or 07:30 (24-hour, local time).")?;
     Ok(json!(t))
@@ -753,6 +766,7 @@ pub struct SettingsState {
     speech_configured: bool,
     extra: Value,
     env: EnvFn,
+    secrets: Secrets,
 }
 
 impl std::fmt::Debug for SettingsState {
@@ -798,7 +812,11 @@ impl SettingsState {
                     ));
                 }
                 // The key variable may not be set yet (it is the service's job); only the shape matters here.
-                match normalize(&k, &v, &|_| Some("x".to_owned())) {
+                let lk = Lookup {
+                    env: &|_| Some("x".to_owned()),
+                    secrets: &Secrets::none(),
+                };
+                match normalize(&k, &v, &lk) {
                     Ok(v) => {
                         loaded.insert(k, v);
                     }
@@ -816,6 +834,7 @@ impl SettingsState {
             speech_configured,
             extra: Value::Null,
             env,
+            secrets: Secrets::none(),
         };
         let eff = st.effective();
         check(&eff, speech_configured).map_err(|e| {
@@ -843,9 +862,15 @@ impl SettingsState {
             speech_configured,
             extra: Value::Null,
             env,
+            secrets: Secrets::none(),
         };
         st.running = st.values_of(&st.effective());
         st
+    }
+
+    /// Where the keys pasted into the portal are looked up (the owning core hands over its own).
+    pub fn set_secrets(&mut self, secrets: Secrets) {
+        self.secrets = secrets;
     }
 
     /// Facts shown next to the settings but not changeable here (for example the speech provider's models).
@@ -923,7 +948,11 @@ impl SettingsState {
             if v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()) {
                 saved.remove(k);
             } else {
-                saved.insert(k.clone(), normalize(k, v, &*self.env)?);
+                let lk = Lookup {
+                    env: &*self.env,
+                    secrets: &self.secrets,
+                };
+                saved.insert(k.clone(), normalize(k, v, &lk)?);
             }
         }
         let before = std::mem::replace(&mut self.saved, saved);
@@ -967,7 +996,7 @@ impl SettingsState {
             .0
             .as_str()
             .unwrap_or(crate::rtvoice::DEFAULT_KEY_ENV);
-        if crate::secrets::get(crate::secrets::REALTIME_KEY).is_none()
+        if self.secrets.get(crate::secrets::REALTIME_KEY).is_none()
             && (self.env)(key_env).is_none_or(|v| v.is_empty())
         {
             return Err(format!(
@@ -1016,25 +1045,25 @@ impl SettingsState {
             "speech_configured": self.speech_configured,
             "llm": {
                 "configured": !eff["llm_url"].0.is_null() && !eff["llm_model"].0.is_null(),
-                "key_present": crate::secrets::get(crate::secrets::LLM_KEY).is_some()
+                "key_present": self.secrets.get(crate::secrets::LLM_KEY).is_some()
                     || (self.env)(key_env).is_some_and(|v| !v.is_empty()),
                 // The first and last few characters of the key pasted into the page, never the key.
-                "key_hint": crate::secrets::hint(crate::secrets::LLM_KEY),
+                "key_hint": self.secrets.hint(crate::secrets::LLM_KEY),
             },
             // Never the key: whether realtime voice can run, the provider, and the masked end of a pasted key.
             "realtime": {
-                "configured": rt.configured_with(&*self.env),
+                "configured": rt.configured_with(&self.secrets, &*self.env),
                 "built": crate::rtvoice::RtSettings::built(),
                 "provider": crate::rtvoice::PROVIDER,
-                "key_hint": crate::secrets::hint(crate::secrets::REALTIME_KEY),
+                "key_hint": self.secrets.hint(crate::secrets::REALTIME_KEY),
             },
             // The speech service key follows the same rules: only a masked hint, never the key (REQ-VOI-023).
             "speech": {
-                "key_present": crate::secrets::get(crate::secrets::SPEECH_KEY).is_some()
+                "key_present": self.secrets.get(crate::secrets::SPEECH_KEY).is_some()
                     || self.extra["speech_key_env"]
                         .as_str()
                         .is_some_and(|n| (self.env)(n).is_some_and(|v| !v.is_empty())),
-                "key_hint": crate::secrets::hint(crate::secrets::SPEECH_KEY),
+                "key_hint": self.secrets.hint(crate::secrets::SPEECH_KEY),
             },
         });
         if let (Some(o), Some(e)) = (out.as_object_mut(), self.extra.as_object()) {
@@ -1099,7 +1128,11 @@ mod tests {
         for f in FIELDS {
             assert!(seen.insert(f.key), "duplicate row {}", f.key);
             if let Some(d) = f.default.value() {
-                let got = normalize(f.key, &d, &|_| Some("x".to_owned()));
+                let lk = Lookup {
+                    env: &|_| Some("x".to_owned()),
+                    secrets: &Secrets::none(),
+                };
+                let got = normalize(f.key, &d, &lk);
                 assert_eq!(
                     got.as_ref(),
                     Ok(&d),

@@ -101,7 +101,8 @@ impl Core {
     }
 
     /// Hand over the settings state (all layers and the saved file). Nothing in it is a secret.
-    pub fn set_settings(&self, state: crate::settings::SettingsState) {
+    pub fn set_settings(&self, mut state: crate::settings::SettingsState) {
+        state.set_secrets(self.secrets.clone());
         *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);
     }
 

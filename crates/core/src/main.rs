@@ -85,7 +85,6 @@ async fn main() -> ExitCode {
             "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and              reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
         );
     }
-    clawdot_core::secrets::init(&args.data_dir);
     match clawdot_core::admin::migrate_legacy(&args.data_dir) {
         Ok(true) => println!(
             "clawdot: the old administrator token still works: sign in with it, then set a password in the web UI"
@@ -144,14 +143,14 @@ async fn main() -> ExitCode {
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
     if let Some(url) = &args.speech.url {
-        clawdot_core::speech::set_source(
+        core.set_speech_origin(clawdot_core::speech::SpeechOrigin::new(
             url,
             args.speech.key_env.as_deref(),
             args.speech.dialect(),
-        );
+        ));
     }
     #[cfg(feature = "tls")]
-    start_updates(&args, &applied);
+    start_updates(&args, &applied, &core);
     settings_state.set_extra(settings_extra(&args));
     core.set_settings(settings_state);
     if let Some(input) = args.voice_in.clone() {
@@ -159,6 +158,7 @@ async fn main() -> ExitCode {
             &mut brain,
             &mut hub,
             &args.speech,
+            core.secrets(),
             &input,
             args.voice_out.as_deref(),
         )

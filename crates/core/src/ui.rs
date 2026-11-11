@@ -236,8 +236,11 @@ fn hive_peers(core: &Core) -> Resp {
     #[cfg(feature = "hive")]
     {
         let name = core.setting("device_name");
-        if let Some(v) = crate::hive::peers_json(name.as_str().unwrap_or("ClawDot")) {
-            return json_reply(StatusCode::OK, &v);
+        if let Some(h) = core.hive() {
+            return json_reply(
+                StatusCode::OK,
+                &h.peers_json(name.as_str().unwrap_or("ClawDot")),
+            );
         }
     }
     let _ = core;
@@ -591,15 +594,15 @@ pub async fn handle(
         Id::ModelsAsk => models_with_key(core, body).await,
         Id::LlmKeySet => llm_key_set(core, body).await,
         Id::LlmKeyClear => llm_key_clear(core).await,
-        Id::SpeechKeySet => speech_key_set(body).await,
-        Id::SpeechKeyClear => speech_key_clear(),
-        Id::RealtimeKeySet => realtime_key_set(body).await,
-        Id::RealtimeKeyClear => realtime_key_clear(),
-        Id::Voices => voices().await,
+        Id::SpeechKeySet => speech_key_set(core, body).await,
+        Id::SpeechKeyClear => speech_key_clear(core),
+        Id::RealtimeKeySet => realtime_key_set(core, body).await,
+        Id::RealtimeKeyClear => realtime_key_clear(core),
+        Id::Voices => voices(core).await,
         Id::HivePeers => hive_peers(core),
-        Id::UpdateStatus => update_status(),
-        Id::UpdateCheck => update_check().await,
-        Id::UpdateApply => update_apply(body).await,
+        Id::UpdateStatus => update_status(core),
+        Id::UpdateCheck => update_check(core).await,
+        Id::UpdateApply => update_apply(core, body).await,
         Id::About => json_reply(
             StatusCode::OK,
             &json!({ "version": env!("CARGO_PKG_VERSION"), "build": crate::diag::build_info(), "changelog": CHANGELOG }),
@@ -686,11 +689,14 @@ async fn models_with_key(core: &Core, body: Incoming) -> Resp {
     }
     let key = match ask.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
         Some(k) => k.to_owned(),
-        None => crate::secrets::get(crate::secrets::LLM_KEY).unwrap_or_else(|| {
-            let s = core.ui_settings();
-            let var = s["fields"]["llm_key_env"]["value"].as_str().unwrap_or("");
-            std::env::var(var).unwrap_or_default()
-        }),
+        None => core
+            .secrets()
+            .get(crate::secrets::LLM_KEY)
+            .unwrap_or_else(|| {
+                let s = core.ui_settings();
+                let var = s["fields"]["llm_key_env"]["value"].as_str().unwrap_or("");
+                std::env::var(var).unwrap_or_default()
+            }),
     };
     fetch_models(url, &key).await
 }
@@ -707,7 +713,7 @@ async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
         Ok(k) => k,
         Err((s, m)) => return error(s, m),
     };
-    if let Err(m) = crate::secrets::set(crate::secrets::LLM_KEY, &k.key) {
+    if let Err(m) = core.secrets().set(crate::secrets::LLM_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
     }
     rekeyed(core).await
@@ -715,7 +721,7 @@ async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
 
 /// `DELETE /api/llm/key`: forget the stored key.
 async fn llm_key_clear(core: &Core) -> Resp {
-    if let Err(m) = crate::secrets::clear(crate::secrets::LLM_KEY) {
+    if let Err(m) = core.secrets().clear(crate::secrets::LLM_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
     rekeyed(core).await
@@ -726,29 +732,29 @@ async fn rekeyed(core: &Core) -> Resp {
     let _ = core.portal_call(Op::Rekey).await;
     json_reply(
         StatusCode::OK,
-        &json!({ "hint": crate::secrets::hint(crate::secrets::LLM_KEY) }),
+        &json!({ "hint": core.secrets().hint(crate::secrets::LLM_KEY) }),
     )
 }
 
 /// `PUT /api/speech/key`: keep the speech-service key pasted on the page. It is read on every request, so it applies at
 /// once (REQ-VOI-023). Only the masked hint comes back.
-async fn speech_key_set(body: Incoming) -> Resp {
+async fn speech_key_set(core: &Core, body: Incoming) -> Resp {
     let k = match read_json::<KeyBody>(body).await {
         Ok(k) => k,
         Err((s, m)) => return error(s, m),
     };
-    if let Err(m) = crate::secrets::set(crate::secrets::SPEECH_KEY, &k.key) {
+    if let Err(m) = core.secrets().set(crate::secrets::SPEECH_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
     }
     json_reply(
         StatusCode::OK,
-        &json!({ "hint": crate::secrets::hint(crate::secrets::SPEECH_KEY) }),
+        &json!({ "hint": core.secrets().hint(crate::secrets::SPEECH_KEY) }),
     )
 }
 
 /// `DELETE /api/speech/key`: forget the stored speech key (an environment variable, if named, applies again).
-fn speech_key_clear() -> Resp {
-    if let Err(m) = crate::secrets::clear(crate::secrets::SPEECH_KEY) {
+fn speech_key_clear(core: &Core) -> Resp {
+    if let Err(m) = core.secrets().clear(crate::secrets::SPEECH_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
     json_reply(StatusCode::OK, &json!({ "hint": null }))
@@ -756,23 +762,23 @@ fn speech_key_clear() -> Resp {
 
 /// `PUT /api/realtime/key`: keep the key for the realtime voice service. It is read at the start of each session, so
 /// it applies to the next one without a restart, and it wins over the environment variable.
-async fn realtime_key_set(body: Incoming) -> Resp {
+async fn realtime_key_set(core: &Core, body: Incoming) -> Resp {
     let k = match read_json::<KeyBody>(body).await {
         Ok(k) => k,
         Err((s, m)) => return error(s, m),
     };
-    if let Err(m) = crate::secrets::set(crate::secrets::REALTIME_KEY, &k.key) {
+    if let Err(m) = core.secrets().set(crate::secrets::REALTIME_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
     }
     json_reply(
         StatusCode::OK,
-        &json!({ "hint": crate::secrets::hint(crate::secrets::REALTIME_KEY) }),
+        &json!({ "hint": core.secrets().hint(crate::secrets::REALTIME_KEY) }),
     )
 }
 
 /// `DELETE /api/realtime/key`: forget the stored realtime key.
-fn realtime_key_clear() -> Resp {
-    if let Err(m) = crate::secrets::clear(crate::secrets::REALTIME_KEY) {
+fn realtime_key_clear(core: &Core) -> Resp {
+    if let Err(m) = core.secrets().clear(crate::secrets::REALTIME_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
     json_reply(StatusCode::OK, &json!({ "hint": null }))
@@ -808,8 +814,8 @@ const OPENAI_VOICES: [&str; 11] = [
 
 /// `GET /api/voices`: the voices the speech server offers (REQ-CFG-081): its own list when it has one, OpenAI's fixed
 /// set for OpenAI, otherwise a plain statement that the voice has to be typed.
-async fn voices() -> Resp {
-    let Some(src) = crate::speech::source() else {
+async fn voices(core: &Core) -> Resp {
+    let Some(src) = core.speech_source() else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
             "No speech provider is set up, so there are no voices to choose from.",
@@ -858,8 +864,8 @@ async fn voices() -> Resp {
 /// `GET /api/update`: whether a newer version exists, when it was last looked for, and whether it can be installed
 /// here (REQ-UPD-005).
 #[cfg(feature = "tls")]
-fn update_status() -> Resp {
-    match crate::update::global() {
+fn update_status(core: &Core) -> Resp {
+    match core.updater() {
         Some(u) => json_reply(StatusCode::OK, &u.status()),
         None => error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -869,7 +875,7 @@ fn update_status() -> Resp {
 }
 
 #[cfg(not(feature = "tls"))]
-fn update_status() -> Resp {
+fn update_status(_core: &Core) -> Resp {
     error(
         StatusCode::SERVICE_UNAVAILABLE,
         "This build does not check for updates.",
@@ -879,25 +885,25 @@ fn update_status() -> Resp {
 /// `POST /api/update/check`: look for a newer version now. The answer is the same document as `GET /api/update`;
 /// a failed look is in its `error` field, not an HTTP error.
 #[cfg(feature = "tls")]
-async fn update_check() -> Resp {
-    let Some(u) = crate::update::global() else {
-        return update_status();
+async fn update_check(core: &Core) -> Resp {
+    let Some(u) = core.updater() else {
+        return update_status(core);
     };
     let _ = u.check().await;
     json_reply(StatusCode::OK, &u.status())
 }
 
 #[cfg(not(feature = "tls"))]
-async fn update_check() -> Resp {
-    update_status()
+async fn update_check(core: &Core) -> Resp {
+    update_status(core)
 }
 
 /// `POST /api/update/apply` with `{"version": "1.2.3"}`: install the version the person confirmed (REQ-UPD-006).
 /// It starts at once and the page watches `GET /api/update`.
 #[cfg(feature = "tls")]
-async fn update_apply(body: Incoming) -> Resp {
-    let Some(u) = crate::update::global() else {
-        return update_status();
+async fn update_apply(core: &Core, body: Incoming) -> Resp {
+    let Some(u) = core.updater() else {
+        return update_status(core);
     };
     let v = match read_json::<Value>(body).await {
         Ok(v) => v,
@@ -913,8 +919,8 @@ async fn update_apply(body: Incoming) -> Resp {
 }
 
 #[cfg(not(feature = "tls"))]
-async fn update_apply(_body: Incoming) -> Resp {
-    update_status()
+async fn update_apply(core: &Core, _body: Incoming) -> Resp {
+    update_status(core)
 }
 
 /// `GET /api/settings/export`: the saved settings as a file the page offers for download (REQ-CFG-065).

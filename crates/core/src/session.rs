@@ -719,6 +719,7 @@ impl TurnCtl {
         match &self.clock {
             Some(c) => c.now(),
             None => {
+                // Deliberately process-wide: only the origin of a monotonic clock, not state of any core.
                 static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
                 let secs = START
                     .get_or_init(std::time::Instant::now)
