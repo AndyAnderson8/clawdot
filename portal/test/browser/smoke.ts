@@ -1312,6 +1312,14 @@ await step("Settings: numbers show their source and range, save only what change
   assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { agent_max_rounds: null });
   // quiet hours are on the Assistant tab
   await section("assistant", "Assistant");
+  // the spending limit is in dollars; there is no limit on how many requests are made
+  await eq(`T.q('#f-max_requests_per_day') === null`, true, "no cap on the number of requests");
+  await T(`set('#f-daily_spend_usd', '2.5')`);
+  await b.ev(`T.q('#f-daily_spend_usd').form.requestSubmit()`);
+  await b.until(`T.text('#msg') === 'Saved.'`, "the spending limit saved");
+  assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+    daily_spend_usd: 2.5,
+  });
   await eq(`T.q('#f-quiet_start').getAttribute('inputmode')`, "numeric", "quiet hours use a typed time");
   await eq(`T.q('#f-dry_run') === null`, true, "practice mode is a switch under Features");
   await setTime("f-quiet_start", "22:00");

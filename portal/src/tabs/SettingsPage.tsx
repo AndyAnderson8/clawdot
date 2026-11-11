@@ -195,6 +195,12 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
         specs={LIMITS}
       />
       <Group
+        title="Spending limit"
+        settings={s}
+        intro="Stops the assistant from using the language model once it has cost this much in a day. It starts again the next day."
+        specs={[{ key: "daily_spend_usd", kind: "number", hint: "In US dollars. Leave it empty for no limit." }]}
+      />
+      <Group
         title="Quiet hours"
         settings={s}
         intro={

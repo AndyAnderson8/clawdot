@@ -129,7 +129,7 @@ export const LABEL: Record<string, string> = {
   listen: "Portal address",
   public_url: "Address other programs use",
   max_requests_per_day: "Requests per day",
-  daily_spend_usd: "Daily spend limit",
+  daily_spend_usd: "Most to spend per day",
   board: "Board",
   agent_max_rounds: "Rounds per request",
   agent_max_tool_calls: "Tool calls per request",
