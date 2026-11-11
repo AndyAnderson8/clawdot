@@ -25,7 +25,7 @@ use hyper::{Method, Request};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -146,9 +146,9 @@ impl std::fmt::Debug for Server {
 }
 
 /// The connected MCP servers and the tools they offer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct McpClient {
-    servers: Vec<Server>,
+    servers: Vec<Arc<Server>>,
     tools: Vec<McpTool>,
     connector: Connector,
     /// Why each server could not be used, parallel to `servers` (`None` = connected).
@@ -266,12 +266,12 @@ impl McpClient {
                 })?),
                 None => None,
             };
-            servers.push(Server {
+            servers.push(Arc::new(Server {
                 endpoint: Endpoint::parse(&d.url)?,
                 def: d.clone(),
                 secret,
                 session: Mutex::new(None),
-            });
+            }));
         }
         let mut client = Self {
             servers,
@@ -519,12 +519,12 @@ impl McpClient {
             })?),
             None => None,
         };
-        self.servers.push(Server {
+        self.servers.push(Arc::new(Server {
             endpoint: Endpoint::parse(&def.url)?,
             def,
             secret,
             session: Mutex::new(None),
-        });
+        }));
         self.errors.push(None);
         let i = self.servers.len() - 1;
         match self.load(i).await {

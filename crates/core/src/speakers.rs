@@ -154,15 +154,17 @@ impl<Q> Speakers<Q> {
         }
     }
 
-    /// Hold something for a speaker whose turn is running. False when the speaker has no turn running or
-    /// is already holding [`MAX_WAITING`] things.
-    pub fn defer(&mut self, id: &str, item: Q) -> bool {
+    /// Hold something for a speaker whose turn is running.
+    ///
+    /// # Errors
+    /// The item itself, when the speaker has no turn running or is already holding [`MAX_WAITING`] things.
+    pub fn defer(&mut self, id: &str, item: Q) -> Result<(), Q> {
         match self.slots.get_mut(id) {
             Some(s) if s.conv.is_none() && s.waiting.len() < MAX_WAITING => {
                 s.waiting.push_back(item);
-                true
+                Ok(())
             }
-            _ => false,
+            _ => Err(item),
         }
     }
 
@@ -206,11 +208,15 @@ mod tests {
     fn a_busy_speaker_has_a_short_queue_and_gets_it_back_in_order() {
         let mut s = set(4);
         let c = take(&mut s, "console", 1);
-        assert!(s.defer("console", "one".into()));
-        assert!(s.defer("console", "two".into()));
-        assert!(!s.defer("console", "three".into()), "the queue is bounded");
+        assert!(s.defer("console", "one".into()).is_ok());
+        assert!(s.defer("console", "two".into()).is_ok());
+        assert_eq!(
+            s.defer("console", "three".into()),
+            Err("three".to_owned()),
+            "the queue is bounded"
+        );
         assert!(
-            !s.defer("nobody", "x".into()),
+            s.defer("nobody", "x".into()).is_err(),
             "nothing waits for a speaker with no turn"
         );
         s.checkin("console", c, 2);
@@ -257,7 +263,7 @@ mod tests {
     fn a_lost_conversation_is_replaced_and_the_queue_survives() {
         let mut s = set(4);
         let _gone = take(&mut s, "a", 1);
-        assert!(s.defer("a", "later".into()));
+        assert!(s.defer("a", "later".into()).is_ok());
         s.reset("a", 2);
         assert!(!s.is_busy("a"));
         assert_eq!(s.next_deferred("a").as_deref(), Some("later"));

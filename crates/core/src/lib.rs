@@ -51,6 +51,7 @@ pub mod speech;
 pub mod stopwatch;
 pub mod store;
 pub mod transport;
+pub mod turns;
 pub mod ui;
 #[cfg(feature = "tls")]
 pub mod update;
