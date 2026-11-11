@@ -947,7 +947,8 @@ paths:
         A JSON object of `key: value`; a `null` value removes the saved value so the default or the
         configuration file applies again. The whole change is checked first and applied all or nothing, so an
         export file's `settings` object can be sent as it is. Keys: `device_name`, `zone`, `persona`, `llm_url`,
-        `llm_model`, `llm_key_env`, `voice`, `speech_language`, `listen`, `public_url`, `daily_spend_usd`,
+        `llm_model`, `llm_key_env`, `voice`, `speech_language`, `speech_provider` (`openai`, `elevenlabs` or
+        `deepgram`; needs a restart), `listen`, `public_url`, `daily_spend_usd`,
         `board`, `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`,
         `plan_speech`, `progress_speech`, `notes`, `update_check`, `max_actions_per_day`, `max_costly_per_day`,
         `dry_run`, `quiet_start`, `quiet_end`. Values that apply live take effect at once; the rest are listed
@@ -1090,14 +1091,52 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /api/speech/key:
+    put:
+      tags: [Settings]
+      summary: Keep the speech-service key pasted on the page
+      description: |
+        Same rules as `/api/llm/key`, for the key of the speech service (ElevenLabs, Deepgram, or an OpenAI-style
+        server that needs one). Stored on the device (write-only); it wins over the environment variable and applies
+        to the next request without a restart. The response never contains it, only the masked hint.
+      operationId: setSpeechKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              additionalProperties: false
+              properties:
+                key: { type: string, writeOnly: true }
+      responses:
+        "200": { $ref: "#/components/responses/KeyHint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      tags: [Settings]
+      summary: Forget the stored speech key
+      operationId: clearSpeechKey
+      responses:
+        "200": { $ref: "#/components/responses/KeyHint" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /api/voices:
     get:
       tags: [Settings]
-      summary: The voices the speech server offers
+      summary: The voices the speech provider offers
       description: |
-        `source` is `server` when the speech server listed them, `builtin` for OpenAI's fixed set. `503` when no
-        speech provider is set up; `502` when the server shares no list (the message says to type a voice name).
-        Use a name from here as `voice` in `POST /api/speak`.
+        `voices` is the plain list of values to send as `voice` (for ElevenLabs, voice ids, so a cloned voice is
+        listed by its id). `details` repeats each with the `label` to show (a cloned voice shows the name it was
+        given) and a `category` where the service says (`premade`, `cloned`, `professional`, ...). `source` is
+        `server` when the provider listed them, `builtin` for a fixed set kept here (OpenAI, Deepgram). `503` when no
+        speech provider is set up; `502` when the provider shares no list or could not be reached (the message says
+        what to do); `401` when the speech provider did not accept the key or none is set. Use a value from
+        `voices` as `voice` in `POST /api/speak`.
       operationId: listVoices
       responses:
         "200":
@@ -1111,6 +1150,15 @@ paths:
                   voices:
                     type: array
                     items: { type: string }
+                  details:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, label]
+                      properties:
+                        id: { type: string }
+                        label: { type: string }
+                        category: { type: [string, "null"] }
                   source: { type: string, enum: [server, builtin] }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1855,10 +1903,22 @@ components:
             key_hint:
               type: [string, "null"]
               description: The first and last few characters of the pasted key. Never the key.
+        speech:
+          type: object
+          description: The speech-service key, with the same rules as the language-model one.
+          properties:
+            key_present: { type: boolean, description: "A pasted key, or the named environment variable, is in place." }
+            key_hint:
+              type: [string, "null"]
+              description: The first and last few characters of the pasted speech key. Never the key.
+        speech_key_env:
+          type: [string, "null"]
+          description: The NAME of the environment variable the speech key is read from when none is pasted.
         speech_configured: { type: boolean }
         voice_info:
           type: object
           properties:
+            dialect: { type: string, enum: [openai, elevenlabs, deepgram], description: "The speech provider in use (`speech_provider`)." }
             language: { type: string }
             stt_model: { type: string }
             tts_model: { type: string }

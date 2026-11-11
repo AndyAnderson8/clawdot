@@ -80,6 +80,9 @@ pub struct UpdatesConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechConfig {
+    /// Whose wire format to speak: `openai` (the default, and every OpenAI-compatible server), `elevenlabs` or
+    /// `deepgram`. The last two have a default `url`, models and voice (REQ-VOI-021).
+    pub provider: Option<String>,
     /// Base URL, for example `https://api.openai.com/v1`. Plain `http://` only for local hosts.
     pub url: Option<String>,
     /// Name of the environment variable that holds the API key.
@@ -94,6 +97,32 @@ pub struct SpeechConfig {
     pub language: Option<String>,
     /// Sample rate of the provider's raw PCM output (default 24000).
     pub tts_sample_rate: Option<u32>,
+}
+
+impl SpeechConfig {
+    /// The dialect named by `provider` (the OpenAI style when unset or unknown; `validate` rejects unknown names).
+    #[must_use]
+    pub fn dialect(&self) -> crate::speech::Dialect {
+        self.provider
+            .as_deref()
+            .and_then(|p| crate::speech::Dialect::parse(p).ok())
+            .unwrap_or_default()
+    }
+
+    /// Fill what the chosen service already knows: its address, models and voice. Settings the person gave win.
+    pub fn apply_provider_defaults(&mut self) {
+        let d = self.dialect();
+        let fill = |slot: &mut Option<String>, v: Option<&str>| {
+            if slot.is_none() {
+                *slot = v.map(str::to_owned);
+            }
+        };
+        fill(&mut self.url, d.default_url());
+        fill(&mut self.stt_model, d.default_stt_model());
+        fill(&mut self.tts_model, d.default_tts_model());
+        fill(&mut self.voice, d.default_voice());
+        fill(&mut self.key_env, d.default_key_env());
+    }
 }
 
 /// The satellite server: where speakers and other audio devices connect.
@@ -234,7 +263,8 @@ impl Config {
             let addr: SocketAddr = l.parse().map_err(|e| {
                 format!("config: `satellite.listen` is not an address like 0.0.0.0:10400: {e}")
             })?;
-            if self.speech.url.is_none() {
+            if self.speech.url.is_none() && self.speech.dialect() == crate::speech::Dialect::OpenAi
+            {
                 return Err("config: `satellite.listen` needs the `speech` section".into());
             }
             if !addr.ip().is_loopback() && self.satellite.token_env.is_none() {
@@ -248,7 +278,10 @@ impl Config {
         #[cfg(feature = "esphome-satellite")]
         {
             self.esphome.validate()?;
-            if !self.esphome.is_empty() && self.speech.url.is_none() {
+            if !self.esphome.is_empty()
+                && self.speech.url.is_none()
+                && self.speech.dialect() == crate::speech::Dialect::OpenAi
+            {
                 return Err("config: `esphome` needs the `speech` section".into());
             }
         }
@@ -264,7 +297,17 @@ impl Config {
             );
         }
         let sp = &self.speech;
-        if sp.url.is_some() {
+        let dialect = sp
+            .provider
+            .as_deref()
+            .map_or(
+                Ok(crate::speech::Dialect::OpenAi),
+                crate::speech::Dialect::parse,
+            )
+            .map_err(|e| format!("config: `speech.provider`: {e}"))?;
+        if dialect != crate::speech::Dialect::OpenAi {
+            // The other services have their own address, models and voice; none of the rest is required.
+        } else if sp.url.is_some() {
             for (key, v) in [
                 ("stt_model", &sp.stt_model),
                 ("tts_model", &sp.tts_model),
@@ -367,6 +410,45 @@ mod tests {
         let speech = r#""speech": {"url": "https://x/v1", "stt_model": "w", "tts_model": "t", "voice": "v"}"#;
         let c = Config::parse(&format!("{{{dev}, {speech}}}")).unwrap();
         assert_eq!(c.esphome.devices[0].host_port(), "h:6053");
+    }
+
+    // REQ-VOI-021
+    #[test]
+    fn the_speech_provider_is_checked_and_brings_its_own_defaults() {
+        use crate::speech::Dialect;
+        // Unchanged: the OpenAI style still needs its address, models and voice.
+        let e =
+            Config::parse(r#"{"speech": {"provider": "openai", "stt_model": "w"}}"#).unwrap_err();
+        assert!(e.contains("speech.url"), "{e}");
+        let e = Config::parse(r#"{"speech": {"provider": "acme"}}"#).unwrap_err();
+        assert!(
+            e.contains("speech.provider") && e.contains("elevenlabs"),
+            "{e}"
+        );
+        // The others need nothing else.
+        let mut c = Config::parse(r#"{"speech": {"provider": "elevenlabs"}}"#).unwrap();
+        assert_eq!(c.speech.dialect(), Dialect::ElevenLabs);
+        c.speech.apply_provider_defaults();
+        assert_eq!(c.speech.url.as_deref(), Some("https://api.elevenlabs.io"));
+        assert_eq!(c.speech.key_env.as_deref(), Some("ELEVENLABS_API_KEY"));
+        assert!(
+            c.speech.voice.is_some()
+                && c.speech.tts_model.is_some()
+                && c.speech.stt_model.is_some()
+        );
+        // What the person set is kept.
+        let mut c = Config::parse(
+            r#"{"speech": {"provider": "deepgram", "voice": "aura-2-luna-en", "key_env": "MY_DG"}}"#,
+        )
+        .unwrap();
+        c.speech.apply_provider_defaults();
+        assert_eq!(c.speech.voice.as_deref(), Some("aura-2-luna-en"));
+        assert_eq!(c.speech.key_env.as_deref(), Some("MY_DG"));
+        assert_eq!(c.speech.stt_model.as_deref(), Some("nova-3"));
+        // Not set: nothing is filled in for the OpenAI style.
+        let mut c = Config::parse("{}").unwrap();
+        c.speech.apply_provider_defaults();
+        assert!(c.speech.url.is_none() && c.speech.voice.is_none());
     }
 
     #[test]
