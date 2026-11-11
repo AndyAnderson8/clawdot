@@ -92,7 +92,7 @@ pub struct Args {
     pub esphome: EsphomeConfig,
     /// Hive discovery mode (`--hive-discovery`); `None` leaves the hive unstarted.
     #[cfg(feature = "hive")]
-    pub hive: Option<clawdot_core::hive::Mode>,
+    pub hive: Option<crate::hive::Mode>,
     #[cfg(feature = "hive")]
     pub hive_publish_name: bool,
     pub voice_in: Option<PathBuf>,
@@ -166,7 +166,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             #[cfg(feature = "hive")]
             "--hive-discovery" => {
                 a.hive = Some(
-                    clawdot_core::hive::Mode::parse(&value("--hive-discovery")?)
+                    crate::hive::Mode::parse(&value("--hive-discovery")?)
                         .map_err(|e| format!("bad --hive-discovery: {e}"))?,
                 );
             }

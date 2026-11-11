@@ -41,6 +41,7 @@ pub mod notes;
 #[cfg(feature = "realtime")]
 pub mod realtime;
 pub mod rtvoice;
+pub mod runtime;
 pub mod satellite;
 pub mod say;
 pub mod sched;
