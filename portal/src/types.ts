@@ -28,6 +28,7 @@ export interface HardwareInfo {
 
 export interface Status {
   hardware?: HardwareInfo;
+  realtime?: { configured?: boolean; active?: boolean; last_error?: string | null };
   clock_valid?: boolean;
   satellites?: number;
   llm?: { configured?: boolean; model?: string | null };
@@ -156,6 +157,10 @@ export interface Settings {
   fields: Record<string, SettingField>;
   restart_needed?: string[];
   llm?: { key_present?: boolean; key_hint?: string | null };
+  /** The speech service's key: whether one is in place, and the masked end of a pasted one. Never the key. */
+  speech?: { key_present?: boolean; key_hint?: string | null };
+  /** Realtime voice: whether it can run, whether this build has it, and the masked end of a pasted key. */
+  realtime?: { configured?: boolean; built?: boolean; provider?: string; key_hint?: string | null };
   voice_info?: { language?: string; stt_model?: string; tts_model?: string; provider?: string | null };
   speech_configured?: boolean;
   speakers_listen?: string;

@@ -1075,7 +1075,7 @@ await step(
     await eq(`T.text('#speechprovider').includes('No speech provider is set up')`, true, "and the page says why");
     await open("open", "#/settings/voice", { speechOn: true });
     await b.until(`!!T.q('#f-speech_language') && !T.q('#f-speech_language').disabled`, "the language box");
-    await eq(`T.text('#speechprovider dd')`, "speech.example", "the speech provider is shown");
+    await eq(`T.text('#speechprovider dd')`, "speech.example", "the speech service in use is shown");
     await eq(`T.q('#f-speech_language').tagName`, "SELECT", "a dropdown, not a code to type");
     await eq(
       `T.all('#f-speech_language option').some((o) => o.textContent === 'English (en)') && T.all('#f-speech_language option').some((o) => o.textContent === 'German (de)')`,
@@ -1097,8 +1097,8 @@ await step(
     await b.until(`T.q('#f-voice')?.tagName === 'SELECT'`, "the voice list");
     await eq(
       `T.all('#f-voice option').map((o) => o.textContent).filter((t) => t !== 'Choose a voice')`,
-      ["alloy", "nova", "onyx"],
-      "the voices on offer",
+      ["alloy", "Nova (my voice)", "onyx"],
+      "the voices on offer, a cloned one by the name it was given",
     );
     await eq(`T.q('#hearvoice').disabled`, true, "nothing to hear until a voice is chosen");
     await T(`set('#f-voice', 'nova')`);
@@ -1118,6 +1118,56 @@ await step(
       voice: "nova",
     });
     await eq(`T.q('#sayform') !== null`, true, "the speaker test is on this page, not among the settings");
+    await eq(`T.q('#f-voice option[value="nova"]').textContent`, "Nova (my voice)", "its id is what is sent");
+
+    // The speech service is a choice, and its key is pasted once and shown only as its ends.
+    await eq(
+      `T.all('#f-speech_provider option').map((o) => o.value)`,
+      ["openai", "elevenlabs", "deepgram"],
+      "three kinds of speech service",
+    );
+    await T(`set('#f-speech_provider', 'elevenlabs')`);
+    await b.ev(`T.q('#f-speech_provider').form.requestSubmit()`);
+    await b.until(`T.text('#msg').startsWith('Saved')`, "the choice is saved");
+    assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+      speech_provider: "elevenlabs",
+    });
+    await b.until(`!!T.q('#speechkey')`, "a box for the key");
+    await T(`set('#speechkey', 'two words')`);
+    await T(`click('#speechsave')`);
+    await b.until(
+      `T.text('#speechmsg').startsWith('A key is one line')`,
+      "a key that cannot be one is refused, with why",
+    );
+    await T(`set('#speechkey', 'xi-abcdefghijklmnop9876')`);
+    await T(`click('#speechsave')`);
+    await b.until(`T.text('#speechhint') === 'xi-abc…9876'`, "kept, and shown only as its ends");
+    await eq(`document.body.innerText.includes('defghijklmnop')`, false, "never the key itself");
+
+    // Realtime voice: its settings, its key and a plain line about whether it can run.
+    await eq(`T.text('#realtimestate').startsWith('Not ready')`, true, "says it is not ready, and what it needs");
+    await T(`set('#realtimekey', 'sk-realtime-abcdefgh1234')`);
+    await T(`click('#realtimesave')`);
+    await b.until(`T.text('#realtimehint') === 'sk-rea…1234'`, "the realtime key is kept the same way");
+    assert.ok(
+      mock.log.some((l) => l.method === "PUT" && l.path === "/api/realtime/key"),
+      "through its own call",
+    );
+    await T(`set('#f-realtime_enabled', 'true')`);
+    await T(`set('#f-realtime_url', 'wss://rt.example/v1/realtime')`);
+    await T(`set('#f-realtime_model', 'rt-model')`);
+    await b.ev(`T.q('#f-realtime_enabled').form.requestSubmit()`);
+    await b.until(`T.text('#msg').startsWith('Saved')`, "realtime settings saved");
+    assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+      realtime_enabled: true,
+      realtime_url: "wss://rt.example/v1/realtime",
+      realtime_model: "rt-model",
+    });
+    // A build without it says so and offers nothing that would do nothing.
+    await open("open", "#/settings/voice", { speechOn: true, realtimeBuilt: false });
+    await b.until(`!!T.q('#realtimestate')`, "the realtime card");
+    await eq(`T.text('#realtimestate')`, "This build of ClawDot does not include realtime voice.", "says so");
+    await eq(`T.q('#f-realtime_enabled').disabled && T.q('#realtimekey').disabled`, true, "and its controls are off");
 
     // Time zones show their offset, west to east.
     await open("open", "#/settings/general");

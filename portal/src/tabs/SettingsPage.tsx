@@ -17,6 +17,7 @@ import { Skills } from "./Skills.tsx";
 import { HardwareCard } from "./HardwareCard.tsx";
 import { Lights } from "./Lights.tsx";
 import { Planned } from "./Planned.tsx";
+import { SavedKey } from "./SavedKey.tsx";
 import { Themes } from "./Themes.tsx";
 import { MediaSettings } from "./Media.tsx";
 import { Tools } from "./Tools.tsx";
@@ -312,33 +313,68 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
 }
 
 /** Speech: the provider (shown, not yet changeable here), the voice and language, and a way to hear it. */
+const SPEECH_SERVICES: [string, string][] = [
+  ["openai", "An OpenAI-style speech server"],
+  ["elevenlabs", "ElevenLabs"],
+  ["deepgram", "Deepgram"],
+];
+
 function VoiceSection(props: { s: SettingsData }): JSX.Element {
   const s = props.s;
   const vi = s.voice_info ?? {};
+  const live = useApp().status?.realtime;
+  const service = String(s.fields["speech_provider"]?.value ?? "openai");
+  const own = service !== "openai";
+  const rt = s.realtime;
+  const noRealtime = rt?.built === false;
   return (
     <>
-      <section class="card" id="speechprovider">
-        <h3>Speech provider</h3>
-        <p class="mut">
-          The service that turns what you say into text and the assistant&apos;s words into speech. It is chosen when
-          ClawDot is installed. Changing it from this page is not available yet.
-        </p>
-        {s.speech_configured ? (
-          <dl class="kv">
-            <dt>Provider</dt>
-            <dd>{vi.provider || "Not known"}</dd>
-            <dt>Hears you with</dt>
-            <dd>{vi.stt_model || "Not set"}</dd>
-            <dt>Speaks with</dt>
-            <dd>{vi.tts_model || "Not set"}</dd>
-          </dl>
-        ) : (
-          <p class="empty">
-            No speech provider is set up, so the speaker cannot hear you or talk yet. Whoever installed ClawDot can add
-            one; the local speech guide shows a free one.
-          </p>
+      <Group
+        title="Speech provider"
+        settings={s}
+        intro="The service that turns what you say into text and the assistant's words into speech. Changing it needs a restart, and a new voice, because voices do not carry from one service to another."
+        specs={[
+          {
+            key: "speech_provider",
+            kind: "choice",
+            options: SPEECH_SERVICES,
+            hint: "ElevenLabs and Deepgram need only a key. An OpenAI-style server is set up where ClawDot is installed.",
+          },
+        ]}
+        below={() => (
+          <>
+            <SavedKey
+              id="speech"
+              label="Key"
+              what={
+                own
+                  ? "From your account with the service. It is kept on this device; only its first and last few characters are shown."
+                  : "Only if your speech server asks for one. It is kept on this device; only its first and last few characters are shown."
+              }
+              path="/api/speech/key"
+              hint={s.speech?.key_hint}
+              fromEnv={s.speech?.key_present === true}
+            />
+            <div id="speechprovider">
+              {s.speech_configured || own ? (
+                <dl class="kv">
+                  <dt>In use now</dt>
+                  <dd>{vi.provider || "Not known"}</dd>
+                  <dt>Hears you with</dt>
+                  <dd>{vi.stt_model || "The service's usual model"}</dd>
+                  <dt>Speaks with</dt>
+                  <dd>{vi.tts_model || "The service's usual model"}</dd>
+                </dl>
+              ) : (
+                <p class="empty">
+                  No speech provider is set up, so the speaker cannot hear you or talk yet. Choose ElevenLabs or
+                  Deepgram above and add a key, or follow the local speech guide for a free one.
+                </p>
+              )}
+            </div>
+          </>
         )}
-      </section>
+      />
       <Group
         title="Voice and language"
         settings={s}
@@ -360,6 +396,67 @@ function VoiceSection(props: { s: SettingsData }): JSX.Element {
         ]}
       />
       <TestSpeaker />
+      <Group
+        title="Realtime voice"
+        settings={s}
+        intro="An optional service that hears you and answers in one step, which is faster than listening, thinking and speaking in turn. It is billed by the minute of audio, and your spending limit counts it. Tools still ask you first. Off unless you turn it on."
+        specs={[
+          { key: "realtime_enabled", kind: "bool", off: noRealtime },
+          {
+            key: "realtime_url",
+            kind: "text",
+            off: noRealtime,
+            hint: "It starts with wss://. For example wss://api.openai.com/v1/realtime.",
+          },
+          { key: "realtime_model", kind: "text", off: noRealtime, hint: "The realtime model's name." },
+          { key: "realtime_voice", kind: "text", off: noRealtime, hint: "A voice name the service offers." },
+          {
+            key: "realtime_usd_per_min_in",
+            kind: "money",
+            off: noRealtime,
+            placeholder: "0.03",
+            hint: "What the service charges for a minute of your speech. Used to count spending; check it against your bill.",
+          },
+          {
+            key: "realtime_usd_per_min_out",
+            kind: "money",
+            off: noRealtime,
+            placeholder: "0.10",
+            hint: "What it charges for a minute of its speech.",
+          },
+          {
+            key: "realtime_max_session_secs",
+            kind: "number",
+            min: 10,
+            max: 3600,
+            off: noRealtime,
+            hint: "In seconds. A conversation ends by itself after this long. 10 to 3600.",
+          },
+        ]}
+        below={() => (
+          <>
+            <SavedKey
+              id="realtime"
+              label="Key"
+              what="From your account with the realtime service. It is kept on this device; only its first and last few characters are shown."
+              path="/api/realtime/key"
+              hint={rt?.key_hint}
+              off={noRealtime ? "Not available in this build" : undefined}
+            />
+            <p class="mut" id="realtimestate" role="status">
+              {noRealtime
+                ? "This build of ClawDot does not include realtime voice."
+                : live?.active
+                  ? "A realtime conversation is going on now."
+                  : live?.last_error
+                    ? "The last realtime conversation failed: " + live.last_error
+                    : rt?.configured
+                      ? "Ready. The next conversation after the wake word uses it."
+                      : "Not ready: it needs to be turned on, with an address, a model and a key."}
+            </p>
+          </>
+        )}
+      />
     </>
   );
 }

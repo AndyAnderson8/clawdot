@@ -122,6 +122,14 @@ export const LABEL: Record<string, string> = {
   llm_url: "Address",
   llm_model: "Model",
   speech_language: "Language you speak",
+  speech_provider: "Service",
+  realtime_enabled: "Use realtime voice",
+  realtime_url: "Address",
+  realtime_model: "Model",
+  realtime_voice: "Voice",
+  realtime_usd_per_min_in: "Cost per minute you speak",
+  realtime_usd_per_min_out: "Cost per minute it speaks",
+  realtime_max_session_secs: "Longest conversation",
   llm_key_env: "Key variable",
   voice: "Voice",
   listen: "Portal address",
@@ -149,7 +157,7 @@ export const FROM: Record<string, string> = {
 };
 
 export type SettingKind =
-  "text" | "zone" | "area" | "board" | "number" | "money" | "bool" | "time" | "language" | "voice" | "model";
+  "text" | "zone" | "area" | "board" | "number" | "money" | "choice" | "bool" | "time" | "language" | "voice" | "model";
 export interface SettingSpec {
   key: string;
   kind: SettingKind;
@@ -162,6 +170,10 @@ export interface SettingSpec {
   /** For a whole number: the range the device accepts (shown to the browser as min and max). */
   min?: number;
   max?: number;
+  /** For a choice: each value and the words shown for it. */
+  options?: [string, string][];
+  /** Shown in an empty box. */
+  placeholder?: string;
 }
 
 export function labelOf(key: string): string {

@@ -111,6 +111,14 @@ function seed(mode: string): Json {
       llm_key_env: { value: "API_KEY", source: "file", live: true },
       voice: { value: null, source: "default", live: true },
       speech_language: { value: null, source: "default", live: true },
+      speech_provider: { value: "openai", source: "default", live: false },
+      realtime_enabled: { value: false, source: "default", live: true },
+      realtime_url: { value: null, source: "default", live: true },
+      realtime_model: { value: null, source: "default", live: true },
+      realtime_voice: { value: "alloy", source: "default", live: true },
+      realtime_usd_per_min_in: { value: 0.03, source: "default", live: true },
+      realtime_usd_per_min_out: { value: 0.1, source: "default", live: true },
+      realtime_max_session_secs: { value: 300, source: "default", live: true },
       listen: { value: "0.0.0.0:3335", source: "flag", live: false, ignored: true },
       public_url: { value: null, source: "default", live: true },
       daily_spend_usd: { value: null, source: "default", live: true },
@@ -263,6 +271,13 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
     fields: st["settings"],
     restart_needed: st["restart"],
     llm: { key_present: !!st["keyHint"], key_hint: st["keyHint"] || null },
+    speech: { key_present: !!st["speechKey"], key_hint: st["speechKey"] || null },
+    realtime: {
+      configured: !!st["realtimeKey"],
+      built: st["realtimeBuilt"] !== false,
+      provider: "openai",
+      key_hint: st["realtimeKey"] || null,
+    },
     voice_info: { language: "en", stt_model: "whisper", tts_model: "voice-1", provider: "speech.example" },
     speech_configured: !!st["speechOn"],
     speakers_listen: "0.0.0.0:3336",
@@ -418,13 +433,36 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         st["keyHint"] = k.slice(0, 6) + "…" + k.slice(-4);
         return send(200, { hint: st["keyHint"] });
       }
+      for (const [route, slot] of [
+        ["/api/speech/key", "speechKey"],
+        ["/api/realtime/key", "realtimeKey"],
+      ] as const) {
+        if (m === "PUT" && path === route) {
+          const k = String(body.key ?? "");
+          if (/\s/.test(k)) return err(400, "A key is one line of letters, digits and dashes, with no spaces.");
+          st[slot] = k.slice(0, 6) + "…" + k.slice(-4);
+          return send(200, { hint: st[slot] });
+        }
+        if (m === "DELETE" && path === route) {
+          st[slot] = "";
+          return send(200, { hint: null });
+        }
+      }
       if (m === "DELETE" && path === "/api/llm/key") {
         st["keyHint"] = "";
         return send(200, { hint: null });
       }
       if (m === "GET" && path === "/api/voices") {
         if (!st["speechOn"]) return err(503, "No speech provider is set up, so there are no voices to choose from.");
-        return send(200, { voices: ["alloy", "nova", "onyx"], source: "builtin" });
+        return send(200, {
+          voices: ["alloy", "nova", "onyx"],
+          details: [
+            { id: "alloy", label: "alloy", category: null },
+            { id: "nova", label: "Nova (my voice)", category: "cloned" },
+            { id: "onyx", label: "onyx", category: null },
+          ],
+          source: "builtin",
+        });
       }
       if (m === "GET" && path === "/api/update") return send(200, st["update"]);
       if (m === "POST" && path === "/api/update/check") {
