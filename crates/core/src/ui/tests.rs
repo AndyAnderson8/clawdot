@@ -858,6 +858,15 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
     let (_, a) = call(&p, "GET", "/api/about", &session, "").await;
     assert_eq!(a["build"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(a["build"]["features"].is_array());
+    // The release version is a separate field from the commit, so the updater's comparison is untouched.
+    assert_eq!(a["version"], env!("CARGO_PKG_VERSION"));
+    assert!(a["build"]["commit"].as_str().is_some_and(|c| !c.is_empty()));
+    assert!(a["build"]["dirty"].is_boolean());
+    assert!(
+        a["build"]["id"]
+            .as_str()
+            .is_some_and(|i| i.starts_with(env!("CARGO_PKG_VERSION")))
+    );
 }
 
 // ----- forgotten password: local reset window (REQ-CFG-069); there is no recovery code -----

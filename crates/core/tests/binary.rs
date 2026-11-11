@@ -9,6 +9,21 @@ use std::time::{Duration, Instant};
 
 const STOP: &str = r#"{"session_id":"s1","cwd":"/home/dev/clawdot","hook_event_name":"Stop","last_assistant_message":"Done."}"#;
 
+// The updater runs `--version` on a new program and requires the release version in the text (REQ-UPD-007); the
+// commit follows it.
+#[test]
+fn version_prints_the_release_version_then_the_commit() {
+    let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let said = String::from_utf8(out.stdout).unwrap();
+    let prefix = format!("clawdot {} (", env!("CARGO_PKG_VERSION"));
+    assert!(said.starts_with(&prefix), "{said}");
+    assert!(said.trim_end().ends_with(')'), "{said}");
+}
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
