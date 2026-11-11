@@ -236,8 +236,11 @@ fn hive_peers(core: &Core) -> Resp {
     #[cfg(feature = "hive")]
     {
         let name = core.setting("device_name");
-        if let Some(v) = crate::hive::peers_json(name.as_str().unwrap_or("ClawDot")) {
-            return json_reply(StatusCode::OK, &v);
+        if let Some(h) = core.hive() {
+            return json_reply(
+                StatusCode::OK,
+                &h.peers_json(name.as_str().unwrap_or("ClawDot")),
+            );
         }
     }
     let _ = core;

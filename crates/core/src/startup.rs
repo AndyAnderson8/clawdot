@@ -313,8 +313,12 @@ pub fn start_hive(args: &Args, core: &Core) {
                 .unwrap_or("ClawDot")
                 .to_owned(),
         };
-        if let Err(e) = crate::hive::start(&args.data_dir, &opts) {
+        let started = crate::hive::start(&args.data_dir, &opts);
+        if let Some(e) = started.problem {
             eprintln!("clawdot: hive: {e}");
+        }
+        if let Some(h) = started.hive {
+            core.set_hive(h);
         }
     }
 }

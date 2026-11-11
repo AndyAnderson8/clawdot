@@ -1058,7 +1058,9 @@ async fn hive_peers_is_administrator_only_and_holds_no_secret() {
             publish_name: false,
             name: String::new(),
         };
-        crate::hive::start(&dir.0, &opts).unwrap();
+        let started = crate::hive::start(&dir.0, &opts);
+        assert_eq!(started.problem, None);
+        p.core.set_hive(started.hive.unwrap());
         let (s, v) = call(&p, "GET", "/api/hive/peers", &session, "").await;
         assert_eq!(s, 200, "{v}");
         assert_eq!(v["self"]["name"], "Test Dot");

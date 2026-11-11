@@ -222,6 +222,8 @@ pub struct Core {
     secrets: crate::secrets::Secrets,
     speech_handles: crate::speechio::SpeechHandles,
     speech_origin: std::sync::OnceLock<crate::speech::SpeechOrigin>,
+    #[cfg(feature = "hive")]
+    hive: std::sync::OnceLock<crate::hive::Hive>,
 }
 
 impl std::fmt::Debug for Core {
@@ -325,7 +327,22 @@ impl Core {
             secrets,
             speech_handles: crate::speechio::SpeechHandles::default(),
             speech_origin: std::sync::OnceLock::new(),
+            #[cfg(feature = "hive")]
+            hive: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Keep the started hive for the life of this core (set once; a later call is ignored).
+    #[cfg(feature = "hive")]
+    pub fn set_hive(&self, hive: crate::hive::Hive) {
+        let _ = self.hive.set(hive);
+    }
+
+    /// The hive, when it was started.
+    #[cfg(feature = "hive")]
+    #[must_use]
+    pub fn hive(&self) -> Option<&crate::hive::Hive> {
+        self.hive.get()
     }
 
     /// The speech clients' voice and language registry, owned by this core.
