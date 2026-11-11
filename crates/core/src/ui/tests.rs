@@ -395,6 +395,8 @@ async fn the_portal_manages_tools_connections_and_skills() {
 }
 
 // REQ-CFG-037, REQ-CFG-038, REQ-CFG-039, REQ-CFG-040, REQ-CFG-041
+// Uses named time zones, which only a build with the time zone database accepts.
+#[cfg(feature = "tz")]
 #[tokio::test]
 async fn settings_are_saved_validated_and_need_the_administrator() {
     let p = start(true).await;
