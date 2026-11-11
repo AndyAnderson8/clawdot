@@ -80,7 +80,7 @@ export function toolDefinition(f: ToolForm): ToolDefinition | string {
   if (f.tokenVar.trim()) def.auth_env = f.tokenVar.trim();
   for (const p of f.params) {
     const name = p.name.trim();
-    if (!name) return "Give each value a name, or remove it.";
+    if (!name) return "Give each detail a name, or remove it.";
     const d = p.description.trim();
     def.params[name] = { type: p.type, required: p.required, ...(d ? { description: d } : {}) };
   }
@@ -248,4 +248,94 @@ export function settingsChanges(s: Settings, incoming: Record<string, unknown>):
     out.push({ key, label: labelOf(key), from: shownValue(now), to: shownValue(to) });
   }
   return out;
+}
+
+// ----- skills found in files -----
+
+export interface SkillDraft {
+  name: string;
+  instructions: string;
+  tools: string[];
+}
+export interface SkillFile {
+  /** The path inside the chosen folder, or just the file name. */
+  path: string;
+  text: string;
+}
+export const SKILL_NAME_MAX = 40;
+export const SKILL_TEXT_MAX = 2000;
+
+/** Splits `---` header lines (name, description) from the text of a skill file. */
+function skillHeader(text: string): { head: Record<string, string>; body: string } {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+  if (!m) return { head: {}, body: text };
+  const head: Record<string, string> = {};
+  for (const line of (m[1] ?? "").split(/\r?\n/)) {
+    const kv = /^([A-Za-z_-]+):\s*(.*)$/.exec(line);
+    if (kv) head[(kv[1] ?? "").toLowerCase()] = (kv[2] ?? "").replace(/^["']|["']$/g, "").trim();
+  }
+  return { head, body: m[2] ?? "" };
+}
+
+/**
+ * Reads skills out of chosen files: a Markdown file per skill (a `SKILL.md` with a name and description at the top, the
+ * name of its folder otherwise) or a skills file saved by ClawDot. Anything that does not fit is listed in `skipped`
+ * with the reason, so nothing disappears silently.
+ */
+export function readSkillFiles(files: SkillFile[]): { found: SkillDraft[]; skipped: string[] } {
+  const found: SkillDraft[] = [];
+  const skipped: string[] = [];
+  const add = (where: string, d: SkillDraft) => {
+    const name = d.name.trim();
+    if (!name) skipped.push(where + ": it has no name");
+    else if (name.length > SKILL_NAME_MAX)
+      skipped.push(where + ": the name is longer than " + SKILL_NAME_MAX + " characters");
+    else if (!d.instructions.trim()) skipped.push(where + ": it has no instructions");
+    else if (d.instructions.length > SKILL_TEXT_MAX)
+      skipped.push(
+        where + ": the instructions are " + d.instructions.length + " characters; the limit is " + SKILL_TEXT_MAX,
+      );
+    else if (found.some((f) => f.name.toLowerCase() === name.toLowerCase()))
+      skipped.push(where + ": the name " + name + " is already in this list");
+    else found.push({ name, instructions: d.instructions.trim(), tools: d.tools });
+  };
+  for (const f of files) {
+    const parts = f.path.split("/");
+    const file = parts[parts.length - 1] ?? f.path;
+    if (/\.json$/i.test(file)) {
+      let v: { skills?: { name?: unknown; instructions?: unknown; tools?: unknown }[] };
+      try {
+        v = JSON.parse(f.text) as typeof v;
+      } catch {
+        skipped.push(f.path + ": it is not a skills file");
+        continue;
+      }
+      if (!Array.isArray(v.skills)) {
+        skipped.push(f.path + ": it is not a skills file");
+        continue;
+      }
+      for (const k of v.skills)
+        add(f.path, {
+          name: typeof k.name === "string" ? k.name : "",
+          instructions: typeof k.instructions === "string" ? k.instructions : "",
+          tools: Array.isArray(k.tools) ? k.tools.filter((t): t is string => typeof t === "string") : [],
+        });
+    } else if (/\.md$/i.test(file) && !/^readme/i.test(file)) {
+      const { head, body } = skillHeader(f.text);
+      const folder = file.toLowerCase() === "skill.md" ? (parts[parts.length - 2] ?? "") : file.replace(/\.md$/i, "");
+      const text = [head["description"], body.trim()].filter(Boolean).join("\n\n");
+      add(f.path, { name: head["name"] || folder, instructions: text, tools: [] });
+    }
+  }
+  return { found, skipped };
+}
+
+/** Keeps the rows whose name or text contains every word typed (not case-sensitive). */
+export function matching<T extends { name: string }>(rows: T[], query: string, text: (r: T) => string = () => ""): T[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return rows;
+  return rows.filter((r) => {
+    const hay = (r.name + " " + text(r)).toLowerCase();
+    return words.every((w) => hay.includes(w));
+  });
 }

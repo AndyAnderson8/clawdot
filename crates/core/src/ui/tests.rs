@@ -122,17 +122,16 @@ async fn call(p: &Portal, method: &str, path: &str, auth: &str, body: &str) -> (
 
 // REQ-CFG-025, REQ-CFG-026
 #[test]
-fn the_page_uses_plain_names_and_no_radio() {
-    // A radio *input* (the theme choice) is fine; radio stations are not.
-    let page = PAGE
-        .to_lowercase()
-        .replace("type:\"radio\"", "")
-        .replace("type=radio", "");
-    for word in ["inbox", "scheduled", "radio", "music", "station"] {
-        assert!(!page.contains(word), "the page still says `{word}`");
+fn the_page_uses_plain_names() {
+    // Music and radio appear only on the Media page, which says nothing can play yet.
+    for word in ["inbox", "scheduled"] {
+        assert!(
+            !PAGE.to_lowercase().contains(word),
+            "the page still says `{word}`"
+        );
     }
-    // Home first, then Clock, Bluetooth and Settings; everything configurable, the Features switches included, is under Settings.
-    for tab in ["Home", "Clock", "Bluetooth", "Settings"] {
+    // Home first, then Clock, Media and Settings; everything configurable, the Features switches included, is under Settings.
+    for tab in ["Home", "Clock", "Media", "Settings"] {
         assert!(
             PAGE.contains(&format!("\"{tab}\"")),
             "missing destination {tab}"

@@ -2,10 +2,11 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { attention, dailyCounts, lastHeard, recentItems, speakerView, type Day } from "../dashboard.ts";
-import { fail, sv, useApp, usePolled, zone } from "../store.ts";
+import { Dialog } from "../dialog.tsx";
+import { fail, say, sv, useApp, usePolled, zone } from "../store.ts";
 import { ago, whenText } from "../time.ts";
 import type { AuditPage, AuditRecord, UpdateStatus } from "../types.ts";
-import { Look, LOOKS, lookPref, setLookPref, type LookId } from "./looks.tsx";
+import { Look, LOOKS, lookPref, photoPref, readPhoto, setLookPref, setPhoto, type LookId } from "./looks.tsx";
 
 /** One number with a plain label. */
 function Stat(props: { label: string; value: string; note?: string; id?: string }): JSX.Element {
@@ -63,20 +64,89 @@ function UsageChart(props: { days: Day[] | null }): JSX.Element {
   );
 }
 
+/** Choose the picture of the device: one of the drawings, or a photo from this computer. Kept in this browser only. */
 function LookPicker(props: { value: LookId; onPick: (id: LookId) => void }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [photo, setPhotoState] = useState(photoPref());
+  const upload = async (ev: Event) => {
+    const input = ev.currentTarget as HTMLInputElement;
+    const f = input.files?.[0];
+    input.value = "";
+    if (!f) return;
+    try {
+      const url = await readPhoto(f);
+      setPhoto(url);
+      setPhotoState(url);
+      props.onPick("photo");
+    } catch (x) {
+      say(x instanceof Error ? x.message : "That picture could not be used.", true);
+    }
+  };
+  const remove = () => {
+    setPhoto("");
+    setPhotoState("");
+    if (props.value === "photo") props.onPick("puck");
+  };
   return (
-    <details class="looks">
-      <summary>Change look</summary>
-      <div class="lookgrid" role="group" aria-label="What your device looks like">
-        {LOOKS.map((l) => (
-          <label key={l.id} class={"lookopt" + (l.id === props.value ? " on" : "")}>
-            <input type="radio" name="look" checked={l.id === props.value} onChange={() => props.onPick(l.id)} />
-            <Look id={l.id} />
-            <span>{l.name}</span>
+    <>
+      <button class="plain small" type="button" id="changelook" onClick={() => setOpen(true)}>
+        Change picture
+      </button>
+      <Dialog id="lookdialog" title="Change the picture" open={open} onClose={() => setOpen(false)} wide>
+        <p class="mut">Pick what stands for your device on Home. It is kept in this browser.</p>
+        <div class="lookgrid" role="radiogroup" aria-label="What your device looks like">
+          {LOOKS.map((l) => (
+            <button
+              key={l.id}
+              type="button"
+              role="radio"
+              aria-checked={l.id === props.value}
+              class={"lookopt" + (l.id === props.value ? " on" : "")}
+              onClick={() => props.onPick(l.id)}
+            >
+              <span class="lookart">
+                <Look id={l.id} />
+              </span>
+              <span class="lookname">{l.name}</span>
+            </button>
+          ))}
+          {photo ? (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={props.value === "photo"}
+              class={"lookopt" + (props.value === "photo" ? " on" : "")}
+              onClick={() => props.onPick("photo")}
+            >
+              <span class="lookart">
+                <Look id="photo" />
+              </span>
+              <span class="lookname">Your photo</span>
+            </button>
+          ) : null}
+        </div>
+        <div class="row lookphotorow">
+          <label class="plain small filebtn">
+            {photo ? "Choose another photo" : "Choose a photo"}
+            <input id="lookfile" type="file" class="sr" accept="image/*" onChange={(e) => void upload(e)} />
           </label>
-        ))}
-      </div>
-    </details>
+          {photo ? (
+            <button class="plain small" type="button" id="lookremove" onClick={remove}>
+              Remove photo
+            </button>
+          ) : null}
+        </div>
+        <p class="mut">
+          The photo is made smaller and stays in this browser; it is never sent anywhere. A picture on another web site
+          cannot be used, because this page never contacts other sites. Save it to your computer, then choose the file.
+        </p>
+        <div class="row dlgfoot">
+          <button type="button" onClick={() => setOpen(false)}>
+            Done
+          </button>
+        </div>
+      </Dialog>
+    </>
   );
 }
 

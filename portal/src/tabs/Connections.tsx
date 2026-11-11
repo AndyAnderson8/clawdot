@@ -1,193 +1,261 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
+import { AddButton, Dialog } from "../dialog.tsx";
 import { connectionDefinition } from "../forms.ts";
-import { Field, OffBadge } from "../parts.tsx";
-import { change, fail, loadExt, useApp, usePolled } from "../store.ts";
+import { Field } from "../parts.tsx";
+import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { ConnectionTest, McpServer } from "../types.ts";
-import { OnOffButton, Problems, ToolList } from "./Tools.tsx";
+import { Problems } from "./Tools.tsx";
 
-function Server(props: { s: McpServer }) {
+function Source(props: { s: McpServer }) {
   const s = props.s;
   const remove = () => {
-    if (confirm("Remove the connection " + s.name + "? Its tools will disappear."))
+    if (confirm("Remove the source " + s.name + "? Its tools will disappear."))
       void change("DELETE", "/api/connections/" + s.name, undefined, "Removed.");
   };
+  const n = s.tools.length;
   return (
-    <li>
-      <div class="rowhead">
-        <strong>{s.name}</strong>
-        <span>
-          <OffBadge enabled={s.enabled} />{" "}
-          <span class={"badge " + (s.connected ? "good" : "bad")}>{s.connected ? "Connected" : "Cannot connect"}</span>
-        </span>
+    <li class={"toolrow srcrow" + (s.enabled ? "" : " off")}>
+      <input
+        class="switch"
+        type="checkbox"
+        checked={s.enabled}
+        aria-label={s.name + (s.enabled ? " is on" : " is off")}
+        onChange={() =>
+          change(
+            "POST",
+            "/api/connections/" + s.name + "/enabled",
+            { enabled: !s.enabled },
+            s.name + (s.enabled ? " turned off." : " turned on."),
+          )
+        }
+      />
+      <div class="toolmain">
+        <div class="toolname">{s.name}</div>
+        <div class="tooldesc">{s.url}</div>
+        {!s.connected ? (
+          <div class="tooldesc bad">
+            Cannot connect: {s.error || "unknown reason"}. Check the address and token variable, then restart ClawDot.
+          </div>
+        ) : null}
       </div>
-      <div class="mut">{s.url + (s.origin === "config" ? " (set when ClawDot was installed)" : "")}</div>
-      {!s.connected ? (
-        <p>
-          It did not answer: {s.error || "unknown reason"}. Check the address, that the server is running, and that the
-          token variable is set, then restart ClawDot.
-        </p>
-      ) : null}
-      {s.token_env ? <div class="mut">Token comes from the environment variable {s.token_env}.</div> : null}
-      {s.tools.length ? (
-        <details id={"tools-" + s.name}>
-          <summary>{s.tools.length + (s.tools.length === 1 ? " tool" : " tools")}</summary>
-          <ToolList tools={s.tools} />
-        </details>
-      ) : s.connected ? (
-        <p class="mut">Connected, but it offers no tools.</p>
-      ) : null}
-      <div class="acts">
-        <OnOffButton path={"/api/connections/" + s.name + "/enabled"} on={s.enabled} what={s.name} />
+      <div class="toolwhen">
+        <span class={"badge " + (s.connected ? "good" : "bad")}>{s.connected ? "Connected" : "Cannot connect"}</span>{" "}
+        <span class="mut">{n + (n === 1 ? " tool" : " tools")}</span>
+      </div>
+      <div class="toolact">
         {s.deletable ? (
-          <button class="danger" type="button" onClick={remove}>
+          <button class="danger small" type="button" onClick={remove}>
             Remove
           </button>
         ) : (
-          <span class="mut">To remove it, remove it from the settings file on the device.</span>
+          <span class="mut">Set when ClawDot was installed</span>
         )}
       </div>
     </li>
   );
 }
 
-function AddConnection() {
+/** Add a source: check it, choose which of its tools to use, add it. */
+function AddSource(props: { open: boolean; onClose: () => void }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [tokenVar, setTokenVar] = useState("");
   const [confirmFirst, setConfirmFirst] = useState(true);
-  const [result, setResult] = useState("");
+  const [found, setFound] = useState<string[] | null>(null);
+  const [off, setOff] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
   const def = () => connectionDefinition({ name, url, tokenVar, confirm: confirmFirst });
+  const changed =
+    <T,>(set: (v: T) => void) =>
+    (v: T) => {
+      set(v);
+      setFound(null);
+      setOff([]);
+    };
 
-  const test = async () => {
-    setResult("Connecting...");
+  const check = async () => {
+    setBusy(true);
     try {
       const r = await api<ConnectionTest>("POST", "/api/connections/test", def());
-      const n = r.tools.length;
-      setResult(
-        "Connected. It offers " +
-          n +
-          (n === 1 ? " tool" : " tools") +
-          (n ? ": " + r.tools.map((t) => t.name).join(", ") : "") +
-          ".",
-      );
+      setFound(r.tools.map((t) => t.name));
+      setOff([]);
     } catch (x) {
-      setResult("");
       fail(x);
     }
+    setBusy(false);
   };
-  const submit = async (ev: Event) => {
-    ev.preventDefault();
-    setResult("Connecting...");
-    const ok = await change("POST", "/api/connections", def(), "Connected and added.");
-    setResult("");
+  const add = async () => {
+    setBusy(true);
+    const ok = await change("POST", "/api/connections", def(), "");
     if (ok) {
+      // Every tool comes in; the ones left unticked are switched off.
+      for (const t of off) {
+        try {
+          await api("POST", "/api/tools/" + t + "/enabled", { enabled: false });
+        } catch (x) {
+          fail(x);
+        }
+      }
+      await loadExt();
+      say(found ? "Added. " + (found.length - off.length) + " of its " + found.length + " tools are on." : "Added.");
       setName("");
       setUrl("");
       setTokenVar("");
       setConfirmFirst(true);
+      setFound(null);
+      setOff([]);
+      props.onClose();
     }
+    setBusy(false);
+  };
+  const submit = (ev: Event) => {
+    ev.preventDefault();
+    void (found ? add() : check());
   };
 
   return (
-    <form class="panel" onSubmit={submit}>
-      <h3>Add a connection</h3>
-      <p class="mut">The server must speak MCP over HTTP. It is tested before it is saved.</p>
-      <Field id="conn-name" label="Name" hint="Lowercase letters, digits, - and _. Its tools start with this name.">
-        <input
-          id="conn-name"
-          type="text"
-          maxLength={24}
-          autoCapitalize="none"
-          autoComplete="off"
-          placeholder="home"
-          value={name}
-          onInput={(e) => setName(e.currentTarget.value)}
-        />
-      </Field>
-      <Field id="conn-url" label="Server address">
-        <input
-          id="conn-url"
-          type="text"
-          inputMode="url"
-          autoCapitalize="none"
-          autoComplete="off"
-          placeholder="https://homeassistant.local:8123/mcp"
-          value={url}
-          onInput={(e) => setUrl(e.currentTarget.value)}
-        />
-      </Field>
-      <Field
-        id="conn-token"
-        label="Token variable (optional)"
-        hint="The name of an environment variable on the device that holds the token. Type the name only, never the token itself."
-      >
-        <input
+    <Dialog id="sourcedialog" title="Add a source" open={props.open} onClose={props.onClose} wide>
+      <form class="dlgform" onSubmit={submit}>
+        <p class="mut">
+          A source is a server that offers tools to the assistant, such as a calendar or a smart-home hub. It must speak
+          MCP over HTTP. ClawDot connects first, so you can choose which of its tools to use.
+        </p>
+        <Field id="conn-name" label="Name" hint="Lowercase letters, digits, - and _. Its tools start with this name.">
+          <input
+            id="conn-name"
+            type="text"
+            maxLength={24}
+            autoCapitalize="none"
+            autoComplete="off"
+            placeholder="home"
+            value={name}
+            onInput={(e) => changed(setName)(e.currentTarget.value)}
+          />
+        </Field>
+        <Field id="conn-url" label="Address">
+          <input
+            id="conn-url"
+            type="text"
+            inputMode="url"
+            autoCapitalize="none"
+            autoComplete="off"
+            placeholder="https://homeassistant.local:8123/mcp"
+            value={url}
+            onInput={(e) => changed(setUrl)(e.currentTarget.value)}
+          />
+        </Field>
+        <Field
           id="conn-token"
-          type="text"
-          maxLength={64}
-          autoCapitalize="none"
-          autoComplete="off"
-          placeholder="HA_TOKEN"
-          value={tokenVar}
-          onInput={(e) => setTokenVar(e.currentTarget.value)}
-        />
-      </Field>
-      <div class="row">
-        <input
-          type="checkbox"
-          id="conn-asks"
-          checked={confirmFirst}
-          onChange={(e) => setConfirmFirst(e.currentTarget.checked)}
-        />
-        <label for="conn-asks" class="inline">
-          Ask me out loud before its tools run (recommended)
-        </label>
-      </div>
-      <div class="row">
-        <button>Add connection</button>
-        <button class="plain" type="button" onClick={test}>
-          Test connection
-        </button>
-      </div>
-      <p role="status">{result}</p>
-    </form>
+          label="Token variable"
+          hint="Optional. The name of an environment variable on the device that holds the source's token. Type the name only, never the token itself."
+        >
+          <input
+            id="conn-token"
+            type="text"
+            maxLength={64}
+            autoCapitalize="none"
+            autoComplete="off"
+            placeholder="HA_TOKEN"
+            value={tokenVar}
+            onInput={(e) => changed(setTokenVar)(e.currentTarget.value)}
+          />
+        </Field>
+        <div class="row">
+          <input
+            type="checkbox"
+            id="conn-asks"
+            checked={confirmFirst}
+            onChange={(e) => setConfirmFirst(e.currentTarget.checked)}
+          />
+          <label for="conn-asks" class="inline">
+            Ask me out loud before its tools run (recommended)
+          </label>
+        </div>
+        {found ? (
+          <fieldset class="pickbox" id="sourcetools">
+            <legend>
+              Found {found.length} {found.length === 1 ? "tool" : "tools"}
+            </legend>
+            <p class="mut">
+              All of them are added. Untick any you do not want the assistant to use; you can turn them on later.
+            </p>
+            {found.length ? (
+              <>
+                <div class="row">
+                  <button class="plain small" type="button" onClick={() => setOff([])}>
+                    Select all
+                  </button>
+                  <button class="plain small" type="button" onClick={() => setOff(found)}>
+                    Select none
+                  </button>
+                  <span class="mut" role="status">
+                    {found.length - off.length} of {found.length} selected
+                  </span>
+                </div>
+                <ul class="picklist">
+                  {found.map((t) => (
+                    <li key={t}>
+                      <label class="inline">
+                        <input
+                          type="checkbox"
+                          checked={!off.includes(t)}
+                          onChange={(e) => setOff(e.currentTarget.checked ? off.filter((x) => x !== t) : [...off, t])}
+                        />{" "}
+                        <span class="toolname">{t}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p class="mut">It connected, but it offers no tools.</p>
+            )}
+          </fieldset>
+        ) : null}
+        <div class="row dlgfoot">
+          <button disabled={busy}>{busy ? "Connecting..." : found ? "Add source" : "Connect and see its tools"}</button>
+          <button class="plain" type="button" onClick={props.onClose}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </Dialog>
   );
 }
 
-export function Connections(): JSX.Element {
+/** The outside servers that provide tools. Their tools are in the Tools list. */
+export function Sources(): JSX.Element {
   const ext = useApp().ext;
   usePolled(loadExt);
+  const [adding, setAdding] = useState(false);
   const servers = ext?.mcp ?? [];
   return (
     <>
-      <section class="card">
-        <h3>
-          Connections<span class="count">{servers.length}</span>
-        </h3>
-        <p class="mut">
-          A connection links ClawDot to an outside tool server using MCP (the Model Context Protocol), such as Home
-          Assistant or a calendar. Its tools then show up under Tools, where you can turn each one off.
-        </p>
-        <div>
-          {ext ? (
-            <>
-              <Problems ext={ext} kind="connection" />
-              {!servers.length ? (
-                <p class="empty">No connections yet. Add one below.</p>
-              ) : (
-                <ul class="rows">
-                  {servers.map((s) => (
-                    <Server key={s.name} s={s} />
-                  ))}
-                </ul>
-              )}
-            </>
-          ) : null}
+      <section class="card" id="sourcecard">
+        <div class="head">
+          <h3>
+            Tool sources<span class="count">{servers.length}</span>
+          </h3>
+          <AddButton label="Add a source" id="addsource" onClick={() => setAdding(true)} />
         </div>
+        <p class="mut">
+          Servers that give the assistant more tools, such as a calendar or a smart-home hub. What they offer shows up
+          in the list below.
+        </p>
+        {ext ? <Problems ext={ext} kind="connection" /> : null}
+        {ext && !servers.length ? (
+          <p class="empty">No sources yet. Add one to bring in tools from another program.</p>
+        ) : (
+          <ul class="rows tools">
+            {servers.map((s) => (
+              <Source key={s.name} s={s} />
+            ))}
+          </ul>
+        )}
       </section>
-      <AddConnection />
+      <AddSource open={adding} onClose={() => setAdding(false)} />
     </>
   );
 }
