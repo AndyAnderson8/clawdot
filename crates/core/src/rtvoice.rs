@@ -1,4 +1,4 @@
-//! The parts of the optional realtime voice (ADR-0020) that the rest of the program touches: its settings, its
+//! The parts of the optioal realtime voice (ADR-0020) that the rest of the program touches: its settigs, its
 //! status, the hand-off between a speaker's connection and the session, and audio conversion.
 //!
 //! They are always compiled, are small and use no network, so the speaker loop and the settings page do not
@@ -198,8 +198,12 @@ pub struct Job {
     pub done: oneshot::Sender<Done>,
 }
 
+/// How an environment variable is looked up; tests replace it.
+pub type EnvFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 struct Inner {
     settings: Mutex<RtSettings>,
+    env: EnvFn,
     active: AtomicBool,
     last_error: Mutex<Option<String>>,
     jobs: Mutex<Option<mpsc::Sender<Job>>>,
@@ -226,8 +230,15 @@ impl Realtime {
     /// A handle with these settings and nowhere to send sessions yet.
     #[must_use]
     pub fn new(settings: RtSettings) -> Self {
+        Self::with_env(settings, Box::new(|n| std::env::var(n).ok()))
+    }
+
+    /// Like [`Self::new`], looking environment variables up with `env`.
+    #[must_use]
+    pub fn with_env(settings: RtSettings, env: EnvFn) -> Self {
         Self(Arc::new(Inner {
             settings: Mutex::new(settings),
+            env,
             active: AtomicBool::new(false),
             last_error: Mutex::new(None),
             jobs: Mutex::new(None),
@@ -261,6 +272,12 @@ impl Realtime {
         rx
     }
 
+    /// The API key in effect, if there is one. Never printed.
+    #[must_use]
+    pub fn key(&self) -> Option<String> {
+        self.settings().key_with(&*self.0.env)
+    }
+
     /// Record (or clear) the last error. It is one plain line and holds no key and no audio.
     pub fn set_error(&self, e: Option<String>) {
         *self
@@ -274,7 +291,7 @@ impl Realtime {
     /// session lasts.
     #[must_use]
     pub fn claim(&self) -> Option<Claim> {
-        if !self.settings().configured() {
+        if !self.settings().configured_with(&*self.0.env) {
             return None;
         }
         let tx = self
@@ -297,7 +314,7 @@ impl Realtime {
     #[must_use]
     pub fn status(&self) -> Value {
         json!({
-            "configured": self.settings().configured(),
+            "configured": self.settings().configured_with(&*self.0.env),
             "active": self.0.active.load(Ordering::Acquire),
             "last_error": self.0.last_error.lock().unwrap_or_else(PoisonError::into_inner).clone(),
         })

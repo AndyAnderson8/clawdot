@@ -19,6 +19,7 @@
 //! service (see docs/guides/realtime-voice.md).
 
 mod b64;
+pub mod serve;
 pub mod ws;
 
 use crate::llm::{ChatRequest, Completion, LlmError, Role, ToolCall, ToolSpec};
@@ -380,7 +381,7 @@ pub struct Env<'a, H> {
     /// Usage counters and the spend cap.
     pub usage: &'a mut UsageTracker,
     /// The clock.
-    pub clock: &'a dyn Fn() -> (i64, Ts),
+    pub clock: &'a (dyn Fn() -> (i64, Ts) + Sync),
 }
 
 impl<H> fmt::Debug for Env<'_, H> {
@@ -844,3 +845,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wiring_tests;

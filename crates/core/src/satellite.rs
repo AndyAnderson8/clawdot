@@ -13,6 +13,7 @@
 use crate::assistant::{Effect, MediaCmd};
 use crate::cancel::CancelToken;
 use crate::inbox::endpoint::verify_token;
+use crate::rtvoice::{Claim, Done, Job, Realtime, Speaker, resample};
 use crate::session::is_cancel;
 use crate::speech::decode_pcm16;
 use crate::voice::{
@@ -102,6 +103,12 @@ pub struct Settings {
     pub admin_reset: Option<AdminResetHook>,
     /// Set by [`serve`] for a connection from a loopback address; such a peer is on the device itself.
     pub peer_loopback: bool,
+    /// The optional realtime voice (REQ-RTV-009). `None`, or not configured, keeps the normal path.
+    pub realtime: Option<Realtime>,
+    /// A realtime session ends after this long without speech from either side.
+    pub rt_idle: Duration,
+    /// After a realtime failure the normal path is used for this long (REQ-RTV-010).
+    pub rt_cooldown: Duration,
 }
 
 impl Default for Settings {
@@ -117,6 +124,9 @@ impl Default for Settings {
             announcer: Announcer::default(),
             admin_reset: None,
             peer_loopback: false,
+            realtime: None,
+            rt_idle: Duration::from_secs(10),
+            rt_cooldown: Duration::from_secs(60),
         }
     }
 }
@@ -248,6 +258,171 @@ type Work = Pin<Box<dyn Future<Output = (VoiceOutcome, Vec<Effect>, bool)> + Sen
 /// A short check of audio heard while a turn runs: was it a stop phrase (REQ-VOI-020)?
 type StopCheck = Pin<Box<dyn Future<Output = bool> + Send>>;
 
+/// Model audio that stops arriving for this long ends the reply on the speaker.
+const RT_GAP: Duration = Duration::from_millis(300);
+/// Microphone samples above this peak count as someone speaking, for the idle timeout.
+const RT_LOUD: u16 = 1500;
+
+/// One open realtime session, from this speaker's side (REQ-RTV-009).
+struct RtLive {
+    /// Microphone audio to the session. Dropping it ends the session.
+    mic: Option<mpsc::Sender<Vec<u8>>>,
+    speaker: mpsc::Receiver<Speaker>,
+    speaker_open: bool,
+    done: oneshot::Receiver<Done>,
+    /// Frees the single session slot when this is dropped.
+    _claim: Claim,
+    /// An odd byte of model audio waiting for its other half.
+    carry: Option<u8>,
+    /// A reply is being streamed to the speaker (started, not yet stopped).
+    streaming: bool,
+    last_audio: Instant,
+    last_activity: Instant,
+}
+
+enum RtEv {
+    Out(Speaker),
+    SpeakerClosed,
+    Gap,
+    Done(Option<Done>),
+}
+
+/// Start a session for a speaker that is idle, unmuted and not in its cool-down, or `None` to use the normal
+/// path. The claim makes sure only one session runs at a time.
+fn rt_start(settings: &Settings, quiet: bool, blocked_until: Option<Instant>) -> Option<RtLive> {
+    if !quiet || blocked_until.is_some_and(|t| Instant::now() < t) {
+        return None;
+    }
+    let claim = settings.realtime.as_ref()?.claim()?;
+    let (mic_tx, mic) = mpsc::channel(64);
+    let (speaker_tx, speaker) = mpsc::channel(256);
+    let (done_tx, done) = oneshot::channel();
+    if !claim.submit(Job {
+        mic,
+        speaker: speaker_tx,
+        done: done_tx,
+    }) {
+        return None;
+    }
+    let now = Instant::now();
+    Some(RtLive {
+        mic: Some(mic_tx),
+        speaker,
+        speaker_open: true,
+        done,
+        _claim: claim,
+        carry: None,
+        streaming: false,
+        last_audio: now,
+        last_activity: now,
+    })
+}
+
+async fn rt_next(rt: &mut Option<RtLive>) -> RtEv {
+    let Some(r) = rt else {
+        return std::future::pending().await;
+    };
+    let (streaming, deadline) = (r.streaming, r.last_audio + RT_GAP);
+    let gap = async move {
+        if streaming {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        sp = r.speaker.recv(), if r.speaker_open => match sp {
+            Some(s) => RtEv::Out(s),
+            None => {
+                r.speaker_open = false;
+                RtEv::SpeakerClosed
+            }
+        },
+        d = &mut r.done => RtEv::Done(d.ok()),
+        () = gap => RtEv::Gap,
+    }
+}
+
+/// Microphone audio (16 kHz) goes to the session at 24 kHz. A full queue drops audio rather than stalling the
+/// connection.
+fn rt_mic(r: &mut RtLive, payload: &[u8]) {
+    let pcm = decode_pcm16(payload);
+    if pcm.iter().any(|s| s.unsigned_abs() > RT_LOUD) {
+        r.last_activity = Instant::now();
+    }
+    let bytes: Vec<u8> = resample(&pcm, 16_000, 24_000)
+        .iter()
+        .flat_map(|s| s.to_le_bytes())
+        .collect();
+    if let Some(tx) = &r.mic {
+        let _ = tx.try_send(bytes);
+    }
+}
+
+/// Model audio (24 kHz) goes to the speaker at 16 kHz through the same start, chunks and stop as any reply, with
+/// music ducked first (REQ-RTV-009).
+async fn rt_play<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    r: &mut RtLive,
+    bytes: &[u8],
+    playing: &mut bool,
+    rt_audio: &mut bool,
+    music: &mut bool,
+    ducked: &mut bool,
+) -> Result<(), String> {
+    r.last_audio = Instant::now();
+    r.last_activity = r.last_audio;
+    let mut b: Vec<u8> = r.carry.take().into_iter().collect();
+    b.extend_from_slice(bytes);
+    if b.len() % 2 == 1 {
+        r.carry = b.pop();
+    }
+    let pcm = resample(&decode_pcm16(&b), 24_000, 16_000);
+    if pcm.is_empty() {
+        return Ok(());
+    }
+    if !r.streaming {
+        duck(w, music, ducked).await?;
+        send(w, &Message::SetIndicator(Indicator::Speaking)).await?;
+        send(w, &Message::AudioStart(AudioFormat::PCM_16K_MONO)).await?;
+        r.streaming = true;
+        *playing = true;
+        *rt_audio = true;
+    }
+    for chunk in pcm.chunks(DOWNLINK_CHUNK) {
+        let payload: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+        send(
+            w,
+            &Message::AudioChunk {
+                format: AudioFormat::PCM_16K_MONO,
+                timestamp_ms: None,
+                payload,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Barge-in: stop what the speaker is playing from the session and forget what was queued (REQ-RTV-009).
+async fn rt_flush<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    r: Option<&mut RtLive>,
+    playing: &mut bool,
+    rt_audio: &mut bool,
+) -> Result<(), String> {
+    if *rt_audio {
+        send(w, &Message::StopPlayback).await?;
+        *playing = false;
+        *rt_audio = false;
+    }
+    if let Some(r) = r {
+        r.streaming = false;
+        r.carry = None;
+    }
+    Ok(())
+}
+
 async fn send<W: AsyncWrite + Unpin>(w: &mut W, m: &Message) -> Result<(), String> {
     let bytes = encode(&m.to_frame()).map_err(|e| e.to_string())?;
     w.write_all(&bytes).await.map_err(|e| format!("write: {e}"))
@@ -376,6 +551,11 @@ where
     // A finished turn waits here while its progress speech is still playing.
     let mut ready: Option<(VoiceOutcome, Vec<Effect>, bool)> = None;
     let mut stop_check: Option<StopCheck> = None;
+    // The optional realtime session and what goes with it (REQ-RTV-009, REQ-RTV-010).
+    let mut rt: Option<RtLive> = None;
+    // Audio from a session is on the speaker, so its playback-done must not open the follow-up window.
+    let mut rt_audio = false;
+    let mut rt_blocked_until: Option<Instant> = None;
     let mut warned_format = false;
     let mut tick = tokio::time::interval(
         settings
@@ -391,13 +571,22 @@ where
     loop {
         // What the previous step asked us to do.
         let mut steps: Vec<Step> = Vec::new();
+        // The wake word or the action button was pressed while no turn was running.
+        let mut woke = false;
         tokio::select! {
             msg = next_message(&mut rd, &mut dec) => {
                 last_heard = Instant::now();
                 let Some(msg) = msg? else { return Ok(()) };
                 match msg {
                     Message::Ping => send(&mut wr, &Message::Pong).await?,
-                    Message::Wake(_) => steps.push(dialog.on_wake()),
+                    Message::Wake(_) => woke = true,
+                    Message::Button(b) if b.name == "action" && rt.is_some() => {
+                        // The action button ends a realtime session.
+                        rt_flush(&mut wr, rt.as_mut(), &mut playing, &mut rt_audio).await?;
+                        if let Some(r) = rt.as_mut() {
+                            r.mic = None;
+                        }
+                    }
                     Message::Button(b) if b.name == "action" => {
                         // While a turn is running the action button stops it (REQ-VOI-020).
                         match turn_cancel.as_ref().filter(|_| dialog.phase() == Phase::Thinking) {
@@ -408,7 +597,7 @@ where
                                     send(&mut wr, &Message::StopPlayback).await?;
                                 }
                             }
-                            None => steps.push(dialog.on_wake()),
+                            None => woke = true,
                         }
                     }
                     Message::Button(b) if b.name == "mute" => {
@@ -443,8 +632,18 @@ where
                                     code: Some("bad-audio-format".into()),
                                 })).await?;
                             }
+                        } else if let Some(r) = rt.as_mut() {
+                            rt_mic(r, &payload);
                         } else {
                             steps.push(dialog.on_audio(now_ms(), &decode_pcm16(&payload)));
+                        }
+                    }
+                    Message::PlaybackDone { .. } if playing && rt_audio => {
+                        // A reply from the session ended. The session itself goes on listening.
+                        playing = false;
+                        rt_audio = false;
+                        if rt.is_some() {
+                            send(&mut wr, &Message::SetIndicator(Indicator::Listening)).await?;
                         }
                     }
                     Message::PlaybackDone { .. } if playing && progress_playing => {
@@ -481,6 +680,57 @@ where
                 }
                 ready = Some((outcome, effects, asked));
             }
+            ev = rt_next(&mut rt), if rt.is_some() => match ev {
+                RtEv::Out(Speaker::Audio(bytes)) => {
+                    if let Some(r) = rt.as_mut() {
+                        rt_play(&mut wr, r, &bytes, &mut playing, &mut rt_audio, &mut music, &mut ducked).await?;
+                    }
+                }
+                RtEv::Out(Speaker::Flush) => {
+                    rt_flush(&mut wr, rt.as_mut(), &mut playing, &mut rt_audio).await?;
+                }
+                RtEv::SpeakerClosed => {}
+                RtEv::Gap => {
+                    if let Some(r) = rt.as_mut() {
+                        r.streaming = false;
+                    }
+                    send(&mut wr, &Message::AudioStop).await?;
+                }
+                RtEv::Done(done) => {
+                    if let Some(mut r) = rt.take() {
+                        // Whatever the model said before it ended still gets played.
+                        while let Ok(Speaker::Audio(bytes)) = r.speaker.try_recv() {
+                            rt_play(&mut wr, &mut r, &bytes, &mut playing, &mut rt_audio, &mut music, &mut ducked).await?;
+                        }
+                        if r.streaming {
+                            send(&mut wr, &Message::AudioStop).await?;
+                        }
+                    }
+                    send(&mut wr, &Message::StreamStop).await?;
+                    let done = done.unwrap_or(Done {
+                        speak: Some("I couldn't run the realtime voice.".into()),
+                        failed: true,
+                        effects: Vec::new(),
+                    });
+                    if done.failed {
+                        // Use the normal path for a while, so a broken service is not tried on every wake.
+                        rt_blocked_until = Some(Instant::now() + settings.rt_cooldown);
+                    }
+                    // The end of a session is delivered like a finished turn: after any audio still playing,
+                    // with its effects, and then either silence or the explanation in the normal voice.
+                    let mut outcome = VoiceOutcome {
+                        transcript: Some(String::new()),
+                        ..VoiceOutcome::default()
+                    };
+                    if let Some(text) = done.speak {
+                        let mut problems = Vec::new();
+                        outcome.audio = speak_text(&*tts, &text, &mut problems).await;
+                        outcome.transcript = None;
+                        outcome.reply = text;
+                    }
+                    ready = Some((outcome, done.effects, false));
+                }
+            },
             p = recv_progress(&mut progress_rx), if progress_rx.is_some() => {
                 match p {
                     Some(p) => progress_q.push_back(p),
@@ -504,6 +754,7 @@ where
                     && !dialog.is_muted()
                     && work.is_none()
                     && ready.is_none()
+                    && rt.is_none()
                     && !playing;
                 let accepted = match a.request {
                     Request::Probe => idle,
@@ -533,7 +784,43 @@ where
                     send(&mut wr, &Message::Ping).await?;
                 }
                 steps.push(dialog.tick(now_ms()));
+                // A session nobody is talking in ends, so the microphone does not stream (and cost) for nothing.
+                if let Some(r) = rt.as_mut()
+                    && !playing
+                    && !r.streaming
+                    && r.last_activity.elapsed() >= settings.rt_idle
+                {
+                    r.mic = None;
+                }
             }
+        }
+
+        if woke {
+            if rt.is_some() {
+                // The wake word during a session is the user cutting in.
+                rt_flush(&mut wr, rt.as_mut(), &mut playing, &mut rt_audio).await?;
+            } else {
+                let quiet = dialog.phase() == Phase::Idle
+                    && !dialog.is_muted()
+                    && work.is_none()
+                    && ready.is_none()
+                    && !playing;
+                match rt_start(&settings, quiet, rt_blocked_until) {
+                    Some(live) => {
+                        send(&mut wr, &Message::SetIndicator(Indicator::Listening)).await?;
+                        send(&mut wr, &Message::StreamStart).await?;
+                        rt = Some(live);
+                    }
+                    None => steps.push(dialog.on_wake()),
+                }
+            }
+        }
+
+        // Muting must really stop the microphone, so it ends a session.
+        if dialog.is_muted()
+            && let Some(r) = rt.as_mut()
+        {
+            r.mic = None;
         }
 
         // Progress speech is played one phrase at a time while the turn goes on (REQ-AST-020).
@@ -608,9 +895,19 @@ where
                 play_audio(&mut wr, &outcome.audio).await?;
                 playing = true;
             } else if outcome.transcript.is_some() && outcome.reply.is_empty() {
-                // A command with nothing to say ("pause", "volume up"): do it now and go quiet.
+                // A command with nothing to say ("pause", "volume up"): do it now and go quiet. Music that a
+                // realtime session paused comes back (nothing is playing now, or this would not run).
+                if ducked {
+                    ducked = false;
+                    if after.is_empty() {
+                        send(&mut wr, &Message::MediaControl(MediaAction::Resume)).await?;
+                        music = true;
+                    }
+                }
                 flush_media(&mut wr, &mut after, &mut music).await?;
-                send(&mut wr, &Message::SetIndicator(Indicator::Idle)).await?;
+                if !dialog.is_muted() {
+                    send(&mut wr, &Message::SetIndicator(Indicator::Idle)).await?;
+                }
                 steps.push(dialog.on_reply_silent());
             } else {
                 steps.push(dialog.on_reply_failed());
