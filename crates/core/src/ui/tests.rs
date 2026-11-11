@@ -369,6 +369,38 @@ async fn the_portal_manages_tools_connections_and_skills() {
             .0,
         400
     );
+    // REQ-SKL-001, REQ-SKL-002: a skill folder sent as files, then accepted
+    let folder = r#"{"format":"skill-folder","files":[{"path":"tea/SKILL.md","text":"---\nname: tea\ndescription: Brew tea\n---\nSteep it."},{"path":"tea/a.md","text":"notes"}]}"#;
+    let (s, v) = call(&p, "POST", "/api/skills/import", "", folder).await;
+    assert_eq!(s, 200, "{v}");
+    let tea = v["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["name"] == "tea")
+        .unwrap();
+    assert_eq!(
+        (
+            tea["description"].as_str(),
+            tea["needs_review"].as_bool(),
+            tea["source"].as_str()
+        ),
+        (Some("Brew tea"), Some(true), Some("tea/SKILL.md"))
+    );
+    assert_eq!(v["import"]["added"], 1);
+    let on = r#"{"name":"tea","enabled":true}"#;
+    assert_eq!(call(&p, "POST", "/api/skills/enabled", "", on).await.0, 400);
+    let (s, v) = call(&p, "POST", "/api/skills/accept", "", r#"{"name":"tea"}"#).await;
+    assert_eq!(s, 200);
+    assert!(
+        v["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["name"] == "tea" && k["needs_review"] == false)
+    );
+    assert_eq!(call(&p, "POST", "/api/skills/enabled", "", on).await.0, 200);
+    call(&p, "POST", "/api/skills/delete", "", r#"{"name":"tea"}"#).await;
     assert_eq!(
         call(&p, "POST", "/api/skills/unknown", "", "{}").await.0,
         404
@@ -705,7 +737,11 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
     for (body, status, needle) in [
         (add("my printer is pixel"), 409, "already remembered"),
         (add("   "), 400, "Write what"),
-        (add(&"a".repeat(201)), 400, "too long"),
+        (
+            add(&"a".repeat(crate::notes::MAX_NOTE_CHARS + 1)),
+            400,
+            "too long",
+        ),
         (
             add("the key is sk-abcdefghijklmnopqrstuvwxyz123456"),
             400,
