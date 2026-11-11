@@ -184,6 +184,23 @@ await step("setup: mismatched and short passwords are refused, a good one signs 
   await b.until(`T.text('#setup h2') === 'Set up ClawDot'`, "setup screen");
   await eq(`!!T.q('#hero') && !T.q('#band')`, true, "hero shown, sidebar hidden");
   await shot("setup");
+  // what is typed can be shown, and the page says how the two boxes stand while you type
+  await eq(`T.q('#pw1').type`, "password", "hidden to begin with");
+  await T(`click('#pw1')`);
+  await T(`clickText('.authfield:nth-of-type(1)', 'Show')`);
+  await eq(`T.q('#pw1').type`, "text", "shown on request");
+  await T(`clickText('.authfield:nth-of-type(1)', 'Hide')`);
+  await eq(`T.q('#pw1').type`, "password", "and hidden again");
+  await T(`set('#pw1', 'abc')`);
+  await eq(`T.text('#pwhint')`, "Use 8 or more characters.", "too short, and it says so");
+  await T(`set('#pw1', 'longenough1')`);
+  await eq(`T.text('#pwhint')`, "Type it again to be sure.", "long enough");
+  await T(`set('#pw2', 'longenough')`);
+  await eq(`T.text('#pwhint')`, "They do not match yet.", "not the same yet");
+  await T(`set('#pw2', 'longenough1')`);
+  await eq(`T.text('#pwhint')`, "They match.", "the same");
+  await T(`set('#pw1', '')`);
+  await T(`set('#pw2', '')`);
   await T(`set('#pw1', 'longenough1')`);
   await T(`set('#pw2', 'different12')`);
   await T(`submit('#pwform')`);

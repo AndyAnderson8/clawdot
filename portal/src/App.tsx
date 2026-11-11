@@ -1,13 +1,13 @@
 import type { ComponentType, JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { api, keep } from "./api.ts";
 import { Activity } from "./tabs/Activity.tsx";
 import { Dashboard } from "./tabs/Dashboard.tsx";
 import { Clock } from "./tabs/Reminders.tsx";
 import { Media } from "./tabs/Media.tsx";
 import { SettingsPage } from "./tabs/SettingsPage.tsx";
-import { Forgot } from "./forgot.tsx";
-import { fail, say, start, useApp } from "./store.ts";
+import { AuthShell, Login, Setup } from "./auth.tsx";
+import { Logo, Wordmark } from "./brand.tsx";
+import { useApp } from "./store.ts";
 
 /** What a view is given: the part of the address after the destination (`#/settings/assistant` gives "assistant"). */
 interface ViewProps {
@@ -37,12 +37,6 @@ export function routeFromHash(hash: string): { tab: Tab; sub: string } {
   return { tab: [...TABS, ...HIDDEN].find((t) => t.id === name) ?? TABS[0], sub };
 }
 
-const Logo = () => (
-  <svg class="logo" aria-hidden="true">
-    <use href="#mk" />
-  </svg>
-);
-
 const ICONS: Record<string, string> = {
   dashboard: "M3 11.5 12 4l9 7.500V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1Z",
   clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 5v4.500l3 2",
@@ -52,16 +46,6 @@ const ICONS: Record<string, string> = {
   settings:
     "M4 7h9m4 0h3M4 17h3m4 0h9M15 4.500a2.500 2.500 0 1 0 0 5 2.500 2.500 0 0 0 0-5ZM9 14.500a2.500 2.500 0 1 0 0 5 2.500 2.500 0 0 0 0-5Z",
 };
-
-/** The name, with the light ring of the speaker standing in for the o. Read out as plain "ClawDot". */
-function Wordmark() {
-  return (
-    <span class="wordmark" aria-hidden="true">
-      ClawD
-      <span class="ring" />t
-    </span>
-  );
-}
 
 function Rail(props: { tab: Tab }) {
   return (
@@ -83,137 +67,6 @@ function Rail(props: { tab: Tab }) {
         ))}
       </nav>
     </div>
-  );
-}
-
-function Setup() {
-  const s = useApp();
-  const [pw1, setPw1] = useState("");
-  const [pw2, setPw2] = useState("");
-  const finish = async (body: { mode: string; password?: string }) => {
-    try {
-      const r = await api<{ token?: string }>("POST", "/api/setup", body);
-      keep(r.token);
-      say("");
-      await start();
-    } catch (x) {
-      fail(x);
-    }
-  };
-  const setPassword = (ev: Event) => {
-    ev.preventDefault();
-    if (pw1 !== pw2) {
-      say("The two passwords differ. Type the same one twice.", true);
-      return;
-    }
-    if (pw1.length < 8) {
-      say("Use at least 8 characters.", true);
-      return;
-    }
-    const password = pw1;
-    setPw1("");
-    setPw2("");
-    void finish({ mode: "password", password });
-  };
-  return (
-    <section id="setup">
-      <h2>Set up ClawDot</h2>
-      <p class="mut">
-        Tokens for senders are separate and always required. Until you finish, anyone on your private network who opens
-        this page could do it instead, so do it now.
-      </p>
-      <form id="pwform" class="panel" onSubmit={setPassword}>
-        <h3>Protect with an admin password</h3>
-        <div class="row">
-          <input
-            id="pw1"
-            type="password"
-            autoComplete="new-password"
-            placeholder="Password (8 or more characters)"
-            aria-label="New password"
-            maxLength={128}
-            value={pw1}
-            onInput={(e) => setPw1(e.currentTarget.value)}
-          />
-        </div>
-        <div class="row">
-          <input
-            id="pw2"
-            type="password"
-            autoComplete="new-password"
-            placeholder="Repeat the password"
-            aria-label="Repeat the password"
-            maxLength={128}
-            value={pw2}
-            onInput={(e) => setPw2(e.currentTarget.value)}
-          />
-        </div>
-        <div class="row">
-          <button>Set password</button>
-        </div>
-      </form>
-      <form
-        id="openform"
-        class="panel quiet"
-        onSubmit={(ev) => {
-          ev.preventDefault();
-          void finish({ mode: "open" });
-        }}
-      >
-        <h3>Or leave it open on this network</h3>
-        <p class="mut">Anyone on this network can use this page and see what your senders send.</p>
-        <div class="row">
-          <button class="danger" id="openbtn" disabled={!s.openAllowed || !s.peerPrivate}>
-            Leave open
-          </button>
-        </div>
-      </form>
-    </section>
-  );
-}
-
-function Login() {
-  const [pw, setPw] = useState("");
-  const submit = async (ev: Event) => {
-    ev.preventDefault();
-    const password = pw;
-    setPw("");
-    try {
-      const r = await api<{ token: string }>("POST", "/api/login", { password });
-      keep(r.token);
-      say("");
-      await start();
-    } catch (x) {
-      const status = (x as { status?: number }).status;
-      say(
-        status === 401
-          ? "That password was not accepted. Check it and try again."
-          : status === 429
-            ? "Too many attempts. Wait a few seconds and try again."
-            : (x as Error).message,
-        true,
-      );
-    }
-  };
-  return (
-    <section id="login">
-      <h2>Sign in</h2>
-      <form class="panel" id="loginform" onSubmit={submit}>
-        <div class="row">
-          <input
-            id="pw"
-            type="password"
-            autoComplete="current-password"
-            placeholder="Password"
-            aria-label="Password"
-            value={pw}
-            onInput={(e) => setPw(e.currentTarget.value)}
-          />
-          <button>Sign in</button>
-        </div>
-      </form>
-      <Forgot />
-    </section>
   );
 }
 
@@ -239,6 +92,16 @@ export function App(): JSX.Element {
   }, [inApp, tab.id, sub, tab.label]);
 
   const Active = tab.view;
+  if (s.view === "setup" || s.view === "login") {
+    return (
+      <>
+        <AuthShell>{s.view === "setup" ? <Setup /> : <Login />}</AuthShell>
+        <div id="msg" class={"toast" + (s.toast.bad ? " err" : "")} role="status">
+          {s.toast.text || null}
+        </div>
+      </>
+    );
+  }
   return (
     <div class={"shell" + (inApp ? " in" : "")}>
       {inApp ? <Rail tab={tab} /> : null}
@@ -258,17 +121,6 @@ export function App(): JSX.Element {
           ) : null}
         </div>
         <main>
-          {s.view === "setup" || s.view === "login" ? (
-            <div id="hero">
-              <Logo />
-              <div>
-                <h1>ClawDot</h1>
-                <p class="sub">A voice assistant that runs on your own speaker.</p>
-              </div>
-            </div>
-          ) : null}
-          {s.view === "setup" ? <Setup /> : null}
-          {s.view === "login" ? <Login /> : null}
           {inApp ? (
             <div id="app">
               <div id="panel" tabIndex={-1}>

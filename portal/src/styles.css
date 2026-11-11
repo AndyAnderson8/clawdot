@@ -1020,45 +1020,6 @@ ul.rows.tools > li.toolrow:last-child {
   }
 }
 
-/* ---- Sign in and setup ---- */
-#hero {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-4);
-  max-width: 28rem;
-  margin: var(--spacing-8) auto var(--spacing-4);
-}
-#hero .logo {
-  width: 4rem;
-  height: 4rem;
-  flex: none;
-}
-#hero h1 {
-  font-size: var(--font-size-xl);
-}
-#hero p {
-  margin: 0;
-}
-#setup,
-#login {
-  max-width: 28rem;
-  margin: 0 auto;
-  display: grid;
-  gap: var(--spacing-4);
-}
-#setup h2,
-#login h2 {
-  font-size: var(--font-size-xl);
-}
-#setup .row > input,
-#login .row > input {
-  flex: 1 1 100%;
-  max-width: none;
-}
-#setup .row > button {
-  width: 100%;
-}
-
 /* ---- Home: the device, what needs doing, the numbers, then the chart and the latest happenings ---- */
 .home {
   display: grid;
@@ -1796,4 +1757,181 @@ label.filebtn {
 }
 .card > .soon {
   margin: var(--spacing-3) 0;
+}
+
+/* ---- First run and sign-in: the dark panel of the rail, the speaker's ring, and an open form ---- */
+.auth {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+}
+.authbrand {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  justify-items: start;
+  gap: var(--spacing-8);
+  padding: clamp(2rem, 5vw, 4.5rem);
+  background: radial-gradient(60rem 40rem at 20% 85%, rgb(46 230 197 / 0.1), transparent 60%), var(--color-rail);
+  color: var(--color-rail-strong);
+  overflow: hidden;
+}
+.authlogo .wordmark {
+  font-size: 2rem;
+}
+.bigring {
+  position: relative;
+  align-self: center;
+  justify-self: center;
+  width: min(22rem, 100%);
+  aspect-ratio: 1;
+}
+.bigring svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.bigring .disc {
+  fill: rgb(255 255 255 / 0.04);
+  stroke: rgb(255 255 255 / 0.1);
+  stroke-width: 1.5;
+}
+.bigring .inner {
+  fill: rgb(0 0 0 / 0.22);
+  stroke: rgb(255 255 255 / 0.06);
+}
+.bigring .led {
+  fill: var(--color-mint);
+  filter: drop-shadow(0 0 5px rgb(46 230 197 / 0.7));
+  opacity: 0.18;
+  animation: ledon 0.5s ease-out forwards;
+  animation-delay: calc(0.25s + var(--i) * 0.075s);
+}
+@keyframes ledon {
+  to {
+    opacity: 1;
+  }
+}
+.bigring .logo {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 36%;
+  height: 36%;
+}
+.authtext h1 {
+  margin: 0 0 var(--spacing-2);
+  max-width: 18ch;
+  font-size: clamp(1.5rem, 2.6vw, 2.25rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+.authtext p {
+  margin: 0;
+  color: var(--color-rail-text);
+  max-width: 34ch;
+}
+.authmain {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: clamp(1.5rem, 4vw, 3rem) clamp(1.25rem, 6vw, 5rem) var(--spacing-4);
+  min-width: 0;
+}
+.authcard {
+  width: min(26rem, 100%);
+  margin: auto;
+  padding: var(--spacing-8) 0;
+}
+.authcard h2 {
+  margin: 0 0 var(--spacing-2);
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+}
+.authlead {
+  margin: 0 0 var(--spacing-6);
+  color: var(--color-text-secondary);
+}
+.authcard form {
+  display: grid;
+  gap: var(--spacing-4);
+}
+.authfield label {
+  display: block;
+  margin: 0 0 var(--spacing-1);
+  font-weight: 650;
+}
+.pwbox {
+  position: relative;
+}
+.pwbox input {
+  max-width: none;
+  min-height: 3rem;
+  padding-right: 4.5rem;
+  font-size: 1.0625rem;
+}
+.pwbox .showpw {
+  position: absolute;
+  top: 50%;
+  right: var(--spacing-2);
+  transform: translateY(-50%);
+  min-height: 2rem;
+  border-color: transparent;
+  background: none;
+  color: var(--color-text-secondary);
+}
+.authhint {
+  margin: calc(var(--spacing-1) * -1) 0 0;
+  min-height: 1.5em;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+button.authgo {
+  width: 100%;
+  min-height: 3rem;
+  font-size: 1.0625rem;
+}
+.authcard form.authskip {
+  margin-top: var(--spacing-8);
+  padding-top: var(--spacing-4);
+  border-top: 1px solid var(--color-card-border);
+  justify-items: start;
+}
+.authskip p {
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+.authcard details.help {
+  margin-top: var(--spacing-6);
+}
+.authfoot {
+  margin-top: 0;
+}
+@media (max-width: 56rem) {
+  .auth {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+  }
+  .authbrand {
+    grid-template-rows: auto;
+    grid-template-columns: auto;
+    padding: var(--spacing-4) var(--spacing-4);
+    gap: 0;
+  }
+  .authbrand .bigring,
+  .authbrand .authtext {
+    display: none;
+  }
+  .authlogo .wordmark {
+    font-size: 1.5rem;
+  }
+  .authcard {
+    padding: var(--spacing-6) 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bigring .led {
+    animation: none;
+    opacity: 1;
+  }
 }
