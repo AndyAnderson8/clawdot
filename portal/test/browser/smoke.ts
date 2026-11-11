@@ -308,6 +308,12 @@ await step(
     await eq(`T.text('#stat-requests .statvalue')`, "3", "requests today");
     await eq(`T.text('#stat-heard .statvalue').endsWith('ago')`, true, "last heard as a number");
     await eq(`T.all('#usage .cbar').length`, 14, "the chart shows fourteen days");
+    await eq(`T.text('#usage h3')`, "Requests, last 14 days", "and says what it counts");
+    await eq(
+      `T.text('#usage .chartnote')`,
+      "5 requests in two weeks.",
+      "yesterday's five count; today's three arrive with the next status",
+    );
     await b.until(`T.rows('#recent ul.rows > li').length === 6`, "six recent happenings, newest first");
     await eq(`T.all('#recent .badge').length`, 6, "each with an outcome");
     await eq(`T.all('#panel img, #panel script').length`, 0, "no markup from event text");

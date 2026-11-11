@@ -1,7 +1,6 @@
 // What the Dashboard says, as pure functions (unit-tested): the speaker's state in words, what needs attention with
 // a fix link for each, why a test phrase cannot be spoken, and the merged list of recent happenings.
 import { outcome, type Tone } from "./activity.ts";
-import { parts } from "./time.ts";
 import type { AgentEvent, AuditRecord, SpeakRefusal, SpeakerState, Status, UpdateStatus } from "./types.ts";
 
 export type RingState = "idle" | "listening" | "thinking" | "speaking" | "muted" | "off" | "attention";
@@ -226,22 +225,20 @@ export interface Day {
   today: boolean;
 }
 
-/** How many things the assistant did on each of the last `days` days, oldest first, from the activity log. */
-export function dailyCounts(records: AuditRecord[], now: number, zone: string, days = 14): Day[] {
+/** How many requests the assistant made to the language model on each of the last `days` days, oldest first. `today` is the
+ *  device's local day number; a day number counts days since 1970, in the device's own day. */
+export function requestDays(history: { day: number; requests: number }[], today: number, days = 14): Day[] {
+  const by = new Map(history.map((h) => [h.day, h.requests]));
   const out: Day[] = [];
   for (let i = days - 1; i >= 0; i--) {
-    const ts = now - i * 86400;
+    const day = today - i;
+    const at = new Date(day * 86400000);
     out.push({
-      date: parts(ts, zone).date,
-      label: new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "short" }).format(new Date(ts * 1000)),
-      count: 0,
+      date: at.toISOString().slice(0, 10),
+      label: new Intl.DateTimeFormat(undefined, { timeZone: "UTC", weekday: "short" }).format(at),
+      count: by.get(day) ?? 0,
       today: i === 0,
     });
-  }
-  const at = new Map(out.map((d) => [d.date, d]));
-  for (const r of records) {
-    const d = at.get(parts(r.ts, zone).date);
-    if (d) d.count += 1;
   }
   return out;
 }
