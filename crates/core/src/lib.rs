@@ -51,6 +51,7 @@ pub mod settings;
 pub mod skillfolder;
 pub mod speakers;
 pub mod speech;
+pub mod speechio;
 pub mod stopwatch;
 pub mod store;
 pub mod transport;
