@@ -1183,4 +1183,18 @@ mod tests {
         let st = c.status();
         assert_eq!((st[0].source.as_str(), st[0].finished), ("Claude Code", 1));
     }
+
+    // REQ-RTV-011
+    #[test]
+    fn one_field_of_the_status_can_be_replaced_between_snapshots() {
+        let (c, _) = core();
+        c.patch_ui_status("realtime", serde_json::json!({"active": true}));
+        assert!(c.ui_status().is_null(), "nothing before the first snapshot");
+        c.set_ui_status(serde_json::json!({"version": "9", "realtime": {"active": false}}));
+        c.patch_ui_status("realtime", serde_json::json!({"active": true}));
+        assert_eq!(
+            c.ui_status(),
+            serde_json::json!({"version": "9", "realtime": {"active": true}})
+        );
+    }
 }
