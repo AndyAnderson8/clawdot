@@ -246,7 +246,11 @@ impl UpdateConfig {
     ///
     /// # Errors
     /// A plain description of a bad key or address.
-    pub fn new(url: Option<&str>, public_key_hex: Option<&str>) -> Result<Self, String> {
+    pub fn new(
+        url: Option<&str>,
+        public_key_hex: Option<&str>,
+        env: &crate::env::Env,
+    ) -> Result<Self, String> {
         let url = url.map_or(DEFAULT_URL, str::trim).to_owned();
         let ep = Endpoint::parse(&url).map_err(|e| format!("updates.url: {e}"))?;
         if !ep.tls && !is_loopback(&ep.host) {
@@ -264,8 +268,7 @@ impl UpdateConfig {
         Ok(Self {
             url,
             public_key,
-            supervised: std::env::var_os("CLAWDOT_SUPERVISED").is_some()
-                || std::env::var_os("INVOCATION_ID").is_some(),
+            supervised: env.is_set("CLAWDOT_SUPERVISED") || env.is_set("INVOCATION_ID"),
         })
     }
 }

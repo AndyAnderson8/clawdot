@@ -98,8 +98,8 @@ pub fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
 }
 
 /// `clawdot say TEXT ...`: speak a message on a running ClawDot (REQ-INB-026).
-pub async fn say_command(rest: &[String]) -> ExitCode {
-    let say_args = match crate::say::parse(rest, |k| std::env::var(k).ok()) {
+pub async fn say_command(rest: &[String], env: &crate::env::Env) -> ExitCode {
+    let say_args = match crate::say::parse(rest, |k| env.get(k)) {
         Ok(a) => a,
         Err(m) if m.is_empty() => {
             print!("{}", crate::say::HELP);
@@ -110,9 +110,7 @@ pub async fn say_command(rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let token = std::env::var(&say_args.token_env)
-        .ok()
-        .filter(|t| !t.is_empty());
+    let token = env.get(&say_args.token_env).filter(|t| !t.is_empty());
     if token.is_none() && say_args.body.get("endpoint").is_none() {
         eprintln!(
             "clawdot say: set the environment variable {} to an endpoint token (or choose another with --token-env)",

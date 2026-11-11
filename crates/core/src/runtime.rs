@@ -107,6 +107,7 @@ pub fn build_llm(
     url: Option<&str>,
     model: Option<&str>,
     secrets: &crate::secrets::Secrets,
+    env: &crate::env::Env,
     key_env: &str,
     max_tokens: u32,
     agent: &AgentConfig,
@@ -117,7 +118,7 @@ pub fn build_llm(
     // A key pasted into the portal wins; otherwise the environment variable that was named.
     let key = secrets
         .get(crate::secrets::LLM_KEY)
-        .unwrap_or_else(|| std::env::var(key_env).unwrap_or_default());
+        .unwrap_or_else(|| env.get(key_env).unwrap_or_default());
     let backend = Arc::new(HttpBackend::new(url, &key, Duration::from_secs(30))?);
     Ok(Some(Llm {
         backend,
@@ -199,6 +200,7 @@ pub fn apply_live(
             text("llm_url"),
             text("llm_model"),
             core.secrets(),
+            core.env(),
             text("llm_key_env").unwrap_or("OPENROUTER_API_KEY"),
             max_tokens,
             &brain.agent,
@@ -235,6 +237,8 @@ pub struct Brain {
     pub voice_configured: bool,
     /// The optional realtime voice: its settings, status and the way sessions reach this loop.
     pub rt: Realtime,
+    /// The environment as it was at start-up (see [`crate::env`]); keys named by settings are looked up here.
+    pub env: crate::env::Env,
     /// MCP connections being made beside the loop, for servers added in the portal.
     pub connects: Connects,
 }
@@ -278,7 +282,7 @@ impl Brain {
                 Arc::make_mut(&mut self.http_tools),
                 Arc::make_mut(&mut self.mcp),
                 &self.builtin,
-                |v| std::env::var(v).ok(),
+                &self.env.lookup(),
             )
             .await;
         self.ext_view = Arc::new(self.ext.snapshot());
@@ -572,9 +576,8 @@ pub async fn portal_op(
         Op::Ext(ExtOp::McpAdd(v)) => {
             match brain
                 .ext
-                .mcp_prepare(&v, &brain.mcp, brain.connects.len(), |v| {
-                    std::env::var(v).ok()
-                }) {
+                .mcp_prepare(&v, &brain.mcp, brain.connects.len(), |v| brain.env.get(v))
+            {
                 Ok(pending) => {
                     brain.connects.start(pending, reply);
                     return;
@@ -680,7 +683,7 @@ mod tests {
         let mut argv = vec!["--data-dir".to_owned(), dir.0.display().to_string()];
         argv.extend(extra.iter().map(|s| (*s).to_owned()));
         let mut args = cli::parse(&argv).unwrap();
-        let (state, _) = seed::resolve_settings(&mut args).unwrap();
+        let (state, _) = seed::resolve_settings(&mut args, &crate::env::Env::empty()).unwrap();
         let live = state.live_values();
         let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
         let core = Arc::new(

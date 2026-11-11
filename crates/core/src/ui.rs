@@ -524,7 +524,7 @@ pub(crate) async fn handle(
             Err((s, m)) => error(s, m),
         },
         Id::ConnectionTest => match read_json::<Value>(body).await {
-            Ok(v) => match extensions::test_connection(&v, |n| std::env::var(n).ok()).await {
+            Ok(v) => match extensions::test_connection(&v, |n| core.env().get(n)).await {
                 Ok(r) => json_reply(StatusCode::OK, &r),
                 Err(f) => fail_reply(&f),
             },
@@ -621,7 +621,7 @@ async fn models(core: &Core, query: Option<&str>) -> Resp {
     let key = if var.is_empty() {
         String::new()
     } else {
-        std::env::var(&var).unwrap_or_default()
+        core.env().get(&var).unwrap_or_default()
     };
     fetch_models(&url, &key).await
 }
@@ -669,7 +669,7 @@ async fn models_with_key(core: &Core, body: Incoming) -> Resp {
             .unwrap_or_else(|| {
                 let s = core.ui_settings();
                 let var = s["fields"]["llm_key_env"]["value"].as_str().unwrap_or("");
-                std::env::var(var).unwrap_or_default()
+                core.env().get(var).unwrap_or_default()
             }),
     };
     fetch_models(url, &key).await

@@ -159,12 +159,6 @@ impl RtSettings {
             .filter(|k| !k.is_empty())
     }
 
-    /// [`Self::key_with`] using the process environment.
-    #[must_use]
-    pub fn key(&self, secrets: &Secrets) -> Option<String> {
-        self.key_with(secrets, &|n| std::env::var(n).ok())
-    }
-
     /// Ready to start a session: built in, chosen, addressed, and with a key.
     #[must_use]
     pub fn configured_with(&self, secrets: &Secrets, env: &dyn Fn(&str) -> Option<String>) -> bool {
@@ -173,12 +167,6 @@ impl RtSettings {
             && self.url.is_some()
             && self.model.is_some()
             && self.key_with(secrets, env).is_some()
-    }
-
-    /// [`Self::configured_with`] using the process environment.
-    #[must_use]
-    pub fn configured(&self, secrets: &Secrets) -> bool {
-        self.configured_with(secrets, &|n| std::env::var(n).ok())
     }
 }
 
@@ -207,7 +195,7 @@ pub struct Job {
 }
 
 /// How an environment variable is looked up; tests replace it.
-pub type EnvFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub use crate::env::EnvFn;
 
 struct Inner {
     settings: Mutex<RtSettings>,
@@ -236,10 +224,11 @@ impl Default for Realtime {
 }
 
 impl Realtime {
-    /// A handle with these settings and nowhere to send sessions yet.
+    /// A handle with these settings and nowhere to send sessions yet. It sees no environment variables; use
+    /// [`Self::with_env_and_secrets`] to give it the start-up snapshot.
     #[must_use]
     pub fn new(settings: RtSettings) -> Self {
-        Self::with_env(settings, Box::new(|n| std::env::var(n).ok()))
+        Self::with_env(settings, crate::env::Env::empty().lookup())
     }
 
     /// Like [`Self::new`], looking environment variables up with `env`.
@@ -248,13 +237,10 @@ impl Realtime {
         Self::with_env_and_secrets(settings, env, Secrets::none())
     }
 
-    /// Like [`Self::new`], looking a pasted key up in `secrets` (the owning core's).
+    /// Like [`Self::new`], looking environment variables up with `env` (the owning core's snapshot) and a pasted
+    /// key up in `secrets`.
     #[must_use]
-    pub fn with_secrets(settings: RtSettings, secrets: Secrets) -> Self {
-        Self::with_env_and_secrets(settings, Box::new(|n| std::env::var(n).ok()), secrets)
-    }
-
-    fn with_env_and_secrets(settings: RtSettings, env: EnvFn, secrets: Secrets) -> Self {
+    pub fn with_env_and_secrets(settings: RtSettings, env: EnvFn, secrets: Secrets) -> Self {
         Self(Arc::new(Inner {
             settings: Mutex::new(settings),
             env,
