@@ -204,3 +204,182 @@ pub fn quiet_from(live: &serde_json::Map<String, serde_json::Value>) -> Option<Q
         end: at("quiet_end")?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli;
+    use crate::session::{MAX_CALLS_CEILING, MAX_DEADLINE_CEILING_SECS, MAX_ROUNDS_CEILING};
+    use crate::store::testutil::TempDir;
+
+    fn blank_args() -> Args {
+        cli::parse(&[]).unwrap()
+    }
+
+    // REQ-CFG-038, REQ-CFG-062
+    #[test]
+    fn the_file_layer_gets_what_the_file_sets_and_nothing_else() {
+        let mut a = blank_args();
+        let c = Config::parse(
+            r#"{"name": "Kitchen", "listen": "127.0.0.1:4100", "llm": {"url": "http://x/v1", "model": "m"},
+                "limits": {"max_actions_per_day": 7, "dry_run": true},
+                "agent": {"max_rounds": 6, "plan_speech": true}}"#,
+        )
+        .unwrap();
+        seed_from_config(&mut a, &c).unwrap();
+        assert_eq!(a.listen, "127.0.0.1:4100".parse().unwrap());
+        let f = &a.file_layer;
+        assert_eq!(f["device_name"], "Kitchen");
+        assert_eq!(f["listen"], "127.0.0.1:4100");
+        assert_eq!(f["llm_model"], "m");
+        assert_eq!(f["max_actions_per_day"], 7);
+        assert_eq!(f["dry_run"], true);
+        assert_eq!(f["agent_max_rounds"], 6);
+        assert_eq!(f["plan_speech"], true);
+        // Settings the file does not mention stay out of the layer, so the defaults show through.
+        for k in [
+            "zone",
+            "public_url",
+            "notes",
+            "agent_deadline_secs",
+            "voice",
+        ] {
+            assert!(!f.contains_key(k), "{k}");
+        }
+        assert!(a.flag_layer.is_empty());
+    }
+
+    #[test]
+    fn an_empty_file_seeds_nothing() {
+        let mut a = blank_args();
+        seed_from_config(&mut a, &Config::parse("{}").unwrap()).unwrap();
+        assert!(a.file_layer.is_empty());
+        assert_eq!(a.listen, "127.0.0.1:3335".parse().unwrap());
+    }
+
+    // The clamp reads the range from the settings table row, which holds the same numbers as the turn ceilings.
+    #[test]
+    fn agent_limits_above_their_ceiling_are_shown_at_the_ceiling() {
+        let mut a = blank_args();
+        let c = Config::parse(
+            r#"{"agent": {"max_rounds": 99, "max_tool_calls": 99, "deadline_secs": 1, "tool_timeout_secs": 500}}"#,
+        )
+        .unwrap();
+        seed_from_config(&mut a, &c).unwrap();
+        assert_eq!(a.file_layer["agent_max_rounds"], MAX_ROUNDS_CEILING);
+        assert_eq!(a.file_layer["agent_max_tool_calls"], MAX_CALLS_CEILING);
+        assert_eq!(a.file_layer["agent_deadline_secs"], 5);
+        assert_eq!(a.file_layer["agent_tool_timeout_secs"], 120);
+    }
+
+    #[test]
+    fn the_table_ranges_match_the_turn_ceilings() {
+        assert_eq!(
+            settings::whole_range("agent_max_rounds"),
+            Some((1, MAX_ROUNDS_CEILING as u64))
+        );
+        assert_eq!(
+            settings::whole_range("agent_max_tool_calls"),
+            Some((1, MAX_CALLS_CEILING as u64))
+        );
+        assert_eq!(
+            settings::whole_range("agent_deadline_secs"),
+            Some((5, MAX_DEADLINE_CEILING_SECS))
+        );
+        assert_eq!(
+            settings::whole_range("agent_tool_timeout_secs"),
+            Some((1, 120))
+        );
+        assert_eq!(settings::whole_range("zone"), None);
+    }
+
+    #[test]
+    fn defaults_apply_when_no_layer_sets_a_value() {
+        let dir = TempDir::new("seed-defaults");
+        let mut a = blank_args();
+        a.data_dir.clone_from(&dir.0);
+        let (state, _) = resolve_settings(&mut a).unwrap();
+        assert_eq!(a.listen, "127.0.0.1:3335".parse().unwrap());
+        assert_eq!(a.zone, None);
+        assert_eq!(a.persona, crate::assistant::DEFAULT_PERSONA);
+        assert_eq!(a.key_env, "OPENROUTER_API_KEY");
+        assert_eq!(a.daily_spend, None);
+        assert_eq!(a.llm_url, None);
+        assert!(!a.actions.dry_run && a.quiet.is_none());
+        assert_eq!(state.get("device_name"), "ClawDot");
+    }
+
+    #[test]
+    fn the_file_layer_beats_defaults_and_flags_beat_the_file() {
+        let dir = TempDir::new("seed-layers");
+        let path = dir.0.join("c.json");
+        std::fs::write(
+            &path,
+            r#"{"listen": "127.0.0.1:4100", "zone": "America/Chicago", "llm": {"url": "http://x/v1", "model": "from-file"},
+                "limits": {"max_actions_per_day": 7, "daily_spend_usd": 1.5},
+                "agent": {"max_rounds": 6, "notes": true}}"#,
+        )
+        .unwrap();
+        let mut a = cli::parse(&[
+            "--config".to_owned(),
+            path.display().to_string(),
+            "--data-dir".to_owned(),
+            dir.0.display().to_string(),
+            "--llm-model".to_owned(),
+            "from-flag".to_owned(),
+        ])
+        .unwrap();
+        let (state, _) = resolve_settings(&mut a).unwrap();
+        assert_eq!(a.listen, "127.0.0.1:4100".parse().unwrap());
+        assert_eq!(a.llm_url.as_deref(), Some("http://x/v1"));
+        assert_eq!(a.llm_model.as_deref(), Some("from-flag"));
+        assert_eq!(a.zone.as_deref(), Some("America/Chicago"));
+        assert_eq!(a.daily_spend, Some(1.5));
+        assert_eq!(a.agent.max_rounds, Some(6));
+        assert_eq!(a.agent.notes, Some(true));
+        assert_eq!(a.actions.max_actions_per_day, 7);
+        assert_eq!(state.get("llm_model"), "from-flag");
+        // The layers were handed to the settings state.
+        assert!(a.file_layer.is_empty() && a.flag_layer.is_empty());
+    }
+
+    #[test]
+    fn a_persona_file_that_cannot_be_used_is_an_error() {
+        let dir = TempDir::new("seed-persona");
+        let mut a = blank_args();
+        a.data_dir.clone_from(&dir.0);
+        a.persona_file = Some(dir.0.join("missing.txt"));
+        let e = resolve_settings(&mut a).unwrap_err();
+        assert!(e.starts_with("cannot use persona file"), "{e}");
+        std::fs::write(dir.0.join("p.txt"), "You are terse.").unwrap();
+        a.persona_file = Some(dir.0.join("p.txt"));
+        a.persona_flag = true;
+        resolve_settings(&mut a).unwrap();
+        assert_eq!(a.persona, "You are terse.");
+    }
+
+    #[test]
+    fn live_values_become_the_agent_policy_and_quiet_hours() {
+        let live: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"agent_max_rounds": 3, "agent_deadline_secs": 40, "plan_speech": false,
+                "dry_run": true, "max_actions_per_day": 9, "quiet_start": "22:00", "quiet_end": "07:00"}"#,
+        )
+        .unwrap();
+        let agent = agent_from(&live, Some(500));
+        assert_eq!(agent.max_rounds, Some(3));
+        assert_eq!(agent.deadline_secs, Some(40));
+        assert_eq!(agent.plan_speech, Some(false));
+        assert_eq!(agent.summarize_over_chars, Some(500));
+        assert_eq!(agent.max_tool_calls, None);
+        let p = policy_from(&live);
+        assert!(p.dry_run);
+        assert_eq!(p.max_actions_per_day, 9);
+        assert_eq!(
+            p.max_costly_per_day,
+            ActionPolicy::default().max_costly_per_day
+        );
+        let q = quiet_from(&live).unwrap();
+        assert!(q.contains(23 * 60) && !q.contains(12 * 60));
+        assert!(quiet_from(&serde_json::Map::new()).is_none());
+    }
+}

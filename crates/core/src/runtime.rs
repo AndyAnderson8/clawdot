@@ -597,3 +597,154 @@ impl std::fmt::Debug for Brain {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Adapters, Limits, Stores};
+    use crate::sched::SystemClock;
+    use crate::session::Conversation;
+    use crate::startup::build_brain;
+    use crate::store::testutil::TempDir;
+    use crate::{cli, seed};
+
+    type Map = serde_json::Map<String, serde_json::Value>;
+
+    /// A real brain over a scratch data directory, and the live values it started with.
+    async fn started(dir: &TempDir, extra: &[&str]) -> (Brain, Arc<Core>, Map) {
+        let mut argv = vec!["--data-dir".to_owned(), dir.0.display().to_string()];
+        argv.extend(extra.iter().map(|s| (*s).to_owned()));
+        let mut args = cli::parse(&argv).unwrap();
+        let (state, _) = seed::resolve_settings(&mut args).unwrap();
+        let live = state.live_values();
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
+        let core = Arc::new(
+            Core::open(
+                clock.clone(),
+                Adapters::builtin(),
+                Limits::default(),
+                Stores::in_dir(&args.data_dir),
+            )
+            .unwrap(),
+        );
+        let zone = zone_for(None).unwrap();
+        let (brain, _hub) = build_brain(&mut args, &live, zone, &clock, &core)
+            .await
+            .unwrap();
+        (brain, core, live)
+    }
+
+    fn with(live: &Map, changes: &[(&str, serde_json::Value)]) -> Map {
+        let mut m = live.clone();
+        for (k, v) in changes {
+            m.insert((*k).to_owned(), v.clone());
+        }
+        m
+    }
+
+    // REQ-CFG-039: the agent group applies as a whole and reaches the language model's turn settings.
+    #[tokio::test]
+    async fn a_change_to_the_agent_group_reaches_the_brain_and_the_model_settings() {
+        let dir = TempDir::new("apply-live-agent");
+        let (mut brain, core, live) = started(
+            &dir,
+            &["--llm-url", "http://127.0.0.1:1/v1", "--llm-model", "m"],
+        )
+        .await;
+        let mut applied = live.clone();
+        assert_ne!(brain.llm.as_ref().unwrap().cfg.max_tool_loops, 3);
+
+        let next = with(
+            &live,
+            &[
+                ("agent_max_rounds", 3.into()),
+                ("plan_speech", false.into()),
+            ],
+        );
+        apply_live(&mut brain, &core, &next, &mut applied);
+
+        assert_eq!(brain.agent.max_rounds, Some(3));
+        assert_eq!(brain.agent.plan_speech, Some(false));
+        let cfg = &brain.llm.as_ref().unwrap().cfg;
+        assert_eq!(cfg.max_tool_loops, 3);
+        assert!(!cfg.plan_speech);
+        assert_eq!(applied, next, "what is in effect is remembered");
+    }
+
+    #[tokio::test]
+    async fn only_what_changed_is_applied() {
+        let dir = TempDir::new("apply-live-persona");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+
+        // Nothing changed: a value set behind the loop's back is left alone.
+        brain.persona = "set elsewhere".into();
+        apply_live(&mut brain, &core, &live, &mut applied);
+        assert_eq!(brain.persona, "set elsewhere");
+
+        let next = with(&live, &[("persona", "You are terse.".into())]);
+        apply_live(&mut brain, &core, &next, &mut applied);
+        assert_eq!(brain.persona, "You are terse.");
+        assert!(brain.llm.is_none(), "no model was configured or added");
+    }
+
+    #[tokio::test]
+    async fn the_daily_spend_cap_and_notes_switch_follow_the_settings() {
+        let dir = TempDir::new("apply-live-spend");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        assert_eq!(brain.usage.limits().daily_spend_cap_usd, None);
+
+        let next = with(
+            &live,
+            &[("daily_spend_usd", 2.5.into()), ("notes", true.into())],
+        );
+        apply_live(&mut brain, &core, &next, &mut applied);
+        assert_eq!(brain.usage.limits().daily_spend_cap_usd, Some(2.5));
+        assert!(core.notes().unwrap().enabled());
+    }
+
+    #[tokio::test]
+    async fn the_status_snapshot_reports_the_brain_without_secrets() {
+        let dir = TempDir::new("status");
+        let (brain, _core, _live) = started(&dir, &[]).await;
+        let view = SpeakerView {
+            available: false,
+            console: true,
+            quiet: None,
+        };
+        let s = brain.status_json(0, &view, &["Jazz".to_owned()], &serde_json::json!({}));
+        assert_eq!(s["llm"]["configured"], false);
+        assert_eq!(s["speaker"]["name"], "console");
+        assert_eq!(s["speaker"]["available"], true);
+        assert_eq!(s["stations"][0], "Jazz");
+        assert_eq!(s["satellites"], 0);
+        assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn the_fast_path_answers_without_a_model_and_other_requests_say_one_is_needed() {
+        let dir = TempDir::new("dispatch");
+        let (mut brain, _core, _live) = started(&dir, &[]).await;
+        let mut hub = Hub::new(|| Conversation::new(String::new(), 20, 24_000, 600));
+        let ask = |line: &str| Request {
+            speaker: "console".into(),
+            line: line.to_owned(),
+            ctl: TurnCtl::default(),
+            origin: Origin::Console,
+        };
+        let (_, reply) = dispatch(&mut brain, &mut hub, ask("set a timer for 5 minutes")).unwrap();
+        assert!(
+            !reply.say.is_empty() && reply.say != NO_LLM,
+            "{}",
+            reply.say
+        );
+        let (_, reply) = dispatch(
+            &mut brain,
+            &mut hub,
+            ask("tell me about owls and their habits"),
+        )
+        .unwrap();
+        assert_eq!(reply.say, NO_LLM);
+    }
+}
