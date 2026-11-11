@@ -397,6 +397,7 @@ Release early and often: tag `v0.x` releases as steps land, so the differentiato
 | 5 | **Wi-Fi provisioner** (captive portal; BLE for ESP32) | Makes it an appliance | Portal is network-independent; mDNS |
 | 6 | **Home Assistant HACS integration** and **Wyoming bridge** | HA community reach | Generic webhook, HTTP tools, Wyoming-compatible framing (ADR-0008) |
 | 7 | **Willow-compatible front end** (let a Willow device talk to ClawDot) | Reuses an existing open voice front end instead of building one | Satellite protocol; Wyoming-compatible framing; no fork |
+| 7b | **Try third-party Echo front ends as satellites** (for example echo-dot-assist's `hassmic`, which makes a Fire OS Echo Dot, Echo or Echo Show look like an ESPHome device): check whether ClawDot's ESPHome client can be their brain without Home Assistant. Untested; their README only describes Home Assistant. Would also cover Echo Show screens | Reuses existing device support, including screens | ESPHome native-API client (B8); display capability (SAT-016) |
 | 8 | **`/display` page** and semantic display events for screen speakers | Screens, kiosks | Display capability and `clawdot.display.*` reserved (SAT-016) |
 | 9 | **librespot Connect receiver sidecar (research)**: ClawDot's speaker as a Spotify Connect device, as a separate process | Music playing on the device itself | Media-source interface (MUS-003/005). Research only: reverse-engineered library, budget and terms-of-service concerns |
 | 10 | Podcasts and audiobooks (resume positions) | Music breadth | Media-source interface |
