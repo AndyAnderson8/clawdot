@@ -63,7 +63,7 @@ pub struct Field {
 }
 
 /// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039).
-pub const FIELDS: [Field; 25] = [
+pub const FIELDS: [Field; 26] = [
     Field {
         key: "device_name",
         live: true,
@@ -95,6 +95,11 @@ pub const FIELDS: [Field; 25] = [
     Field {
         key: "speech_language",
         live: true,
+    },
+    // Which service's wire format the speech client speaks; the clients are built at start (REQ-VOI-021).
+    Field {
+        key: "speech_provider",
+        live: false,
     },
     Field {
         key: "listen",
@@ -316,6 +321,10 @@ fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Resu
             json!(n)
         }
         "voice" => json!(string("The voice", 64)?),
+        "speech_provider" => {
+            let t = string("The speech provider", 20)?;
+            json!(crate::speech::Dialect::parse(&t)?.name())
+        }
         "speech_language" => {
             let t = string("The speech language", 12)?;
             if !t.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
@@ -394,7 +403,12 @@ fn check(
     {
         return Err("Quiet hours cannot start and end at the same time. Use different times, or clear both.".into());
     }
-    if (has("voice") || has("speech_language")) && !speech_configured {
+    // ElevenLabs and Deepgram need no `speech` section: they have their own address (REQ-VOI-021).
+    let own_service = eff
+        .get("speech_provider")
+        .and_then(|(v, _)| v.as_str())
+        .is_some_and(|p| p != "openai");
+    if (has("voice") || has("speech_language")) && !speech_configured && !own_service {
         return Err(
             "A voice needs a speech provider. Add a `speech` section to the configuration file (see docs/architecture/voice-pipeline.md) and restart, or clear the voice.".into(),
         );
@@ -642,6 +656,14 @@ impl SettingsState {
                     || (self.env)(key_env).is_some_and(|v| !v.is_empty()),
                 // The first and last few characters of the key pasted into the page, never the key.
                 "key_hint": crate::secrets::hint(crate::secrets::LLM_KEY),
+            },
+            // The speech service key follows the same rules: only a masked hint, never the key (REQ-VOI-023).
+            "speech": {
+                "key_present": crate::secrets::get(crate::secrets::SPEECH_KEY).is_some()
+                    || self.extra["speech_key_env"]
+                        .as_str()
+                        .is_some_and(|n| (self.env)(n).is_some_and(|v| !v.is_empty())),
+                "key_hint": crate::secrets::hint(crate::secrets::SPEECH_KEY),
             },
         });
         if let (Some(o), Some(e)) = (out.as_object_mut(), self.extra.as_object()) {
@@ -941,6 +963,30 @@ mod tests {
         for k in ["llm_key", "api_key", "key"] {
             assert!(st.change(&json!({ (k): "sk-1234" })).is_err());
         }
+    }
+
+    // REQ-VOI-021
+    #[test]
+    fn the_speech_provider_is_a_known_name_that_needs_a_restart_and_frees_the_voice() {
+        let mut st = SettingsState::in_memory(defaults(), false, env_with(&[]));
+        // A voice needs a speech section for the OpenAI style...
+        let e = st.change(&json!({"voice": "alloy"})).unwrap_err();
+        assert!(e.contains("speech provider"), "{e}");
+        let e = st.change(&json!({"speech_provider": "acme"})).unwrap_err();
+        assert!(e.contains("openai, elevenlabs, deepgram"), "{e}");
+        // ...but ElevenLabs and Deepgram bring their own address.
+        st.change(&json!({"speech_provider": " ElevenLabs ", "voice": "21m00Tcm4TlvDq8ikWAM"}))
+            .unwrap();
+        assert_eq!(st.get("speech_provider"), "elevenlabs");
+        let j = st.json();
+        assert_eq!(j["fields"]["speech_provider"]["live"], false);
+        assert!(
+            j["restart_needed"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("speech_provider"))
+        );
+        st.change(&json!({"speech_provider": null})).unwrap_err();
     }
 
     // REQ-CFG-062, REQ-CFG-038

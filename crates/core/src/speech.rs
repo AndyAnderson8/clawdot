@@ -1,4 +1,8 @@
-//! Speech-to-text and text-to-speech over OpenAI-compatible HTTP APIs (REQ-VOI-003, REQ-VOI-004).
+//! Speech-to-text and text-to-speech over HTTP APIs (REQ-VOI-003, REQ-VOI-004).
+//!
+//! The wire format is a [`Dialect`]: `openai` (the default; also Kokoro, Piper helpers, Whisper servers and anything
+//! else that copies OpenAI), `elevenlabs` and `deepgram` (REQ-VOI-021). Text below that says "OpenAI style"
+//! describes the default dialect.
 //!
 //! * [`HttpTranscriber`] uploads one utterance as a WAV file to `POST {base}/audio/transcriptions` (batch mode).
 //! * [`HttpSynthesizer`] asks `POST {base}/audio/speech` for raw 16-bit PCM and converts it to 16 kHz.
@@ -166,11 +170,207 @@ fn multipart(boundary: &str, fields: &[(&str, &str)], file: &[u8]) -> Vec<u8> {
     body
 }
 
+/// Which service's wire format is spoken (`speech.provider`, REQ-VOI-021).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    /// `POST /audio/speech` and `/audio/transcriptions` with a bearer key. The default.
+    #[default]
+    OpenAi,
+    /// ElevenLabs: `xi-api-key`, `POST /v1/text-to-speech/{voice_id}`, `POST /v1/speech-to-text` (Scribe), voices
+    /// (including cloned ones) from `GET /v2/voices`.
+    ElevenLabs,
+    /// Deepgram: `Authorization: Token`, `POST /v1/listen` (Nova) and `POST /v1/speak` (Aura); no voice list.
+    Deepgram,
+}
+
+impl Dialect {
+    /// Every name `speech.provider` accepts.
+    pub const NAMES: [&'static str; 3] = ["openai", "elevenlabs", "deepgram"];
+
+    /// The dialect called `name` (case does not matter).
+    ///
+    /// # Errors
+    /// A plain message listing the names that exist.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "openai" => Ok(Self::OpenAi),
+            "elevenlabs" => Ok(Self::ElevenLabs),
+            "deepgram" => Ok(Self::Deepgram),
+            _ => Err(format!(
+                "The speech provider must be one of: {}.",
+                Self::NAMES.join(", ")
+            )),
+        }
+    }
+
+    /// The name used in settings and the configuration file.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::ElevenLabs => "elevenlabs",
+            Self::Deepgram => "deepgram",
+        }
+    }
+
+    /// The service's own address, used when `speech.url` is not set. The OpenAI style has none: the address says
+    /// which server it is.
+    #[must_use]
+    pub fn default_url(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAi => None,
+            Self::ElevenLabs => Some("https://api.elevenlabs.io"),
+            Self::Deepgram => Some("https://api.deepgram.com"),
+        }
+    }
+
+    /// The transcription model used when `speech.stt_model` is not set.
+    #[must_use]
+    pub fn default_stt_model(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAi => None,
+            Self::ElevenLabs => Some("scribe_v2"),
+            Self::Deepgram => Some("nova-3"),
+        }
+    }
+
+    /// The speech model used when `speech.tts_model` is not set. Deepgram picks its model by voice, so this is only
+    /// a placeholder there.
+    #[must_use]
+    pub fn default_tts_model(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAi => None,
+            Self::ElevenLabs => Some("eleven_flash_v2_5"),
+            Self::Deepgram => Some("aura-2"),
+        }
+    }
+
+    /// The voice used when `speech.voice` is not set.
+    #[must_use]
+    pub fn default_voice(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAi => None,
+            // "Rachel", a premade voice from ElevenLabs' own quick start.
+            Self::ElevenLabs => Some("21m00Tcm4TlvDq8ikWAM"),
+            Self::Deepgram => Some("aura-2-thalia-en"),
+        }
+    }
+
+    /// The environment variable the key is read from when `speech.key_env` is not set.
+    #[must_use]
+    pub fn default_key_env(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAi => None,
+            Self::ElevenLabs => Some("ELEVENLABS_API_KEY"),
+            Self::Deepgram => Some("DEEPGRAM_API_KEY"),
+        }
+    }
+
+    fn needs_key(self) -> bool {
+        self != Self::OpenAi
+    }
+
+    /// How messages name the service.
+    fn title(self) -> &'static str {
+        match self {
+            Self::OpenAi => "the speech server",
+            Self::ElevenLabs => "ElevenLabs",
+            Self::Deepgram => "Deepgram",
+        }
+    }
+
+    /// Output rates (Hz) the service can produce as raw 16-bit PCM.
+    fn pcm_rates(self) -> &'static [u32] {
+        match self {
+            Self::OpenAi => &[],
+            Self::ElevenLabs => &[8_000, 16_000, 22_050, 24_000, 44_100],
+            Self::Deepgram => &[8_000, 16_000, 24_000, 32_000, 48_000],
+        }
+    }
+}
+
+/// One voice a service offers: the `id` is what is sent as the voice, the `label` is what a person recognises.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceInfo {
+    /// The value to use as `voice`.
+    pub id: String,
+    /// A display name: for a cloned voice, the name it was given.
+    pub label: String,
+    /// `premade`, `cloned`, `professional`, ... where the service says.
+    pub category: Option<String>,
+}
+
+/// A voice or model name goes into a web address, so it is only letters, digits, dashes, underscores and dots.
+fn plain_id(what: &str, v: &str) -> Result<(), String> {
+    if v.is_empty()
+        || v.len() > 128
+        || !v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(format!(
+            "{what} `{}` is not a name this service accepts (letters, digits, dashes and underscores only).",
+            v.chars().take(40).collect::<String>()
+        ));
+    }
+    Ok(())
+}
+
+/// The message inside a provider's error body.
+fn error_text(dialect: Dialect, v: &Value) -> String {
+    if let Some(m) = v["error"]["message"].as_str() {
+        return m.to_owned();
+    }
+    if dialect == Dialect::OpenAi {
+        return String::new();
+    }
+    // ElevenLabs: {"detail":{"status","message"}}, {"detail":"text"} or {"detail":[{"msg"}]};
+    // Deepgram: {"err_msg"} or {"message"}.
+    [
+        &v["detail"]["message"],
+        &v["detail"],
+        &v["detail"][0]["msg"],
+        &v["err_msg"],
+        &v["message"],
+    ]
+    .iter()
+    .find_map(|x| x.as_str())
+    .unwrap_or_default()
+    .to_owned()
+}
+
+/// The text of a failed request. The OpenAI style keeps `HTTP <code>: <message>`; the others lead with a plain reason
+/// for the failures a person can fix (the key, the limit, the plan), then the service's own words.
+fn failure(dialect: Dialect, code: u16, msg: &str) -> String {
+    let msg: String = msg.chars().take(200).collect();
+    let reason = if dialect == Dialect::OpenAi {
+        ""
+    } else {
+        match code {
+            401 | 403 => {
+                "the key was not accepted, check that it is the whole key for this service"
+            }
+            402 => "the plan has no credit or characters left",
+            429 => "too many requests or the plan's limit is reached; wait a little and try again",
+            _ => "",
+        }
+    };
+    match (reason.is_empty(), msg.is_empty()) {
+        (true, true) => format!("HTTP {code}"),
+        (true, false) => format!("HTTP {code}: {msg}"),
+        (false, true) => format!("HTTP {code}: {reason}"),
+        (false, false) => format!("HTTP {code}: {reason} ({msg})"),
+    }
+}
+
 struct Client {
     endpoint: Endpoint,
     key: String,
+    /// Prefer the key pasted into the portal over `key` (REQ-VOI-023).
+    use_stored_key: bool,
     deadline: Duration,
     connector: Connector,
+    dialect: Dialect,
 }
 
 impl Client {
@@ -178,9 +378,21 @@ impl Client {
         Ok(Self {
             endpoint: check_url(base_url)?,
             key: key.to_owned(),
+            use_stored_key: false,
             deadline,
             connector: Connector::new()?,
+            dialect: Dialect::OpenAi,
         })
+    }
+
+    /// The key to send now: one pasted into the portal wins, so it takes effect without a restart.
+    fn current_key(&self) -> String {
+        if self.use_stored_key
+            && let Some(k) = crate::secrets::get(crate::secrets::SPEECH_KEY)
+        {
+            return k;
+        }
+        self.key.clone()
     }
 
     async fn post(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -199,15 +411,33 @@ impl Client {
         content_type: &str,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, String> {
+        // The other dialects' paths start with /v1 themselves; an address that already ends in it still works.
+        let base = self.endpoint.base.as_str();
+        let base = if self.dialect == Dialect::OpenAi {
+            base
+        } else {
+            base.strip_suffix("/v1").unwrap_or(base)
+        };
         let mut req = Request::builder()
             .method(method)
-            .uri(format!("{}{path}", self.endpoint.base))
+            .uri(format!("{base}{path}"))
             .header("host", &self.endpoint.host)
             .header("content-type", content_type)
             .header("connection", "close")
             .header("user-agent", "clawdot");
-        if !self.key.is_empty() {
-            req = req.header("authorization", format!("Bearer {}", self.key));
+        let key = self.current_key();
+        if key.is_empty() && self.dialect.needs_key() {
+            return Err(format!(
+                "No key is set for {}. Paste one in the voice settings, or name an environment variable that holds it.",
+                self.dialect.title()
+            ));
+        }
+        if !key.is_empty() {
+            req = match self.dialect {
+                Dialect::OpenAi => req.header("authorization", format!("Bearer {key}")),
+                Dialect::ElevenLabs => req.header("xi-api-key", key),
+                Dialect::Deepgram => req.header("authorization", format!("Token {key}")),
+            };
         }
         let request = req
             .body(Full::new(Bytes::from(body)))
@@ -232,14 +462,9 @@ impl Client {
                 // Provider error bodies are JSON with a message; show that, never anything else.
                 let msg = serde_json::from_slice::<Value>(&all)
                     .ok()
-                    .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
+                    .map(|v| error_text(self.dialect, &v))
                     .unwrap_or_default();
-                Err(format!(
-                    "HTTP {}{}{}",
-                    status.as_u16(),
-                    if msg.is_empty() { "" } else { ": " },
-                    msg.chars().take(200).collect::<String>()
-                ))
+                Err(failure(self.dialect, status.as_u16(), &msg))
             }
         };
         timeout(self.deadline, work)
@@ -287,20 +512,97 @@ impl HttpTranscriber {
     pub fn language_handle(&self) -> Arc<Mutex<Option<String>>> {
         Arc::clone(&self.language)
     }
-}
 
-impl Transcriber for HttpTranscriber {
-    async fn transcribe(&self, pcm: &[i16]) -> Result<String, String> {
-        // The boundary only needs to be absent from the data; WAV bytes could contain anything, so mix in the length.
+    /// Speak another service's wire format (REQ-VOI-021).
+    #[must_use]
+    pub fn with_dialect(mut self, dialect: Dialect) -> Self {
+        self.client.dialect = dialect;
+        self
+    }
+
+    /// Use the key pasted into the portal when there is one (REQ-VOI-023).
+    #[must_use]
+    pub fn with_stored_key(mut self) -> Self {
+        self.client.use_stored_key = true;
+        self
+    }
+
+    async fn transcribe_elevenlabs(
+        &self,
+        pcm: &[i16],
+        language: Option<&str>,
+    ) -> Result<String, String> {
         let boundary = format!(
             "clawdot-boundary-{:016x}",
             pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
         );
+        let mut fields = vec![("model_id", self.model.as_str())];
+        // ElevenLabs takes ISO 639 codes, so `pt-BR` is sent as `pt`.
+        let code = language.map(|l| l.split('-').next().unwrap_or(l).to_owned());
+        if let Some(c) = &code {
+            fields.push(("language_code", c.as_str()));
+        }
+        let body = multipart(&boundary, &fields, &wav(pcm));
+        let raw = self
+            .client
+            .post(
+                "/v1/speech-to-text",
+                &format!("multipart/form-data; boundary={boundary}"),
+                body,
+            )
+            .await?;
+        text_of(&raw, |v| v["text"].as_str())
+    }
+
+    async fn transcribe_deepgram(
+        &self,
+        pcm: &[i16],
+        language: Option<&str>,
+    ) -> Result<String, String> {
+        plain_id("The transcription model", &self.model)?;
+        let lang = match language {
+            Some(l) => {
+                plain_id("The language", l)?;
+                format!("language={l}")
+            }
+            None => "detect_language=true".to_owned(),
+        };
+        let path = format!("/v1/listen?model={}&smart_format=true&{lang}", self.model);
+        let raw = self.client.post(&path, "audio/wav", wav(pcm)).await?;
+        text_of(&raw, |v| {
+            v["results"]["channels"][0]["alternatives"][0]["transcript"].as_str()
+        })
+    }
+}
+
+/// The text a provider's JSON answer holds, found by `pick`.
+fn text_of(raw: &[u8], pick: impl Fn(&Value) -> Option<&str>) -> Result<String, String> {
+    let v: Value = serde_json::from_slice(raw)
+        .map_err(|_| "the provider returned something that is not JSON".to_owned())?;
+    pick(&v)
+        .map(|t| t.trim().to_owned())
+        .ok_or_else(|| "the response has no `text`".into())
+}
+
+impl Transcriber for HttpTranscriber {
+    async fn transcribe(&self, pcm: &[i16]) -> Result<String, String> {
         let language = self
             .language
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        match self.client.dialect {
+            Dialect::OpenAi => {}
+            Dialect::ElevenLabs => {
+                return self.transcribe_elevenlabs(pcm, language.as_deref()).await;
+            }
+            Dialect::Deepgram => return self.transcribe_deepgram(pcm, language.as_deref()).await,
+        }
+        // The boundary only needs to be absent from the data; WAV bytes could contain anything, so mix in the length.
+        let boundary = format!(
+            "clawdot-boundary-{:016x}",
+            pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
+        );
         let mut fields = vec![("model", self.model.as_str()), ("response_format", "json")];
         if let Some(l) = &language {
             fields.push(("language", l.as_str()));
@@ -372,6 +674,30 @@ impl HttpSynthesizer {
     pub fn voice_handle(&self) -> Arc<Mutex<String>> {
         Arc::clone(&self.voice)
     }
+
+    /// Speak another service's wire format (REQ-VOI-021). `source_rate` must be a PCM rate that service can produce.
+    ///
+    /// # Errors
+    /// A rate the service cannot produce, with the rates it can.
+    pub fn with_dialect(mut self, dialect: Dialect) -> Result<Self, String> {
+        let rates = dialect.pcm_rates();
+        if !rates.is_empty() && !rates.contains(&self.source_rate) {
+            return Err(format!(
+                "{} cannot produce {} Hz audio; use one of {rates:?} for `speech.tts_sample_rate`.",
+                dialect.title(),
+                self.source_rate
+            ));
+        }
+        self.client.dialect = dialect;
+        Ok(self)
+    }
+
+    /// Use the key pasted into the portal when there is one (REQ-VOI-023).
+    #[must_use]
+    pub fn with_stored_key(mut self) -> Self {
+        self.client.use_stored_key = true;
+        self
+    }
 }
 
 impl Synthesizer for HttpSynthesizer {
@@ -382,15 +708,36 @@ impl Synthesizer for HttpSynthesizer {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let body =
-            json!({ "model": self.model, "voice": voice, "input": text, "response_format": "pcm" });
+        let (path, body) = match self.client.dialect {
+            Dialect::OpenAi => (
+                "/audio/speech".to_owned(),
+                json!({ "model": self.model, "voice": voice, "input": text, "response_format": "pcm" }),
+            ),
+            Dialect::ElevenLabs => {
+                plain_id("The voice", &voice)?;
+                (
+                    format!(
+                        "/v1/text-to-speech/{voice}?output_format=pcm_{}",
+                        self.source_rate
+                    ),
+                    json!({ "text": text, "model_id": self.model }),
+                )
+            }
+            Dialect::Deepgram => {
+                // The voice is the model: `aura-2-thalia-en`.
+                plain_id("The voice", &voice)?;
+                (
+                    format!(
+                        "/v1/speak?model={voice}&encoding=linear16&container=none&sample_rate={}",
+                        self.source_rate
+                    ),
+                    json!({ "text": text }),
+                )
+            }
+        };
         let raw = self
             .client
-            .post(
-                "/audio/speech",
-                "application/json",
-                body.to_string().into_bytes(),
-            )
+            .post(&path, "application/json", body.to_string().into_bytes())
             .await?;
         let samples = decode_pcm16(&raw);
         if samples.is_empty() {
@@ -400,24 +747,139 @@ impl Synthesizer for HttpSynthesizer {
     }
 }
 
-static SOURCE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+static SOURCE: std::sync::OnceLock<(String, String, Dialect)> = std::sync::OnceLock::new();
 
-/// Remember which speech server (address and the NAME of the key variable) the portal may ask for its voices.
-pub fn set_source(url: &str, key_env: Option<&str>) {
-    let _ = SOURCE.set((url.to_owned(), key_env.unwrap_or("").to_owned()));
+/// Remember which speech server (address, the NAME of the key variable, and its dialect) the portal may ask for its
+/// voices.
+pub fn set_source(url: &str, key_env: Option<&str>, dialect: Dialect) {
+    let _ = SOURCE.set((url.to_owned(), key_env.unwrap_or("").to_owned(), dialect));
 }
 
-/// The speech server set up at start, and its key read from the environment.
+/// The speech server set up at start.
+#[derive(Debug, Clone)]
+pub struct SpeechSource {
+    /// Its address.
+    pub url: String,
+    /// The key now in effect: one pasted into the portal, else the one in the named environment variable.
+    pub key: String,
+    /// Its wire format.
+    pub dialect: Dialect,
+}
+
+/// The speech server set up at start, with the key it would use now.
 #[must_use]
-pub fn source() -> Option<(String, String)> {
-    SOURCE.get().map(|(url, var)| {
-        let key = if var.is_empty() {
-            String::new()
-        } else {
-            std::env::var(var).unwrap_or_default()
-        };
-        (url.clone(), key)
+pub fn source() -> Option<SpeechSource> {
+    SOURCE.get().map(|(url, var, dialect)| SpeechSource {
+        url: url.clone(),
+        key: crate::secrets::get(crate::secrets::SPEECH_KEY).unwrap_or_else(|| {
+            if var.is_empty() {
+                String::new()
+            } else {
+                std::env::var(var).unwrap_or_default()
+            }
+        }),
+        dialect: *dialect,
     })
+}
+
+/// Deepgram has no list to ask for; these are its Aura 2 English voices (the model name is the voice).
+const DEEPGRAM_VOICES: [(&str, &str); 12] = [
+    ("aura-2-thalia-en", "Thalia"),
+    ("aura-2-andromeda-en", "Andromeda"),
+    ("aura-2-helena-en", "Helena"),
+    ("aura-2-luna-en", "Luna"),
+    ("aura-2-athena-en", "Athena"),
+    ("aura-2-aurora-en", "Aurora"),
+    ("aura-2-apollo-en", "Apollo"),
+    ("aura-2-arcas-en", "Arcas"),
+    ("aura-2-orion-en", "Orion"),
+    ("aura-2-atlas-en", "Atlas"),
+    ("aura-2-zeus-en", "Zeus"),
+    ("aura-2-hermes-en", "Hermes"),
+];
+
+/// The voices ElevenLabs lists for this key, cloned ones included, with their names. Pages of 100, at most 10 pages.
+async fn elevenlabs_voices(base_url: &str, key: &str) -> Result<Vec<VoiceInfo>, String> {
+    let mut c = Client::new(base_url, key, Duration::from_secs(10))?;
+    c.dialect = Dialect::ElevenLabs;
+    let mut out = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..10 {
+        let mut path = "/v2/voices?page_size=100&include_total_count=false".to_owned();
+        if let Some(t) = &token {
+            plain_id("The page token", t)?;
+            path.push_str("&next_page_token=");
+            path.push_str(t);
+        }
+        let raw = c.get(&path).await?;
+        let v: Value = serde_json::from_slice(&raw)
+            .map_err(|_| "the list of voices is not readable".to_owned())?;
+        for x in v["voices"].as_array().into_iter().flatten() {
+            let (Some(id), name) = (x["voice_id"].as_str(), x["name"].as_str()) else {
+                continue;
+            };
+            if id.is_empty() || id.len() > 128 {
+                continue;
+            }
+            let label: String = name.unwrap_or(id).chars().take(128).collect();
+            out.push(VoiceInfo {
+                id: id.to_owned(),
+                label,
+                category: x["category"].as_str().map(|s| s.chars().take(32).collect()),
+            });
+        }
+        token = v["next_page_token"].as_str().map(str::to_owned);
+        if v["has_more"].as_bool() != Some(true) || token.is_none() {
+            break;
+        }
+    }
+    out.sort_by_key(|a| (a.label.to_lowercase(), a.id.clone()));
+    out.dedup_by(|a, b| a.id == b.id);
+    out.truncate(1000);
+    if out.is_empty() {
+        return Err("the service did not list any voices".into());
+    }
+    Ok(out)
+}
+
+/// The voices a service offers, as `(voices, source)` where `source` is `server` for a list the service gave and
+/// `builtin` for a fixed one kept here. The OpenAI style is asked like [`list_voices`].
+///
+/// # Errors
+/// A plain description of why the list could not be had.
+pub async fn list_voice_details(
+    dialect: Dialect,
+    base_url: &str,
+    key: &str,
+) -> Result<(Vec<VoiceInfo>, &'static str), String> {
+    match dialect {
+        Dialect::OpenAi => {
+            let names = list_voices(base_url, key).await?;
+            Ok((
+                names
+                    .into_iter()
+                    .map(|n| VoiceInfo {
+                        label: n.clone(),
+                        id: n,
+                        category: None,
+                    })
+                    .collect(),
+                "server",
+            ))
+        }
+        Dialect::ElevenLabs => Ok((elevenlabs_voices(base_url, key).await?, "server")),
+        Dialect::Deepgram => Ok((
+            DEEPGRAM_VOICES
+                .iter()
+                .map(|(id, label)| VoiceInfo {
+                    id: (*id).to_owned(),
+                    label: (*label).to_owned(),
+                    category: None,
+                })
+                .collect(),
+            "builtin",
+        )),
+    }
 }
 
 /// The names in a list a server returns: a plain array, or an object holding one under `voices`, `data` or `models`,
@@ -795,6 +1257,481 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.contains("did not list any voices"), "{e}");
+    }
+
+    // REQ-VOI-021
+    #[test]
+    fn providers_are_named_and_have_their_own_defaults() {
+        assert_eq!(Dialect::parse(" ElevenLabs ").unwrap(), Dialect::ElevenLabs);
+        assert_eq!(Dialect::parse("deepgram").unwrap(), Dialect::Deepgram);
+        assert_eq!(Dialect::parse("openai").unwrap(), Dialect::OpenAi);
+        let e = Dialect::parse("acme").unwrap_err();
+        assert!(e.contains("openai, elevenlabs, deepgram"), "{e}");
+        for d in [Dialect::ElevenLabs, Dialect::Deepgram] {
+            assert!(d.default_url().unwrap().starts_with("https://"));
+            assert!(d.default_voice().is_some() && d.default_key_env().is_some());
+            assert_eq!(Dialect::parse(d.name()).unwrap(), d);
+        }
+        assert!(
+            Dialect::OpenAi.default_url().is_none(),
+            "no default server for the OpenAI style"
+        );
+        // A voice goes into a web address: nothing that could change the path or add a query.
+        assert!(plain_id("v", "21m00Tcm4TlvDq8ikWAM").is_ok());
+        assert!(plain_id("v", "aura-2-thalia-en").is_ok());
+        for bad in ["", "a/b", "a?x=1", "a b", "../x", "a&b"] {
+            assert!(plain_id("The voice", bad).is_err(), "{bad}");
+        }
+    }
+
+    // REQ-VOI-021
+    #[test]
+    fn error_texts_are_plain_and_keep_the_openai_style_as_it_was() {
+        assert_eq!(
+            failure(Dialect::OpenAi, 401, "bad key"),
+            "HTTP 401: bad key"
+        );
+        assert_eq!(failure(Dialect::OpenAi, 429, ""), "HTTP 429");
+        let e = failure(Dialect::ElevenLabs, 401, "Invalid API key");
+        assert!(
+            e.starts_with("HTTP 401: the key was not accepted") && e.ends_with("(Invalid API key)"),
+            "{e}"
+        );
+        assert!(failure(Dialect::Deepgram, 429, "").contains("wait a little"));
+        assert_eq!(failure(Dialect::Deepgram, 500, "boom"), "HTTP 500: boom");
+        let v = json!({"detail": {"status": "invalid_api_key", "message": "Invalid API key"}});
+        assert_eq!(error_text(Dialect::ElevenLabs, &v), "Invalid API key");
+        assert_eq!(
+            error_text(Dialect::ElevenLabs, &json!({"detail": "plain"})),
+            "plain"
+        );
+        assert_eq!(
+            error_text(Dialect::ElevenLabs, &json!({"detail": [{"msg": "bad"}]})),
+            "bad"
+        );
+        assert_eq!(
+            error_text(
+                Dialect::Deepgram,
+                &json!({"err_msg": "Invalid credentials"})
+            ),
+            "Invalid credentials"
+        );
+        assert_eq!(error_text(Dialect::OpenAi, &json!({"message": "x"})), "");
+    }
+
+    /// Answer each request in turn with `responses`; returns the request heads and bodies.
+    async fn serve_seq(
+        responses: Vec<(&'static str, Vec<u8>)>,
+    ) -> (u16, tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>) {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for (status, body) in responses {
+                let (mut c, _) = l.accept().await.unwrap();
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                let (head, req_body) = loop {
+                    let n = c.read(&mut buf).await.unwrap();
+                    raw.extend_from_slice(&buf[..n]);
+                    if let Some(p) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&raw[..p]).into_owned();
+                        let want = head
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if raw.len() >= p + 4 + want {
+                            break (head, raw[p + 4..p + 4 + want].to_vec());
+                        }
+                    }
+                    assert!(n > 0, "client hung up early");
+                };
+                let mut resp = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                resp.extend_from_slice(&body);
+                c.write_all(&resp).await.unwrap();
+                seen.push((head, req_body));
+            }
+            seen
+        });
+        (port, h)
+    }
+
+    fn pcm_bytes(n: i16) -> Vec<u8> {
+        (0..n).flat_map(|i| (i * 3).to_le_bytes()).collect()
+    }
+
+    fn eleven(port: u16, key: &str, rate: u32) -> HttpSynthesizer {
+        HttpSynthesizer::new(
+            &format!("http://127.0.0.1:{port}"),
+            key,
+            "eleven_flash_v2_5",
+            "21m00Tcm4TlvDq8ikWAM",
+            rate,
+            T,
+        )
+        .unwrap()
+        .with_dialect(Dialect::ElevenLabs)
+        .unwrap()
+    }
+
+    // REQ-VOI-021
+    #[tokio::test]
+    async fn elevenlabs_speaks_with_its_key_header_and_gives_16k_audio() {
+        let (port, server) = serve_once("200 OK", "audio/pcm", pcm_bytes(2400)).await;
+        let s = eleven(port, "xi-secret", 24_000);
+        let audio = s.synthesize("Hello there.").await.unwrap();
+        assert_eq!(audio.len(), 1600, "24 kHz becomes 16 kHz");
+        let (head, body) = server.await.unwrap();
+        assert!(
+            head.starts_with(
+                "POST /v1/text-to-speech/21m00Tcm4TlvDq8ikWAM?output_format=pcm_24000 HTTP/1.1"
+            ),
+            "{head}"
+        );
+        let lower = head.to_ascii_lowercase();
+        assert!(lower.contains("xi-api-key: xi-secret"), "{head}");
+        assert!(!lower.contains("authorization"), "{head}");
+        let sent: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(sent["text"], "Hello there.");
+        assert_eq!(sent["model_id"], "eleven_flash_v2_5");
+        // A voice changed while running is the id used next, and an odd id never reaches the address.
+        *s.voice_handle().lock().unwrap() = "../admin".into();
+        let e = s.synthesize("x").await.unwrap_err();
+        assert!(e.contains("not a name this service accepts"), "{e}");
+        // 22.05 kHz is asked for as such and converted.
+        let (port, server) = serve_once("200 OK", "audio/pcm", pcm_bytes(2205)).await;
+        let audio = eleven(port, "k", 22_050).synthesize("x").await.unwrap();
+        assert_eq!(audio.len(), 1600);
+        assert!(server.await.unwrap().0.contains("output_format=pcm_22050"));
+        // A rate ElevenLabs cannot make is refused when set up.
+        let bad = HttpSynthesizer::new("http://127.0.0.1:1", "k", "m", "v", 48_000, T)
+            .unwrap()
+            .with_dialect(Dialect::ElevenLabs);
+        assert!(bad.unwrap_err().contains("22050"));
+    }
+
+    // REQ-VOI-021
+    #[tokio::test]
+    async fn elevenlabs_failures_are_plain_and_a_missing_key_is_caught_first() {
+        let (port, _s) = serve_once(
+            "401 Unauthorized",
+            "application/json",
+            br#"{"detail":{"status":"invalid_api_key","message":"Invalid API key"}}"#.to_vec(),
+        )
+        .await;
+        let e = eleven(port, "xi-secret", 24_000)
+            .synthesize("x")
+            .await
+            .unwrap_err();
+        assert!(
+            e.starts_with("HTTP 401: the key was not accepted") && e.contains("Invalid API key"),
+            "{e}"
+        );
+        assert!(!e.contains("xi-secret"));
+        let (port, _s) = serve_once(
+            "429 Too Many Requests",
+            "application/json",
+            br#"{"detail":{"status":"too_many_concurrent_requests","message":"Too many concurrent requests"}}"#.to_vec(),
+        )
+        .await;
+        let e = eleven(port, "k", 24_000).synthesize("x").await.unwrap_err();
+        assert!(
+            e.starts_with("HTTP 429: too many requests") && e.contains("concurrent"),
+            "{e}"
+        );
+        // No key at all: said before anything is sent.
+        let e = eleven(1, "", 24_000).synthesize("x").await.unwrap_err();
+        assert!(e.contains("No key is set for ElevenLabs"), "{e}");
+    }
+
+    // REQ-VOI-021
+    #[tokio::test]
+    async fn elevenlabs_transcribes_with_scribe_and_a_two_letter_language() {
+        let (port, server) = serve_once(
+            "200 OK",
+            "application/json",
+            br#"{"language_code":"en","text":" lights on "}"#.to_vec(),
+        )
+        .await;
+        let t = HttpTranscriber::new(
+            &format!("http://127.0.0.1:{port}"),
+            "xi-k",
+            "scribe_v2",
+            Some("pt-BR"),
+            T,
+        )
+        .unwrap()
+        .with_dialect(Dialect::ElevenLabs);
+        assert_eq!(t.transcribe(&[1, 2, 3, 4]).await.unwrap(), "lights on");
+        let (head, body) = server.await.unwrap();
+        assert!(
+            head.starts_with("POST /v1/speech-to-text HTTP/1.1"),
+            "{head}"
+        );
+        assert!(head.to_ascii_lowercase().contains("xi-api-key: xi-k"));
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("name=\"model_id\"\r\n\r\nscribe_v2")
+                && text.contains("name=\"language_code\"\r\n\r\npt"),
+            "{text}"
+        );
+        assert!(body.windows(4).any(|w| w == b"RIFF"));
+    }
+
+    // REQ-VOI-021, REQ-VOI-022
+    #[tokio::test]
+    async fn elevenlabs_voices_include_cloned_ones_by_name_across_pages() {
+        let page1 = br#"{"voices":[{"voice_id":"v2","name":"Zed","category":"premade"},{"voice_id":"v1","name":"My Mum","category":"cloned"}],"has_more":true,"next_page_token":"tok_2"}"#.to_vec();
+        let page2 = br#"{"voices":[{"voice_id":"v3","name":"Ana","category":"professional"},{"voice_id":"v1","name":"My Mum","category":"cloned"}],"has_more":false,"next_page_token":null}"#.to_vec();
+        let (port, server) = serve_seq(vec![("200 OK", page1), ("200 OK", page2)]).await;
+        let (voices, source) = list_voice_details(
+            Dialect::ElevenLabs,
+            &format!("http://127.0.0.1:{port}"),
+            "xi-k",
+        )
+        .await
+        .unwrap();
+        assert_eq!(source, "server");
+        let got: Vec<(&str, &str, &str)> = voices
+            .iter()
+            .map(|v| {
+                (
+                    v.id.as_str(),
+                    v.label.as_str(),
+                    v.category.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("v3", "Ana", "professional"),
+                ("v1", "My Mum", "cloned"),
+                ("v2", "Zed", "premade")
+            ],
+            "sorted by name, the name shown while the id is what is sent, no repeats"
+        );
+        let seen = server.await.unwrap();
+        assert!(
+            seen[0].0.starts_with("GET /v2/voices?page_size=100"),
+            "{}",
+            seen[0].0
+        );
+        assert!(seen[1].0.contains("next_page_token=tok_2"), "{}", seen[1].0);
+        assert!(seen[0].0.to_ascii_lowercase().contains("xi-api-key: xi-k"));
+        // A bad key is a plain failure; an empty list is said too.
+        let (port, _s) = serve_once(
+            "401 Unauthorized",
+            "application/json",
+            br#"{"detail":{"message":"Invalid API key"}}"#.to_vec(),
+        )
+        .await;
+        let e = list_voice_details(
+            Dialect::ElevenLabs,
+            &format!("http://127.0.0.1:{port}"),
+            "bad",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            e.contains("401") && e.contains("key was not accepted"),
+            "{e}"
+        );
+        let (port, _s) = serve_once(
+            "200 OK",
+            "application/json",
+            br#"{"voices":[],"has_more":false}"#.to_vec(),
+        )
+        .await;
+        let e = list_voice_details(
+            Dialect::ElevenLabs,
+            &format!("http://127.0.0.1:{port}"),
+            "k",
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("did not list any voices"), "{e}");
+    }
+
+    fn deepgram_tts(port: u16, rate: u32) -> HttpSynthesizer {
+        HttpSynthesizer::new(
+            &format!("http://127.0.0.1:{port}"),
+            "dg-key",
+            "aura-2",
+            "aura-2-thalia-en",
+            rate,
+            T,
+        )
+        .unwrap()
+        .with_dialect(Dialect::Deepgram)
+        .unwrap()
+    }
+
+    // REQ-VOI-021
+    #[tokio::test]
+    async fn deepgram_speaks_headerless_pcm_and_gives_16k_audio() {
+        let (port, server) = serve_once("200 OK", "audio/l16", pcm_bytes(4800)).await;
+        let audio = deepgram_tts(port, 48_000)
+            .synthesize("Hello there.")
+            .await
+            .unwrap();
+        assert_eq!(audio.len(), 1600, "48 kHz becomes 16 kHz");
+        let (head, body) = server.await.unwrap();
+        assert!(
+            head.starts_with("POST /v1/speak?model=aura-2-thalia-en&encoding=linear16&container=none&sample_rate=48000 HTTP/1.1"),
+            "{head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("authorization: token dg-key"),
+            "{head}"
+        );
+        let sent: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(sent, json!({"text": "Hello there."}));
+        // 16 kHz needs no conversion.
+        let (port, _s) = serve_once("200 OK", "audio/l16", pcm_bytes(1600)).await;
+        assert_eq!(
+            deepgram_tts(port, 16_000)
+                .synthesize("x")
+                .await
+                .unwrap()
+                .len(),
+            1600
+        );
+        // 22.05 kHz is not a Deepgram rate.
+        let bad = HttpSynthesizer::new("http://127.0.0.1:1", "k", "m", "v", 22_050, T)
+            .unwrap()
+            .with_dialect(Dialect::Deepgram);
+        assert!(bad.unwrap_err().contains("32000"));
+    }
+
+    // REQ-VOI-021
+    #[tokio::test]
+    async fn deepgram_transcribes_a_raw_wav_body_and_reads_the_nested_transcript() {
+        let ok =
+            br#"{"results":{"channels":[{"alternatives":[{"transcript":" turn on the lamp "}]}]}}"#
+                .to_vec();
+        let (port, server) = serve_once("200 OK", "application/json", ok.clone()).await;
+        let t = HttpTranscriber::new(
+            &format!("http://127.0.0.1:{port}"),
+            "dg-key",
+            "nova-3",
+            Some("de"),
+            T,
+        )
+        .unwrap()
+        .with_dialect(Dialect::Deepgram);
+        assert_eq!(t.transcribe(&[5, 6, 7]).await.unwrap(), "turn on the lamp");
+        let (head, body) = server.await.unwrap();
+        assert!(
+            head.starts_with("POST /v1/listen?model=nova-3&smart_format=true&language=de HTTP/1.1"),
+            "{head}"
+        );
+        let lower = head.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: token dg-key")
+                && lower.contains("content-type: audio/wav"),
+            "{head}"
+        );
+        assert_eq!(
+            &body[..4],
+            b"RIFF",
+            "the audio is the body itself, not a form"
+        );
+        // No language set: ask the service to detect it.
+        let (port, server) = serve_once("200 OK", "application/json", ok).await;
+        let t = HttpTranscriber::new(
+            &format!("http://127.0.0.1:{port}"),
+            "dg-key",
+            "nova-3",
+            None,
+            T,
+        )
+        .unwrap()
+        .with_dialect(Dialect::Deepgram);
+        t.transcribe(&[1]).await.unwrap();
+        assert!(server.await.unwrap().0.contains("detect_language=true"));
+        // A bad key and a rate limit.
+        let (port, _s) = serve_once(
+            "401 Unauthorized",
+            "application/json",
+            br#"{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials.","request_id":"r"}"#
+                .to_vec(),
+        )
+        .await;
+        let t = HttpTranscriber::new(
+            &format!("http://127.0.0.1:{port}"),
+            "dg-key",
+            "nova-3",
+            None,
+            T,
+        )
+        .unwrap()
+        .with_dialect(Dialect::Deepgram);
+        let e = t.transcribe(&[1]).await.unwrap_err();
+        assert!(
+            e.starts_with("HTTP 401: the key was not accepted")
+                && e.contains("Invalid credentials"),
+            "{e}"
+        );
+        assert!(!e.contains("dg-key"));
+        let (port, _s) = serve_once(
+            "429 Too Many Requests",
+            "application/json",
+            br#"{"err_msg":"slow down"}"#.to_vec(),
+        )
+        .await;
+        let e = deepgram_tts(port, 24_000)
+            .synthesize("x")
+            .await
+            .unwrap_err();
+        assert!(
+            e.starts_with("HTTP 429: too many requests") && e.contains("slow down"),
+            "{e}"
+        );
+        // The model name cannot change the address.
+        let t = HttpTranscriber::new("http://127.0.0.1:1", "k", "nova&x=1", None, T)
+            .unwrap()
+            .with_dialect(Dialect::Deepgram);
+        assert!(t.transcribe(&[1]).await.unwrap_err().contains("not a name"));
+    }
+
+    // REQ-VOI-022
+    #[tokio::test]
+    async fn deepgram_has_a_built_in_voice_list() {
+        let (voices, source) =
+            list_voice_details(Dialect::Deepgram, "https://api.deepgram.com", "")
+                .await
+                .unwrap();
+        assert_eq!(source, "builtin");
+        assert!(
+            voices
+                .iter()
+                .any(|v| v.id == "aura-2-thalia-en" && v.label == "Thalia")
+        );
+        assert!(voices.iter().all(|v| plain_id("v", &v.id).is_ok()));
+    }
+
+    // REQ-VOI-022
+    #[tokio::test]
+    async fn the_openai_style_voice_list_keeps_names_as_labels() {
+        let (port, _s) = serve_once("200 OK", "application/json", br#"["b","a"]"#.to_vec()).await;
+        let (voices, source) =
+            list_voice_details(Dialect::OpenAi, &format!("http://127.0.0.1:{port}"), "")
+                .await
+                .unwrap();
+        assert_eq!(source, "server");
+        assert_eq!(
+            voices
+                .iter()
+                .map(|v| (v.id.as_str(), v.label.as_str()))
+                .collect::<Vec<_>>(),
+            [("a", "a"), ("b", "b")]
+        );
     }
 
     #[tokio::test]
