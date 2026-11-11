@@ -23,6 +23,7 @@ import { Themes } from "./Themes.tsx";
 import { MediaSettings } from "./Media.tsx";
 import { Tools } from "./Tools.tsx";
 import { Webhooks } from "./Webhooks.tsx";
+import { ask } from "../confirm.tsx";
 
 type Spec = SettingSpec[];
 const MODEL: Spec = [
@@ -146,7 +147,7 @@ function KeyRow(props: {
     setBusy(false);
   };
   const remove = async () => {
-    if (!confirm("Remove the saved key? The assistant will stop answering until you add one.")) return;
+    if (!(await ask("Remove the saved key? The assistant will stop answering until you add one.", "Remove"))) return;
     try {
       await api("DELETE", "/api/llm/key");
       setMsg("");
