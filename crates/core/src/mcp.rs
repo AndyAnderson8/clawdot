@@ -155,6 +155,37 @@ pub struct McpClient {
     errors: Vec<Option<String>>,
 }
 
+/// A server that is being added: checked, not yet part of the client. It owns everything the network half
+/// needs, so [`PendingServer::load`] can run in a task beside the main loop.
+#[derive(Debug)]
+pub struct PendingServer {
+    server: Arc<Server>,
+    probe: McpClient,
+}
+
+impl PendingServer {
+    /// The server's name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.server.def.name
+    }
+
+    /// The definition as the administrator gave it.
+    #[must_use]
+    pub fn def(&self) -> &ServerDef {
+        &self.server.def
+    }
+
+    /// Handshake and list the tools. This is the slow part (the network, up to the server's timeout for each
+    /// request).
+    ///
+    /// # Errors
+    /// Why the server cannot be used, clipped to 200 characters.
+    pub async fn load(&self) -> Result<Vec<McpTool>, String> {
+        self.probe.load(0).await.map_err(|e| clip(&e, 200))
+    }
+}
+
 /// A server's address without credentials, query, or fragment, safe to show.
 #[must_use]
 pub fn display_url(url: &str) -> String {
@@ -238,6 +269,36 @@ fn find_response(content_type: &str, body: &str, want: u64) -> Result<Value, Str
     Err("the server sent no reply to the request".into())
 }
 
+/// Why one MCP request failed. The retry in [`McpClient::call`] depends on the kind, never on the wording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RpcError {
+    /// The server answered 404 to a request in a session: it forgot the session, so a new handshake can help.
+    SessionLost,
+    /// Anything else, with the message to show.
+    Other(String),
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionLost => f.write_str("the server no longer knows this session; try again"),
+            Self::Other(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<String> for RpcError {
+    fn from(m: String) -> Self {
+        Self::Other(m)
+    }
+}
+
+impl From<RpcError> for String {
+    fn from(e: RpcError) -> Self {
+        e.to_string()
+    }
+}
+
 impl McpClient {
     /// Validate the definitions, connect to each server, and list its tools.
     ///
@@ -314,7 +375,7 @@ impl McpClient {
         id: Option<u64>,
         method: &str,
         params: Value,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, RpcError> {
         let s = &self.servers[i];
         let mut msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         if let Some(id) = id {
@@ -393,13 +454,13 @@ impl McpClient {
         if status.as_u16() == 404 && method != "initialize" {
             // The session expired; forget it so the next call starts a new one.
             *s.session.lock().unwrap_or_else(PoisonError::into_inner) = None;
-            return Err("the server no longer knows this session; try again".into());
+            return Err(RpcError::SessionLost);
         }
         if !status.is_success() {
-            return Err(format!("HTTP {}", status.as_u16()));
+            return Err(RpcError::Other(format!("HTTP {}", status.as_u16())));
         }
         match id {
-            Some(id) => find_response(&ctype, &body, id),
+            Some(id) => find_response(&ctype, &body, id).map_err(RpcError::Other),
             None => Ok(Value::Null),
         }
     }
@@ -506,6 +567,22 @@ impl McpClient {
         reserved: &[String],
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<usize, String> {
+        let pending = self.prepare_server(def, env)?;
+        let tools = pending.load().await?;
+        self.install_server(&pending, tools, reserved)
+    }
+
+    /// The quick, local first half of adding a server: check the definition and the name, read the credential.
+    /// Nothing is added and nothing touches the network. The network half is [`PendingServer::load`], which
+    /// owns what it needs and can run in a task; [`McpClient::install_server`] finishes the job (ADR-0021).
+    ///
+    /// # Errors
+    /// An invalid or duplicate definition, or a credential variable that is not set.
+    pub fn prepare_server(
+        &self,
+        def: ServerDef,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<PendingServer, String> {
         def.validate()?;
         if self.has_server(&def.name) {
             return Err(format!("mcp server `{}` is listed twice", def.name));
@@ -519,30 +596,50 @@ impl McpClient {
             })?),
             None => None,
         };
-        self.servers.push(Arc::new(Server {
+        let server = Arc::new(Server {
             endpoint: Endpoint::parse(&def.url)?,
             def,
             secret,
             session: Mutex::new(None),
-        }));
+        });
+        // A client of one server, so the same code that loads at startup loads this one without `&self`.
+        let probe = Self {
+            servers: vec![Arc::clone(&server)],
+            tools: Vec::new(),
+            connector: self.connector.clone(),
+            errors: vec![None],
+        };
+        Ok(PendingServer { server, probe })
+    }
+
+    /// The quick, local second half: add a server whose tools were listed. Checked again here, because the
+    /// client may have changed while the connection was made. Tools that clash with `reserved` or with tools
+    /// already on offer are left out. Returns how many were kept.
+    ///
+    /// # Errors
+    /// A server of that name was added in the meantime.
+    pub fn install_server(
+        &mut self,
+        pending: &PendingServer,
+        mut tools: Vec<McpTool>,
+        reserved: &[String],
+    ) -> Result<usize, String> {
+        let name = &pending.server.def.name;
+        if self.has_server(name) {
+            return Err(format!("mcp server `{name}` is listed twice"));
+        }
+        self.servers.push(Arc::clone(&pending.server));
         self.errors.push(None);
         let i = self.servers.len() - 1;
-        match self.load(i).await {
-            Ok(mut tools) => {
-                tools.retain(|t| {
-                    !reserved.contains(&t.exposed)
-                        && !self.tools.iter().any(|o| o.exposed == t.exposed)
-                });
-                let n = tools.len();
-                self.tools.extend(tools);
-                Ok(n)
-            }
-            Err(e) => {
-                self.servers.pop();
-                self.errors.pop();
-                Err(clip(&e, 200))
-            }
+        tools.retain(|t| {
+            !reserved.contains(&t.exposed) && !self.tools.iter().any(|o| o.exposed == t.exposed)
+        });
+        for t in &mut tools {
+            t.server = i;
         }
+        let n = tools.len();
+        self.tools.extend(tools);
+        Ok(n)
     }
 
     /// Forget a server and its tools; false if there is none.
@@ -615,11 +712,7 @@ impl McpClient {
         let mut result = self
             .rpc(t.server, Some(3), "tools/call", params.clone())
             .await;
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.contains("no longer knows this session"))
-        {
+        if result.as_ref().err() == Some(&RpcError::SessionLost) {
             self.handshake(t.server).await?;
             result = self.rpc(t.server, Some(3), "tools/call", params).await;
         }
@@ -869,6 +962,22 @@ mod tests {
         tokened.auth_env = Some("NOPE_TOKEN".into());
         let e = c.add_server(tokened, &[], |_| None).await.unwrap_err();
         assert!(e.contains("NOPE_TOKEN"), "{e}");
+    }
+
+    #[test]
+    fn rpc_errors_read_as_before_and_only_a_lost_session_asks_for_a_retry() {
+        assert_eq!(
+            RpcError::SessionLost.to_string(),
+            "the server no longer knows this session; try again"
+        );
+        assert_eq!(RpcError::Other("HTTP 500".into()).to_string(), "HTTP 500");
+        // A message that merely says the same words is not the typed condition.
+        let imposter = RpcError::Other(RpcError::SessionLost.to_string());
+        assert_ne!(imposter, RpcError::SessionLost);
+        assert_eq!(
+            String::from(RpcError::SessionLost),
+            RpcError::SessionLost.to_string()
+        );
     }
 
     #[test]

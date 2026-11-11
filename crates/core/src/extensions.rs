@@ -7,7 +7,7 @@
 use crate::app::Fail;
 use crate::httptools::{HttpTools, ToolDef};
 use crate::llm::ToolSpec;
-use crate::mcp::{McpClient, ServerDef};
+use crate::mcp::{McpClient, McpTool, PendingServer, ServerDef};
 use crate::session::{Risk, Tier, ToolHost};
 use crate::skillfolder::{self, SkillFile};
 use crate::store::JsonStore;
@@ -775,6 +775,9 @@ impl Extensions {
         Ok(())
     }
 
+    /// Add and connect an MCP server, waiting for the connection. Used where no main loop is being kept free
+    /// (tests, tools); the loop itself splits this into [`Extensions::mcp_prepare`], a task that runs
+    /// [`PendingServer::load`], and [`Extensions::mcp_commit`] (ADR-0021).
     async fn mcp_add(
         &mut self,
         v: &Value,
@@ -783,8 +786,47 @@ impl Extensions {
         builtin: &[String],
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<(), Fail> {
+        let pending = self.mcp_prepare(v, mcp, 0, env)?;
+        let tools = pending.load().await.map_err(friendly_env)?;
+        self.mcp_commit(&pending, tools, http, mcp, builtin)
+    }
+
+    /// The local first half of adding an MCP server from the portal: parse and check the request, with
+    /// `in_flight` other connections already being made counting against the limit. Touches nothing.
+    ///
+    /// # Errors
+    /// [`Fail::Invalid`] with what to fix.
+    pub fn mcp_prepare(
+        &self,
+        v: &Value,
+        mcp: &McpClient,
+        in_flight: usize,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<PendingServer, Fail> {
         let def: ServerDef = serde_json::from_value(v.clone())
             .map_err(|e| invalid(format!("The connection is not described correctly: {e}")))?;
+        if self.conns.servers.len() + in_flight >= MAX_PORTAL_SERVERS {
+            return Err(invalid(format!(
+                "You can add up to {MAX_PORTAL_SERVERS} connections here. Remove one first."
+            )));
+        }
+        mcp.prepare_server(def, env).map_err(friendly_env)
+    }
+
+    /// The local second half: the server answered with `tools`; add it and save. The checks are made again,
+    /// because everything may have changed while the connection was made.
+    ///
+    /// # Errors
+    /// [`Fail::Invalid`] when the name or the limit no longer allows it, [`Fail::Unavailable`] when saving
+    /// fails; nothing is added then.
+    pub fn mcp_commit(
+        &mut self,
+        pending: &PendingServer,
+        tools: Vec<McpTool>,
+        http: &HttpTools,
+        mcp: &mut McpClient,
+        builtin: &[String],
+    ) -> Result<(), Fail> {
         if self.conns.servers.len() >= MAX_PORTAL_SERVERS {
             return Err(invalid(format!(
                 "You can add up to {MAX_PORTAL_SERVERS} connections here. Remove one first."
@@ -792,9 +834,9 @@ impl Extensions {
         }
         let mut reserved = builtin.to_vec();
         reserved.extend(http.specs().into_iter().map(|t| t.name));
-        mcp.add_server(def.clone(), &reserved, env)
-            .await
+        mcp.install_server(pending, tools, &reserved)
             .map_err(friendly_env)?;
+        let def = pending.def().clone();
         self.conns.servers.push(def.clone());
         if let Err(e) = self.save_conns() {
             self.conns.servers.pop();
