@@ -433,6 +433,15 @@ pub fn field(key: &str) -> Option<&'static Field> {
     FIELDS.iter().find(|f| f.key == key)
 }
 
+/// The smallest and largest value of a whole-number setting, from its row. `None` for any other setting.
+#[must_use]
+pub fn whole_range(key: &str) -> Option<(u64, u64)> {
+    match field(key)?.check {
+        Check::Whole { lo, hi, .. } => Some((lo, hi)),
+        _ => None,
+    }
+}
+
 /// Whether a change to `key` applies without a restart. `None` for a key that is not a setting.
 #[must_use]
 pub fn is_live(key: &str) -> Option<bool> {
