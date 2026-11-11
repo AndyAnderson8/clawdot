@@ -3,6 +3,7 @@
 
 use crate::config::SpeechConfig;
 use crate::runtime::{Brain, respond_inline};
+use crate::secrets::Secrets;
 use crate::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
 use crate::turns::Hub;
 use crate::voice::voice_turn;
@@ -25,8 +26,9 @@ static SPEECH_HANDLES: std::sync::Mutex<SpeechHandles> = std::sync::Mutex::new(S
 /// Build the speech clients and remember how to change their voice and language later.
 pub fn build_registered_speech(
     speech: &SpeechConfig,
+    secrets: &Secrets,
 ) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
-    let (stt, tts) = build_speech(speech)?;
+    let (stt, tts) = build_speech(speech, secrets)?;
     let mut h = SPEECH_HANDLES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -79,7 +81,10 @@ pub fn apply_speech(live: &serde_json::Map<String, serde_json::Value>) {
     }
 }
 
-pub fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
+pub fn build_speech(
+    speech: &SpeechConfig,
+    secrets: &Secrets,
+) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
     let missing =
         |k: &str| format!("speech.{k} is not configured (see docs/architecture/voice-pipeline.md)");
     let url = speech.url.as_deref().ok_or_else(|| missing("url"))?;
@@ -101,7 +106,7 @@ pub fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynth
         deadline,
     )?
     .with_dialect(dialect)
-    .with_stored_key();
+    .with_stored_key(secrets.clone());
     let tts = HttpSynthesizer::new(
         url,
         &key,
@@ -114,7 +119,7 @@ pub fn build_speech(speech: &SpeechConfig) -> Result<(HttpTranscriber, HttpSynth
         deadline,
     )?
     .with_dialect(dialect)?
-    .with_stored_key();
+    .with_stored_key(secrets.clone());
     Ok((stt, tts))
 }
 
@@ -123,10 +128,11 @@ pub async fn voice_once(
     brain: &mut Brain,
     hub: &mut Hub,
     speech: &SpeechConfig,
+    secrets: &Secrets,
     input: &std::path::Path,
     output: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let (stt, tts) = build_speech(speech)?;
+    let (stt, tts) = build_speech(speech, secrets)?;
     let bytes =
         std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let pcm = parse_wav(&bytes).map_err(|e| format!("{}: {e}", input.display()))?;

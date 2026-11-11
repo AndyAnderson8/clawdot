@@ -11,6 +11,7 @@
 //! machine or private network, such as a self-hosted Whisper server; anything on the internet needs `https://`.
 //! Audio is never written to disk or logged, and error messages never include it or the API key.
 
+use crate::secrets::Secrets;
 use crate::transport::{Connector, Endpoint};
 use crate::voice::{Synthesizer, Transcriber};
 use http_body_util::{BodyExt, Full};
@@ -367,7 +368,7 @@ struct Client {
     endpoint: Endpoint,
     key: String,
     /// Prefer the key pasted into the portal over `key` (REQ-VOI-023).
-    use_stored_key: bool,
+    stored: Option<Secrets>,
     deadline: Duration,
     connector: Connector,
     dialect: Dialect,
@@ -378,7 +379,7 @@ impl Client {
         Ok(Self {
             endpoint: check_url(base_url)?,
             key: key.to_owned(),
-            use_stored_key: false,
+            stored: None,
             deadline,
             connector: Connector::new()?,
             dialect: Dialect::OpenAi,
@@ -387,8 +388,10 @@ impl Client {
 
     /// The key to send now: one pasted into the portal wins, so it takes effect without a restart.
     fn current_key(&self) -> String {
-        if self.use_stored_key
-            && let Some(k) = crate::secrets::get(crate::secrets::SPEECH_KEY)
+        if let Some(k) = self
+            .stored
+            .as_ref()
+            .and_then(|s| s.get(crate::secrets::SPEECH_KEY))
         {
             return k;
         }
@@ -522,8 +525,8 @@ impl HttpTranscriber {
 
     /// Use the key pasted into the portal when there is one (REQ-VOI-023).
     #[must_use]
-    pub fn with_stored_key(mut self) -> Self {
-        self.client.use_stored_key = true;
+    pub fn with_stored_key(mut self, secrets: Secrets) -> Self {
+        self.client.stored = Some(secrets);
         self
     }
 
@@ -694,8 +697,8 @@ impl HttpSynthesizer {
 
     /// Use the key pasted into the portal when there is one (REQ-VOI-023).
     #[must_use]
-    pub fn with_stored_key(mut self) -> Self {
-        self.client.use_stored_key = true;
+    pub fn with_stored_key(mut self, secrets: Secrets) -> Self {
+        self.client.stored = Some(secrets);
         self
     }
 }
@@ -768,10 +771,10 @@ pub struct SpeechSource {
 
 /// The speech server set up at start, with the key it would use now.
 #[must_use]
-pub fn source() -> Option<SpeechSource> {
+pub fn source(secrets: &Secrets) -> Option<SpeechSource> {
     SOURCE.get().map(|(url, var, dialect)| SpeechSource {
         url: url.clone(),
-        key: crate::secrets::get(crate::secrets::SPEECH_KEY).unwrap_or_else(|| {
+        key: secrets.get(crate::secrets::SPEECH_KEY).unwrap_or_else(|| {
             if var.is_empty() {
                 String::new()
             } else {

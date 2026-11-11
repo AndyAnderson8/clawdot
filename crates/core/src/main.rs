@@ -85,7 +85,6 @@ async fn main() -> ExitCode {
             "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and              reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
         );
     }
-    clawdot_core::secrets::init(&args.data_dir);
     match clawdot_core::admin::migrate_legacy(&args.data_dir) {
         Ok(true) => println!(
             "clawdot: the old administrator token still works: sign in with it, then set a password in the web UI"
@@ -159,6 +158,7 @@ async fn main() -> ExitCode {
             &mut brain,
             &mut hub,
             &args.speech,
+            core.secrets(),
             &input,
             args.voice_out.as_deref(),
         )

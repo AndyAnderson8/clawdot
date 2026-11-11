@@ -97,6 +97,8 @@ pub struct Stores {
     pub replies: JsonStore,
     /// The web UI administrator setting (password hash or open mode).
     pub admin: JsonStore,
+    /// The keys pasted into the portal (see [`crate::secrets`]).
+    pub secrets: JsonStore,
 }
 
 impl Stores {
@@ -108,6 +110,7 @@ impl Stores {
             inbox: JsonStore::new(dir.join("inbox.json"), crate::inbox::queue::SCHEMA),
             replies: JsonStore::new(dir.join("replies.json"), reply::SCHEMA),
             admin: JsonStore::new(dir.join("admin.json"), crate::admin::SCHEMA),
+            secrets: JsonStore::new(dir.join("secrets.json"), crate::secrets::SCHEMA),
         }
     }
 }
@@ -216,6 +219,7 @@ pub struct Core {
     audit: std::sync::OnceLock<Arc<crate::audit::AuditLog>>,
     notes: std::sync::OnceLock<Arc<crate::notes::NoteStore>>,
     asks: Mutex<Vec<ask::PendingAsk>>,
+    secrets: crate::secrets::Secrets,
 }
 
 impl std::fmt::Debug for Core {
@@ -286,6 +290,11 @@ impl Core {
         replies: ReplyQueue,
     ) -> Self {
         let now = clock.now();
+        let secrets = stores
+            .as_ref()
+            .map_or_else(crate::secrets::Secrets::none, |s| {
+                crate::secrets::Secrets::at(s.secrets.clone())
+            });
         Self {
             clock,
             adapters,
@@ -311,7 +320,14 @@ impl Core {
             audit: std::sync::OnceLock::new(),
             notes: std::sync::OnceLock::new(),
             asks: Mutex::new(Vec::new()),
+            secrets,
         }
+    }
+
+    /// The keys pasted into the portal, owned by this core.
+    #[must_use]
+    pub fn secrets(&self) -> &crate::secrets::Secrets {
+        &self.secrets
     }
 
     /// The current time.

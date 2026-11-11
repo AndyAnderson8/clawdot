@@ -55,6 +55,7 @@ pub async fn build_brain(
     let llm = build_llm(
         args.llm_url.as_deref(),
         args.llm_model.as_deref(),
+        core.secrets(),
         &args.key_env,
         limits.max_output_tokens_per_turn,
         &args.agent,
@@ -171,7 +172,7 @@ pub async fn build_brain(
         persona,
         agent: args.agent.clone(),
         voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
-        rt: Realtime::new(RtSettings::from_live(live)),
+        rt: Realtime::with_secrets(RtSettings::from_live(live), core.secrets().clone()),
     };
     if brain.rt.settings().enabled && !RtSettings::built() {
         brain.rt.set_error(Some(
@@ -214,7 +215,7 @@ pub async fn start_satellites(
         let addr: SocketAddr = listen
             .parse()
             .map_err(|e| format!("satellite.listen: {e}"))?;
-        let (stt, tts) = build_registered_speech(&args.speech)?;
+        let (stt, tts) = build_registered_speech(&args.speech, core.secrets())?;
         let mut settings = satellite::Settings {
             announcer: announcer.clone(),
             realtime: Some(rt.clone()),
@@ -271,7 +272,7 @@ pub async fn start_satellites(
     // ESPHome voice satellites (optional feature; spec 0004) share the satellite pipeline and announcer.
     #[cfg(feature = "esphome-satellite")]
     if !args.esphome.is_empty() {
-        let (stt, tts) = build_registered_speech(&args.speech)?;
+        let (stt, tts) = build_registered_speech(&args.speech, core.secrets())?;
         let mut settings = satellite::Settings {
             announcer: announcer.clone(),
             realtime: Some(rt.clone()),

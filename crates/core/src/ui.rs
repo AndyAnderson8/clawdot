@@ -591,11 +591,11 @@ pub async fn handle(
         Id::ModelsAsk => models_with_key(core, body).await,
         Id::LlmKeySet => llm_key_set(core, body).await,
         Id::LlmKeyClear => llm_key_clear(core).await,
-        Id::SpeechKeySet => speech_key_set(body).await,
-        Id::SpeechKeyClear => speech_key_clear(),
-        Id::RealtimeKeySet => realtime_key_set(body).await,
-        Id::RealtimeKeyClear => realtime_key_clear(),
-        Id::Voices => voices().await,
+        Id::SpeechKeySet => speech_key_set(core, body).await,
+        Id::SpeechKeyClear => speech_key_clear(core),
+        Id::RealtimeKeySet => realtime_key_set(core, body).await,
+        Id::RealtimeKeyClear => realtime_key_clear(core),
+        Id::Voices => voices(core).await,
         Id::HivePeers => hive_peers(core),
         Id::UpdateStatus => update_status(),
         Id::UpdateCheck => update_check().await,
@@ -686,11 +686,14 @@ async fn models_with_key(core: &Core, body: Incoming) -> Resp {
     }
     let key = match ask.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
         Some(k) => k.to_owned(),
-        None => crate::secrets::get(crate::secrets::LLM_KEY).unwrap_or_else(|| {
-            let s = core.ui_settings();
-            let var = s["fields"]["llm_key_env"]["value"].as_str().unwrap_or("");
-            std::env::var(var).unwrap_or_default()
-        }),
+        None => core
+            .secrets()
+            .get(crate::secrets::LLM_KEY)
+            .unwrap_or_else(|| {
+                let s = core.ui_settings();
+                let var = s["fields"]["llm_key_env"]["value"].as_str().unwrap_or("");
+                std::env::var(var).unwrap_or_default()
+            }),
     };
     fetch_models(url, &key).await
 }
@@ -707,7 +710,7 @@ async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
         Ok(k) => k,
         Err((s, m)) => return error(s, m),
     };
-    if let Err(m) = crate::secrets::set(crate::secrets::LLM_KEY, &k.key) {
+    if let Err(m) = core.secrets().set(crate::secrets::LLM_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
     }
     rekeyed(core).await
@@ -715,7 +718,7 @@ async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
 
 /// `DELETE /api/llm/key`: forget the stored key.
 async fn llm_key_clear(core: &Core) -> Resp {
-    if let Err(m) = crate::secrets::clear(crate::secrets::LLM_KEY) {
+    if let Err(m) = core.secrets().clear(crate::secrets::LLM_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
     rekeyed(core).await
@@ -726,29 +729,29 @@ async fn rekeyed(core: &Core) -> Resp {
     let _ = core.portal_call(Op::Rekey).await;
     json_reply(
         StatusCode::OK,
-        &json!({ "hint": crate::secrets::hint(crate::secrets::LLM_KEY) }),
+        &json!({ "hint": core.secrets().hint(crate::secrets::LLM_KEY) }),
     )
 }
 
 /// `PUT /api/speech/key`: keep the speech-service key pasted on the page. It is read on every request, so it applies at
 /// once (REQ-VOI-023). Only the masked hint comes back.
-async fn speech_key_set(body: Incoming) -> Resp {
+async fn speech_key_set(core: &Core, body: Incoming) -> Resp {
     let k = match read_json::<KeyBody>(body).await {
         Ok(k) => k,
         Err((s, m)) => return error(s, m),
     };
-    if let Err(m) = crate::secrets::set(crate::secrets::SPEECH_KEY, &k.key) {
+    if let Err(m) = core.secrets().set(crate::secrets::SPEECH_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
     }
     json_reply(
         StatusCode::OK,
-        &json!({ "hint": crate::secrets::hint(crate::secrets::SPEECH_KEY) }),
+        &json!({ "hint": core.secrets().hint(crate::secrets::SPEECH_KEY) }),
     )
 }
 
 /// `DELETE /api/speech/key`: forget the stored speech key (an environment variable, if named, applies again).
-fn speech_key_clear() -> Resp {
-    if let Err(m) = crate::secrets::clear(crate::secrets::SPEECH_KEY) {
+fn speech_key_clear(core: &Core) -> Resp {
+    if let Err(m) = core.secrets().clear(crate::secrets::SPEECH_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
     json_reply(StatusCode::OK, &json!({ "hint": null }))
@@ -756,23 +759,23 @@ fn speech_key_clear() -> Resp {
 
 /// `PUT /api/realtime/key`: keep the key for the realtime voice service. It is read at the start of each session, so
 /// it applies to the next one without a restart, and it wins over the environment variable.
-async fn realtime_key_set(body: Incoming) -> Resp {
+async fn realtime_key_set(core: &Core, body: Incoming) -> Resp {
     let k = match read_json::<KeyBody>(body).await {
         Ok(k) => k,
         Err((s, m)) => return error(s, m),
     };
-    if let Err(m) = crate::secrets::set(crate::secrets::REALTIME_KEY, &k.key) {
+    if let Err(m) = core.secrets().set(crate::secrets::REALTIME_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
     }
     json_reply(
         StatusCode::OK,
-        &json!({ "hint": crate::secrets::hint(crate::secrets::REALTIME_KEY) }),
+        &json!({ "hint": core.secrets().hint(crate::secrets::REALTIME_KEY) }),
     )
 }
 
 /// `DELETE /api/realtime/key`: forget the stored realtime key.
-fn realtime_key_clear() -> Resp {
-    if let Err(m) = crate::secrets::clear(crate::secrets::REALTIME_KEY) {
+fn realtime_key_clear(core: &Core) -> Resp {
+    if let Err(m) = core.secrets().clear(crate::secrets::REALTIME_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
     json_reply(StatusCode::OK, &json!({ "hint": null }))
@@ -808,8 +811,8 @@ const OPENAI_VOICES: [&str; 11] = [
 
 /// `GET /api/voices`: the voices the speech server offers (REQ-CFG-081): its own list when it has one, OpenAI's fixed
 /// set for OpenAI, otherwise a plain statement that the voice has to be typed.
-async fn voices() -> Resp {
-    let Some(src) = crate::speech::source() else {
+async fn voices(core: &Core) -> Resp {
+    let Some(src) = crate::speech::source(core.secrets()) else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
             "No speech provider is set up, so there are no voices to choose from.",

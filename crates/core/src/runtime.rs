@@ -106,6 +106,7 @@ pub fn with_agent(cfg: TurnConfig, agent: &AgentConfig) -> TurnConfig {
 pub fn build_llm(
     url: Option<&str>,
     model: Option<&str>,
+    secrets: &crate::secrets::Secrets,
     key_env: &str,
     max_tokens: u32,
     agent: &AgentConfig,
@@ -114,7 +115,8 @@ pub fn build_llm(
         return Ok(None);
     };
     // A key pasted into the portal wins; otherwise the environment variable that was named.
-    let key = crate::secrets::get(crate::secrets::LLM_KEY)
+    let key = secrets
+        .get(crate::secrets::LLM_KEY)
         .unwrap_or_else(|| std::env::var(key_env).unwrap_or_default());
     let backend = Arc::new(HttpBackend::new(url, &key, Duration::from_secs(30))?);
     Ok(Some(Llm {
@@ -194,6 +196,7 @@ pub fn apply_live(
         match build_llm(
             text("llm_url"),
             text("llm_model"),
+            core.secrets(),
             text("llm_key_env").unwrap_or("OPENROUTER_API_KEY"),
             max_tokens,
             &brain.agent,

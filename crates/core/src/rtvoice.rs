@@ -7,6 +7,7 @@
 //! false and nothing here ever starts a session (REQ-RTV-001, REQ-RTV-008).
 
 use crate::assistant::Effect;
+use crate::secrets::Secrets;
 use serde_json::{Map, Value, json};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -147,32 +148,37 @@ impl RtSettings {
     /// The key: one pasted into the portal wins, otherwise the environment variable that was named. `env` looks
     /// a variable up.
     #[must_use]
-    pub fn key_with(&self, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-        crate::secrets::get(crate::secrets::REALTIME_KEY)
+    pub fn key_with(
+        &self,
+        secrets: &Secrets,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<String> {
+        secrets
+            .get(crate::secrets::REALTIME_KEY)
             .or_else(|| env(&self.key_env))
             .filter(|k| !k.is_empty())
     }
 
     /// [`Self::key_with`] using the process environment.
     #[must_use]
-    pub fn key(&self) -> Option<String> {
-        self.key_with(&|n| std::env::var(n).ok())
+    pub fn key(&self, secrets: &Secrets) -> Option<String> {
+        self.key_with(secrets, &|n| std::env::var(n).ok())
     }
 
     /// Ready to start a session: built in, chosen, addressed, and with a key.
     #[must_use]
-    pub fn configured_with(&self, env: &dyn Fn(&str) -> Option<String>) -> bool {
+    pub fn configured_with(&self, secrets: &Secrets, env: &dyn Fn(&str) -> Option<String>) -> bool {
         Self::built()
             && self.enabled
             && self.url.is_some()
             && self.model.is_some()
-            && self.key_with(env).is_some()
+            && self.key_with(secrets, env).is_some()
     }
 
     /// [`Self::configured_with`] using the process environment.
     #[must_use]
-    pub fn configured(&self) -> bool {
-        self.configured_with(&|n| std::env::var(n).ok())
+    pub fn configured(&self, secrets: &Secrets) -> bool {
+        self.configured_with(secrets, &|n| std::env::var(n).ok())
     }
 }
 
@@ -206,6 +212,7 @@ pub type EnvFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 struct Inner {
     settings: Mutex<RtSettings>,
     env: EnvFn,
+    secrets: Secrets,
     active: AtomicBool,
     last_error: Mutex<Option<String>>,
     jobs: Mutex<Option<mpsc::Sender<Job>>>,
@@ -238,9 +245,20 @@ impl Realtime {
     /// Like [`Self::new`], looking environment variables up with `env`.
     #[must_use]
     pub fn with_env(settings: RtSettings, env: EnvFn) -> Self {
+        Self::with_env_and_secrets(settings, env, Secrets::none())
+    }
+
+    /// Like [`Self::new`], looking a pasted key up in `secrets` (the owning core's).
+    #[must_use]
+    pub fn with_secrets(settings: RtSettings, secrets: Secrets) -> Self {
+        Self::with_env_and_secrets(settings, Box::new(|n| std::env::var(n).ok()), secrets)
+    }
+
+    fn with_env_and_secrets(settings: RtSettings, env: EnvFn, secrets: Secrets) -> Self {
         Self(Arc::new(Inner {
             settings: Mutex::new(settings),
             env,
+            secrets,
             active: AtomicBool::new(false),
             last_error: Mutex::new(None),
             jobs: Mutex::new(None),
@@ -277,7 +295,7 @@ impl Realtime {
     /// The API key in effect, if there is one. Never printed.
     #[must_use]
     pub fn key(&self) -> Option<String> {
-        self.settings().key_with(&*self.0.env)
+        self.settings().key_with(&self.0.secrets, &*self.0.env)
     }
 
     /// Record (or clear) the last error. It is one plain line and holds no key and no audio.
@@ -293,7 +311,10 @@ impl Realtime {
     /// session lasts.
     #[must_use]
     pub fn claim(&self) -> Option<Claim> {
-        if !self.settings().configured_with(&*self.0.env) {
+        if !self
+            .settings()
+            .configured_with(&self.0.secrets, &*self.0.env)
+        {
             return None;
         }
         let tx = self
@@ -316,7 +337,7 @@ impl Realtime {
     #[must_use]
     pub fn status(&self) -> Value {
         json!({
-            "configured": self.settings().configured_with(&*self.0.env),
+            "configured": self.settings().configured_with(&self.0.secrets, &*self.0.env),
             "active": self.0.active.load(Ordering::Acquire),
             "last_error": self.0.last_error.lock().unwrap_or_else(PoisonError::into_inner).clone(),
         })
@@ -393,10 +414,13 @@ mod tests {
         };
         let with_key = |_: &str| Some("sk-test".to_owned());
         let no_key = |_: &str| None;
-        assert_eq!(s.configured_with(&with_key), RtSettings::built());
-        assert!(!s.configured_with(&no_key));
+        assert_eq!(
+            s.configured_with(&Secrets::none(), &with_key),
+            RtSettings::built()
+        );
+        assert!(!s.configured_with(&Secrets::none(), &no_key));
         s.enabled = false;
-        assert!(!s.configured_with(&with_key));
+        assert!(!s.configured_with(&Secrets::none(), &with_key));
         let shown = format!("{s:?}");
         assert!(!shown.contains("sk-"), "{shown}");
     }
