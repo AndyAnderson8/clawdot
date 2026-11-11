@@ -839,16 +839,25 @@ paths:
   /api/skills/{action}:
     post:
       tags: [Tools]
-      summary: Import, edit, delete or enable a skill
+      summary: Import, edit, delete, accept or enable a skill
       description: |
         Skills are addressed in the body, not the path, because their names are free text. The body depends on
         `action`:
 
-        * `import`: an export file, `{"format":"clawdot-skills","version":1,"skills":[...]}`. Imported skills
-          arrive turned off.
-        * `edit`: `{"name": "<current name>", "skill": {<Skill>}}` replaces that skill.
+        * `import`: either an export file, `{"format":"clawdot-skills","version":1,"skills":[...]}`, or the raw
+          files of skill folders in the open SKILL.md format, `{"format":"skill-folder","files":[{"path":"tea/SKILL.md","text":".."},..]}`
+          (at most 64 files, 384 KB in all). The core reads the header (`name`, `description`) and keeps the
+          description apart from the instructions; small text files below a `SKILL.md` become that skill's
+          helper files; scripts and other runnable or binary files are left out and listed. Every imported skill
+          arrives turned off with `needs_review` true and its `source` set. Nothing in a skill is ever run. What
+          was added and what was left out, with the reason, comes back as `import` in the listing.
+        * `edit`: `{"name": "<current name>", "skill": {<Skill>}}` replaces that skill. Keys the body leaves
+          out (`description`, `source`, `files`) keep their value; `needs_review` is never changed by an edit.
         * `delete`: `{"name": "<name>"}`.
-        * `enabled`: `{"name": "<name>", "enabled": true|false}`.
+        * `enabled`: `{"name": "<name>", "enabled": true|false}`. Turning on a skill that `needs_review` is
+          refused with `400`.
+        * `accept`: `{"name": "<name>"}` clears `needs_review` (the person opened the skill and accepts it). It
+          does not turn the skill on.
 
         Any other action is `404`. The answer is the new listing.
       operationId: skillAction
@@ -856,7 +865,7 @@ paths:
         - name: action
           in: path
           required: true
-          schema: { type: string, enum: [import, edit, delete, enabled] }
+          schema: { type: string, enum: [import, edit, delete, enabled, accept] }
       requestBody:
         required: true
         content:
@@ -865,11 +874,16 @@ paths:
               type: object
               additionalProperties: true
               properties:
-                format: { type: string, const: clawdot-skills }
+                format: { type: string, enum: [clawdot-skills, skill-folder] }
                 version: { type: integer, const: 1 }
                 skills:
                   type: array
                   items: { $ref: "#/components/schemas/SkillBody" }
+                files:
+                  type: array
+                  maxItems: 64
+                  description: For `format` `skill-folder`. Paths only label the files; nothing is read from disk.
+                  items: { $ref: "#/components/schemas/SkillFile" }
                 name: { type: string }
                 skill: { $ref: "#/components/schemas/SkillBody" }
                 enabled: { type: boolean }
@@ -1724,6 +1738,20 @@ components:
           items: { type: string }
           description: When the user names the skill, only these tools can be used. Empty means no limit.
         enabled: { type: boolean, default: false }
+        description: { type: string, maxLength: 300, description: "When to use the skill. Kept apart from the instructions." }
+        source: { type: string, maxLength: 200, description: "The file it came from, for example tea/SKILL.md." }
+        needs_review: { type: boolean, default: false, description: "A skill with this set is always off." }
+        files:
+          type: array
+          maxItems: 8
+          items: { $ref: "#/components/schemas/SkillFile" }
+    SkillFile:
+      type: object
+      required: [path, text]
+      additionalProperties: false
+      properties:
+        path: { type: string, maxLength: 100, description: "Relative, with `/`, ending in md, txt, json, yaml, yml, csv, tsv or toml." }
+        text: { type: string, maxLength: 4000, description: "Plain text, shown to the model as reference text and never run. At most 16000 characters over all files of a skill." }
     Tool:
       type: object
       required: [name, description, enabled, confirm, source]
@@ -1765,6 +1793,12 @@ components:
           type: array
           items: { type: string }
         enabled: { type: boolean }
+        description: { type: string }
+        source: { type: string }
+        needs_review: { type: boolean, description: "Imported and not yet accepted; it cannot be turned on." }
+        files:
+          type: array
+          items: { $ref: "#/components/schemas/SkillFile" }
     ExtListing:
       type: object
       properties:
@@ -1777,6 +1811,12 @@ components:
         skills:
           type: array
           items: { $ref: "#/components/schemas/Skill" }
+        import:
+          description: What the last skill import did. Null before any import.
+          type: [object, "null"]
+          properties:
+            added: { type: integer }
+            skipped: { type: array, items: { type: string } }
         problems:
           type: array
           description: Portal entries that could not be loaded.
