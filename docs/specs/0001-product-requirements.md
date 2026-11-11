@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.41 |
+| **Version** | 0.42 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -430,3 +430,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.39 | 2026-11-11 | The device reports what it is and which parts it has (CFG-083); Settings is grouped, hides what the device cannot use, and calls senders webhooks |
 | 0.40 | 2026-11-11 | Themes, built in and uploaded (CFG-084) |
 | 0.41 | 2026-11-11 | Optional realtime (speech-to-speech) voice provider (section 4.12, RTV-001..007, ADR-0020): behind a cargo feature and off unless chosen; tool calls go through the host with tiers and confirmation; audio time counts toward the spend cap; no audio or transcript stored |
+| 0.42 | 2026-11-11 | A ClawDot MCP server (announce, ask_user) for agent harnesses (EXT-011..018) |
