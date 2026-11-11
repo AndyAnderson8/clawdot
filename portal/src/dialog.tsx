@@ -4,9 +4,9 @@ import type { ComponentChildren, JSX } from "preact";
 import { useEffect, useRef } from "preact/hooks";
 
 /** A small "+ Add ..." button for a card's header. */
-export function AddButton(props: { label: string; onClick: () => void; id?: string }): JSX.Element {
+export function AddButton(props: { label: string; onClick: () => void; id?: string; disabled?: boolean }): JSX.Element {
   return (
-    <button class="plain small addbtn" type="button" id={props.id} onClick={props.onClick}>
+    <button class="plain small addbtn" type="button" id={props.id} disabled={props.disabled} onClick={props.onClick}>
       <span aria-hidden="true">+</span> {props.label}
     </button>
   );

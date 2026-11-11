@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.35 |
+| **Version** | 0.36 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -232,7 +232,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-072 | **Open and setup modes are unaffected.** In open mode and while setup is pending the window endpoint MUST answer `409` and the window MUST NOT be opened (there is no password to reset). | Must | M5 | T |
 | REQ-CFG-073 | **(Removed in 0.32.)** Existing installations: see REQ-CFG-067; nothing needs migrating. | Removed | M5 | T |
 | REQ-CFG-080 | **Voice and speech language change while running.** The `voice` and `speech_language` settings (the language is a code such as `en`; empty means detect it) MUST apply to the next request to the speech provider without a restart, for every speech client the process has. Both need a speech provider and are refused without one. | Must | A5b | T |
-| REQ-CFG-081 | **Lists come from the services.** `GET /api/models` MUST ask the saved language-model service for its list of models (`GET <address>/models`, with the key read from the saved environment variable name) and `GET /api/voices` MUST ask the speech server for its voices (`GET <address>/audio/voices`; OpenAI's fixed set when that is the provider and it has no list). Each answers in plain words when there is nothing to ask, no list exists or the service refuses, so the page can fall back to typing. Both need the administrator and never return the key. | Should | A5b | T |
+| REQ-CFG-081 | **Lists come from the services.** `GET /api/models` MUST ask the saved language-model service for its list of models (`GET <address>/models`, with the key read from the saved environment variable name) and `GET /api/voices` MUST ask the speech server for its voices (`GET <address>/audio/voices`, then `/voices` and `/audio/speech/voices`; OpenAI's fixed set when that is the provider and it has no list). `POST /api/speak` MAY carry a `voice`, used for that one phrase so a voice can be heard before it is saved. Each answers in plain words when there is nothing to ask, no list exists or the service refuses, so the page can fall back to typing. Both need the administrator and never return the key. | Should | A5b | T |
 
 ### 4.7 Non-functional (`NFR`)
 
@@ -401,3 +401,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.33 | 2026-11-10 | Updates (section 4.11, UPD-001..011): a daily check for a newer release, a manual check, and an install only on confirmation of a release signed by the project's key; with no key it only announces |
 | 0.34 | 2026-11-10 | The voice and the speech language change while running, and the portal asks the services for their models and voices (CFG-080, 081) |
 | 0.35 | 2026-11-10 | The portal has a Media page (a stub until providers exist), so music and radio may appear there (CFG-026) |
+| 0.36 | 2026-11-10 | A voice can be tried before it is saved; voice lists are looked up at three common paths (CFG-081); the portal may load a picture from an address the person gives for their device |

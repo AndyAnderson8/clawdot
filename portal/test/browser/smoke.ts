@@ -335,6 +335,19 @@ await step("Home: the picture of the device is chosen in a dialog, with a photo 
   await T(`click('.lookopt:nth-child(3)')`);
   await eq(`T.q('.lookopt:nth-child(3)').getAttribute('aria-checked')`, "true", "the choice is marked");
   await eq(`localStorage.getItem('clawdot-look')`, "computer", "and remembered by this browser");
+  await eq(`T.q('#ownpic').open`, false, "your own picture is a side option, folded away");
+  // an address must be a whole address, and must load as a picture
+  await T(`click('#ownpic summary')`);
+  await T(`set('#lookurl', 'nope')`);
+  await T(`submit('#ownpic form')`);
+  await b.until(`T.text('#msg').startsWith('Enter the whole address')`, "a half address is explained");
+  await T(`set('#lookurl', location.origin + '/none.png')`);
+  await T(`submit('#ownpic form')`);
+  await b.until(
+    `T.text('#msg') === 'That address did not load as a picture.'`,
+    "an address that is not a picture is said so",
+  );
+  await eq(`localStorage.getItem('clawdot-look')`, "computer", "and nothing changed");
   // a photo from this computer: made small, kept here, shown on Home
   await b.ev(`(async () => {
     const c = document.createElement('canvas'); c.width = 1200; c.height = 600;
@@ -424,7 +437,10 @@ await step("Clock: alarms, timers, reminders and the stopwatch each have their o
   await eq(`T.rows()[0].includes('Weekdays at')`, true, "repeat text");
   await eq(`T.text('#clocklist h3').startsWith('Alarms')`, true, "the list has a title and a count");
   await eq(`T.q('#rkind') === null`, true, "no type to choose: this page makes alarms");
-  await eq(`T.text('#panel form h3')`, "Add an alarm", "the form says what it makes");
+  await eq(`T.q('#scheduledialog').open`, false, "the form is not in the way");
+  await T(`click('#addschedule')`);
+  await b.until(`T.q('#scheduledialog').open === true`, "the dialog opens");
+  await eq(`T.text('#scheduledialog h3')`, "Add an alarm", "it says what it makes");
   await setTime("rtime", "06:30");
   await eq(
     `T.q('#rtime').tagName + T.q('#rtime-m').tagName`,
@@ -434,8 +450,8 @@ await step("Clock: alarms, timers, reminders and the stopwatch each have their o
   await T(`set('#rlabel', 'gym')`);
   await T(`click('.days input[value="0"]')`);
   await T(`click('.days input[value="2"]')`);
-  await T(`submit('#panel form.panel')`);
-  await b.until(`T.rows().length === 2`, "alarm added");
+  await T(`submit('#scheduledialog form')`);
+  await b.until(`T.rows().length === 2 && T.q('#scheduledialog').open === false`, "alarm added, and the dialog closes");
   const post = mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").pop()!;
   assert.deepEqual(post.body, { kind: "alarm", label: "gym", hour: 6, minute: 30, days: [0, 2] });
   // Timers: the timer is listed here and the alarms are not.
@@ -444,15 +460,15 @@ await step("Clock: alarms, timers, reminders and the stopwatch each have their o
   await eq(`T.rows()[0].startsWith('pasta') && T.rows()[0].includes('Rings in 10 min')`, true, "timer text");
   await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Edit')`);
   await eq(`T.q('#rlabel').value`, "pasta", "edit loads the label");
-  await eq(`T.text('#panel form h3')`, "Change this timer", "edit title");
+  await eq(`T.text('#scheduledialog h3')`, "Change this timer", "edit title");
   await T(`set('#rlabel', 'tea')`);
   await T(`set('#ramount', '20')`);
-  await T(`submit('#panel form.panel')`);
+  await T(`submit('#scheduledialog form')`);
   await b.until(`T.rows()[0].startsWith('tea')`, "edit saved");
   const put = mock.log.find((l) => l.method === "PUT")!;
   assert.equal(put.path, "/api/schedule/1");
   assert.deepEqual(put.body, { kind: "timer", label: "tea", seconds: 1200 });
-  await eq(`T.text('#panel form h3')`, "Add a timer", "form left edit mode");
+  await eq(`T.q('#scheduledialog').open`, false, "the editor closed after saving");
   await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Cancel')`);
   await b.until(
     `T.rows().length === 1 && T.q('#clocklist .empty') !== null`,
@@ -461,9 +477,10 @@ await step("Clock: alarms, timers, reminders and the stopwatch each have their o
   assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/schedule/1"));
   // Reminders: validation.
   await b.ev(`location.hash = '#/clock/reminders'`);
+  await T(`click('#addschedule')`);
   await b.until(`!!T.q('#rdate')`, "the reminder form");
   await T(`set('#rdate', '')`);
-  await T(`submit('#panel form.panel')`);
+  await T(`submit('#scheduledialog form')`);
   await eq(`T.text('#msg')`, "Pick a date and a time for the reminder.", "validation message");
   await eq(`(T.text('#clocklist p.mut') ?? '').length > 0`, true, "zone note present");
   // Stopwatch: used by voice, so this page explains and offers nothing that would not work.
@@ -557,17 +574,22 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
   await shot("settings-memory");
   await eq(`T.rows("#notelist > li")[0].includes("my printer is <b>Pixel</b>")`, true, "shown literally");
   await eq(`T.all("#panel #notelist b").length`, 0, "no markup from a memory");
+  await eq(`T.q("#notedialog").open`, false, "the add form is not in the way");
+  await T(`click("#addnote")`);
+  await b.until(`T.q("#notedialog").open === true`, "the dialog opens");
   await T(`set("#note-text", "the spare key is under the pot")`);
   await T(`submit("#noteform")`);
   await b.until(`T.rows("#notelist > li").length === 2`, "added");
   assert.deepEqual(mock.log.filter((l) => l.method === "POST" && l.path === "/api/notes").pop()!.body, {
     text: "the spare key is under the pot",
   });
-  await eq(`T.q("#note-text").value`, "", "box cleared");
+  await b.until(`T.q("#notedialog").open === false`, "the dialog closes once it is saved");
+  await T(`click("#addnote")`);
   await T(`set("#note-text", "the key is sk-abc")`);
   await T(`submit("#noteform")`);
   await b.until(`T.text("#noteform .errtext").includes("password or a key")`, "a refusal is shown in the form");
   await eq(`T.rows("#notelist > li").length`, 2, "nothing was added");
+  await T(`clickText("#notedialog", "Cancel")`);
   // forgetting asks first: declining does nothing
   await b.ev(`window.confirm = () => false`);
   await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
@@ -584,7 +606,7 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
   await section("memory", "Memory");
   await b.until(`!!T.q("#notesoff")`, "the off notice");
   await eq(`T.q("#notesoff a").getAttribute("href")`, "#/settings/features", "it says where to turn it on");
-  await eq(`T.q("#note-text").disabled`, true, "adding is disabled while memory is off");
+  await eq(`T.q("#addnote").disabled`, true, "adding is disabled while memory is off");
 });
 
 await step("Activity: plain outcomes, filters, paging, text only, read-only", async () => {
@@ -1491,6 +1513,7 @@ await step("Updates: Home says a new version exists, and Features can turn the d
 await step("a 10-second refresh keeps what you typed", async () => {
   await open("open", "#/clock/timers");
   await b.until(`T.rows().length === 1`, "rows");
+  await T(`click('#addschedule')`);
   await T(`set('#rlabel', 'half typed')`);
   (mock.state["schedule"] as unknown[]).push({
     id: 9,

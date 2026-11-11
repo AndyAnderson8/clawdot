@@ -64,36 +64,49 @@ function UsageChart(props: { days: Day[] | null }): JSX.Element {
   );
 }
 
-/** Choose the picture of the device: one of the drawings, or a photo from this computer. Kept in this browser only. */
+/** Choose the picture of the device: one of the drawings. Your own picture is a side option below them. Kept in this browser only. */
 function LookPicker(props: { value: LookId; onPick: (id: LookId) => void }): JSX.Element {
   const [open, setOpen] = useState(false);
   const [photo, setPhotoState] = useState(photoPref());
+  const [address, setAddress] = useState("");
+  const keep = (url: string) => {
+    setPhoto(url);
+    setPhotoState(url);
+    props.onPick(url ? "photo" : "puck");
+  };
   const upload = async (ev: Event) => {
     const input = ev.currentTarget as HTMLInputElement;
     const f = input.files?.[0];
     input.value = "";
     if (!f) return;
     try {
-      const url = await readPhoto(f);
-      setPhoto(url);
-      setPhotoState(url);
-      props.onPick("photo");
+      keep(await readPhoto(f));
     } catch (x) {
       say(x instanceof Error ? x.message : "That picture could not be used.", true);
     }
   };
-  const remove = () => {
-    setPhoto("");
-    setPhotoState("");
-    if (props.value === "photo") props.onPick("puck");
+  // An address is tried first, so one that is not a picture is said so instead of leaving a blank space on Home.
+  const useAddress = (ev: Event) => {
+    ev.preventDefault();
+    const url = address.trim();
+    if (!/^https?:\/\/\S+$/.test(url)) {
+      say("Enter the whole address of the picture, starting with https://.", true);
+      return;
+    }
+    const probe = new Image();
+    probe.onload = () => {
+      keep(url);
+      setAddress("");
+    };
+    probe.onerror = () => say("That address did not load as a picture.", true);
+    probe.src = url;
   };
   return (
     <>
       <button class="plain small" type="button" id="changelook" onClick={() => setOpen(true)}>
         Change picture
       </button>
-      <Dialog id="lookdialog" title="Change the picture" open={open} onClose={() => setOpen(false)} wide>
-        <p class="mut">Pick what stands for your device on Home. It is kept in this browser.</p>
+      <Dialog id="lookdialog" title="Change the picture" open={open} onClose={() => setOpen(false)}>
         <div class="lookgrid" role="radiogroup" aria-label="What your device looks like">
           {LOOKS.map((l) => (
             <button
@@ -121,25 +134,46 @@ function LookPicker(props: { value: LookId; onPick: (id: LookId) => void }): JSX
               <span class="lookart">
                 <Look id="photo" />
               </span>
-              <span class="lookname">Your photo</span>
+              <span class="lookname">Your picture</span>
             </button>
           ) : null}
         </div>
-        <div class="row lookphotorow">
-          <label class="plain small filebtn">
-            {photo ? "Choose another photo" : "Choose a photo"}
-            <input id="lookfile" type="file" class="sr" accept="image/*" onChange={(e) => void upload(e)} />
-          </label>
-          {photo ? (
-            <button class="plain small" type="button" id="lookremove" onClick={remove}>
-              Remove photo
-            </button>
-          ) : null}
-        </div>
-        <p class="mut">
-          The photo is made smaller and stays in this browser; it is never sent anywhere. A picture on another web site
-          cannot be used, because this page never contacts other sites. Save it to your computer, then choose the file.
-        </p>
+        <details class="ownpic" id="ownpic" open={Boolean(photo)}>
+          <summary>Use your own picture instead</summary>
+          <div class="ownbody">
+            <div class="row">
+              <label class="plain small filebtn">
+                Upload a photo
+                <input id="lookfile" type="file" class="sr" accept="image/*" onChange={(e) => void upload(e)} />
+              </label>
+              {photo ? (
+                <button class="plain small" type="button" id="lookremove" onClick={() => keep("")}>
+                  Remove it
+                </button>
+              ) : null}
+            </div>
+            <form class="row addressrow" onSubmit={useAddress}>
+              <input
+                id="lookurl"
+                type="text"
+                inputMode="url"
+                autoCapitalize="none"
+                autoComplete="off"
+                placeholder="Or paste a picture address, https://..."
+                aria-label="Picture address"
+                value={address}
+                onInput={(e) => setAddress(e.currentTarget.value)}
+              />
+              <button class="plain small" id="lookurlgo">
+                Use address
+              </button>
+            </form>
+            <p class="mut">
+              An uploaded photo is made smaller and kept in this browser. With an address, this browser loads the
+              picture from that site each time Home opens. Either way, the choice stays in this browser.
+            </p>
+          </div>
+        </details>
         <div class="row dlgfoot">
           <button type="button" onClick={() => setOpen(false)}>
             Done

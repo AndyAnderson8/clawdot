@@ -1606,18 +1606,17 @@ dialog.dlg textarea {
 
 /* ---- Choosing the picture of the device ---- */
 .lookgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: var(--spacing-3);
-  margin-top: var(--spacing-3);
+  margin: var(--spacing-2) 0 var(--spacing-4);
 }
 button.lookopt {
-  position: relative;
   display: grid;
   grid-template-rows: auto auto;
   gap: var(--spacing-2);
-  justify-items: stretch;
-  width: auto;
+  width: 9.5rem;
   min-height: 0;
   padding: var(--spacing-2);
   border: 2px solid var(--color-card-border);
@@ -1636,11 +1635,12 @@ button.lookopt.on {
   place-items: center;
   aspect-ratio: 4 / 3;
   overflow: hidden;
+  padding: var(--spacing-1);
   border-radius: calc(var(--radius-inner) - 4px);
 }
-.lookart .look,
-.lookart .lookphoto {
-  max-height: 100%;
+.lookart .look {
+  width: 100%;
+  height: 100%;
 }
 .lookname {
   font-size: var(--font-size-sm);
@@ -1655,9 +1655,42 @@ img.lookphoto {
 .devart img.lookphoto {
   aspect-ratio: 4 / 3;
 }
-.lookphotorow {
-  margin-bottom: var(--spacing-3);
+details.ownpic {
+  border: 0;
+  background: none;
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+details.ownpic > summary {
+  display: inline-flex;
+  min-height: 2rem;
+  padding: 0;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+details.ownpic .ownbody {
+  display: grid;
+  justify-items: center;
+  gap: var(--spacing-3);
   margin-top: var(--spacing-3);
+  padding: var(--spacing-4);
+  border: 1px dashed var(--color-card-border);
+  border-radius: var(--radius-inner);
+}
+details.ownpic .ownbody .row {
+  justify-content: center;
+}
+details.ownpic .addressrow input {
+  width: min(24rem, 100%);
+}
+details.ownpic p {
+  margin: 0;
+  max-width: 44ch;
 }
 label.filebtn {
   min-height: 2.5rem;
@@ -1737,4 +1770,30 @@ label.filebtn {
 .timecolon {
   font-size: 1.375rem;
   font-weight: 700;
+}
+
+/* ---- A setting that is one switch or choice: words on the left, the control at the right edge ---- */
+.switchrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-6);
+  padding: var(--spacing-4) 0;
+  border-top: 1px solid var(--color-card-border);
+}
+.switchrow > div {
+  min-width: 0;
+}
+.switchrow label {
+  margin: 0;
+}
+.switchrow p {
+  margin: var(--spacing-1) 0 0;
+}
+.switchrow select {
+  width: 16rem;
+  max-width: 45%;
+}
+.card > .soon {
+  margin: var(--spacing-3) 0;
 }

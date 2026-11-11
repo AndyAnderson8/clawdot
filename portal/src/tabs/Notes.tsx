@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
 import { Field } from "../parts.tsx";
+import { AddButton, Dialog } from "../dialog.tsx";
 import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
@@ -11,6 +12,7 @@ export function Notes(): JSX.Element {
   const [missing, setMissing] = useState(false);
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
+  const [adding, setAdding] = useState(false);
 
   const load = async () => {
     try {
@@ -29,6 +31,7 @@ export function Notes(): JSX.Element {
     try {
       setData(await api<NotesList>("POST", "/api/notes", { text }));
       setText("");
+      setAdding(false);
       say("Saved. The assistant will see it from now on.");
     } catch (x) {
       if (x instanceof ApiError && (x.status === 400 || x.status === 409)) setErr(x.message);
@@ -82,35 +85,15 @@ export function Notes(): JSX.Element {
       ) : null}
       {data ? (
         <>
-          <form class="panel" id="noteform" onSubmit={add}>
-            <h3>Add a memory</h3>
-            <Field
-              id="note-text"
-              label="What to remember"
-              hint={`${text.length} of ${max} characters. ${data.notes.length} of ${data.limits.max_notes} memories used.`}
-            >
-              <input
-                id="note-text"
-                type="text"
-                maxLength={max}
-                autoComplete="off"
-                placeholder="The spare key is under the blue pot"
-                disabled={!data.enabled}
-                value={text}
-                onInput={(e) => setText(e.currentTarget.value)}
-              />
-              <p class="errtext" role="alert">
-                {err}
-              </p>
-            </Field>
-            <div class="row">
-              <button disabled={!data.enabled}>Save memory</button>
-            </div>
-          </form>
           <section class="card" id="notecard">
-            <h3>
-              What it remembers<span class="count">{data.notes.length}</span>
-            </h3>
+            <div class="head">
+              <h3>
+                What it remembers<span class="count">{data.notes.length}</span>
+              </h3>
+              <span title={data.enabled ? undefined : "Turn memory on under Features first."}>
+                <AddButton label="Add a memory" id="addnote" onClick={() => setAdding(true)} disabled={!data.enabled} />
+              </span>
+            </div>
             {data.notes.length ? (
               <ul class="rows" id="notelist">
                 {data.notes.map((n) => (
@@ -132,7 +115,7 @@ export function Notes(): JSX.Element {
               </ul>
             ) : (
               <p class="empty" id="noteempty">
-                Nothing remembered yet. Add one above, or say “remember that ...” to the speaker.
+                Nothing remembered yet. Use “Add a memory”, or say “remember that ...” to the speaker.
               </p>
             )}
             {data.notes.length ? (
@@ -143,6 +126,35 @@ export function Notes(): JSX.Element {
               </div>
             ) : null}
           </section>
+          <Dialog id="notedialog" title="Add a memory" open={adding} onClose={() => setAdding(false)}>
+            <form class="dlgform" id="noteform" onSubmit={add}>
+              <Field
+                id="note-text"
+                label="What to remember"
+                hint={`${text.length} of ${max} characters. ${data.notes.length} of ${data.limits.max_notes} memories used.`}
+              >
+                <input
+                  id="note-text"
+                  type="text"
+                  maxLength={max}
+                  autoComplete="off"
+                  placeholder="The spare key is under the blue pot"
+                  disabled={!data.enabled}
+                  value={text}
+                  onInput={(e) => setText(e.currentTarget.value)}
+                />
+                <p class="errtext" role="alert">
+                  {err}
+                </p>
+              </Field>
+              <div class="row dlgfoot">
+                <button disabled={!data.enabled}>Save memory</button>
+                <button class="plain" type="button" onClick={() => setAdding(false)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </Dialog>
         </>
       ) : null}
     </>

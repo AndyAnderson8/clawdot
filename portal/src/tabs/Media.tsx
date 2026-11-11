@@ -36,40 +36,77 @@ export function Media(): JSX.Element {
           </div>
         </section>
         <section class="card" id="btcard">
-          <h3>Bluetooth</h3>
-          <div class="srow">
-            <div class="slabel">
-              <label for="btswitch">Bluetooth</label>
-              <p class="mut">
-                Not available on this device yet. The device software has no Bluetooth connection, so this cannot be
-                turned on from here. Hold the action button to start pairing.
-              </p>
-            </div>
-            <div class="sctl">
-              <input
-                id="btswitch"
-                class="switch"
-                type="checkbox"
-                disabled
-                checked={false}
-                aria-label="Bluetooth is off"
-              />
-            </div>
+          <div class="head">
+            <h3>Bluetooth</h3>
+            <span class="badge" id="btstate">
+              Off
+            </span>
           </div>
-          <ul class="rows">
-            <li>
-              <strong>Play to a Bluetooth speaker or headphones</strong>
-              <div class="mut">The assistant's voice and sounds go there instead of the built-in speaker.</div>
-            </li>
-            <li>
-              <strong>Pair a phone</strong>
-              <div class="mut">Choose the speaker on your phone to play your own music through it.</div>
-            </li>
-            <li>
-              <strong>Forget a device</strong>
-              <div class="mut">Remove one you no longer use, so it stops connecting.</div>
-            </li>
-          </ul>
+          <div class="soon" role="status">
+            <p>
+              Bluetooth is not available on this device yet. The device software has no Bluetooth connection, so the
+              controls below are shown but cannot be used.
+            </p>
+          </div>
+          <div class="switchrow">
+            <div>
+              <label for="btswitch">Bluetooth</label>
+              <p class="mut">Turn it on to pair and connect speakers, headphones and phones.</p>
+            </div>
+            <input
+              id="btswitch"
+              class="switch"
+              type="checkbox"
+              disabled
+              checked={false}
+              aria-label="Bluetooth is off"
+            />
+          </div>
+          <div class="switchrow">
+            <div>
+              <label for="btvisible">Let phones find this speaker</label>
+              <p class="mut">Visible while you pair, so a phone can play its sound through this speaker.</p>
+            </div>
+            <input
+              id="btvisible"
+              class="switch"
+              type="checkbox"
+              disabled
+              checked={false}
+              aria-label="Visible to phones"
+            />
+          </div>
+          <div class="switchrow">
+            <div>
+              <label for="btout">Play the assistant through</label>
+              <p class="mut">Where its voice and sounds come out.</p>
+            </div>
+            <select id="btout" disabled>
+              <option>The built-in speaker</option>
+            </select>
+          </div>
+        </section>
+        <section class="card" id="btdevices">
+          <div class="head">
+            <h3>
+              Paired devices<span class="count">0</span>
+            </h3>
+            <button class="plain small addbtn" type="button" id="btpair" disabled>
+              <span aria-hidden="true">+</span> Pair a device
+            </button>
+          </div>
+          <div class="blank">
+            <span class="fico" aria-hidden="true">
+              <svg class="ico" viewBox="0 0 24 24">
+                <path d="m7 7 10 10-5 5V2l5 5L7 17" />
+              </svg>
+            </span>
+            <h3>No devices paired</h3>
+            <p class="mut">
+              Paired speakers, headphones and phones will be listed here, each with a way to connect, disconnect or
+              forget it.
+            </p>
+          </div>
         </section>
       </div>
     </div>
