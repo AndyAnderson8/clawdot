@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
-import { attention, dailyCounts, lastHeard, recentItems, speakerView, type Day } from "../dashboard.ts";
+import { attention, requestDays, lastHeard, recentItems, speakerView, type Day } from "../dashboard.ts";
 import { Dialog } from "../dialog.tsx";
 import { fail, say, sv, useApp, usePolled, zone } from "../store.ts";
 import { ago, whenText } from "../time.ts";
@@ -19,7 +19,7 @@ function Stat(props: { label: string; value: string; note?: string; id?: string 
   );
 }
 
-/** Bars for the last two weeks. The assistant's actions are what the activity log records, so that is what is counted. */
+/** Bars for the last two weeks: how many requests the assistant made to the language model each day. */
 function UsageChart(props: { days: Day[] | null }): JSX.Element {
   const days = props.days;
   const max = Math.max(1, ...(days ?? []).map((d) => d.count));
@@ -27,7 +27,7 @@ function UsageChart(props: { days: Day[] | null }): JSX.Element {
   return (
     <section class="card" id="usage" aria-labelledby="usage-h">
       <div class="head">
-        <h3 id="usage-h">Activity, last 14 days</h3>
+        <h3 id="usage-h">Requests, last 14 days</h3>
         <a href="#/activity">All activity</a>
       </div>
       {days ? (
@@ -35,7 +35,7 @@ function UsageChart(props: { days: Day[] | null }): JSX.Element {
           <div
             class="bars"
             role="img"
-            aria-label={`${total} actions over the last 14 days. Most in one day: ${Math.max(...days.map((d) => d.count))}.`}
+            aria-label={`${total} requests over the last 14 days. Most in one day: ${Math.max(...days.map((d) => d.count))}.`}
           >
             {days.map((d) => (
               <div
@@ -53,8 +53,8 @@ function UsageChart(props: { days: Day[] | null }): JSX.Element {
           </div>
           <p class="mut chartnote">
             {total
-              ? `${total} actions in two weeks.`
-              : "Nothing yet. Each thing the assistant does adds to this chart."}
+              ? `${total} requests in two weeks.`
+              : "Nothing yet. Each question the assistant answers adds to this chart."}
           </p>
         </>
       ) : (
@@ -288,7 +288,7 @@ export function Dashboard(): JSX.Element {
       </div>
 
       <div class="cols">
-        <UsageChart days={records ? dailyCounts(records, now, zone()) : null} />
+        <UsageChart days={u?.day !== undefined ? requestDays(u.history ?? [], u.day) : null} />
         <section class="card d-recent" id="recent">
           <div class="head">
             <h3>Recent</h3>

@@ -57,13 +57,26 @@ impl fmt::Display for LimitReached {
 
 impl std::error::Error for LimitReached {}
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// How many requests one past day made, kept so the portal can chart them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct PastDay {
+    day: i64,
+    requests: u32,
+}
+
+/// The most past days kept.
+const KEEP_DAYS: usize = 30;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct State {
     /// Local day number the counters belong to.
     day: i64,
     requests: u32,
     /// Spend in millionths of a dollar, to avoid floating-point drift.
     micro_usd: u64,
+    /// The days before today that made requests, oldest first.
+    #[serde(default)]
+    history: Vec<PastDay>,
 }
 
 /// Tracks usage against the limits.
@@ -115,10 +128,21 @@ impl UsageTracker {
 
     fn roll(&mut self, day: i64) {
         if self.state.day != day {
+            let mut history = std::mem::take(&mut self.state.history);
+            if self.state.requests > 0 && self.state.day != 0 {
+                history.push(PastDay {
+                    day: self.state.day,
+                    requests: self.state.requests,
+                });
+            }
+            if history.len() > KEEP_DAYS {
+                history.drain(..history.len() - KEEP_DAYS);
+            }
             self.state = State {
                 day,
                 requests: 0,
                 micro_usd: 0,
+                history,
             };
         }
     }
@@ -155,6 +179,21 @@ impl UsageTracker {
         }
     }
 
+    /// The local day the counters are for, and the requests each recent day made, today last.
+    #[must_use]
+    pub fn request_days(&self) -> (i64, Vec<(i64, u32)>) {
+        let mut days: Vec<(i64, u32)> = self
+            .state
+            .history
+            .iter()
+            .map(|p| (p.day, p.requests))
+            .collect();
+        if self.state.day != 0 {
+            days.push((self.state.day, self.state.requests));
+        }
+        (self.state.day, days)
+    }
+
     /// Requests made today.
     #[must_use]
     pub fn requests_today(&self) -> u32 {
@@ -179,6 +218,28 @@ mod tests {
             completion_tokens: 5,
             cost_usd: cost,
         }
+    }
+
+    #[test]
+    fn past_days_are_kept_for_the_chart() {
+        let mut t = UsageTracker::new(UsageLimits::default());
+        t.record(100, None);
+        t.record(100, None);
+        t.record(102, None);
+        let (today, days) = t.request_days();
+        assert_eq!(today, 102);
+        assert_eq!(
+            days,
+            vec![(100, 2), (102, 1)],
+            "a day with no requests is not listed"
+        );
+        for d in 103..160 {
+            t.record(d, None);
+        }
+        assert!(
+            t.request_days().1.len() <= KEEP_DAYS + 1,
+            "only recent days are kept"
+        );
     }
 
     #[test]

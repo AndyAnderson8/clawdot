@@ -926,6 +926,8 @@ impl Brain {
                 "model": self.llm.as_ref().map(|l| l.cfg.model.clone()),
             },
             "usage": {
+                "day": self.usage.request_days().0,
+                "history": self.usage.request_days().1.iter().map(|(d, n)| serde_json::json!({ "day": d, "requests": n })).collect::<Vec<_>>(),
                 "requests_today": self.usage.requests_today(),
                 "max_requests_per_day": self.usage.limits().max_requests_per_day,
                 "spend_today": self.usage.spend_today(),
