@@ -254,6 +254,8 @@ export interface SkillDraft {
   name: string;
   instructions: string;
   tools: string[];
+  /** The file it was read from. */
+  path?: string;
 }
 export interface SkillFile {
   /** The path inside the chosen folder, or just the file name. */
@@ -295,7 +297,7 @@ export function readSkillFiles(files: SkillFile[]): { found: SkillDraft[]; skipp
       );
     else if (found.some((f) => f.name.toLowerCase() === name.toLowerCase()))
       skipped.push(where + ": the name " + name + " is already in this list");
-    else found.push({ name, instructions: d.instructions.trim(), tools: d.tools });
+    else found.push({ name, instructions: d.instructions.trim(), tools: d.tools, path: where });
   };
   for (const f of files) {
     const parts = f.path.split("/");
@@ -344,4 +346,29 @@ export function cents(typed: string): string {
   const [whole = "", ...rest] = t.split(".");
   if (!rest.length) return whole.replace(/^0+(?=\d)/, "");
   return whole.replace(/^0+(?=\d)/, "") + "." + rest.join("").slice(0, 2);
+}
+
+/** Plain-text files a skill folder may carry besides its SKILL.md. Anything else (scripts, programs) is never sent. */
+export const SKILL_HELPER = /\.(md|txt|json|ya?ml|csv|tsv|toml)$/i;
+
+/**
+ * What to send for the chosen skills. A skill that is a folder with a `SKILL.md` is sent as its raw files (the device
+ * reads the header itself and keeps the helper files); anything else (a single Markdown file, a ClawDot skills file) is
+ * sent as the name and instructions already read here.
+ */
+export function skillImports(
+  chosen: SkillDraft[],
+  all: SkillFile[],
+): { folders: SkillFile[]; plain: { name: string; instructions: string; tools: string[] }[] } {
+  const folders: SkillFile[] = [];
+  const plain: { name: string; instructions: string; tools: string[] }[] = [];
+  for (const d of chosen) {
+    const p = d.path ?? "";
+    if (/(^|\/)SKILL\.md$/i.test(p) && p.includes("/")) {
+      const dir = p.slice(0, p.lastIndexOf("/") + 1);
+      // Only the skill's own folder, not folders inside it that hold another skill.
+      for (const f of all) if (f.path.startsWith(dir) && !f.path.slice(dir.length).includes("/")) folders.push(f);
+    } else plain.push({ name: d.name, instructions: d.instructions, tools: d.tools });
+  }
+  return { folders, plain };
 }

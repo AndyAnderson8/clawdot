@@ -870,7 +870,7 @@ await step("Skills: search, select all or none, add, edit in place, folder impor
   await b.until(`T.text('#skillcount') === '2 of 2 turned on'`, "all turned on");
   await T(`click('${rows}:nth-child(2) input.switch')`);
   await b.until(`T.text('#skillcount') === '1 of 2 turned on'`, "one turned off");
-  // import from files: the page reads them, lists what it found, and adds the chosen ones turned off
+  // import from files: the page reads them, lists what it found, and adds the chosen ones for review
   await T(`click('#addskill')`);
   await T(`clickText('#skilladddialog .seg', 'From a folder or files')`);
   await b.until(`!!T.q('#skillfiles')`, "the file chooser");
@@ -879,6 +879,8 @@ await step("Skills: search, select all or none, add, edit in place, folder impor
     const dt = new DataTransfer();
     const mk = (text, name, rel) => { const f = new File([text], name); Object.defineProperty(f, 'webkitRelativePath', { value: rel }); return f; };
     dt.items.add(mk('---\\nname: Tidy up\\ndescription: Put things away\\n---\\nAsk which room first.', 'SKILL.md', 'skills/tidy/SKILL.md'));
+    dt.items.add(mk('Start with the hall.', 'rooms.txt', 'skills/tidy/rooms.txt'));
+    dt.items.add(mk('rm -rf /', 'run.sh', 'skills/tidy/run.sh'));
     dt.items.add(mk('Plain notes', 'notes.md', 'skills/notes.md'));
     dt.items.add(mk('x'.repeat(2100), 'long.md', 'skills/long.md'));
     const input = document.getElementById('skillfiles');
@@ -886,19 +888,55 @@ await step("Skills: search, select all or none, add, edit in place, folder impor
     input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
   await b.until(`!!T.q('#skillfound .picklist')`, "what was found");
-  await eq(`T.all('#skillfound .picklist li').length`, 2, "two skills found");
+  await eq(
+    `T.all('#skillfound .picklist li').length`,
+    2,
+    "two skills found; a folder's helper file is not a skill of its own",
+  );
   await eq(`T.text('#skillfound details summary')`, "1 left out", "and one left out, with the reason");
   await T(`click('#skillfound .picklist li:nth-child(2) input')`);
   await eq(`T.text('#skilladd')`, "Add 1 skill", "one chosen");
   await T(`click('#skilladd')`);
   await b.until(`T.q('#skilladddialog').open === false && T.rows('${rows}').length === 3`, "added");
+  const sent = mock.log.filter((l) => l.path === "/api/skills/import").pop()!.body as {
+    format: string;
+    files: { path: string }[];
+  };
+  assert.equal(sent.format, "skill-folder", "a folder is sent as its files, for the device to read");
   assert.deepEqual(
-    (mock.log.filter((l) => l.path === "/api/skills/import").pop()!.body as { skills: { name: string }[] }).skills.map(
-      (s) => s.name,
-    ),
-    ["Tidy up"],
+    sent.files.map((f) => f.path).sort(),
+    ["skills/tidy/SKILL.md", "skills/tidy/rooms.txt"],
+    "the skill and its text file; the script is never sent",
   );
-  await eq(`T.rows('${rows}')[2].includes('Put things away')`, true, "the description came with it");
+  // an imported skill waits: it cannot be turned on until it has been read and accepted
+  await eq(`T.rows('${rows}')[2].includes('Needs review')`, true, "marked as waiting for review");
+  await eq(`T.q('${rows}:nth-child(3) input.switch').disabled`, true, "and its switch does nothing yet");
+  await eq(`T.text('#skillcount').includes('1 to review')`, true, "the count says so");
+  await T(`click('#skillall')`);
+  await b.until(
+    `T.text('#msg').includes('turned on') || T.text('#skillcount').startsWith('2 of 3')`,
+    "turn on all skips it",
+  );
+  await eq(`T.q('${rows}:nth-child(3) input.switch').checked`, false, "still off");
+  await T(`clickText('${rows}:nth-child(3)', 'Review')`);
+  await b.until(`T.q('#skillreviewdialog').open === true`, "the review opens");
+  await eq(
+    `T.text('#skillreview dl').includes('Put things away') && T.text('#skillreview dl').includes('skills/tidy/SKILL.md')`,
+    true,
+    "what it is for and where it came from",
+  );
+  await eq(`T.text('#reviewtext').trim()`, "Ask which room first.", "its instructions, to read");
+  await eq(`T.all('#skillreview details summary').map((x) => x.textContent)`, ["rooms.txt"], "and its helper file");
+  await T(`click('#skillaccepton')`);
+  await b.until(
+    `T.q('#skillreviewdialog').open === false && T.q('${rows}:nth-child(3) input.switch').checked === true`,
+    "accepted and on",
+  );
+  assert.ok(
+    mock.log.some((l) => l.path === "/api/skills/accept"),
+    "accepting is its own call",
+  );
+  await eq(`T.rows('${rows}')[2].includes('Needs review')`, false, "no longer waiting");
   // delete from the editor
   await b.ev(`window.confirm = () => true`);
   await T(`clickText('${rows}:nth-child(3)', 'Edit')`);

@@ -12,6 +12,7 @@ import {
   restartText,
   settingsChanges,
   settingsPatch,
+  skillImports,
   shownValue,
   skillBody,
   toolDefinition,
@@ -292,4 +293,26 @@ test("a dollar amount keeps digits and a point, with at most two decimals", () =
   assert.equal(cents("abc"), "");
   assert.equal(cents("007.50"), "7.50");
   assert.equal(cents(""), "");
+});
+
+test("a skill folder is sent as its own files, and a loose file as its text", () => {
+  const all = [
+    { path: "s/tea/SKILL.md", text: "x" },
+    { path: "s/tea/notes.txt", text: "y" },
+    { path: "s/tea/inner/SKILL.md", text: "z" },
+    { path: "s/loose.md", text: "w" },
+  ];
+  const out = skillImports(
+    [
+      { name: "Tea", instructions: "x", tools: [], path: "s/tea/SKILL.md" },
+      { name: "loose", instructions: "w", tools: [], path: "s/loose.md" },
+    ],
+    all,
+  );
+  assert.deepEqual(
+    out.folders.map((f) => f.path),
+    ["s/tea/SKILL.md", "s/tea/notes.txt"],
+    "its folder only, not a skill folder inside it",
+  );
+  assert.deepEqual(out.plain, [{ name: "loose", instructions: "w", tools: [] }]);
 });

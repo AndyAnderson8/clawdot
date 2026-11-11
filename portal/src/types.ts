@@ -122,6 +122,14 @@ export interface Skill {
   instructions: string;
   tools?: string[];
   enabled: boolean;
+  /** What the skill is for, from the header of an imported skill file. */
+  description?: string;
+  /** The file an imported skill came from, for example `tea/SKILL.md`. */
+  source?: string;
+  /** Imported and not yet read and accepted: it cannot be turned on until it is. */
+  needs_review?: boolean;
+  /** Plain-text helper files that came in the skill's folder. They are text the assistant may read, never run. */
+  files?: { path: string; text: string }[];
 }
 export interface Problem {
   kind: string;
@@ -133,6 +141,8 @@ export interface Extensions {
   mcp?: McpServer[];
   skills?: Skill[];
   problems?: Problem[];
+  /** What the last import did: how many were added, and what was left out and why. */
+  import?: { added: number; skipped: string[] } | null;
 }
 
 export interface SettingField {

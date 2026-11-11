@@ -673,12 +673,51 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             return send(200, ext());
           }
           if (seg[1] === "enabled") {
-            for (const k of skills) if (k["name"] === body.name) k["enabled"] = body.enabled;
+            const k = skills.find((x) => x["name"] === body.name);
+            if (k && body.enabled && k["needs_review"])
+              return err(
+                400,
+                "This skill was imported and has not been reviewed. Open it, read it, and choose Accept before turning it on.",
+              );
+            if (k) k["enabled"] = body.enabled;
+            return send(200, ext());
+          }
+          if (seg[1] === "accept") {
+            const k = skills.find((x) => x["name"] === body.name);
+            if (k) k["needs_review"] = false;
             return send(200, ext());
           }
           if (seg[1] === "import") {
-            for (const k of body.skills ?? []) skills.push({ ...k, enabled: false });
-            return send(200, ext());
+            // Like the device: every imported skill is off and waits for review; a folder is read from its raw files.
+            const skipped: string[] = [];
+            let added = 0;
+            if (body.format === "skill-folder") {
+              const files = (body.files ?? []) as { path: string; text: string }[];
+              for (const f of files.filter((x) => /(^|\/)SKILL\.md$/i.test(x.path))) {
+                const dir = f.path.slice(0, f.path.lastIndexOf("/") + 1);
+                const head = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(f.text);
+                const get = (k: string) => new RegExp("^" + k + ":\\s*(.*)$", "m").exec(head?.[1] ?? "")?.[1] ?? "";
+                skills.push({
+                  name: get("name") || dir.replace(/\/$/, ""),
+                  description: get("description"),
+                  instructions: (head?.[2] ?? f.text).trim(),
+                  tools: [],
+                  enabled: false,
+                  needs_review: true,
+                  source: f.path,
+                  files: files
+                    .filter((x) => x !== f && x.path.startsWith(dir))
+                    .map((x) => ({ path: x.path.slice(dir.length), text: x.text })),
+                });
+                added++;
+              }
+            } else {
+              for (const k of body.skills ?? []) {
+                skills.push({ ...k, enabled: false, needs_review: true });
+                added++;
+              }
+            }
+            return send(200, { ...ext(), import: { added, skipped } });
           }
         }
       }
