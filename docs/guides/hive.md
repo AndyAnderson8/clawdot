@@ -39,11 +39,15 @@ Without `--hive-discovery` nothing starts and `/api/hive/peers` answers 404.
 
 ## The Dot and Avahi
 
-On the TECHO5 Dot image `avahi-daemon` already owns UDP 5353. Two responders on one host answer the same questions
-twice, so on that image use `avahi`: ClawDot writes `/etc/avahi/services/clawdot.service` (type, port and the same
-TXT set), which the daemon watches and publishes itself, and removes nothing on a crash (see below). Browsing in this
-mode opens a second socket on 5353 with address and port reuse and joins the group. **This has not been tried on a
-Dot**; if the daemon refuses to share the port the peer list is simply empty and a message is printed. The
+**Tried on a Dot on 2026-11-11** ([proving pass](../reports/2026-11-11-proving-pass.md)): the TECHO5 image runs no
+`avahi-daemon`. Its own voice service holds UDP 5353 for its own announcements, with address reuse. So on that image
+use `native`: ClawDot's responder shared the port, an independent mDNS client on another computer got the service,
+port, id and address back, and two speakers started on the Dot listed each other through `/api/hive/peers`.
+
+The `avahi` mode is for systems that do run the daemon: ClawDot writes `/etc/avahi/services/clawdot.service` (type,
+port and the same TXT set), which the daemon watches and publishes itself, and removes nothing on a crash (see below).
+Browsing in this mode opens a second socket on 5353 with address and port reuse and joins the group. That mode has
+not been tried on a real system. The
 announcer sits behind the `Announcer` trait so another route (for example D-Bus) can replace the file later.
 
 ## What it does not do
