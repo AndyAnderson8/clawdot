@@ -32,6 +32,8 @@ SSH is **off by default, key-only, and owned by the image's own voice service**:
 
 ## Pushing a build
 
+CI builds this same artifact on every push (job `dot build`, with `cross`; the binary is kept as the workflow artifact `clawdot-armv7-dot`, and `clawdot-armv7-full` adds `hive,realtime`) and fails above the 8 MiB budget. `clawdot --version` prints the version and the git commit, for example `clawdot 0.0.0 (a1b2c3d4e-dirty)`; the same text is in `GET /api/about` (`build.id`).
+
 Build for the Dot (armv7 musl, features `esphome-satellite,esphome-noise`), then:
 
 ```

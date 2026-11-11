@@ -1,14 +1,14 @@
 //! The OpenAPI description in `docs/api/openapi.yaml` must match the routes in the code.
 //!
 //! Both sides are reduced to a set of `METHOD /path` lines, with every path parameter written as `{}`, and the
-//! sets must be equal. The code side is read from the route tables in `src/ui.rs` (the `match (method, rest)`
-//! arms) and `src/http.rs` (the `match segs` arms); the document side from the `paths:` section. This is a
-//! text check, not a YAML parse, so the document keeps its path keys at two spaces and methods at four.
+//! sets must be equal. The code side is the route table in `src/ui.rs` (read through `ui::api_routes`, so every
+//! `/api` route the table serves must be documented and every documented `/api` route must be in the table) plus
+//! the `match segs` arms of `src/http.rs`; the document side is read from the `paths:` section. The document is
+//! read as text, not parsed as YAML, so it keeps its path keys at two spaces and methods at four.
 
 use std::collections::BTreeSet;
 
 const SPEC: &str = include_str!("../../../docs/api/openapi.yaml");
-const UI: &str = include_str!("../src/ui.rs");
 const HTTP: &str = include_str!("../src/http.rs");
 
 /// `["tools", name, "tier"]` -> `/tools/{}/tier`. Quoted words are literal; anything else is a parameter.
@@ -38,22 +38,12 @@ fn groups(text: &str) -> Vec<&str> {
     out
 }
 
-/// Routes in `ui.rs`: lines like `(&Method::POST, ["tools", name, "tier"]) => ...`, all under `/api`.
+/// Routes in the `ui.rs` table, all under `/api`: `("POST", "/tools/{name}/tier")` -> `POST /api/tools/{}/tier`.
 fn ui_routes() -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for line in UI.lines().map(str::trim) {
-        let Some(rest) = line.strip_prefix("(&Method::") else {
-            continue;
-        };
-        let Some((method, rest)) = rest.split_once(',') else {
-            continue;
-        };
-        let pattern = rest.split("=>").next().unwrap_or("");
-        for g in groups(pattern) {
-            out.insert(format!("{method} {}", path_of(g, "/api")));
-        }
-    }
-    out
+    clawdot_core::ui::api_routes()
+        .into_iter()
+        .map(|(method, path)| format!("{method} {}", braces_empty(&format!("/api{path}"))))
+        .collect()
 }
 
 /// Routes in `http.rs`: a `[..] => match parts.method {` arm followed by `Method::X =>` lines.
@@ -137,6 +127,7 @@ fn the_route_readers_find_the_routes() {
     assert!(ui.contains("GET /api/status"), "{ui:?}");
     assert!(ui.contains("POST /api/tools/{}/tier"), "{ui:?}");
     assert!(ui.contains("GET /api/skills"), "{ui:?}");
+    assert!(ui.contains("PUT /api/notes/{}"), "{ui:?}");
     assert!(ui.len() >= 40, "only {} ui routes read", ui.len());
     let http = http_routes();
     assert!(http.contains("POST /hook/{}"), "{http:?}");
@@ -155,6 +146,28 @@ fn the_openapi_document_describes_exactly_the_routes_in_the_code() {
     assert!(
         undocumented.is_empty() && stale.is_empty(),
         "docs/api/openapi.yaml is out of step with the code.\n  in the code but not described: {undocumented:?}\n  described but not in the code: {stale:?}"
+    );
+}
+
+/// The `/api` half on its own, both ways, so a failure names the table rather than the whole document. The one
+/// route served from `http.rs` (`/api/announce`) is not in the table; the combined test above covers it.
+#[test]
+fn the_api_table_and_the_document_agree_in_both_directions() {
+    let table = ui_routes();
+    let http = http_routes();
+    let documented: BTreeSet<String> = spec_routes()
+        .into_iter()
+        .filter(|r| {
+            r.split_once(' ')
+                .is_some_and(|(_, p)| p.starts_with("/api/"))
+        })
+        .filter(|r| !http.contains(r))
+        .collect();
+    let missing: Vec<_> = table.difference(&documented).collect();
+    let extra: Vec<_> = documented.difference(&table).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "in the route table but not documented: {missing:?}\n  documented under /api but not in the table: {extra:?}"
     );
 }
 

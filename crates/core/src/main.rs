@@ -1476,7 +1476,7 @@ async fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // Used by an update to check that a new program starts before it replaces the running one.
     if matches!(argv.first().map(String::as_str), Some("--version" | "-V")) {
-        println!("clawdot {}", env!("CARGO_PKG_VERSION"));
+        println!("clawdot {}", clawdot_core::diag::build_id());
         return ExitCode::SUCCESS;
     }
     if argv.first().map(String::as_str) == Some("say") {

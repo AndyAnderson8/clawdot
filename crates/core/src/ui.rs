@@ -254,6 +254,204 @@ struct NewEndpoint {
     adapter: String,
 }
 
+/// Who may call a route.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Auth {
+    /// No sign-in: what to show, setup and sign-in. A wrong method on these is a plain 404.
+    Open,
+    /// An administrator session, or a private-network peer in open mode (REQ-CFG-005). Checked before any body is read.
+    SignedIn,
+}
+
+/// What a route does. The dispatch in `handle` matches on this with no catch-all arm, so a handler without a route,
+/// or an id nothing handles, does not compile (an id missing from the table is a dead-code error).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Id {
+    AuthState,
+    Setup,
+    Login,
+    RecoverWindow,
+    Logout,
+    Overview,
+    Status,
+    Speak,
+    EndpointCreate,
+    EndpointRotate,
+    EndpointDelete,
+    AdminPassword,
+    ToolsList,
+    ToolAdd,
+    ToolDelete,
+    ToolEnable,
+    ToolTier,
+    ConnectionTest,
+    ConnectionAdd,
+    ConnectionDelete,
+    ConnectionEnable,
+    SkillAction,
+    SkillAdd,
+    SettingsGet,
+    SettingsPut,
+    SettingsExport,
+    Diagnostics,
+    Logs,
+    Audit,
+    NotesList,
+    NoteAdd,
+    NotesForgetAll,
+    NoteEdit,
+    NoteForget,
+    ModelsGet,
+    ModelsAsk,
+    LlmKeySet,
+    LlmKeyClear,
+    SpeechKeySet,
+    SpeechKeyClear,
+    RealtimeKeySet,
+    RealtimeKeyClear,
+    Voices,
+    HivePeers,
+    UpdateStatus,
+    UpdateCheck,
+    UpdateApply,
+    About,
+    ScheduleList,
+    ScheduleAdd,
+    ScheduleEdit,
+    ScheduleCancel,
+}
+
+/// One route under `/api`: the method, the path (`{name}` is one segment taken as a parameter), who may call it and
+/// what it does. This table is the only place a route is written in code. The 404 for an unknown path, the 405 for a
+/// known path with the wrong method, the sign-in requirement and the test of it, and the check against
+/// `docs/api/openapi.yaml` (`tests/openapi.rs`) are all read from it. Order matters only between rows of the same
+/// method that could both match; a test refuses a row that an earlier one hides.
+struct Route {
+    method: &'static str,
+    path: &'static str,
+    auth: Auth,
+    id: Id,
+}
+
+const fn r(method: &'static str, path: &'static str, auth: Auth, id: Id) -> Route {
+    Route {
+        method,
+        path,
+        auth,
+        id,
+    }
+}
+
+use Auth::{Open, SignedIn};
+
+const ROUTES: &[Route] = &[
+    r("GET", "/auth", Open, Id::AuthState),
+    r("POST", "/setup", Open, Id::Setup),
+    r("POST", "/login", Open, Id::Login),
+    r("POST", "/recover/window", Open, Id::RecoverWindow),
+    r("POST", "/logout", Open, Id::Logout),
+    r("GET", "/overview", SignedIn, Id::Overview),
+    r("GET", "/status", SignedIn, Id::Status),
+    r("POST", "/speak", SignedIn, Id::Speak),
+    r("POST", "/endpoints", SignedIn, Id::EndpointCreate),
+    r(
+        "POST",
+        "/endpoints/{name}/rotate",
+        SignedIn,
+        Id::EndpointRotate,
+    ),
+    r("DELETE", "/endpoints/{name}", SignedIn, Id::EndpointDelete),
+    r("POST", "/admin/password", SignedIn, Id::AdminPassword),
+    r("GET", "/tools", SignedIn, Id::ToolsList),
+    r("GET", "/skills", SignedIn, Id::ToolsList),
+    r("POST", "/tools", SignedIn, Id::ToolAdd),
+    r("DELETE", "/tools/{name}", SignedIn, Id::ToolDelete),
+    r("POST", "/tools/{name}/enabled", SignedIn, Id::ToolEnable),
+    r("POST", "/tools/{name}/tier", SignedIn, Id::ToolTier),
+    r("POST", "/connections/test", SignedIn, Id::ConnectionTest),
+    r("POST", "/connections", SignedIn, Id::ConnectionAdd),
+    r(
+        "DELETE",
+        "/connections/{name}",
+        SignedIn,
+        Id::ConnectionDelete,
+    ),
+    r(
+        "POST",
+        "/connections/{name}/enabled",
+        SignedIn,
+        Id::ConnectionEnable,
+    ),
+    r("POST", "/skills/{action}", SignedIn, Id::SkillAction),
+    r("POST", "/skills", SignedIn, Id::SkillAdd),
+    r("GET", "/settings", SignedIn, Id::SettingsGet),
+    r("PUT", "/settings", SignedIn, Id::SettingsPut),
+    r("GET", "/settings/export", SignedIn, Id::SettingsExport),
+    r("GET", "/diagnostics", SignedIn, Id::Diagnostics),
+    r("GET", "/logs", SignedIn, Id::Logs),
+    r("GET", "/audit", SignedIn, Id::Audit),
+    r("GET", "/notes", SignedIn, Id::NotesList),
+    r("POST", "/notes", SignedIn, Id::NoteAdd),
+    r("DELETE", "/notes", SignedIn, Id::NotesForgetAll),
+    r("PUT", "/notes/{id}", SignedIn, Id::NoteEdit),
+    r("DELETE", "/notes/{id}", SignedIn, Id::NoteForget),
+    r("GET", "/models", SignedIn, Id::ModelsGet),
+    r("POST", "/models", SignedIn, Id::ModelsAsk),
+    r("PUT", "/llm/key", SignedIn, Id::LlmKeySet),
+    r("DELETE", "/llm/key", SignedIn, Id::LlmKeyClear),
+    r("PUT", "/speech/key", SignedIn, Id::SpeechKeySet),
+    r("DELETE", "/speech/key", SignedIn, Id::SpeechKeyClear),
+    r("PUT", "/realtime/key", SignedIn, Id::RealtimeKeySet),
+    r("DELETE", "/realtime/key", SignedIn, Id::RealtimeKeyClear),
+    r("GET", "/voices", SignedIn, Id::Voices),
+    r("GET", "/hive/peers", SignedIn, Id::HivePeers),
+    r("GET", "/update", SignedIn, Id::UpdateStatus),
+    r("POST", "/update/check", SignedIn, Id::UpdateCheck),
+    r("POST", "/update/apply", SignedIn, Id::UpdateApply),
+    r("GET", "/about", SignedIn, Id::About),
+    r("GET", "/schedule", SignedIn, Id::ScheduleList),
+    r("POST", "/schedule", SignedIn, Id::ScheduleAdd),
+    r("PUT", "/schedule/{id}", SignedIn, Id::ScheduleEdit),
+    r("DELETE", "/schedule/{id}", SignedIn, Id::ScheduleCancel),
+];
+
+/// The routes under `/api` as `(METHOD, "/path/{param}")`, for the OpenAPI check in `tests/openapi.rs`.
+#[doc(hidden)]
+#[must_use]
+pub fn api_routes() -> Vec<(&'static str, &'static str)> {
+    ROUTES.iter().map(|r| (r.method, r.path)).collect()
+}
+
+/// Whether `segs` (the path after `/api`) fits `pattern`; on a fit, the first `{parameter}` segment (empty when the
+/// pattern has none).
+fn fit<'a>(pattern: &str, segs: &[&'a str]) -> Option<&'a str> {
+    let mut want = pattern.split('/').skip(1);
+    let mut have = segs.iter();
+    let mut param = "";
+    let mut taken = false;
+    loop {
+        match (want.next(), have.next()) {
+            (None, None) => return Some(param),
+            (Some(w), Some(h)) if w.starts_with('{') => {
+                if !taken {
+                    param = h;
+                    taken = true;
+                }
+            }
+            (Some(w), Some(h)) if w == *h => {}
+            _ => return None,
+        }
+    }
+}
+
+/// The route for this method and path, and its parameter.
+fn find<'a>(method: &Method, segs: &[&'a str]) -> Option<(&'static Route, &'a str)> {
+    ROUTES
+        .iter()
+        .filter(|r| r.method == method.as_str())
+        .find_map(|r| fit(r.path, segs).map(|p| (r, p)))
+}
+
 /// Handle `/`, `/ui`, and `/api/...`. Returns `None` for any other path so the caller can continue routing.
 pub async fn handle(
     core: &Arc<Core>,
@@ -278,9 +476,28 @@ pub async fn handle(
     let ["api", rest @ ..] = segs else {
         return None;
     };
-    // The few calls that work without being signed in: what to show, setup, and sign-in.
-    match (method, rest) {
-        (&Method::GET, ["auth"]) => {
+    let Some((route, p)) = find(method, rest) else {
+        // A path that exists for some other method is a 405 once the caller is signed in; anything else is a 404.
+        // The open routes are not in this check: a wrong method on them is a 404.
+        let known = ROUTES
+            .iter()
+            .any(|r| r.auth == SignedIn && fit(r.path, rest).is_some());
+        if !known {
+            return Some(error(StatusCode::NOT_FOUND, "not found"));
+        }
+        if let Err(e) = core.check_admin(bearer(headers), peer) {
+            return Some(admin_error(e));
+        }
+        return Some(error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"));
+    };
+    // Authenticate before reading any body.
+    if route.auth == SignedIn {
+        if let Err(e) = core.check_admin(bearer(headers), peer) {
+            return Some(admin_error(e));
+        }
+    }
+    Some(match route.id {
+        Id::AuthState => {
             let mut state = core.admin_state();
             state["peer_private"] = json!(admin::is_private(peer));
             if !admin::is_private(peer) {
@@ -288,176 +505,119 @@ pub async fn handle(
                 state["reset_window_secs"] = json!(0);
             }
             state["version"] = json!(env!("CARGO_PKG_VERSION"));
-            return Some(json_reply(StatusCode::OK, &state));
+            json_reply(StatusCode::OK, &state)
         }
-        (&Method::POST, ["setup"]) => return Some(setup(core, peer, body).await),
-        (&Method::POST, ["login"]) => return Some(login(core, body).await),
-        (&Method::POST, ["recover", "window"]) => {
-            return Some(recover_window(core, peer, body).await);
-        }
-        (&Method::POST, ["logout"]) => {
+        Id::Setup => setup(core, peer, body).await,
+        Id::Login => login(core, body).await,
+        Id::RecoverWindow => recover_window(core, peer, body).await,
+        Id::Logout => {
             if let Some(t) = bearer(headers) {
                 core.admin_logout(t);
             }
-            return Some(json_reply(StatusCode::OK, &json!({ "signed_out": true })));
+            json_reply(StatusCode::OK, &json!({ "signed_out": true }))
         }
-        _ => {}
-    }
-    let known = matches!(
-        rest,
-        ["overview"]
-            | ["status"]
-            | ["speak"]
-            | ["endpoints"]
-            | ["endpoints", _]
-            | ["endpoints", _, "rotate"]
-            | ["admin", "password"]
-            | ["schedule"]
-            | ["schedule", _]
-            | ["tools"]
-            | ["tools", _]
-            | ["tools", _, "enabled"]
-            | ["tools", _, "tier"]
-            | ["connections"]
-            | ["connections", _]
-            | ["connections", _, "enabled"]
-            | ["skills"]
-            | ["skills", _]
-            | ["settings"]
-            | ["settings", "export"]
-            | ["diagnostics"]
-            | ["logs"]
-            | ["audit"]
-            | ["notes"]
-            | ["notes", _]
-            | ["about"]
-            | ["update"]
-            | ["update", "check"]
-            | ["update", "apply"]
-            | ["models"]
-            | ["llm", "key"]
-            | ["speech", "key"]
-            | ["realtime", "key"]
-            | ["voices"]
-            | ["hive", "peers"]
-    );
-    if !known {
-        return Some(error(StatusCode::NOT_FOUND, "not found"));
-    }
-    // Authenticate before reading any body.
-    if let Err(e) = core.check_admin(bearer(headers), peer) {
-        return Some(admin_error(e));
-    }
-    Some(match (method, rest) {
-        (&Method::GET, ["overview"]) => overview(core),
-        (&Method::GET, ["status"]) => json_reply(
+        Id::Overview => overview(core),
+        Id::Status => json_reply(
             StatusCode::OK,
             &json!({ "now": core.now(), "status": core.ui_status() }),
         ),
-        (&Method::POST, ["speak"]) => speak(core, body).await,
-        (&Method::POST, ["endpoints"]) => create(core, body).await,
-        (&Method::POST, ["endpoints", name, "rotate"]) => match core.rotate_endpoint(name) {
-            Ok(t) => json_reply(StatusCode::OK, &json!({ "name": name, "token": t })),
+        Id::Speak => speak(core, body).await,
+        Id::EndpointCreate => create(core, body).await,
+        Id::EndpointRotate => match core.rotate_endpoint(p) {
+            Ok(t) => json_reply(StatusCode::OK, &json!({ "name": p, "token": t })),
             Err(e) => endpoint_error(&e),
         },
-        (&Method::DELETE, ["endpoints", name]) => match core.revoke_endpoint(name) {
-            Ok(()) => json_reply(StatusCode::OK, &json!({ "deleted": name })),
+        Id::EndpointDelete => match core.revoke_endpoint(p) {
+            Ok(()) => json_reply(StatusCode::OK, &json!({ "deleted": p })),
             Err(e) => endpoint_error(&e),
         },
-        (&Method::POST, ["admin", "password"]) => change_password(core, body).await,
-        (&Method::GET, ["tools"] | ["skills"]) => json_reply(StatusCode::OK, &core.ui_tools()),
-        (&Method::POST, ["tools"]) => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
+        Id::AdminPassword => change_password(core, body).await,
+        Id::ToolsList => json_reply(StatusCode::OK, &core.ui_tools()),
+        Id::ToolAdd => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
             Ok(v) => ext(core, ExtOp::ToolAdd(v)).await,
             Err((s, m)) => error(s, m),
         },
-        (&Method::DELETE, ["tools", name]) => {
-            ext(core, ExtOp::ToolDelete((*name).to_owned())).await
-        }
-        (&Method::POST, ["tools", name, "enabled"]) => match enabled_flag(body).await {
-            Ok(on) => ext(core, ExtOp::ToolEnable((*name).to_owned(), on)).await,
+        Id::ToolDelete => ext(core, ExtOp::ToolDelete(p.to_owned())).await,
+        Id::ToolEnable => match enabled_flag(body).await {
+            Ok(on) => ext(core, ExtOp::ToolEnable(p.to_owned(), on)).await,
             Err((s, m)) => error(s, m),
         },
-        (&Method::POST, ["tools", name, "tier"]) => match tier_choice(body).await {
-            Ok(t) => ext(core, ExtOp::ToolTier((*name).to_owned(), t)).await,
+        Id::ToolTier => match tier_choice(body).await {
+            Ok(t) => ext(core, ExtOp::ToolTier(p.to_owned(), t)).await,
             Err((s, m)) => error(s, m),
         },
-        (&Method::POST, ["connections", "test"]) => match read_json::<Value>(body).await {
+        Id::ConnectionTest => match read_json::<Value>(body).await {
             Ok(v) => match extensions::test_connection(&v, |n| std::env::var(n).ok()).await {
                 Ok(r) => json_reply(StatusCode::OK, &r),
                 Err(f) => fail_reply(&f),
             },
             Err((s, m)) => error(s, m),
         },
-        (&Method::POST, ["connections"]) => match read_json::<Value>(body).await {
+        Id::ConnectionAdd => match read_json::<Value>(body).await {
             Ok(v) => ext(core, ExtOp::McpAdd(v)).await,
             Err((s, m)) => error(s, m),
         },
-        (&Method::DELETE, ["connections", name]) => {
-            ext(core, ExtOp::McpDelete((*name).to_owned())).await
-        }
-        (&Method::POST, ["connections", name, "enabled"]) => match enabled_flag(body).await {
-            Ok(on) => ext(core, ExtOp::McpEnable((*name).to_owned(), on)).await,
+        Id::ConnectionDelete => ext(core, ExtOp::McpDelete(p.to_owned())).await,
+        Id::ConnectionEnable => match enabled_flag(body).await {
+            Ok(on) => ext(core, ExtOp::McpEnable(p.to_owned(), on)).await,
             Err((s, m)) => error(s, m),
         },
-        (&Method::POST, ["skills", action]) => skill_action(core, action, body).await,
-        (&Method::POST, ["skills"]) => match read_json_limit::<Value>(body, MAX_SKILL_BODY).await {
+        Id::SkillAction => skill_action(core, p, body).await,
+        Id::SkillAdd => match read_json_limit::<Value>(body, MAX_SKILL_BODY).await {
             Ok(v) => ext(core, ExtOp::SkillAdd(v)).await,
             Err((s, m)) => error(s, m),
         },
-        (&Method::GET, ["settings"]) => json_reply(StatusCode::OK, &core.ui_settings()),
-        (&Method::PUT, ["settings"]) => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
+        Id::SettingsGet => json_reply(StatusCode::OK, &core.ui_settings()),
+        Id::SettingsPut => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
             Ok(v) => change_settings(core, &v).await,
             Err((s, m)) => error(s, m),
         },
-        (&Method::GET, ["settings", "export"]) => export_settings(core),
-        (&Method::GET, ["diagnostics"]) => diagnostics(core),
-        (&Method::GET, ["logs"]) => logs(query),
-        (&Method::GET, ["audit"]) => audit(core, query),
-        (&Method::GET, ["notes"]) => match query_param(query, "q") {
+        Id::SettingsExport => export_settings(core),
+        Id::Diagnostics => diagnostics(core),
+        Id::Logs => logs(query),
+        Id::Audit => audit(core, query),
+        Id::NotesList => match query_param(query, "q") {
             Some(q) => notes_search(core, &q),
             None => notes_list(core),
         },
-        (&Method::POST, ["notes"]) => notes_add(core, body).await,
-        (&Method::DELETE, ["notes"]) => notes_forget(core, None),
-        (&Method::PUT, ["notes", id]) => notes_edit(core, id, body).await,
-        (&Method::DELETE, ["notes", id]) => match id.parse::<u64>() {
+        Id::NoteAdd => notes_add(core, body).await,
+        Id::NotesForgetAll => notes_forget(core, None),
+        Id::NoteEdit => notes_edit(core, p, body).await,
+        Id::NoteForget => match p.parse::<u64>() {
             Ok(id) => notes_forget(core, Some(id)),
             Err(_) => error(StatusCode::NOT_FOUND, "no such memory"),
         },
-        (&Method::GET, ["models"]) => models(core, query).await,
-        (&Method::POST, ["models"]) => models_with_key(core, body).await,
-        (&Method::PUT, ["llm", "key"]) => llm_key_set(core, body).await,
-        (&Method::DELETE, ["llm", "key"]) => llm_key_clear(core).await,
-        (&Method::PUT, ["speech", "key"]) => speech_key_set(body).await,
-        (&Method::DELETE, ["speech", "key"]) => speech_key_clear(),
-        (&Method::PUT, ["realtime", "key"]) => realtime_key_set(body).await,
-        (&Method::DELETE, ["realtime", "key"]) => realtime_key_clear(),
-        (&Method::GET, ["voices"]) => voices().await,
-        (&Method::GET, ["hive", "peers"]) => hive_peers(core),
-        (&Method::GET, ["update"]) => update_status(),
-        (&Method::POST, ["update", "check"]) => update_check().await,
-        (&Method::POST, ["update", "apply"]) => update_apply(body).await,
-        (&Method::GET, ["about"]) => json_reply(
+        Id::ModelsGet => models(core, query).await,
+        Id::ModelsAsk => models_with_key(core, body).await,
+        Id::LlmKeySet => llm_key_set(core, body).await,
+        Id::LlmKeyClear => llm_key_clear(core).await,
+        Id::SpeechKeySet => speech_key_set(body).await,
+        Id::SpeechKeyClear => speech_key_clear(),
+        Id::RealtimeKeySet => realtime_key_set(body).await,
+        Id::RealtimeKeyClear => realtime_key_clear(),
+        Id::Voices => voices().await,
+        Id::HivePeers => hive_peers(core),
+        Id::UpdateStatus => update_status(),
+        Id::UpdateCheck => update_check().await,
+        Id::UpdateApply => update_apply(body).await,
+        Id::About => json_reply(
             StatusCode::OK,
             &json!({ "version": env!("CARGO_PKG_VERSION"), "build": crate::diag::build_info(), "changelog": CHANGELOG }),
         ),
-        (&Method::GET, ["schedule"]) => schedule(core, SchedOp::List).await,
-        (&Method::POST, ["schedule"]) => match read_json::<Value>(body).await {
+        Id::ScheduleList => schedule(core, SchedOp::List).await,
+        Id::ScheduleAdd => match read_json::<Value>(body).await {
             Ok(v) => schedule(core, SchedOp::Add(v)).await,
             Err((s, m)) => error(s, m),
         },
-        (&Method::PUT, ["schedule", id]) => {
-            match (id.parse::<u64>(), read_json::<Value>(body).await) {
-                (Ok(id), Ok(v)) => schedule(core, SchedOp::Edit(id, v)).await,
-                (Err(_), _) => error(StatusCode::NOT_FOUND, "no such timer, alarm, or reminder"),
-                (_, Err((s, m))) => error(s, m),
-            }
-        }
-        (&Method::DELETE, ["schedule", id]) => match id.parse::<u64>() {
+        Id::ScheduleEdit => match (p.parse::<u64>(), read_json::<Value>(body).await) {
+            (Ok(id), Ok(v)) => schedule(core, SchedOp::Edit(id, v)).await,
+            (Err(_), _) => error(StatusCode::NOT_FOUND, "no such timer, alarm, or reminder"),
+            (_, Err((s, m))) => error(s, m),
+        },
+        Id::ScheduleCancel => match p.parse::<u64>() {
             Ok(id) => schedule(core, SchedOp::Cancel(id)).await,
             Err(_) => error(StatusCode::NOT_FOUND, "no such timer, alarm, or reminder"),
         },
-        _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     })
 }
 
