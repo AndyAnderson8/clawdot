@@ -3,7 +3,6 @@ import { useState } from "preact/hooks";
 import { api, keep } from "../api.ts";
 import { restartText, type SettingSpec } from "../forms.ts";
 import { fail, say, signedOut, start, sv, useApp } from "../store.ts";
-import { setThemePref, themePref, type ThemePref } from "../theme.ts";
 import { zoneName } from "../time.ts";
 import type { HardwareInfo, Settings as SettingsData } from "../types.ts";
 import { About } from "./About.tsx";
@@ -18,6 +17,7 @@ import { Skills } from "./Skills.tsx";
 import { HardwareCard } from "./HardwareCard.tsx";
 import { Lights } from "./Lights.tsx";
 import { Planned } from "./Planned.tsx";
+import { Themes } from "./Themes.tsx";
 import { MediaSettings } from "./Media.tsx";
 import { Tools } from "./Tools.tsx";
 import { Webhooks } from "./Webhooks.tsx";
@@ -70,41 +70,7 @@ const LIMITS: Spec = [
 ];
 
 function ThemesSection(): JSX.Element {
-  return (
-    <section class="card sgroup">
-      <h3>Theme</h3>
-      <ThemeChoice />
-    </section>
-  );
-}
-
-function ThemeChoice(): JSX.Element {
-  const [pref, setPref] = useState<ThemePref>(themePref());
-  const choose = (p: ThemePref) => {
-    setPref(p);
-    setThemePref(p);
-  };
-  const options: [ThemePref, string][] = [
-    ["light", "Light"],
-    ["dark", "Dark"],
-    ["system", "Match system"],
-  ];
-  return (
-    <fieldset id="themeform" class="srow">
-      <div class="slabel">
-        <legend>Theme</legend>
-        <p class="mut">Light unless you choose otherwise. This is remembered by this browser only.</p>
-      </div>
-      <div class="choices sctl">
-        {options.map(([v, text]) => (
-          <label key={v}>
-            <input type="radio" name="theme" value={v} checked={pref === v} onChange={() => choose(v)} />
-            {text}
-          </label>
-        ))}
-      </div>
-    </fieldset>
-  );
+  return <Themes />;
 }
 
 function General(props: { s: SettingsData }): JSX.Element {
