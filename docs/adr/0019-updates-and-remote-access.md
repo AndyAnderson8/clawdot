@@ -44,7 +44,7 @@ What replaces them, all already built: **Save my settings / Load a settings file
 
 - A speaker updates itself without anyone plugging it in, but only with the person's consent and a key the project holds. Until the maintainer creates the key and signs a release, updates are announced and the Update button explains why it cannot install.
 - The maintainer must keep the signing key safe. If it is lost, updates stop being accepted; if it is stolen, an attacker who can also publish a release can push a program. Rotation is a rebuild with a new public key, installed by hand.
-- No SMB or USB storage code will be written, which closes two questions for good. SSH is revisited at B0 on the real device.
+- No SMB or USB storage code will be written, which closes two questions for good. SSH is revisited at B0 on the real device. **Update 2026-11-11:** the Dot image does ship Dropbear, started by its voice service only while its SSH setting is on, key-only. It is used for the maintainer's pushes of new builds ([guide](../guides/dot-ssh.md)); the login is root, because no other login can write ClawDot's directory, so the key is kept private per device. ClawDot itself does not start SSH.
 
 ## Alternatives rejected
 
