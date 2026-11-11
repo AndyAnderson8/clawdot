@@ -329,18 +329,17 @@ REQ-DEV-001..012 (proposed in [ADR-0015](adr/0015-own-the-device-layer.md); draf
 
 **Exit:** a fresh unlocked Dot reaches a voice turn through our daemon following only the guide.
 
-## B4b. ClawDot's own Linux layer (decided 2026-11-11)
-Today a Dot is made ready by installing someone else's operating system (TECHO5) and then removing its voice service to run ours. That is a stopgap, not a product: it ties ClawDot to another project's choices, release pace and install steps, and a person has to take in two projects to get one speaker. The aim is **our own base layer that we build, boot, update and support**, with TECHO5 (and its forks) as a reference and a source of findings, not a dependency.
+## B4b. ClawDot's own Linux layer
+REQ-DEV-032..037
 
-- **A reproducible image recipe of our own** (Buildroot or Alpine-based, whichever the kernel and the size budget allow) that boots the Dot straight into the ClawDot daemon: Wi-Fi, clock, audio, wake-word front end, the light ring, buttons and Bluetooth come from our board file ([B2](#b2-device-contract-and-the-portable-daemon-on-pc-and-pi-first)), not from a second program
-- **What we copy and what we do not.** Copy the findings (partition layout, kernel and driver choices, mixer routes, LED and button codes, boot flow) and, where the licence allows, code, with notices and credit; send fixes back. Never ship Amazon's files: the vendor firmware blobs the chip needs (Wi-Fi, Bluetooth) are read from the device's own partitions at install time, as the unlock tools already do
-- **Own the install path**: one guided install from an unlocked Dot to a working ClawDot speaker, one signed A/B update flow ([B5](#b5-image-build-and-signed-ab-update-pipeline)), SSH off by default and key-only, a restore path to stock kept, and no Home Assistant needed anywhere
-- **Be able to rebuild the kernel and drivers ourselves** (the vendor kernel here is 3.18 on an MT8163). The open question is how much of that is practical for one maintainer; the first step is to record exactly what TECHO5's image contains and which pieces are proprietary, GPL or MIT, so the plan rests on facts
-- Other boards (Raspberry Pi, a PC) use the same recipe with a different board file, so this is a generic base layer and the Dot is one target
+Today the Dot is prepared by installing T5D's image and replacing `echod`, a stopgap that ties ClawDot to another project's choices and release pace, and asks a person to take in two projects to get one speaker. The SSH push path ([dot-ssh guide](guides/dot-ssh.md)) makes trying images on the Dot much faster. B4b makes the base layer ClawDot's own: a `clawdot-os` repository (created by the maintainer) holding the recipe, with T5D's design ported under MIT notices, Amazon files read from the unit at install time and never shipped, our own signing key and installer, and later our own kernel build. The research, inventory, options, risks and milestones are in [R-12](research/12-own-linux-layer.md) (recommendation: fork the T5D design, not its image, in the order recipe, updates, installer, kernel; 6.1 kernel as a separate spike).
 
-*Status: not started.* It follows the B3 feasibility gate, and the SSH push path ([dot-ssh guide](guides/dot-ssh.md)) makes trying images on the Dot much faster.
+- B4b-0 repository and the no-Amazon-files check; B4b-1 reproducible PC build; B4b-2 first boot on the maintainer's unit; B4b-3 signed A/B updates (this is B5); B4b-4 installer and guide for a normal person (this is the B4 exit); B4b-5 own kernel build; B4b-6 safe boot-image updates; B4b-7 kernel 6.1 spike; B4b-8 no live dependency on TECHO5 or LibreEcho. Each has an exit test in R-12 section 5.1
+- Every device write needs the maintainer's explicit go; B4b-0, B4b-1 and the PC halves of the others need none
 
-**Exit:** a fresh unlocked Dot reaches a voice turn on an image built from our own recipe, following only our guide, with TECHO5 nowhere in it.
+*Status: research done (R-12, 2026-11-11); open questions for the maintainer are in R-12 section 7; nothing is built.*
+
+**Exit:** a person who has not seen the repository, on an unlocked Dot, reaches a voice turn with no TECHO5 or LibreEcho download in the path, and a deliberately broken update rolls back.
 
 ## B5. Image build and signed A/B update pipeline
 REQ-DEV-007
@@ -404,7 +403,7 @@ What to do first after the portal work, in order. The first is chosen because it
 
 1. **Realtime voice providers (item 14 below).** A speech-to-speech provider as an optional choice on the Voice page. Start with an OpenAI-style realtime protocol. Tool calls go back through ClawDot's own tools and ask-first checks. Runs where ClawDot runs on a PC or Pi (or through a small relay), not inside the Dot's memory budget; the spend cap must count its audio time.
 2. **Push updates and files over SSH (done for the Dot, item 17 below).** The image's own opt-in, key-only SSH, with a push script ([guide](guides/dot-ssh.md)).
-3. **ClawDot's own Linux layer ([B4b](#b4b-clawdots-own-linux-layer-decided-2026-11-11)).** Stop depending on TECHO5 as a base. Start by recording what its image contains and what is proprietary, GPL or MIT.
+3. **ClawDot's own Linux layer ([B4b](#b4b-clawdots-own-linux-layer)).** Stop depending on TECHO5 as a base. Start by recording what its image contains and what is proprietary, GPL or MIT.
 4. **Hermes Agent as an optional brain (item 20 below)**, and a review of what other agent harnesses do well for our own loop (item 21). Hermes is the one brain candidate; opencode is only something to study.
 5. **Voice providers beyond the OpenAI style (item 15).** An adapter for services with cloned voices and their own voice lists.
 6. **Board files (item 19)**, so lights and Bluetooth can be described for hardware ClawDot does not know, and the Lights and Bluetooth pages can work for real.
