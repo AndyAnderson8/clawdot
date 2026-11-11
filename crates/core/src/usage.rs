@@ -180,6 +180,18 @@ impl UsageTracker {
         }
     }
 
+    /// Add spend that is not a model request, such as the audio time of a realtime voice session
+    /// (REQ-RTV-004). The request count is not changed; the daily spend cap sees the cost.
+    pub fn add_cost(&mut self, day: i64, usd: f64) {
+        self.roll(day);
+        if usd.is_finite() && usd > 0.0 {
+            self.state.micro_usd = self
+                .state
+                .micro_usd
+                .saturating_add((usd * 1_000_000.0).round() as u64);
+        }
+    }
+
     /// The local day the counters are for, and the requests each recent day made, today last.
     #[must_use]
     pub fn request_days(&self) -> (i64, Vec<(i64, u32)>) {
@@ -212,6 +224,22 @@ impl UsageTracker {
 mod tests {
     use super::*;
     use crate::store::testutil::TempDir;
+
+    #[test]
+    fn added_cost_counts_toward_the_spend_cap_without_counting_a_request() {
+        let mut t = UsageTracker::new(UsageLimits {
+            daily_spend_cap_usd: Some(0.10),
+            ..UsageLimits::default()
+        });
+        t.add_cost(1, 0.04);
+        t.add_cost(1, f64::NAN);
+        t.add_cost(1, -5.0);
+        assert_eq!(t.requests_today(), 0);
+        assert!(t.check(1).is_ok());
+        t.add_cost(1, 0.07);
+        assert_eq!(t.check(1), Err(LimitReached::Spend));
+        assert_eq!(t.check(2), Ok(()), "a new day starts at zero");
+    }
 
     fn usage(cost: Option<f64>) -> Usage {
         Usage {
