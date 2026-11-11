@@ -2,7 +2,6 @@ use super::*;
 use crate::store::testutil::TempDir;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -50,7 +49,7 @@ fn release_json(port: u16, version: &str) -> String {
 }
 
 struct Rig {
-    updater: Updater,
+    updater: Arc<Updater>,
     dir: TempDir,
     exe: PathBuf,
 }
@@ -65,7 +64,11 @@ fn rig(port: u16, key: Option<[u8; 32]>) -> Rig {
         supervised: false,
     };
     let updater = Updater::new(cfg, true, Some(dir.0.clone()), exe.clone(), false, false).unwrap();
-    Rig { updater, dir, exe }
+    Rig {
+        updater: Arc::new(updater),
+        dir,
+        exe,
+    }
 }
 
 /// A server with a newer release whose files are signed by `signer`, whose signed hash is of `hashed`, and whose
@@ -340,7 +343,6 @@ async fn a_build_with_no_key_never_installs_and_says_where_to_download() {
             .unwrap()
             .contains("no update key")
     );
-    let r: &'static Rig = Box::leak(Box::new(r));
     let e = r.updater.start_apply("99.0.0").unwrap_err();
     assert!(e.contains("no update key"), "{e}");
     assert_eq!(std::fs::read(&r.exe).unwrap(), b"old program");
@@ -351,7 +353,7 @@ async fn a_build_with_no_key_never_installs_and_says_where_to_download() {
 async fn only_the_newer_version_that_was_found_can_be_asked_for() {
     let kp = keypair();
     let port = newer_release(&kp, b"p", b"p").await;
-    let r: &'static Rig = Box::leak(Box::new(rig(port, Some(public(&kp)))));
+    let r = rig(port, Some(public(&kp)));
     assert!(
         r.updater
             .start_apply("99.0.0")

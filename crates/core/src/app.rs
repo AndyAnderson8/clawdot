@@ -224,6 +224,8 @@ pub struct Core {
     speech_origin: std::sync::OnceLock<crate::speech::SpeechOrigin>,
     #[cfg(feature = "hive")]
     hive: std::sync::OnceLock<crate::hive::Hive>,
+    #[cfg(feature = "tls")]
+    updater: std::sync::OnceLock<Arc<crate::update::Updater>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -329,6 +331,8 @@ impl Core {
             speech_origin: std::sync::OnceLock::new(),
             #[cfg(feature = "hive")]
             hive: std::sync::OnceLock::new(),
+            #[cfg(feature = "tls")]
+            updater: std::sync::OnceLock::new(),
         }
     }
 
@@ -343,6 +347,19 @@ impl Core {
     #[must_use]
     pub fn hive(&self) -> Option<&crate::hive::Hive> {
         self.hive.get()
+    }
+
+    /// Keep the running updater for the life of this core (set once; a later call is ignored).
+    #[cfg(feature = "tls")]
+    pub fn set_updater(&self, updater: Arc<crate::update::Updater>) {
+        let _ = self.updater.set(updater);
+    }
+
+    /// The updater, when updates are running on this device.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn updater(&self) -> Option<&Arc<crate::update::Updater>> {
+        self.updater.get()
     }
 
     /// The speech clients' voice and language registry, owned by this core.

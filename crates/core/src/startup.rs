@@ -184,7 +184,7 @@ pub async fn build_brain(
 
 /// Start the optional update check (`tls` builds only); a failure is reported and the speaker carries on.
 #[cfg(feature = "tls")]
-pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Value>) {
+pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Value>, core: &Core) {
     match crate::update::UpdateConfig::new(
         args.updates.url.as_deref(),
         args.updates.public_key.as_deref(),
@@ -194,8 +194,9 @@ pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Val
                 .get("update_check")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true);
-            if let Err(e) = crate::update::start(cfg, on, Some(args.data_dir.clone())) {
-                crate::diag::error(&format!("updates are not available: {e}"));
+            match crate::update::start(cfg, on, Some(args.data_dir.clone())) {
+                Ok(u) => core.set_updater(u),
+                Err(e) => crate::diag::error(&format!("updates are not available: {e}")),
             }
         }
         Err(e) => crate::diag::error(&format!("updates are not available: {e}")),

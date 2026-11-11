@@ -166,8 +166,10 @@ pub fn apply_live(
         brain.rt.set_settings(RtSettings::from_live(live));
     }
     #[cfg(feature = "tls")]
-    if changed("update_check") {
-        crate::update::set_enabled(
+    if changed("update_check")
+        && let Some(u) = core.updater()
+    {
+        u.set_enabled(
             live.get("update_check")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),

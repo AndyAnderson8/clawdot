@@ -18,7 +18,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The version this program is.
@@ -304,36 +304,29 @@ impl std::fmt::Debug for Updater {
     }
 }
 
-static GLOBAL: OnceLock<Updater> = OnceLock::new();
-
-/// The updater of this run, once [`start`] has made it.
-#[must_use]
-pub fn global() -> Option<&'static Updater> {
-    GLOBAL.get()
-}
-
 /// Make the updater of this run, start its daily check, and settle any update that was waiting to prove itself.
+/// The caller keeps the returned handle (the core holds it); the check task holds its own clone.
 ///
 /// # Errors
 /// The updater could not be made (a TLS configuration failure).
-pub fn start(cfg: UpdateConfig, enabled: bool, data_dir: Option<PathBuf>) -> Result<(), String> {
+pub fn start(
+    cfg: UpdateConfig,
+    enabled: bool,
+    data_dir: Option<PathBuf>,
+) -> Result<Arc<Updater>, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
     let u = Updater::new(cfg, enabled, data_dir, exe, true, true)?;
     u.load();
     u.settle_pending();
-    if GLOBAL.set(u).is_err() {
-        return Ok(());
-    }
-    if let Some(u) = GLOBAL.get() {
-        tokio::spawn(u.run());
-    }
-    Ok(())
+    let u = Arc::new(u);
+    tokio::spawn(Arc::clone(&u).run());
+    Ok(u)
 }
 
-/// Turn the daily check on or off (the person's choice in the portal).
-pub fn set_enabled(on: bool) {
-    if let Some(u) = global() {
-        u.enabled.store(on, AtomicOrdering::Relaxed);
+impl Updater {
+    /// Turn the daily check on or off (the person's choice in the portal).
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, AtomicOrdering::Relaxed);
     }
 }
 
@@ -377,7 +370,7 @@ impl Updater {
     }
 
     /// Wake once an hour; ask for the newest release when it has been a day.
-    async fn run(&'static self) {
+    async fn run(self: Arc<Self>) {
         tokio::time::sleep(Duration::from_secs(90)).await;
         loop {
             let due = self
@@ -580,7 +573,7 @@ impl Updater {
     ///
     /// # Errors
     /// A plain reason why nothing was started.
-    pub fn start_apply(&'static self, version: &str) -> Result<(), String> {
+    pub fn start_apply(self: &Arc<Self>, version: &str) -> Result<(), String> {
         let release = {
             let s = self.lock();
             if !s.phase.is_empty() && s.phase != "failed" {
@@ -605,9 +598,10 @@ impl Updater {
             s.phase = "downloading".into();
             s.apply_error = None;
         }
+        let this = Arc::clone(self);
         tokio::spawn(async move {
-            let r = tokio::time::timeout(APPLY_DEADLINE, self.apply(&release)).await;
-            let mut s = self.lock();
+            let r = tokio::time::timeout(APPLY_DEADLINE, this.apply(&release)).await;
+            let mut s = this.lock();
             match r {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {

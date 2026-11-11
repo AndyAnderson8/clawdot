@@ -600,9 +600,9 @@ pub async fn handle(
         Id::RealtimeKeyClear => realtime_key_clear(core),
         Id::Voices => voices(core).await,
         Id::HivePeers => hive_peers(core),
-        Id::UpdateStatus => update_status(),
-        Id::UpdateCheck => update_check().await,
-        Id::UpdateApply => update_apply(body).await,
+        Id::UpdateStatus => update_status(core),
+        Id::UpdateCheck => update_check(core).await,
+        Id::UpdateApply => update_apply(core, body).await,
         Id::About => json_reply(
             StatusCode::OK,
             &json!({ "version": env!("CARGO_PKG_VERSION"), "build": crate::diag::build_info(), "changelog": CHANGELOG }),
@@ -864,8 +864,8 @@ async fn voices(core: &Core) -> Resp {
 /// `GET /api/update`: whether a newer version exists, when it was last looked for, and whether it can be installed
 /// here (REQ-UPD-005).
 #[cfg(feature = "tls")]
-fn update_status() -> Resp {
-    match crate::update::global() {
+fn update_status(core: &Core) -> Resp {
+    match core.updater() {
         Some(u) => json_reply(StatusCode::OK, &u.status()),
         None => error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -875,7 +875,7 @@ fn update_status() -> Resp {
 }
 
 #[cfg(not(feature = "tls"))]
-fn update_status() -> Resp {
+fn update_status(_core: &Core) -> Resp {
     error(
         StatusCode::SERVICE_UNAVAILABLE,
         "This build does not check for updates.",
@@ -885,25 +885,25 @@ fn update_status() -> Resp {
 /// `POST /api/update/check`: look for a newer version now. The answer is the same document as `GET /api/update`;
 /// a failed look is in its `error` field, not an HTTP error.
 #[cfg(feature = "tls")]
-async fn update_check() -> Resp {
-    let Some(u) = crate::update::global() else {
-        return update_status();
+async fn update_check(core: &Core) -> Resp {
+    let Some(u) = core.updater() else {
+        return update_status(core);
     };
     let _ = u.check().await;
     json_reply(StatusCode::OK, &u.status())
 }
 
 #[cfg(not(feature = "tls"))]
-async fn update_check() -> Resp {
-    update_status()
+async fn update_check(core: &Core) -> Resp {
+    update_status(core)
 }
 
 /// `POST /api/update/apply` with `{"version": "1.2.3"}`: install the version the person confirmed (REQ-UPD-006).
 /// It starts at once and the page watches `GET /api/update`.
 #[cfg(feature = "tls")]
-async fn update_apply(body: Incoming) -> Resp {
-    let Some(u) = crate::update::global() else {
-        return update_status();
+async fn update_apply(core: &Core, body: Incoming) -> Resp {
+    let Some(u) = core.updater() else {
+        return update_status(core);
     };
     let v = match read_json::<Value>(body).await {
         Ok(v) => v,
@@ -919,8 +919,8 @@ async fn update_apply(body: Incoming) -> Resp {
 }
 
 #[cfg(not(feature = "tls"))]
-async fn update_apply(_body: Incoming) -> Resp {
-    update_status()
+async fn update_apply(core: &Core, _body: Incoming) -> Resp {
+    update_status(core)
 }
 
 /// `GET /api/settings/export`: the saved settings as a file the page offers for download (REQ-CFG-065).

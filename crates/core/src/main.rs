@@ -150,7 +150,7 @@ async fn main() -> ExitCode {
         ));
     }
     #[cfg(feature = "tls")]
-    start_updates(&args, &applied);
+    start_updates(&args, &applied, &core);
     settings_state.set_extra(settings_extra(&args));
     core.set_settings(settings_state);
     if let Some(input) = args.voice_in.clone() {
