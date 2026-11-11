@@ -257,15 +257,6 @@ struct NewEndpoint {
     adapter: String,
 }
 
-/// Who may call a route.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Auth {
-    /// No sign-in: what to show, setup and sign-in. A wrong method on these is a plain 404.
-    Open,
-    /// An administrator session, or a private-network peer in open mode (REQ-CFG-005). Checked before any body is read.
-    SignedIn,
-}
-
 /// What a route does. The dispatch in `handle` matches on this with no catch-all arm, so a handler without a route,
 /// or an id nothing handles, does not compile (an id missing from the table is a dead-code error).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -324,139 +315,133 @@ enum Id {
     ScheduleCancel,
 }
 
-/// One route under `/api`: the method, the path (`{name}` is one segment taken as a parameter), who may call it and
-/// what it does. This table is the only place a route is written in code. The 404 for an unknown path, the 405 for a
-/// known path with the wrong method, the sign-in requirement and the test of it, and the check against
-/// `docs/api/openapi.yaml` (`tests/openapi.rs`) are all read from it. Order matters only between rows of the same
-/// method that could both match; a test refuses a row that an earlier one hides.
-struct Route {
-    method: &'static str,
-    path: &'static str,
-    auth: Auth,
-    id: Id,
-}
-
-const fn r(method: &'static str, path: &'static str, auth: Auth, id: Id) -> Route {
-    Route {
-        method,
-        path,
-        auth,
-        id,
-    }
-}
-
+use crate::routes::{Auth, Row, find, fit};
 use Auth::{Open, SignedIn};
 
+type Route = Row<Id>;
+
+const fn r(method: &'static str, path: &'static str, auth: Auth, id: Id) -> Route {
+    Row::new(method, path, auth, id)
+}
+
+/// The portal's routes under `/api` (the rest are in `http::ROUTES`; see `routes.rs` for why there are two). This table
+/// is the only place these routes are written in code. The 404 for an unknown path, the 405 for a known path with
+/// the wrong method, the sign-in requirement and the test of it, and the check against `docs/api/openapi.yaml`
+/// (`tests/openapi.rs`) are all read from it. Order matters only between rows of the same method that could both
+/// match; a test refuses a row that an earlier one hides.
 const ROUTES: &[Route] = &[
-    r("GET", "/auth", Open, Id::AuthState),
-    r("POST", "/setup", Open, Id::Setup),
-    r("POST", "/login", Open, Id::Login),
-    r("POST", "/recover/window", Open, Id::RecoverWindow),
-    r("POST", "/logout", Open, Id::Logout),
-    r("GET", "/overview", SignedIn, Id::Overview),
-    r("GET", "/status", SignedIn, Id::Status),
-    r("POST", "/speak", SignedIn, Id::Speak),
-    r("POST", "/endpoints", SignedIn, Id::EndpointCreate),
+    r("GET", "/api/auth", Open, Id::AuthState),
+    r("POST", "/api/setup", Open, Id::Setup),
+    r("POST", "/api/login", Open, Id::Login),
+    r("POST", "/api/recover/window", Open, Id::RecoverWindow),
+    r("POST", "/api/logout", Open, Id::Logout),
+    r("GET", "/api/overview", SignedIn, Id::Overview),
+    r("GET", "/api/status", SignedIn, Id::Status),
+    r("POST", "/api/speak", SignedIn, Id::Speak),
+    r("POST", "/api/endpoints", SignedIn, Id::EndpointCreate),
     r(
         "POST",
-        "/endpoints/{name}/rotate",
+        "/api/endpoints/{name}/rotate",
         SignedIn,
         Id::EndpointRotate,
     ),
-    r("DELETE", "/endpoints/{name}", SignedIn, Id::EndpointDelete),
-    r("POST", "/admin/password", SignedIn, Id::AdminPassword),
-    r("GET", "/tools", SignedIn, Id::ToolsList),
-    r("GET", "/skills", SignedIn, Id::ToolsList),
-    r("POST", "/tools", SignedIn, Id::ToolAdd),
-    r("DELETE", "/tools/{name}", SignedIn, Id::ToolDelete),
-    r("POST", "/tools/{name}/enabled", SignedIn, Id::ToolEnable),
-    r("POST", "/tools/{name}/tier", SignedIn, Id::ToolTier),
-    r("POST", "/connections/test", SignedIn, Id::ConnectionTest),
-    r("POST", "/connections", SignedIn, Id::ConnectionAdd),
     r(
         "DELETE",
-        "/connections/{name}",
+        "/api/endpoints/{name}",
+        SignedIn,
+        Id::EndpointDelete,
+    ),
+    r("POST", "/api/admin/password", SignedIn, Id::AdminPassword),
+    r("GET", "/api/tools", SignedIn, Id::ToolsList),
+    r("GET", "/api/skills", SignedIn, Id::ToolsList),
+    r("POST", "/api/tools", SignedIn, Id::ToolAdd),
+    r("DELETE", "/api/tools/{name}", SignedIn, Id::ToolDelete),
+    r(
+        "POST",
+        "/api/tools/{name}/enabled",
+        SignedIn,
+        Id::ToolEnable,
+    ),
+    r("POST", "/api/tools/{name}/tier", SignedIn, Id::ToolTier),
+    r(
+        "POST",
+        "/api/connections/test",
+        SignedIn,
+        Id::ConnectionTest,
+    ),
+    r("POST", "/api/connections", SignedIn, Id::ConnectionAdd),
+    r(
+        "DELETE",
+        "/api/connections/{name}",
         SignedIn,
         Id::ConnectionDelete,
     ),
     r(
         "POST",
-        "/connections/{name}/enabled",
+        "/api/connections/{name}/enabled",
         SignedIn,
         Id::ConnectionEnable,
     ),
-    r("POST", "/skills/{action}", SignedIn, Id::SkillAction),
-    r("POST", "/skills", SignedIn, Id::SkillAdd),
-    r("GET", "/settings", SignedIn, Id::SettingsGet),
-    r("PUT", "/settings", SignedIn, Id::SettingsPut),
-    r("GET", "/settings/export", SignedIn, Id::SettingsExport),
-    r("GET", "/diagnostics", SignedIn, Id::Diagnostics),
-    r("GET", "/logs", SignedIn, Id::Logs),
-    r("GET", "/audit", SignedIn, Id::Audit),
-    r("GET", "/notes", SignedIn, Id::NotesList),
-    r("POST", "/notes", SignedIn, Id::NoteAdd),
-    r("DELETE", "/notes", SignedIn, Id::NotesForgetAll),
-    r("PUT", "/notes/{id}", SignedIn, Id::NoteEdit),
-    r("DELETE", "/notes/{id}", SignedIn, Id::NoteForget),
-    r("GET", "/models", SignedIn, Id::ModelsGet),
-    r("POST", "/models", SignedIn, Id::ModelsAsk),
-    r("PUT", "/llm/key", SignedIn, Id::LlmKeySet),
-    r("DELETE", "/llm/key", SignedIn, Id::LlmKeyClear),
-    r("PUT", "/speech/key", SignedIn, Id::SpeechKeySet),
-    r("DELETE", "/speech/key", SignedIn, Id::SpeechKeyClear),
-    r("PUT", "/realtime/key", SignedIn, Id::RealtimeKeySet),
-    r("DELETE", "/realtime/key", SignedIn, Id::RealtimeKeyClear),
-    r("GET", "/voices", SignedIn, Id::Voices),
-    r("GET", "/hive/peers", SignedIn, Id::HivePeers),
-    r("GET", "/update", SignedIn, Id::UpdateStatus),
-    r("POST", "/update/check", SignedIn, Id::UpdateCheck),
-    r("POST", "/update/apply", SignedIn, Id::UpdateApply),
-    r("GET", "/about", SignedIn, Id::About),
-    r("GET", "/schedule", SignedIn, Id::ScheduleList),
-    r("POST", "/schedule", SignedIn, Id::ScheduleAdd),
-    r("PUT", "/schedule/{id}", SignedIn, Id::ScheduleEdit),
-    r("DELETE", "/schedule/{id}", SignedIn, Id::ScheduleCancel),
+    r("POST", "/api/skills/{action}", SignedIn, Id::SkillAction),
+    r("POST", "/api/skills", SignedIn, Id::SkillAdd),
+    r("GET", "/api/settings", SignedIn, Id::SettingsGet),
+    r("PUT", "/api/settings", SignedIn, Id::SettingsPut),
+    r("GET", "/api/settings/export", SignedIn, Id::SettingsExport),
+    r("GET", "/api/diagnostics", SignedIn, Id::Diagnostics),
+    r("GET", "/api/logs", SignedIn, Id::Logs),
+    r("GET", "/api/audit", SignedIn, Id::Audit),
+    r("GET", "/api/notes", SignedIn, Id::NotesList),
+    r("POST", "/api/notes", SignedIn, Id::NoteAdd),
+    r("DELETE", "/api/notes", SignedIn, Id::NotesForgetAll),
+    r("PUT", "/api/notes/{id}", SignedIn, Id::NoteEdit),
+    r("DELETE", "/api/notes/{id}", SignedIn, Id::NoteForget),
+    r("GET", "/api/models", SignedIn, Id::ModelsGet),
+    r("POST", "/api/models", SignedIn, Id::ModelsAsk),
+    r("PUT", "/api/llm/key", SignedIn, Id::LlmKeySet),
+    r("DELETE", "/api/llm/key", SignedIn, Id::LlmKeyClear),
+    r("PUT", "/api/speech/key", SignedIn, Id::SpeechKeySet),
+    r("DELETE", "/api/speech/key", SignedIn, Id::SpeechKeyClear),
+    r("PUT", "/api/realtime/key", SignedIn, Id::RealtimeKeySet),
+    r(
+        "DELETE",
+        "/api/realtime/key",
+        SignedIn,
+        Id::RealtimeKeyClear,
+    ),
+    r("GET", "/api/voices", SignedIn, Id::Voices),
+    r("GET", "/api/hive/peers", SignedIn, Id::HivePeers),
+    r("GET", "/api/update", SignedIn, Id::UpdateStatus),
+    r("POST", "/api/update/check", SignedIn, Id::UpdateCheck),
+    r("POST", "/api/update/apply", SignedIn, Id::UpdateApply),
+    r("GET", "/api/about", SignedIn, Id::About),
+    r("GET", "/api/schedule", SignedIn, Id::ScheduleList),
+    r("POST", "/api/schedule", SignedIn, Id::ScheduleAdd),
+    r("PUT", "/api/schedule/{id}", SignedIn, Id::ScheduleEdit),
+    r("DELETE", "/api/schedule/{id}", SignedIn, Id::ScheduleCancel),
 ];
 
-/// The routes under `/api` as `(METHOD, "/path/{param}")`, for the OpenAPI check in `tests/openapi.rs`.
-#[doc(hidden)]
-#[must_use]
-pub fn api_routes() -> Vec<(&'static str, &'static str)> {
-    ROUTES.iter().map(|r| (r.method, r.path)).collect()
+/// The rows of this table as `(METHOD, "/api/path/{param}")`, for the OpenAPI check (through
+/// `http::documented_routes`).
+pub(crate) fn api_routes() -> impl Iterator<Item = (&'static str, &'static str)> {
+    ROUTES.iter().map(|r| (r.method, r.path))
 }
 
-/// Whether `segs` (the path after `/api`) fits `pattern`; on a fit, the first `{parameter}` segment (empty when the
-/// pattern has none).
-fn fit<'a>(pattern: &str, segs: &[&'a str]) -> Option<&'a str> {
-    let mut want = pattern.split('/').skip(1);
-    let mut have = segs.iter();
-    let mut param = "";
-    let mut taken = false;
-    loop {
-        match (want.next(), have.next()) {
-            (None, None) => return Some(param),
-            (Some(w), Some(h)) if w.starts_with('{') => {
-                if !taken {
-                    param = h;
-                    taken = true;
-                }
-            }
-            (Some(w), Some(h)) if w == *h => {}
-            _ => return None,
-        }
-    }
+/// A 405 in the portal's own style (cache headers included), for the page.
+pub(crate) fn method_not_allowed() -> Resp {
+    error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
 }
 
-/// The route for this method and path, and its parameter.
-fn find<'a>(method: &Method, segs: &[&'a str]) -> Option<(&'static Route, &'a str)> {
-    ROUTES
-        .iter()
-        .filter(|r| r.method == method.as_str())
-        .find_map(|r| fit(r.path, segs).map(|p| (r, p)))
+/// The static page, for `GET` and `HEAD` on `/` and `/ui`.
+pub(crate) fn serve_page(headers: &HeaderMap) -> Resp {
+    page(
+        headers
+            .get(hyper::header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok()),
+    )
 }
 
-/// Handle `/`, `/ui`, and `/api/...`. Returns `None` for any other path so the caller can continue routing.
-pub async fn handle(
+/// Handle `/api/...`. Returns `None` for any other path so the caller can continue routing.
+pub(crate) async fn handle(
     core: &Arc<Core>,
     method: &Method,
     segs: &[&str],
@@ -465,26 +450,15 @@ pub async fn handle(
     peer: IpAddr,
     body: Incoming,
 ) -> Option<Resp> {
-    let is_page = matches!(segs, [""] | ["ui"]);
-    if is_page {
-        return Some(match *method {
-            Method::GET | Method::HEAD => page(
-                headers
-                    .get(hyper::header::ACCEPT_ENCODING)
-                    .and_then(|v| v.to_str().ok()),
-            ),
-            _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
-        });
-    }
-    let ["api", rest @ ..] = segs else {
+    if segs.first() != Some(&"api") {
         return None;
-    };
-    let Some((route, p)) = find(method, rest) else {
+    }
+    let Some((route, [p, _])) = find(ROUTES, method.as_str(), segs) else {
         // A path that exists for some other method is a 405 once the caller is signed in; anything else is a 404.
         // The open routes are not in this check: a wrong method on them is a 404.
         let known = ROUTES
             .iter()
-            .any(|r| r.auth == SignedIn && fit(r.path, rest).is_some());
+            .any(|r| r.auth == SignedIn && fit(r.path, segs).is_some());
         if !known {
             return Some(error(StatusCode::NOT_FOUND, "not found"));
         }

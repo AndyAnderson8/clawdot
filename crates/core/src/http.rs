@@ -1,8 +1,9 @@
 //! HTTP front end: webhook ingress, the SSE reply stream for agent bridges, and acknowledgements
 //! (REQ-INB-001/002/008, REQ-SEC-004, REQ-NFR-110).
 //!
-//! Routes:
+//! Routes (written once, in [`ROUTES`] here and in `ui::ROUTES` for the portal's `/api`; see `routes.rs`):
 //!
+//! * `GET  /`, `GET /ui`                          the portal page
 //! * `GET  /healthz`
 //! * `POST /hook/{endpoint}`                      an agent posts its native hook payload
 //! * `POST /api/announce`                         a script says something (REQ-INB-021); endpoint token or admin
@@ -17,6 +18,7 @@
 
 use crate::app::{Core, HookError, HookOutcome};
 use crate::limit::IpLimiter;
+use crate::routes::{Auth, Row, find, path_row};
 use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
 use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::header::{
@@ -25,7 +27,7 @@ use hyper::header::{
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use std::convert::Infallible;
 use std::future::Future;
@@ -143,13 +145,6 @@ fn json(status: StatusCode, body: &'static str) -> Resp {
     text(status, body)
 }
 
-fn valid_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 32
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-}
-
 pub(crate) fn token_from(headers: &HeaderMap) -> Option<String> {
     if let Some(v) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         let (scheme, rest) = v.split_once(' ')?;
@@ -199,6 +194,61 @@ fn error_response(e: &HookError) -> Resp {
     }
 }
 
+/// What a route in [`ROUTES`] does. The dispatch in `route` matches on this with no catch-all arm.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Id {
+    Page,
+    Health,
+    Hook,
+    Announce,
+    Mcp,
+    Replies,
+    Ack,
+}
+
+use Auth::{AnyEndpointToken, EndpointOrAdmin, EndpointToken, Page, Public};
+
+/// Every route the server answers except the portal's `/api` rows, which are in `ui::ROUTES` (see `routes.rs` for why
+/// there are two tables). The 404 for an unknown path, the 405 for a wrong method, the class that decides which
+/// credential a route needs, the OpenAPI check (`tests/openapi.rs`, through [`documented_routes`]) and the tests of
+/// credentials before bodies are all read from the two tables. A path with an `{endpoint}` segment that is not a valid
+/// endpoint name is not in the table at all, so it is a 404.
+const ROUTES: &[Row<Id>] = &[
+    Row::new("GET", "/", Page, Id::Page),
+    Row::new("HEAD", "/", Page, Id::Page),
+    Row::new("GET", "/ui", Page, Id::Page),
+    Row::new("HEAD", "/ui", Page, Id::Page),
+    Row::new("GET", "/healthz", Public, Id::Health),
+    Row::new("POST", "/hook/{endpoint}", EndpointToken, Id::Hook),
+    Row::new("POST", "/api/announce", EndpointOrAdmin, Id::Announce),
+    Row::new("POST", "/mcp", AnyEndpointToken, Id::Mcp),
+    Row::new(
+        "GET",
+        "/bridge/{endpoint}/replies",
+        EndpointToken,
+        Id::Replies,
+    ),
+    Row::new(
+        "POST",
+        "/bridge/{endpoint}/replies/{id}/ack",
+        EndpointToken,
+        Id::Ack,
+    ),
+];
+
+/// Every route the OpenAPI document must describe, as `(METHOD, "/path/{param}")`: both tables, without the page
+/// (which is HTML, not API). For `tests/openapi.rs`.
+#[doc(hidden)]
+#[must_use]
+pub fn documented_routes() -> Vec<(&'static str, &'static str)> {
+    ROUTES
+        .iter()
+        .filter(|r| r.auth != Page)
+        .map(|r| (r.method, r.path))
+        .chain(crate::ui::api_routes())
+        .collect()
+}
+
 async fn route(
     core: Arc<Core>,
     streams: Arc<AtomicUsize>,
@@ -209,51 +259,35 @@ async fn route(
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_owned();
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let headers = &parts.headers;
     // First decide whether the path names a real resource (invalid endpoint names are simply 404),
     // then whether the method is allowed on it (405).
-    let resp = match segs.as_slice() {
-        ["healthz"] => match parts.method {
-            Method::GET => json(StatusCode::OK, r#"{"status":"ok"}"#),
-            _ => method_not_allowed(),
-        },
-        ["hook", name] if valid_name(name) => match parts.method {
-            Method::POST => hook(&core, &parts.headers, name, body, opts.body_timeout).await,
-            _ => method_not_allowed(),
-        },
-        ["api", "announce"] => match parts.method {
-            Method::POST => {
-                crate::announce_api::handle(&core, &parts.headers, peer, body, opts.body_timeout)
-                    .await
+    let resp = match find(ROUTES, parts.method.as_str(), &segs) {
+        Some((row, [name, id])) => match row.id {
+            Id::Page => crate::ui::serve_page(headers),
+            Id::Health => json(StatusCode::OK, r#"{"status":"ok"}"#),
+            Id::Hook => hook(&core, headers, name, body, opts.body_timeout).await,
+            Id::Announce => {
+                crate::announce_api::handle(&core, headers, peer, body, opts.body_timeout).await
             }
-            _ => method_not_allowed(),
+            Id::Mcp => crate::mcp_server::handle(&core, headers, body, opts.body_timeout).await,
+            Id::Replies => replies_stream(core, streams, opts, headers, name),
+            Id::Ack => ack(&core, headers, name, id),
         },
-        ["mcp"] => match parts.method {
-            Method::POST => {
-                crate::mcp_server::handle(&core, &parts.headers, body, opts.body_timeout).await
-            }
-            _ => method_not_allowed(),
-        },
-        ["bridge", name, "replies"] if valid_name(name) => match parts.method {
-            Method::GET => replies_stream(core, streams, opts, &parts.headers, name),
-            _ => method_not_allowed(),
-        },
-        ["bridge", name, "replies", id, "ack"] if valid_name(name) => match parts.method {
-            Method::POST => ack(&core, &parts.headers, name, id),
-            _ => method_not_allowed(),
-        },
-        _ => match crate::ui::handle(
-            &core,
-            &parts.method,
-            &segs,
-            parts.uri.query(),
-            &parts.headers,
-            peer,
-            body,
-        )
-        .await
-        {
-            Some(r) => r,
-            None => json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#),
+        None => match path_row(ROUTES, &segs) {
+            Some(row) if row.auth == Page => crate::ui::method_not_allowed(),
+            Some(_) => method_not_allowed(),
+            None => crate::ui::handle(
+                &core,
+                &parts.method,
+                &segs,
+                parts.uri.query(),
+                headers,
+                peer,
+                body,
+            )
+            .await
+            .unwrap_or_else(|| json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#)),
         },
     };
     Ok(resp)
@@ -1612,6 +1646,165 @@ mod tests {
             post(&h, "/api/login", "", &login).await.0,
             401,
             "the old token stops working once replaced"
+        );
+    }
+
+    // The table is the one list of routes (architecture review C4), here for everything but the portal's `/api`.
+    #[test]
+    fn the_server_table_is_well_formed_and_its_classes_are_the_ones_expected() {
+        crate::routes::assert_well_formed(ROUTES);
+        let by = |a: Auth| -> Vec<String> {
+            ROUTES
+                .iter()
+                .filter(|r| r.auth == a)
+                .map(|r| format!("{} {}", r.method, r.path))
+                .collect()
+        };
+        assert_eq!(by(Page), ["GET /", "HEAD /", "GET /ui", "HEAD /ui"]);
+        assert_eq!(by(Public), ["GET /healthz"]);
+        assert_eq!(
+            by(EndpointToken),
+            [
+                "POST /hook/{endpoint}",
+                "GET /bridge/{endpoint}/replies",
+                "POST /bridge/{endpoint}/replies/{id}/ack"
+            ]
+        );
+        assert_eq!(by(EndpointOrAdmin), ["POST /api/announce"]);
+        assert_eq!(by(AnyEndpointToken), ["POST /mcp"]);
+        // No class the portal's own table owns.
+        assert!(by(Auth::Open).is_empty() && by(Auth::SignedIn).is_empty());
+        // The two tables share no route, so the order in which they are tried cannot matter.
+        for (m, p) in crate::ui::api_routes() {
+            assert!(
+                !ROUTES.iter().any(|r| r.method == m && r.path == p),
+                "{m} {p} is in both tables"
+            );
+        }
+    }
+
+    /// Send the head of a request that promises a body, never send the body, and return the status line if the
+    /// server answers before its body timeout (a server that read the body first would wait the five seconds out).
+    async fn answered_without_the_body(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        header: Option<(&str, &str)>,
+    ) -> Option<u16> {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let mut req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: 64\r\n"
+        );
+        if let Some((k, v)) = header {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str("\r\n");
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = [0_u8; 64];
+        let n = timeout(Duration::from_millis(1500), s.read(&mut buf))
+            .await
+            .ok()?
+            .unwrap();
+        String::from_utf8_lossy(&buf[..n])
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+    }
+
+    // REQ-SEC-004, REQ-INB-002: every route that takes a token refuses a missing or wrong one before reading a body.
+    #[tokio::test]
+    async fn every_token_route_refuses_a_missing_or_wrong_token_before_reading_the_body() {
+        let h = start(Limits::default(), ServeOptions::default()).await;
+        // Sign the portal in, so a request without a session is refused as 401 and not as "set up first".
+        let _ = admin(&h);
+        let guarded: Vec<_> = ROUTES
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.auth,
+                    Auth::EndpointToken | Auth::AnyEndpointToken | Auth::EndpointOrAdmin
+                )
+            })
+            .collect();
+        assert!(guarded.len() >= 5, "only {} token routes", guarded.len());
+        for route in guarded {
+            // The endpoint in the path exists, so the refusal is about the token, not about the name.
+            let path = crate::routes::sample_path(&route.path.replace("{endpoint}", "claude-code"));
+            let wrong = bearer("cdt_not-the-token");
+            for header in [None, Some(("Authorization", wrong.as_str()))] {
+                let s = answered_without_the_body(h.addr, route.method, &path, header).await;
+                assert!(
+                    matches!(s, Some(401 | 429)),
+                    "{} {path} with {header:?}: {s:?}",
+                    route.method
+                );
+            }
+        }
+    }
+
+    // The ways the routes differ today. These are pinned, not endorsed: a change here is a behaviour change.
+    #[tokio::test]
+    async fn the_known_differences_between_routes_are_pinned() {
+        let h = start(Limits::default(), ServeOptions::default()).await;
+        let _ = admin(&h);
+        let big = ("Content-Length", "10485760");
+        // 1. Body routes check the declared size before the credentials, so an oversized request is 413 even with
+        //    no token; the stream and the ack take no body and never answer 413.
+        for path in ["/hook/claude-code", "/api/announce", "/mcp"] {
+            let mut s = TcpStream::connect(h.addr).await.unwrap();
+            let req = format!(
+                "POST {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{}: {}\r\n\r\n",
+                big.0, big.1
+            );
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut raw = Vec::new();
+            timeout(Duration::from_secs(5), s.read_to_end(&mut raw))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 413"),
+                "{path}"
+            );
+        }
+        // 2. The ack checks that the id is a number before it checks the token: a bad id is 400 with a wrong token
+        //    but 401 with none.
+        let wrong = bearer("cdt_wrong");
+        let bad_id = "/bridge/claude-code/replies/x/ack";
+        let (s, ..) = call(h.addr, "POST", bad_id, &[("Authorization", &wrong)], "").await;
+        assert_eq!(s, 400);
+        assert_eq!(call(h.addr, "POST", bad_id, &[], "").await.0, 401);
+        // 3. A wrong method is 405 with no credential on the server's own routes, while the portal's routes ask
+        //    for the sign-in first (401) and its open routes answer 404.
+        assert_eq!(
+            call(h.addr, "GET", "/hook/claude-code", &[], "").await.0,
+            405
+        );
+        assert_eq!(call(h.addr, "GET", "/api/announce", &[], "").await.0, 405);
+        assert_eq!(call(h.addr, "GET", "/mcp", &[], "").await.0, 405);
+        assert_eq!(call(h.addr, "HEAD", "/healthz", &[], "").await.0, 405);
+        assert_eq!(call(h.addr, "GET", "/api/overview", &[], "").await.0, 401);
+        assert_eq!(call(h.addr, "PUT", "/api/overview", &[], "").await.0, 401);
+        assert_eq!(call(h.addr, "GET", "/api/login", &[], "").await.0, 404);
+        // 4. The 405 for the page carries the portal's cache headers; the 405 elsewhere does not.
+        let (s, head, _) = call(h.addr, "POST", "/", &[], "").await;
+        assert_eq!(s, 405);
+        assert!(head.to_lowercase().contains("cache-control: no-store"));
+        let (s, head, _) = call(h.addr, "POST", "/healthz", &[], "").await;
+        assert_eq!(s, 405);
+        assert!(!head.to_lowercase().contains("cache-control"));
+        // 5. An endpoint name that is not valid is not a route (404); a valid one that does not exist is a 401.
+        let hdr = [("Authorization", wrong.as_str())];
+        assert_eq!(call(h.addr, "POST", "/hook/UPPER", &hdr, "{}").await.0, 404);
+        assert_eq!(
+            call(h.addr, "GET", "/bridge/UPPER/replies", &hdr, "")
+                .await
+                .0,
+            404
+        );
+        assert_eq!(
+            call(h.addr, "POST", "/hook/nobody", &hdr, "{}").await.0,
+            401
         );
     }
 }
