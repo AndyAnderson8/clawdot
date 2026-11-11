@@ -236,10 +236,16 @@ pub fn announcement(event: &Event, spoken: &str, more_waiting: usize) -> String 
         source
     };
     // When the "summary" is just the headline again (the no-LLM fallback), say it once.
-    let mut out = if spoken.is_empty() || spoken.trim_end_matches('.') == title {
-        format!("From {source}: {title}.")
+    // A headline that already ends its own sentence (a question, say) gets no second full stop.
+    let stop = if title.ends_with(['.', '?', '!']) {
+        ""
     } else {
-        format!("From {source}: {title}. {spoken}")
+        "."
+    };
+    let mut out = if spoken.is_empty() || spoken.trim_end_matches('.') == title {
+        format!("From {source}: {title}{stop}")
+    } else {
+        format!("From {source}: {title}{stop} {spoken}")
     };
     if event.kind.wants_reply() {
         out.push_str(" What would you like to do?");
@@ -500,6 +506,15 @@ mod tests {
         assert_eq!(
             a,
             "From Claude Code: clawdot finished. All tests pass. Want details?"
+        );
+        let mut asked = event(EventKind::NeedsInput, "x");
+        asked.title = "Shall I deploy?".into();
+        assert!(
+            announcement(&asked, "", 0).starts_with("From ")
+                && announcement(&asked, "", 0)
+                    .contains("Shall I deploy? What would you like to do?"),
+            "a question keeps its own mark: {}",
+            announcement(&asked, "", 0)
         );
         let blocked = event(EventKind::NeedsInput, "x");
         assert!(

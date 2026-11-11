@@ -14,11 +14,16 @@ export function VoiceControl(props: {
   onInput: (v: string) => void;
 }): JSX.Element {
   const [voices, setVoices] = useState<string[] | null>(null);
+  // A cloned voice has a name to show and an id to send.
+  const [names, setNames] = useState<Record<string, string>>({});
   const [why, setWhy] = useState("");
   useEffect(() => {
     if (props.off) return;
-    api<{ voices: string[] }>("GET", "/api/voices")
-      .then((r) => setVoices(r.voices))
+    api<{ voices: string[]; details?: { id: string; label: string }[] }>("GET", "/api/voices")
+      .then((r) => {
+        setVoices(r.voices);
+        setNames(Object.fromEntries((r.details ?? []).map((d) => [d.id, d.label])));
+      })
       .catch((x) => {
         setVoices(null);
         setWhy(x instanceof Error ? x.message : "");
@@ -49,7 +54,7 @@ export function VoiceControl(props: {
           )}
           {list.map((v) => (
             <option key={v} value={v}>
-              {v}
+              {names[v] ?? v}
             </option>
           ))}
         </select>

@@ -2155,3 +2155,33 @@ button.themeopt.on {
 .loglist + p {
   margin-top: var(--spacing-4);
 }
+
+/* ---- A skill waiting to be read and accepted ---- */
+.skillname .badge {
+  margin-left: var(--spacing-2);
+  vertical-align: middle;
+}
+.badge.warn {
+  background: var(--color-warning-muted);
+  color: var(--color-text-warning);
+}
+.skillrow .toolact {
+  display: flex;
+  gap: var(--spacing-2);
+}
+pre.reviewtext {
+  max-height: 16rem;
+  overflow: auto;
+  margin: var(--spacing-2) 0 0;
+  padding: var(--spacing-3);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--radius-inner);
+  background: var(--color-background-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.idtext {
+  font-family: var(--font-family-code);
+  font-size: 0.875rem;
+}

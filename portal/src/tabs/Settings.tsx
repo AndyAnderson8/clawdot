@@ -35,6 +35,8 @@ export function Group(props: {
   settings: SettingsData;
   /** Extra controls shown above the rows, given the form's values and a way to change them. */
   extra?: (f: { vals: Record<string, string>; setVals: (v: Record<string, string>) => void }) => JSX.Element;
+  /** More rows after the settings, before the Save button (a key, a status line). */
+  below?: () => JSX.Element | null;
 }): JSX.Element {
   const { title, intro, specs, settings } = props;
   const current: Record<string, string> = {};
@@ -175,6 +177,16 @@ export function Group(props: {
               <option value="auto">Detect automatically</option>
             </select>
           );
+        } else if (sp.kind === "choice") {
+          ctl = (
+            <select id={id} value={v} disabled={sp.off} onChange={input}>
+              {(sp.options ?? []).map(([val, text]) => (
+                <option key={val} value={val}>
+                  {text}
+                </option>
+              ))}
+            </select>
+          );
         } else if (sp.kind === "bool") {
           ctl = (
             <select id={id} value={v} disabled={sp.off} onChange={input}>
@@ -202,7 +214,8 @@ export function Group(props: {
                 type="text"
                 inputMode="decimal"
                 autoComplete="off"
-                placeholder="No limit"
+                placeholder={sp.placeholder ?? "No limit"}
+                disabled={sp.off}
                 value={v}
                 onInput={(e) => setVals({ ...vals, [sp.key]: cents(e.currentTarget.value) })}
                 onBlur={() => v && setVals({ ...vals, [sp.key]: Number(v || 0).toFixed(2) })}
@@ -295,6 +308,7 @@ export function Group(props: {
           <span class="mut">Optional</span>
         </div>
       ) : null}
+      {props.below ? props.below() : null}
       <p class="errtext" role="alert" ref={errRef}>
         {err}
       </p>

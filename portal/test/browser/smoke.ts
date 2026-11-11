@@ -631,6 +631,32 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
     "/api/notes/2",
   );
   await eq(`T.all("#notelist > li button").length`, 4, "each memory has two buttons: a pencil and an X");
+  // with more than a few memories there is a search, answered by the device
+  for (const t of [
+    "the bins go out on Thursday",
+    "mom's birthday is June 3",
+    "the router is in the hall",
+    "I like oolong tea",
+  ])
+    (mock.state["notes"] as { id: number; text: string; ts: number }[]).push({ id: 50 + t.length, text: t, ts: 1 });
+  await b.ev(`location.hash = '#/dashboard'`);
+  await section("memory", "Memory");
+  await b.until(`!!T.q('#notesearch')`, "a search box once there are many");
+  await T(`set('#notesearch', 'birthday')`);
+  await b.until(`T.rows("#notelist > li").length === 1 && T.rows("#notelist > li")[0].includes("June 3")`, "the match");
+  await eq(`T.text('#notehits')`, "1 of 6 match", "and how many matched");
+  assert.ok(
+    mock.log.some((l) => l.method === "GET" && l.path === "/api/notes"),
+    "the device was asked",
+  );
+  await T(`set('#notesearch', 'zzzz')`);
+  await b.until(`!!T.q('#notenone')`, "nothing matches, and it says so");
+  await T(`set('#notesearch', '')`);
+  await b.until(`T.rows("#notelist > li").length === 6`, "all again");
+  (mock.state["notes"] as unknown[]).splice(2);
+  await b.ev(`location.hash = '#/dashboard'`);
+  await section("memory", "Memory");
+  await b.until(`T.rows("#notelist > li").length === 2`, "back to two");
   // forgetting asks first: declining does nothing
   await b.ev(`window.confirm = () => false`);
   await T(`click("#notelist > li:nth-child(1) button[title='Forget this memory']")`);
@@ -870,7 +896,7 @@ await step("Skills: search, select all or none, add, edit in place, folder impor
   await b.until(`T.text('#skillcount') === '2 of 2 turned on'`, "all turned on");
   await T(`click('${rows}:nth-child(2) input.switch')`);
   await b.until(`T.text('#skillcount') === '1 of 2 turned on'`, "one turned off");
-  // import from files: the page reads them, lists what it found, and adds the chosen ones turned off
+  // import from files: the page reads them, lists what it found, and adds the chosen ones for review
   await T(`click('#addskill')`);
   await T(`clickText('#skilladddialog .seg', 'From a folder or files')`);
   await b.until(`!!T.q('#skillfiles')`, "the file chooser");
@@ -879,6 +905,8 @@ await step("Skills: search, select all or none, add, edit in place, folder impor
     const dt = new DataTransfer();
     const mk = (text, name, rel) => { const f = new File([text], name); Object.defineProperty(f, 'webkitRelativePath', { value: rel }); return f; };
     dt.items.add(mk('---\\nname: Tidy up\\ndescription: Put things away\\n---\\nAsk which room first.', 'SKILL.md', 'skills/tidy/SKILL.md'));
+    dt.items.add(mk('Start with the hall.', 'rooms.txt', 'skills/tidy/rooms.txt'));
+    dt.items.add(mk('rm -rf /', 'run.sh', 'skills/tidy/run.sh'));
     dt.items.add(mk('Plain notes', 'notes.md', 'skills/notes.md'));
     dt.items.add(mk('x'.repeat(2100), 'long.md', 'skills/long.md'));
     const input = document.getElementById('skillfiles');
@@ -886,19 +914,55 @@ await step("Skills: search, select all or none, add, edit in place, folder impor
     input.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
   await b.until(`!!T.q('#skillfound .picklist')`, "what was found");
-  await eq(`T.all('#skillfound .picklist li').length`, 2, "two skills found");
+  await eq(
+    `T.all('#skillfound .picklist li').length`,
+    2,
+    "two skills found; a folder's helper file is not a skill of its own",
+  );
   await eq(`T.text('#skillfound details summary')`, "1 left out", "and one left out, with the reason");
   await T(`click('#skillfound .picklist li:nth-child(2) input')`);
   await eq(`T.text('#skilladd')`, "Add 1 skill", "one chosen");
   await T(`click('#skilladd')`);
   await b.until(`T.q('#skilladddialog').open === false && T.rows('${rows}').length === 3`, "added");
+  const sent = mock.log.filter((l) => l.path === "/api/skills/import").pop()!.body as {
+    format: string;
+    files: { path: string }[];
+  };
+  assert.equal(sent.format, "skill-folder", "a folder is sent as its files, for the device to read");
   assert.deepEqual(
-    (mock.log.filter((l) => l.path === "/api/skills/import").pop()!.body as { skills: { name: string }[] }).skills.map(
-      (s) => s.name,
-    ),
-    ["Tidy up"],
+    sent.files.map((f) => f.path).sort(),
+    ["skills/tidy/SKILL.md", "skills/tidy/rooms.txt"],
+    "the skill and its text file; the script is never sent",
   );
-  await eq(`T.rows('${rows}')[2].includes('Put things away')`, true, "the description came with it");
+  // an imported skill waits: it cannot be turned on until it has been read and accepted
+  await eq(`T.rows('${rows}')[2].includes('Needs review')`, true, "marked as waiting for review");
+  await eq(`T.q('${rows}:nth-child(3) input.switch').disabled`, true, "and its switch does nothing yet");
+  await eq(`T.text('#skillcount').includes('1 to review')`, true, "the count says so");
+  await T(`click('#skillall')`);
+  await b.until(
+    `T.text('#msg').includes('turned on') || T.text('#skillcount').startsWith('2 of 3')`,
+    "turn on all skips it",
+  );
+  await eq(`T.q('${rows}:nth-child(3) input.switch').checked`, false, "still off");
+  await T(`clickText('${rows}:nth-child(3)', 'Review')`);
+  await b.until(`T.q('#skillreviewdialog').open === true`, "the review opens");
+  await eq(
+    `T.text('#skillreview dl').includes('Put things away') && T.text('#skillreview dl').includes('skills/tidy/SKILL.md')`,
+    true,
+    "what it is for and where it came from",
+  );
+  await eq(`T.text('#reviewtext').trim()`, "Ask which room first.", "its instructions, to read");
+  await eq(`T.all('#skillreview details summary').map((x) => x.textContent)`, ["rooms.txt"], "and its helper file");
+  await T(`click('#skillaccepton')`);
+  await b.until(
+    `T.q('#skillreviewdialog').open === false && T.q('${rows}:nth-child(3) input.switch').checked === true`,
+    "accepted and on",
+  );
+  assert.ok(
+    mock.log.some((l) => l.path === "/api/skills/accept"),
+    "accepting is its own call",
+  );
+  await eq(`T.rows('${rows}')[2].includes('Needs review')`, false, "no longer waiting");
   // delete from the editor
   await b.ev(`window.confirm = () => true`);
   await T(`clickText('${rows}:nth-child(3)', 'Edit')`);
@@ -1011,7 +1075,7 @@ await step(
     await eq(`T.text('#speechprovider').includes('No speech provider is set up')`, true, "and the page says why");
     await open("open", "#/settings/voice", { speechOn: true });
     await b.until(`!!T.q('#f-speech_language') && !T.q('#f-speech_language').disabled`, "the language box");
-    await eq(`T.text('#speechprovider dd')`, "speech.example", "the speech provider is shown");
+    await eq(`T.text('#speechprovider dd')`, "speech.example", "the speech service in use is shown");
     await eq(`T.q('#f-speech_language').tagName`, "SELECT", "a dropdown, not a code to type");
     await eq(
       `T.all('#f-speech_language option').some((o) => o.textContent === 'English (en)') && T.all('#f-speech_language option').some((o) => o.textContent === 'German (de)')`,
@@ -1033,8 +1097,8 @@ await step(
     await b.until(`T.q('#f-voice')?.tagName === 'SELECT'`, "the voice list");
     await eq(
       `T.all('#f-voice option').map((o) => o.textContent).filter((t) => t !== 'Choose a voice')`,
-      ["alloy", "nova", "onyx"],
-      "the voices on offer",
+      ["alloy", "Nova (my voice)", "onyx"],
+      "the voices on offer, a cloned one by the name it was given",
     );
     await eq(`T.q('#hearvoice').disabled`, true, "nothing to hear until a voice is chosen");
     await T(`set('#f-voice', 'nova')`);
@@ -1054,6 +1118,56 @@ await step(
       voice: "nova",
     });
     await eq(`T.q('#sayform') !== null`, true, "the speaker test is on this page, not among the settings");
+    await eq(`T.q('#f-voice option[value="nova"]').textContent`, "Nova (my voice)", "its id is what is sent");
+
+    // The speech service is a choice, and its key is pasted once and shown only as its ends.
+    await eq(
+      `T.all('#f-speech_provider option').map((o) => o.value)`,
+      ["openai", "elevenlabs", "deepgram"],
+      "three kinds of speech service",
+    );
+    await T(`set('#f-speech_provider', 'elevenlabs')`);
+    await b.ev(`T.q('#f-speech_provider').form.requestSubmit()`);
+    await b.until(`T.text('#msg').startsWith('Saved')`, "the choice is saved");
+    assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+      speech_provider: "elevenlabs",
+    });
+    await b.until(`!!T.q('#speechkey')`, "a box for the key");
+    await T(`set('#speechkey', 'two words')`);
+    await T(`click('#speechsave')`);
+    await b.until(
+      `T.text('#speechmsg').startsWith('A key is one line')`,
+      "a key that cannot be one is refused, with why",
+    );
+    await T(`set('#speechkey', 'xi-abcdefghijklmnop9876')`);
+    await T(`click('#speechsave')`);
+    await b.until(`T.text('#speechhint') === 'xi-abc…9876'`, "kept, and shown only as its ends");
+    await eq(`document.body.innerText.includes('defghijklmnop')`, false, "never the key itself");
+
+    // Realtime voice: its settings, its key and a plain line about whether it can run.
+    await eq(`T.text('#realtimestate').startsWith('Not ready')`, true, "says it is not ready, and what it needs");
+    await T(`set('#realtimekey', 'sk-realtime-abcdefgh1234')`);
+    await T(`click('#realtimesave')`);
+    await b.until(`T.text('#realtimehint') === 'sk-rea…1234'`, "the realtime key is kept the same way");
+    assert.ok(
+      mock.log.some((l) => l.method === "PUT" && l.path === "/api/realtime/key"),
+      "through its own call",
+    );
+    await T(`set('#f-realtime_enabled', 'true')`);
+    await T(`set('#f-realtime_url', 'wss://rt.example/v1/realtime')`);
+    await T(`set('#f-realtime_model', 'rt-model')`);
+    await b.ev(`T.q('#f-realtime_enabled').form.requestSubmit()`);
+    await b.until(`T.text('#msg').startsWith('Saved')`, "realtime settings saved");
+    assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
+      realtime_enabled: true,
+      realtime_url: "wss://rt.example/v1/realtime",
+      realtime_model: "rt-model",
+    });
+    // A build without it says so and offers nothing that would do nothing.
+    await open("open", "#/settings/voice", { speechOn: true, realtimeBuilt: false });
+    await b.until(`!!T.q('#realtimestate')`, "the realtime card");
+    await eq(`T.text('#realtimestate')`, "This build of ClawDot does not include realtime voice.", "says so");
+    await eq(`T.q('#f-realtime_enabled').disabled && T.q('#realtimekey').disabled`, true, "and its controls are off");
 
     // Time zones show their offset, west to east.
     await open("open", "#/settings/general");
@@ -1176,6 +1290,28 @@ await step("Settings: General says what the device is; settings it cannot use ar
   mock.state["hwLeds"] = true;
 });
 
+await step("Settings: other speakers on the network are listed, or the page says it is not looking", async () => {
+  await open("open", "#/settings/speakers");
+  await b.until(`!!T.q('#speakersoff')`, "not turned on: it says so, and how it is turned on");
+  await eq(`T.q('#peerlist') === null`, true, "and lists nothing made up");
+  await open("open", "#/settings/speakers", {
+    hive: [{ id: "8e003daaa50dbc7b", name: "<b>Bedroom</b>", address: "192.0.2.7", port: 3335, last_seen_secs: 70 }],
+  });
+  await b.until(`T.rows('#peerlist > li').length === 1`, "one other speaker");
+  await eq(`T.text('#selfname')`, "Kitchen Dot", "this speaker is named");
+  await eq(
+    `T.rows('#peerlist > li')[0].includes('<b>Bedroom</b>') && T.all('#peerlist b').length === 0`,
+    true,
+    "a name from the network is shown as text",
+  );
+  await eq(
+    `T.rows('#peerlist > li')[0].includes('192.0.2.7') && T.rows('#peerlist > li')[0].includes('ago')`,
+    true,
+    "with its address and when it was last seen",
+  );
+  await eq(`T.q('#peerlist a').getAttribute('href')`, "http://192.0.2.7:3335/", "and a way to its own page");
+});
+
 await step("Settings: theme is light unless chosen, remembered, and never follows the system uninvited", async () => {
   await open("open", "#/settings/themes");
   await b.until(`!!T.q('#themeform')`, "theme choice");
@@ -1251,7 +1387,7 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
 
 await step("Settings: sections in a tab strip, native dropdowns, no horizontal scroll at 360 px", async () => {
   await open("open", "#/settings");
-  await b.until(`T.all('.tabs a').length === 13`, "the section tabs");
+  await b.until(`T.all('.tabs a').length === 14`, "the section tabs");
   await eq(
     `T.all('.tabs a').map((a) => a.textContent)`,
     [
@@ -1266,6 +1402,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
       "Media",
       "Lights",
       "Webhooks",
+      "Speakers",
       "Security",
       "About",
     ],
@@ -1304,6 +1441,7 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
     "lights",
     "memory",
     "webhooks",
+    "speakers",
     "security",
     "about",
   ])

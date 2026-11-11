@@ -111,6 +111,14 @@ function seed(mode: string): Json {
       llm_key_env: { value: "API_KEY", source: "file", live: true },
       voice: { value: null, source: "default", live: true },
       speech_language: { value: null, source: "default", live: true },
+      speech_provider: { value: "openai", source: "default", live: false },
+      realtime_enabled: { value: false, source: "default", live: true },
+      realtime_url: { value: null, source: "default", live: true },
+      realtime_model: { value: null, source: "default", live: true },
+      realtime_voice: { value: "alloy", source: "default", live: true },
+      realtime_usd_per_min_in: { value: 0.03, source: "default", live: true },
+      realtime_usd_per_min_out: { value: 0.1, source: "default", live: true },
+      realtime_max_session_secs: { value: 300, source: "default", live: true },
       listen: { value: "0.0.0.0:3335", source: "flag", live: false, ignored: true },
       public_url: { value: null, source: "default", live: true },
       daily_spend_usd: { value: null, source: "default", live: true },
@@ -263,6 +271,13 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
     fields: st["settings"],
     restart_needed: st["restart"],
     llm: { key_present: !!st["keyHint"], key_hint: st["keyHint"] || null },
+    speech: { key_present: !!st["speechKey"], key_hint: st["speechKey"] || null },
+    realtime: {
+      configured: !!st["realtimeKey"],
+      built: st["realtimeBuilt"] !== false,
+      provider: "openai",
+      key_hint: st["realtimeKey"] || null,
+    },
     voice_info: { language: "en", stt_model: "whisper", tts_model: "voice-1", provider: "speech.example" },
     speech_configured: !!st["speechOn"],
     speakers_listen: "0.0.0.0:3336",
@@ -418,13 +433,44 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         st["keyHint"] = k.slice(0, 6) + "…" + k.slice(-4);
         return send(200, { hint: st["keyHint"] });
       }
+      for (const [route, slot] of [
+        ["/api/speech/key", "speechKey"],
+        ["/api/realtime/key", "realtimeKey"],
+      ] as const) {
+        if (m === "PUT" && path === route) {
+          const k = String(body.key ?? "");
+          if (/\s/.test(k)) return err(400, "A key is one line of letters, digits and dashes, with no spaces.");
+          st[slot] = k.slice(0, 6) + "…" + k.slice(-4);
+          return send(200, { hint: st[slot] });
+        }
+        if (m === "DELETE" && path === route) {
+          st[slot] = "";
+          return send(200, { hint: null });
+        }
+      }
+      if (m === "GET" && path === "/api/hive/peers") {
+        if (!st["hive"]) return err(404, "not found");
+        return send(200, {
+          discovery: "native",
+          self: { id: "5e56829b0991be4b6be71bba3f639cac", name: "Kitchen Dot", port: 3335 },
+          peers: st["hive"],
+        });
+      }
       if (m === "DELETE" && path === "/api/llm/key") {
         st["keyHint"] = "";
         return send(200, { hint: null });
       }
       if (m === "GET" && path === "/api/voices") {
         if (!st["speechOn"]) return err(503, "No speech provider is set up, so there are no voices to choose from.");
-        return send(200, { voices: ["alloy", "nova", "onyx"], source: "builtin" });
+        return send(200, {
+          voices: ["alloy", "nova", "onyx"],
+          details: [
+            { id: "alloy", label: "alloy", category: null },
+            { id: "nova", label: "Nova (my voice)", category: "cloned" },
+            { id: "onyx", label: "onyx", category: null },
+          ],
+          source: "builtin",
+        });
       }
       if (m === "GET" && path === "/api/update") return send(200, st["update"]);
       if (m === "POST" && path === "/api/update/check") {
@@ -504,7 +550,18 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           notes,
           limits: { max_notes: 50, max_note_chars: 200, max_total_bytes: 8192 },
         });
-        if (m === "GET") return send(200, list());
+        if (m === "GET") {
+          const q = (new URL(req.url ?? "", "http://x").searchParams.get("q") ?? "").toLowerCase().trim();
+          if (!q) return send(200, list());
+          const words = q.split(/\s+/);
+          return send(200, {
+            ...list(),
+            query: q,
+            notes: notes
+              .map((n, i): Json => ({ ...n, position: i + 1 }))
+              .filter((n) => words.some((w) => String(n["text"]).toLowerCase().includes(w))),
+          });
+        }
         if (m === "POST") {
           if (!st["notesOn"]) return err(409, "Memory is turned off. Turn it on in Settings, under Features.");
           if (/sk-/.test(body.text)) return err(400, "That looks like a password or a key, so it is not saved.");
@@ -673,12 +730,51 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             return send(200, ext());
           }
           if (seg[1] === "enabled") {
-            for (const k of skills) if (k["name"] === body.name) k["enabled"] = body.enabled;
+            const k = skills.find((x) => x["name"] === body.name);
+            if (k && body.enabled && k["needs_review"])
+              return err(
+                400,
+                "This skill was imported and has not been reviewed. Open it, read it, and choose Accept before turning it on.",
+              );
+            if (k) k["enabled"] = body.enabled;
+            return send(200, ext());
+          }
+          if (seg[1] === "accept") {
+            const k = skills.find((x) => x["name"] === body.name);
+            if (k) k["needs_review"] = false;
             return send(200, ext());
           }
           if (seg[1] === "import") {
-            for (const k of body.skills ?? []) skills.push({ ...k, enabled: false });
-            return send(200, ext());
+            // Like the device: every imported skill is off and waits for review; a folder is read from its raw files.
+            const skipped: string[] = [];
+            let added = 0;
+            if (body.format === "skill-folder") {
+              const files = (body.files ?? []) as { path: string; text: string }[];
+              for (const f of files.filter((x) => /(^|\/)SKILL\.md$/i.test(x.path))) {
+                const dir = f.path.slice(0, f.path.lastIndexOf("/") + 1);
+                const head = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(f.text);
+                const get = (k: string) => new RegExp("^" + k + ":\\s*(.*)$", "m").exec(head?.[1] ?? "")?.[1] ?? "";
+                skills.push({
+                  name: get("name") || dir.replace(/\/$/, ""),
+                  description: get("description"),
+                  instructions: (head?.[2] ?? f.text).trim(),
+                  tools: [],
+                  enabled: false,
+                  needs_review: true,
+                  source: f.path,
+                  files: files
+                    .filter((x) => x !== f && x.path.startsWith(dir))
+                    .map((x) => ({ path: x.path.slice(dir.length), text: x.text })),
+                });
+                added++;
+              }
+            } else {
+              for (const k of body.skills ?? []) {
+                skills.push({ ...k, enabled: false, needs_review: true });
+                added++;
+              }
+            }
+            return send(200, { ...ext(), import: { added, skipped } });
           }
         }
       }

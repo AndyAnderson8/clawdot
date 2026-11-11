@@ -1141,6 +1141,39 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /api/realtime/key:
+    put:
+      tags: [Settings]
+      summary: Keep the realtime voice key pasted on the page
+      description: |
+        Same rules as `/api/llm/key`, for the key of the realtime voice service. Stored on the device (write-only); it
+        wins over the environment variable and applies to the next session. The response never contains it.
+      operationId: setRealtimeKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              additionalProperties: false
+              properties:
+                key: { type: string, writeOnly: true }
+      responses:
+        "200": { $ref: "#/components/responses/KeyHint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      tags: [Settings]
+      summary: Forget the stored realtime key
+      operationId: clearRealtimeKey
+      responses:
+        "200": { $ref: "#/components/responses/KeyHint" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /api/voices:
     get:
       tags: [Settings]

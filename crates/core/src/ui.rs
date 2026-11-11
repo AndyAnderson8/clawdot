@@ -337,6 +337,7 @@ pub async fn handle(
             | ["models"]
             | ["llm", "key"]
             | ["speech", "key"]
+            | ["realtime", "key"]
             | ["voices"]
             | ["hive", "peers"]
     );
@@ -429,6 +430,8 @@ pub async fn handle(
         (&Method::DELETE, ["llm", "key"]) => llm_key_clear(core).await,
         (&Method::PUT, ["speech", "key"]) => speech_key_set(body).await,
         (&Method::DELETE, ["speech", "key"]) => speech_key_clear(),
+        (&Method::PUT, ["realtime", "key"]) => realtime_key_set(body).await,
+        (&Method::DELETE, ["realtime", "key"]) => realtime_key_clear(),
         (&Method::GET, ["voices"]) => voices().await,
         (&Method::GET, ["hive", "peers"]) => hive_peers(core),
         (&Method::GET, ["update"]) => update_status(),
@@ -586,6 +589,30 @@ async fn speech_key_set(body: Incoming) -> Resp {
 /// `DELETE /api/speech/key`: forget the stored speech key (an environment variable, if named, applies again).
 fn speech_key_clear() -> Resp {
     if let Err(m) = crate::secrets::clear(crate::secrets::SPEECH_KEY) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
+    }
+    json_reply(StatusCode::OK, &json!({ "hint": null }))
+}
+
+/// `PUT /api/realtime/key`: keep the key for the realtime voice service. It is read at the start of each session, so
+/// it applies to the next one without a restart, and it wins over the environment variable.
+async fn realtime_key_set(body: Incoming) -> Resp {
+    let k = match read_json::<KeyBody>(body).await {
+        Ok(k) => k,
+        Err((s, m)) => return error(s, m),
+    };
+    if let Err(m) = crate::secrets::set(crate::secrets::REALTIME_KEY, &k.key) {
+        return error(StatusCode::BAD_REQUEST, &m);
+    }
+    json_reply(
+        StatusCode::OK,
+        &json!({ "hint": crate::secrets::hint(crate::secrets::REALTIME_KEY) }),
+    )
+}
+
+/// `DELETE /api/realtime/key`: forget the stored realtime key.
+fn realtime_key_clear() -> Resp {
+    if let Err(m) = crate::secrets::clear(crate::secrets::REALTIME_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
     json_reply(StatusCode::OK, &json!({ "hint": null }))
