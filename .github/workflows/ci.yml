@@ -34,7 +34,7 @@ jobs:
       rust: ${{ steps.d.outputs.rust }}
       portal: ${{ steps.d.outputs.portal }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: d
         run: |
           if [ -f Cargo.toml ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
@@ -44,7 +44,7 @@ jobs:
     name: commits (conventional, human-only)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check commit messages and identities
@@ -62,7 +62,7 @@ jobs:
     name: docs (links, requirement IDs)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: scripts/check-docs.sh
       - name: Personal-data guard (hashed denylist, see docs/process/personal-data.md)
         run: node scripts/check-personal.mjs
@@ -71,7 +71,7 @@ jobs:
     name: scripts (shellcheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           for f in scripts/*.sh .githooks/* .claude/hooks/*.sh; do bash -n "$f"; done
           shellcheck -x scripts/*.sh .githooks/* .claude/hooks/*.sh
@@ -83,7 +83,7 @@ jobs:
     if: needs.detect.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
@@ -115,7 +115,7 @@ jobs:
           - name: no-default-features
             flags: "--no-default-features"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
@@ -152,7 +152,7 @@ jobs:
           - name: full
             features: "esphome-satellite,esphome-noise,hive,realtime"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-key: dot-${{ matrix.name }}
@@ -189,7 +189,7 @@ jobs:
       run:
         working-directory: portal
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version-file: portal/.nvmrc
@@ -228,7 +228,7 @@ jobs:
     if: startsWith(github.ref, 'refs/heads/release/')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - run: scripts/check.sh --release "${GITHUB_REF_NAME#release/}"
