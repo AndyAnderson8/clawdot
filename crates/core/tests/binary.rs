@@ -1196,6 +1196,8 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
 
 /// Saved settings sit between the configuration file and flags, and a live change reaches the running
 /// assistant without a restart (REQ-CFG-038, REQ-CFG-039).
+// Uses named time zones, which only a build with the time zone database accepts.
+#[cfg(feature = "tz")]
 #[test]
 fn saved_settings_layer_under_flags_and_apply_live() {
     let port = free_port();

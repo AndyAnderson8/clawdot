@@ -124,6 +124,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked ${{ matrix.flags }} -- -D warnings
       - name: Tests
         run: cargo test --workspace --locked ${{ matrix.flags }}
+      # In a workspace build another crate can switch a core feature back on, so the core is also tested alone.
+      - name: Test the core crate alone
+        run: cargo test -p clawdot-core --locked ${{ matrix.flags }}
 
   # The binary that actually runs on the Echo Dot Gen 2 (architecture review D1, spec 0002 REQ-NFR-103):
   # armv7 musl, release profile (stripped, see Cargo.toml), the default features plus the Dot's.
