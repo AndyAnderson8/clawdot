@@ -304,6 +304,116 @@ enum Running {
     Other,
 }
 
+/// What a realtime voice session needs that the loop owned, taken when the session starts (ADR-0020).
+#[cfg(feature = "realtime")]
+pub struct RtKit {
+    /// The settings in force.
+    pub settings: crate::rtvoice::RtSettings,
+    /// The API key. Never printed.
+    pub key: Option<String>,
+    /// The persona, added to the engine's instructions.
+    pub persona: String,
+    /// The turn limits (the gate uses them for the model's function calls).
+    pub cfg: TurnConfig,
+    /// The daily counters (a handle on the loop's own): the audio cost is added to them as it runs.
+    pub usage: UsageTracker,
+    /// The HTTP tools.
+    pub http: Arc<HttpTools>,
+    /// The MCP tools.
+    pub mcp: Arc<McpClient>,
+    /// A read-only copy of the policy.
+    pub ext: Arc<Extensions>,
+    /// The built-in tools on offer now.
+    pub builtin: Vec<ToolSpec>,
+    /// Local day number at the start.
+    pub day: i64,
+    /// The assistant's clock.
+    pub clock: Arc<dyn crate::sched::Clock + Send + Sync>,
+    /// A fresh conversation: it holds the transcript and any held action in memory for the session only.
+    pub conv: Conversation,
+    /// The realtime handle, to record how the session ended.
+    pub rt: crate::rtvoice::Realtime,
+}
+
+#[cfg(feature = "realtime")]
+impl std::fmt::Debug for RtKit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RtKit").finish_non_exhaustive()
+    }
+}
+
+/// Run one realtime session to its end. The function calls its model makes go through the same gate as any
+/// turn; built-in tool calls are served by the loop (REQ-RTV-009, REQ-AST-027).
+#[cfg(feature = "realtime")]
+async fn run_realtime(kit: RtKit, job: crate::rtvoice::Job, tx: mpsc::Sender<ToolReq>) {
+    use crate::realtime::{Env, Io, serve::serve};
+    let RtKit {
+        settings,
+        key,
+        persona,
+        cfg,
+        mut usage,
+        http,
+        mcp,
+        ext,
+        builtin,
+        day,
+        clock,
+        mut conv,
+        rt,
+    } = kit;
+    let mut link = BuiltinLink {
+        specs: builtin,
+        tx,
+        effects: Vec::new(),
+    };
+    let now = move || (day, clock.now());
+    let io = Io {
+        mic: job.mic,
+        speaker: job.speaker,
+    };
+    let finish = {
+        let mut host = WithPolicy {
+            inner: &mut WithMcp {
+                inner: &mut WithHttp {
+                    inner: &mut link,
+                    http: &http,
+                },
+                mcp: &mcp,
+            },
+            ext: &ext,
+            mcp: &mcp,
+            scope: None,
+        };
+        let mut env = Env {
+            host: &mut host,
+            conv: &mut conv,
+            turn_cfg: &cfg,
+            usage: &mut usage,
+            clock: &now,
+        };
+        serve(&settings, key.as_deref(), &persona, io, &mut env).await
+    };
+    if let Some(e) = &finish.error {
+        crate::diag::error(&format!("realtime voice: {e}"));
+    }
+    rt.set_error(finish.error.clone());
+    let _ = job.done.send(crate::rtvoice::Done {
+        speak: finish.speak,
+        failed: finish.failed,
+        effects: link.take_effects(),
+    });
+}
+
+#[cfg(feature = "realtime")]
+impl Hub {
+    /// Run a realtime session beside the loop. The loop is told when it ends ([`Event::Other`]).
+    pub fn spawn_realtime(&mut self, kit: RtKit, job: crate::rtvoice::Job) {
+        let tx = self.tool_tx.clone();
+        self.spawn_other(run_realtime(kit, job, tx));
+    }
+}
+
 /// What the loop learns from the hub.
 #[derive(Debug)]
 pub enum Event {
@@ -573,6 +683,7 @@ mod tests {
         finished: Vec<(Duration, SpeakerId, String)>,
         fired: Vec<Duration>,
         answers: Vec<oneshot::Receiver<Answer>>,
+        others: usize,
     }
 
     fn env(_: &str) -> Option<String> {
@@ -612,6 +723,7 @@ mod tests {
                 finished: Vec::new(),
                 fired: Vec::new(),
                 answers: Vec::new(),
+                others: 0,
             }
         }
 
@@ -665,8 +777,12 @@ mod tests {
 
         /// Run the loop until `n` turns have finished, ringing timers every 20 ms as the real one does.
         async fn run_until(&mut self, n: usize) {
+            self.pump(|lab| lab.finished.len() >= n).await;
+        }
+
+        async fn pump(&mut self, done: impl Fn(&Self) -> bool) {
             let mut tick = tokio::time::interval(Duration::from_millis(20));
-            while self.finished.len() < n {
+            while !done(self) {
                 tokio::select! {
                     ev = self.hub.next() => match ev {
                         Event::Tool(req) => req.serve(&mut self.assistant).await,
@@ -680,7 +796,8 @@ mod tests {
                                 let _ = self.hub.submit(next, 0, || kit);
                             }
                         }
-                        Event::Other(_) | Event::Lost(_) => {}
+                        Event::Other(_) => self.others += 1,
+                        Event::Lost(_) => {}
                     },
                     _ = tick.tick() => {
                         if !self.assistant.tick().is_empty() {
@@ -861,6 +978,89 @@ mod tests {
             lab.started.elapsed() < Duration::from_secs(2),
             "it did not wait for the model"
         );
+    }
+
+    // REQ-AST-027, REQ-RTV-009: a realtime session is a task of its own. A timer rings in the middle of it,
+    // and a built-in tool its model calls is run by the loop.
+    #[cfg(feature = "realtime")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_realtime_session_does_not_delay_a_timer_and_its_calls_reach_the_loop() {
+        use crate::realtime::ws::accept;
+        use crate::rtvoice::{Job, Realtime, RtSettings};
+        let mut lab = Lab::new(0).await;
+        lab.assistant
+            .call_tool("set_timer", &serde_json::json!({"seconds": 2}))
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let (mut ws, _) = accept(tcp).await.unwrap();
+            ws.recv().await.unwrap(); // the session setup
+            let call = serde_json::json!({"type": "response.done", "response": {
+                "status": "completed", "output": [{
+                    "type": "function_call", "status": "completed", "call_id": "c1",
+                    "name": "set_timer", "arguments": "{\"seconds\": 600}"}]}});
+            ws.send_text(&call.to_string()).await.unwrap();
+            ws.recv().await.unwrap(); // the function output
+            ws.recv().await.unwrap(); // the request to speak
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            ws.send_close().await.unwrap();
+        });
+        let settings = RtSettings {
+            enabled: true,
+            url: Some(format!("ws://127.0.0.1:{port}/v1/realtime")),
+            model: Some("m".into()),
+            ..RtSettings::default()
+        };
+        let kit = crate::turns::RtKit {
+            rt: Realtime::new(settings.clone()),
+            settings,
+            key: Some("sk-test".into()),
+            persona: "persona".into(),
+            cfg: TurnConfig::default(),
+            usage: lab.usage.clone(),
+            http: Arc::clone(&lab.http),
+            mcp: Arc::clone(&lab.mcp),
+            ext: Arc::clone(&lab.ext_view),
+            builtin: ToolHost::tool_specs(&lab.assistant),
+            day: 1,
+            clock: Arc::new(FastClock(Instant::now())),
+            conv: Conversation::new("persona", 20, 24_000, 600),
+        };
+        let (_mic_tx, mic) = mpsc::channel(8);
+        let (speaker, _spk_rx) = mpsc::channel(8);
+        let (done, done_rx) = oneshot::channel();
+        lab.hub.spawn_realtime(
+            kit,
+            Job {
+                speaker_id: "sat:a".into(),
+                mic,
+                speaker,
+                done,
+            },
+        );
+        lab.pump(|l| l.others >= 1).await;
+        let ended = lab.started.elapsed();
+        assert!(
+            ended >= Duration::from_millis(850),
+            "the session took its time"
+        );
+        assert_eq!(lab.fired.len(), 1, "the timer rang during the session");
+        assert!(
+            lab.fired[0] < Duration::from_millis(500),
+            "it rang at {:?}, session ended at {ended:?}",
+            lab.fired[0]
+        );
+        assert_eq!(
+            lab.assistant.scheduled().len(),
+            1,
+            "the call the model made set a timer in the loop"
+        );
+        let done = done_rx.await.unwrap();
+        assert!(!done.failed, "{:?}", done.speak);
+        assert_eq!(lab.usage.requests_today(), 1, "the session is one request");
     }
 
     // REQ-AST-027: a task that dies hands the speaker a fresh start and does not wedge the loop.
