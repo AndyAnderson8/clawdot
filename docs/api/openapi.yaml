@@ -1,0 +1,1977 @@
+openapi: 3.1.0
+info:
+  title: ClawDot core HTTP API
+  version: 1.0.0
+  summary: The JSON API the portal uses, and the webhook endpoints other programs post to.
+  description: |
+    Hand-written from `crates/core/src/ui.rs`, `crates/core/src/http.rs` and `crates/core/src/announce_api.rs`,
+    with response shapes taken from `portal/src/types.ts`. A test (`crates/core/tests/openapi.rs`) fails when the
+    set of `METHOD path` pairs here differs from the routes in the code. See `docs/api/README.md`.
+
+    **Errors.** Every failure from the portal API is a JSON object `{"error": "<plain sentence>"}` with a
+    matching status code. Treat the text as data to show, not as something to parse. `POST /api/speak` adds
+    `ok`, `reason` and `message` when the speaker cannot say the phrase.
+
+    **No secrets in responses.** Passwords and tokens are stored hashed. A token is returned once, when it is
+    made or rotated. The language-model key pasted into the portal is never returned: only a masked hint such
+    as `sk-or-...cdef` (its first and last few characters). Settings hold only the *name* of an environment
+    variable for a key, never the key. Diagnostics hold no secret, audio, spoken words, note text or event text.
+
+    **Untrusted text.** Event titles and text, note text, tool results and audit arguments can come from
+    outside ClawDot. Show them as text, never as HTML.
+
+    **Limits.** Most request bodies are limited to 4 KiB; tool, connection, settings and skills bodies to 16 KiB
+    or 64 KiB; the announce endpoint to 32 KiB. A body that is too large or too slow gets `413`.
+  license:
+    name: See the repository licence
+    identifier: NOASSERTION
+servers:
+  - url: http://clawdot.local:8080
+    description: The device. The address and port are whatever `listen` is set to.
+tags:
+  - name: Session
+    description: Mode, first-run setup, sign-in and sign-out. Works without a session token.
+  - name: Status
+    description: What the assistant is doing.
+  - name: Speak
+    description: Make the speaker say a phrase.
+  - name: Webhooks
+    description: Endpoints other programs post to. Each uses an endpoint token, not a session.
+  - name: Schedule
+    description: Timers, alarms and reminders.
+  - name: Tools
+    description: Tools, connections (MCP servers) and skills.
+  - name: Settings
+    description: Saved settings and the language-model key.
+  - name: Activity
+    description: Audit log, notes (memories), logs and diagnostics.
+  - name: Update
+    description: Checking for and installing a newer version.
+security:
+  - session: []
+paths:
+  /healthz:
+    get:
+      tags: [Status]
+      summary: Liveness check
+      operationId: healthz
+      security: []
+      responses:
+        "200":
+          description: The core is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+  /hook/{endpoint}:
+    post:
+      tags: [Webhooks]
+      summary: An agent posts its native hook payload
+      description: |
+        The body is the hook payload of the agent the endpoint's adapter was made for (for example Claude Code).
+        The adapter turns it into an event for the inbox. The response body is always `{}` on success, on
+        purpose: agent runtimes parse hook responses as hook output. The event id is in the `X-ClawDot-Event`
+        header, for example `accepted; id=12`, `coalesced; id=12` or `filtered; id=0`.
+        Authenticate with the endpoint token, as `Authorization: Bearer <token>` or `X-ClawDot-Token: <token>`.
+      operationId: postHook
+      security: [{ endpointToken: [] }, { endpointTokenHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/endpoint"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "202":
+          description: Accepted (queued, coalesced into an earlier event, or filtered out by policy).
+          headers:
+            X-ClawDot-Event:
+              description: "`accepted; id=N`, `coalesced; id=N` or `filtered; id=0`."
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { type: object, maxProperties: 0 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "422":
+          description: The endpoint's adapter has no rule for this payload, or is not installed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /bridge/{endpoint}/replies:
+    get:
+      tags: [Webhooks]
+      summary: Stream of replies for an agent bridge (server-sent events)
+      description: |
+        Each reply is an SSE event named `reply` whose id is the reply id and whose data is a JSON `Reply`.
+        Comments (`: keepalive`) arrive when idle. Replies stay queued until acknowledged and are re-sent to a
+        reconnecting bridge. The stream ends when the token is rotated or revoked. One stream per connection.
+      operationId: streamReplies
+      security: [{ endpointToken: [] }, { endpointTokenHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/endpoint"
+      responses:
+        "200":
+          description: An event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "Events of the form `id: N`, `event: reply`, `data: <Reply as JSON>`."
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503":
+          description: Too many streams are open.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /bridge/{endpoint}/replies/{id}/ack:
+    post:
+      tags: [Webhooks]
+      summary: The bridge confirms it handled a reply
+      operationId: ackReply
+      security: [{ endpointToken: [] }, { endpointTokenHeader: [] }]
+      parameters:
+        - $ref: "#/components/parameters/endpoint"
+        - name: id
+          in: path
+          required: true
+          description: The reply id.
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "204": { description: "Acknowledged." }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/announce:
+    post:
+      tags: [Webhooks]
+      summary: A script says something
+      description: |
+        One-way announcement. Authenticate with an endpoint token (it starts with `cdt_`; it identifies the
+        endpoint) or as the administrator (a session token, then `endpoint` names the endpoint to use). Every
+        refusal for a caller without credentials is `401`, or `429` when the shared failure budget is spent.
+        The response never repeats the text.
+      operationId: announce
+      security: [{ endpointToken: [] }, { endpointTokenHeader: [] }, { session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Announcement" }
+      responses:
+        "202":
+          description: Queued, or filtered out by the endpoint's policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnnounceOutcome" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/auth:
+    get:
+      tags: [Session]
+      summary: Which mode the portal is in
+      description: Works without signing in. `reset_window_secs` is 0 for callers outside the private network.
+      operationId: getAuth
+      security: []
+      responses:
+        "200":
+          description: The mode and what the page should offer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthState" }
+  /api/setup:
+    post:
+      tags: [Session]
+      summary: First-run setup
+      description: |
+        Choose a password (the response carries a session token) or open mode. Only from a private address, and
+        only while the mode is `setup`. Shares the authentication rate limit.
+      operationId: setup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              additionalProperties: false
+              properties:
+                mode: { type: string, enum: [password, open] }
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  description: Required for `mode` `password`.
+      responses:
+        "200":
+          description: Set up. `token` is present for `password` mode.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionGrant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Setup is already complete.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/login:
+    post:
+      tags: [Session]
+      summary: Sign in
+      description: |
+        Exchange the password (or, after an upgrade, the old administrator token) for a session token.
+        `409` when no password is set (open mode).
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              additionalProperties: false
+              properties:
+                password: { type: string }
+      responses:
+        "200":
+          description: Signed in.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string, description: "Use as `Authorization: Bearer <token>`." }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: No password is set.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/logout:
+    post:
+      tags: [Session]
+      summary: End the session
+      description: Always succeeds, with or without a token.
+      operationId: logout
+      security: []
+      responses:
+        "200":
+          description: Signed out.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [signed_out]
+                properties:
+                  signed_out: { type: boolean, const: true }
+  /api/recover/window:
+    post:
+      tags: [Session]
+      summary: Set a new password during the local reset window
+      description: |
+        Only from a private address and only while the reset window is open (see `reset_window_secs` in
+        `GET /api/auth`).
+      operationId: recoverWindow
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              additionalProperties: false
+              properties:
+                password: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        "200":
+          description: New password set; a session token is returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionGrant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/admin/password:
+    post:
+      tags: [Session]
+      summary: Change the administrator password
+      operationId: changePassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              additionalProperties: false
+              properties:
+                password: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        "200":
+          description: Changed. A new session token is returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionGrant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/overview:
+    get:
+      tags: [Status]
+      summary: Webhook endpoints and recent agent events
+      description: Up to 50 events, newest first. Titles and text are clipped to 600 characters.
+      operationId: getOverview
+      responses:
+        "200":
+          description: The overview.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Overview" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/status:
+    get:
+      tags: [Status]
+      summary: What the assistant is doing
+      description: |
+        A snapshot published by the main loop: model, speaker, voice, usage, hardware, quiet hours, tools and
+        scheduled items. It holds no secrets and no agent text. Before the first snapshot, `status` is `null`.
+        A missing field means unknown, not false.
+      operationId: getStatus
+      responses:
+        "200":
+          description: The snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [now, status]
+                properties:
+                  now: { type: integer, description: "Unix seconds." }
+                  status:
+                    oneOf:
+                      - $ref: "#/components/schemas/Status"
+                      - type: "null"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/speak:
+    post:
+      tags: [Speak]
+      summary: The speaker says a phrase ("test speak")
+      description: |
+        Queues a phrase of up to 200 characters. `voice` is an optional voice name to try for this one phrase,
+        so it can be heard before it is saved (see `GET /api/voices`). Refused, with `ok: false` and a
+        `reason`, when there is nothing to say it with: `no_voice` (503), `no_speaker`, `muted` or `busy` (409,
+        also when the last phrase is still being said). The `console` speaker needs neither a voice nor a
+        satellite.
+      operationId: speak
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              additionalProperties: false
+              properties:
+                text: { type: string, minLength: 1, maxLength: 200 }
+                voice:
+                  type: [string, "null"]
+                  maxLength: 128
+                  description: A voice for this phrase; no control characters.
+      responses:
+        "202":
+          description: Queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, queued]
+                properties:
+                  ok: { type: boolean, const: true }
+                  queued: { type: boolean, const: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: No speaker, muted, or busy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpeakRefusal" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503":
+          description: No voice is set up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpeakRefusal" }
+  /api/endpoints:
+    post:
+      tags: [Webhooks]
+      summary: Create a webhook endpoint
+      description: The token is returned once. Only its hash is kept.
+      operationId: createEndpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, adapter]
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  maxLength: 32
+                  pattern: "^[a-z0-9_-]+$"
+                adapter: { type: string, description: "An installed adapter, for example `claude-code`." }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, adapter, token]
+                properties:
+                  name: { type: string }
+                  adapter: { type: string }
+                  token: { type: string, description: "Shown once." }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: An endpoint with that name exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/endpoints/{name}:
+    delete:
+      tags: [Webhooks]
+      summary: Revoke a webhook endpoint
+      operationId: deleteEndpoint
+      parameters:
+        - $ref: "#/components/parameters/name"
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/endpoints/{name}/rotate:
+    post:
+      tags: [Webhooks]
+      summary: Issue a new token for an endpoint
+      description: The old token stops working at once. The new one is returned once.
+      operationId: rotateEndpoint
+      parameters:
+        - $ref: "#/components/parameters/name"
+      responses:
+        "200":
+          description: Rotated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, token]
+                properties:
+                  name: { type: string }
+                  token: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/schedule:
+    get:
+      tags: [Schedule]
+      summary: List timers, alarms and reminders
+      operationId: listSchedule
+      responses:
+        "200":
+          description: The list.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [Schedule]
+      summary: Add a timer, alarm or reminder
+      description: The answer is the whole list; `id` is the new item.
+      operationId: addSchedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScheduleSpec" }
+      responses:
+        "200":
+          description: Added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/schedule/{id}:
+    put:
+      tags: [Schedule]
+      summary: Replace an item
+      description: Same body as adding; the item keeps its id. If the new spec is invalid, the old item is kept.
+      operationId: editSchedule
+      parameters:
+        - $ref: "#/components/parameters/numericId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScheduleSpec" }
+      responses:
+        "200":
+          description: Replaced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [Schedule]
+      summary: Cancel an item
+      operationId: cancelSchedule
+      parameters:
+        - $ref: "#/components/parameters/numericId"
+      responses:
+        "200":
+          description: Cancelled; the list after.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduleList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/tools:
+    get:
+      tags: [Tools]
+      summary: Tools, connections and skills
+      description: The one listing the Tools, Connections and Skills tabs show. `null` before the main loop has published it.
+      operationId: listTools
+      responses:
+        "200":
+          description: The listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      tags: [Tools]
+      summary: Add an HTTP tool
+      description: |
+        Body is a tool definition as in the configuration file (see `docs/architecture/http-tools.md`). The
+        answer is the new listing. Unknown fields, name clashes and unsafe URLs are `400`.
+      operationId: addTool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ToolDef" }
+      responses:
+        "200":
+          description: Added; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/tools/{name}:
+    delete:
+      tags: [Tools]
+      summary: Delete an HTTP tool added in the portal
+      description: Tools from the configuration file cannot be deleted, only turned off.
+      operationId: deleteTool
+      parameters:
+        - $ref: "#/components/parameters/name"
+      responses:
+        "200":
+          description: Deleted; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/tools/{name}/enabled:
+    post:
+      tags: [Tools]
+      summary: Turn a tool on or off
+      operationId: setToolEnabled
+      parameters:
+        - $ref: "#/components/parameters/name"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnabledFlag" }
+      responses:
+        "200":
+          description: Done; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/tools/{name}/tier:
+    post:
+      tags: [Tools]
+      summary: Set a tool's risk tier
+      description: |
+        `null` goes back to the tier the tool was declared with. The tier decides what needs a spoken yes
+        (REQ-SEC-030). The request is parsed as one of `read_only`, `reversible`, `costly`, `destructive`; the
+        error text names only the first three, and the main loop may still refuse a value for a given tool.
+      operationId: setToolTier
+      parameters:
+        - $ref: "#/components/parameters/name"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tier]
+              properties:
+                tier:
+                  oneOf:
+                    - { $ref: "#/components/schemas/Tier" }
+                    - { type: "null" }
+      responses:
+        "200":
+          description: Done; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/connections:
+    post:
+      tags: [Tools]
+      summary: Add and connect an MCP server
+      description: The server is connected before it is saved. Its token is read from the environment variable named in `auth_env`; the variable's value never appears in any response.
+      operationId: addConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServerDef" }
+      responses:
+        "200":
+          description: Added; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/connections/test:
+    post:
+      tags: [Tools]
+      summary: Try an MCP connection without saving it
+      operationId: testConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServerDef" }
+      responses:
+        "200":
+          description: The server answered. This is the report for that one server.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectionTest" }
+        "400":
+          description: The connection is described wrongly or the server did not answer; the message says what to check.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/connections/{name}:
+    delete:
+      tags: [Tools]
+      summary: Remove an MCP server added in the portal
+      operationId: deleteConnection
+      parameters:
+        - $ref: "#/components/parameters/name"
+      responses:
+        "200":
+          description: Removed; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/connections/{name}/enabled:
+    post:
+      tags: [Tools]
+      summary: Turn an MCP server on or off
+      operationId: setConnectionEnabled
+      parameters:
+        - $ref: "#/components/parameters/name"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnabledFlag" }
+      responses:
+        "200":
+          description: Done; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/skills:
+    get:
+      tags: [Tools]
+      summary: Tools, connections and skills
+      description: The same document as `GET /api/tools`.
+      operationId: listSkills
+      responses:
+        "200":
+          description: The listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      tags: [Tools]
+      summary: Add a skill
+      description: Up to 16 skills; the name is unique, up to 40 characters; instructions up to 2000 characters.
+      operationId: addSkill
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SkillBody" }
+      responses:
+        "200":
+          description: Added; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/skills/{action}:
+    post:
+      tags: [Tools]
+      summary: Import, edit, delete or enable a skill
+      description: |
+        Skills are addressed in the body, not the path, because their names are free text. The body depends on
+        `action`:
+
+        * `import`: an export file, `{"format":"clawdot-skills","version":1,"skills":[...]}`. Imported skills
+          arrive turned off.
+        * `edit`: `{"name": "<current name>", "skill": {<Skill>}}` replaces that skill.
+        * `delete`: `{"name": "<name>"}`.
+        * `enabled`: `{"name": "<name>", "enabled": true|false}`.
+
+        Any other action is `404`. The answer is the new listing.
+      operationId: skillAction
+      parameters:
+        - name: action
+          in: path
+          required: true
+          schema: { type: string, enum: [import, edit, delete, enabled] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              properties:
+                format: { type: string, const: clawdot-skills }
+                version: { type: integer, const: 1 }
+                skills:
+                  type: array
+                  items: { $ref: "#/components/schemas/SkillBody" }
+                name: { type: string }
+                skill: { $ref: "#/components/schemas/SkillBody" }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Done; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtListing" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/settings:
+    get:
+      tags: [Settings]
+      summary: Settings, where each value came from, and what needs a restart
+      description: |
+        Holds no secret. A language-model key is only ever the *name* of an environment variable
+        (`llm_key_env`), whether it is set (`llm.key_present`), and a masked hint of a key pasted into the
+        portal (`llm.key_hint`). `null` before the settings are handed over.
+      operationId: getSettings
+      responses:
+        "200":
+          description: The listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    put:
+      tags: [Settings]
+      summary: Save some settings
+      description: |
+        A JSON object of `key: value`; a `null` value removes the saved value so the default or the
+        configuration file applies again. The whole change is checked first and applied all or nothing, so an
+        export file's `settings` object can be sent as it is. Keys: `device_name`, `zone`, `persona`, `llm_url`,
+        `llm_model`, `llm_key_env`, `voice`, `speech_language`, `listen`, `public_url`, `daily_spend_usd`,
+        `board`, `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`,
+        `plan_speech`, `progress_speech`, `notes`, `update_check`, `max_actions_per_day`, `max_costly_per_day`,
+        `dry_run`, `quiet_start`, `quiet_end`. Values that apply live take effect at once; the rest are listed
+        in `restart_needed`. If the running assistant could not apply them now, the answer carries a `note`.
+      operationId: putSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: [string, number, boolean, "null"]
+      responses:
+        "200":
+          description: Saved; the new listing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/settings/export:
+    get:
+      tags: [Settings]
+      summary: The saved settings as a file
+      description: "Served with `Content-Disposition: attachment; filename=\"clawdot-settings.json\"`. Load it again with `PUT /api/settings` using its `settings` object."
+      operationId: exportSettings
+      responses:
+        "200":
+          description: The export file.
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [format, version, settings]
+                properties:
+                  format: { type: string, const: clawdot-settings }
+                  version: { type: integer, const: 1 }
+                  settings: { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/models:
+    get:
+      tags: [Settings]
+      summary: The models the language-model service offers
+      description: |
+        Asked of the service with the saved address and key. `url` and `key_env` can name a choice that is not
+        saved yet (`key_env` is an environment variable name, letters, digits and underscores, at most 64).
+        `409` when no address is known yet; `401` when the service rejects the key; `502` when it cannot be
+        asked. The page falls back to typing a name.
+      operationId: listModels
+      parameters:
+        - name: url
+          in: query
+          schema: { type: string }
+        - name: key_env
+          in: query
+          schema: { type: string, maxLength: 64, pattern: "^[A-Za-z0-9_]*$" }
+      responses:
+        "200": { $ref: "#/components/responses/Models" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Choose who answers and save first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+    post:
+      tags: [Settings]
+      summary: The same list, asking with a key typed on the page
+      description: |
+        Checks a key before it is kept, and keeps the key out of web addresses. Without `key`, the stored key
+        (or the one in the saved environment variable) is used. The key is not echoed and not stored by this call.
+      operationId: listModelsWithKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              additionalProperties: false
+              properties:
+                url: { type: string }
+                key: { type: [string, "null"], description: "A key to try." }
+      responses:
+        "200": { $ref: "#/components/responses/Models" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Choose a provider first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /api/llm/key:
+    put:
+      tags: [Settings]
+      summary: Keep the language-model key pasted on the page
+      description: |
+        The key is stored on the device (write-only) and used from now on. The response never contains it,
+        only the masked hint.
+      operationId: setLlmKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key]
+              additionalProperties: false
+              properties:
+                key: { type: string, writeOnly: true }
+      responses:
+        "200": { $ref: "#/components/responses/KeyHint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      tags: [Settings]
+      summary: Forget the stored key
+      operationId: clearLlmKey
+      responses:
+        "200": { $ref: "#/components/responses/KeyHint" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/voices:
+    get:
+      tags: [Settings]
+      summary: The voices the speech server offers
+      description: |
+        `source` is `server` when the speech server listed them, `builtin` for OpenAI's fixed set. `503` when no
+        speech provider is set up; `502` when the server shares no list (the message says to type a voice name).
+        Use a name from here as `voice` in `POST /api/speak`.
+      operationId: listVoices
+      responses:
+        "200":
+          description: The voices.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [voices, source]
+                properties:
+                  voices:
+                    type: array
+                    items: { type: string }
+                  source: { type: string, enum: [server, builtin] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/audit:
+    get:
+      tags: [Activity]
+      summary: What the assistant did, newest first
+      description: |
+        Filters combine. `decision` is a value or a prefix ending in `:` such as `blocked:`. `trigger` is
+        `voice`, `event` or `event:<source>`. Page with `before` set to the last response's `next_before`.
+        Argument and result text can come from outside: show it as data. `503` when there is no audit log.
+      operationId: getAudit
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: before, in: query, description: "A record id, for the next page.", schema: { type: integer, minimum: 0 } }
+        - { name: since, in: query, description: "Unix seconds.", schema: { type: integer, minimum: 0 } }
+        - { name: tool, in: query, schema: { type: string } }
+        - { name: tier, in: query, schema: { type: string } }
+        - { name: decision, in: query, schema: { type: string } }
+        - { name: trigger, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: A page of records.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/notes:
+    get:
+      tags: [Activity]
+      summary: Notes (memories) the user asked to keep
+      description: Written only when the user asks, by voice or in the portal. Show the text as text.
+      operationId: listNotes
+      responses:
+        "200":
+          description: The notes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotesList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [Activity]
+      summary: Write a note
+      description: Goes through the same checks as a spoken "remember that". The answer is the new list. `409` when memory is off, the note is a duplicate, or the store is full.
+      operationId: addNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NoteText" }
+      responses:
+        "200":
+          description: Added; the new list.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotesList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Memory is off, a duplicate, or full.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [Activity]
+      summary: Forget every note
+      operationId: clearNotes
+      responses:
+        "200": { $ref: "#/components/responses/Forgotten" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/notes/{id}:
+    put:
+      tags: [Activity]
+      summary: Change what one note says
+      description: The answer is the new list.
+      operationId: editNote
+      parameters:
+        - $ref: "#/components/parameters/numericId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NoteText" }
+      responses:
+        "200":
+          description: Changed; the new list.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotesList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Memory is off, a duplicate, or full.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [Activity]
+      summary: Forget one note
+      operationId: deleteNote
+      parameters:
+        - $ref: "#/components/parameters/numericId"
+      responses:
+        "200": { $ref: "#/components/responses/Forgotten" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/logs:
+    get:
+      tags: [Activity]
+      summary: ClawDot's recent warnings and errors
+      description: Newest first, in memory since it started, redacted. No audio and none of what was said.
+      operationId: getLogs
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 100 } }
+      responses:
+        "200":
+          description: The lines.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LogList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/diagnostics:
+    get:
+      tags: [Activity]
+      summary: One document for a bug report
+      description: |
+        Versions and build, status, settings with their sources (the persona as a length only), webhook names
+        (never tokens), counts of tools and audit records, and recent problems. No secret, audio, spoken words,
+        note text or event text. Served as `clawdot-diagnostics.json` for download.
+      operationId: getDiagnostics
+      responses:
+        "200":
+          description: The document.
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Diagnostics" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/about:
+    get:
+      tags: [Status]
+      summary: Version, build and release notes
+      operationId: getAbout
+      responses:
+        "200":
+          description: The about card.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/About" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/update:
+    get:
+      tags: [Update]
+      summary: Whether a newer version exists
+      description: |
+        When it was last looked for, whether it can be installed here, and the progress of an install in
+        `phase`. `503` when updates are not running on this device or the build has no update support.
+      operationId: getUpdate
+      responses:
+        "200":
+          description: The update status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/update/check:
+    post:
+      tags: [Update]
+      summary: Look for a newer version now
+      description: The same document as `GET /api/update`. A failed look is in its `error` field, not an HTTP error.
+      operationId: checkUpdate
+      responses:
+        "200":
+          description: The update status after the look.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /api/update/apply:
+    post:
+      tags: [Update]
+      summary: Install the version the person confirmed
+      description: Starts at once; watch `GET /api/update` (`phase`). `409` when it cannot start, with the reason.
+      operationId: applyUpdate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: string, examples: ["1.2.3"] }
+      responses:
+        "202":
+          description: Started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateStatus" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: It cannot be started now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+components:
+  securitySchemes:
+    session:
+      type: http
+      scheme: bearer
+      description: |
+        A session token from `POST /api/login`, `POST /api/setup` (password mode), `POST /api/admin/password`
+        or `POST /api/recover/window`. In *open* mode (chosen at setup, private network only) no token is
+        needed from a private-network peer. Wrong tokens spend a shared authentication budget and end in `429`.
+    endpointToken:
+      type: http
+      scheme: bearer
+      description: A webhook endpoint token (starts with `cdt_`), shown once when the endpoint is made or rotated.
+    endpointTokenHeader:
+      type: apiKey
+      in: header
+      name: X-ClawDot-Token
+      description: The same endpoint token, for clients that cannot set `Authorization`.
+  parameters:
+    endpoint:
+      name: endpoint
+      in: path
+      required: true
+      description: The endpoint name (lowercase letters, digits, `-` and `_`, at most 32). Other names are `404`.
+      schema: { type: string, maxLength: 32, pattern: "^[a-z0-9_-]+$" }
+    name:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+    numericId:
+      name: id
+      in: path
+      required: true
+      description: A whole number. Anything else is `404`.
+      schema: { type: integer, minimum: 0 }
+  responses:
+    BadRequest:
+      description: The request body or a parameter is wrong; the message says what to fix.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: "Sign in required (or a wrong token). Carries `WWW-Authenticate: Bearer`."
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Setup is required first, the caller is not on a private network, or the reset window is closed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such route, item or name.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: The body is too large or too slow.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Too many attempts. Carries `Retry-After`.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unavailable:
+      description: Not available now (the assistant is busy or not running, or the feature is off); the message says why.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadGateway:
+      description: The other service could not be asked; the message says why.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServerError:
+      description: The change could not be saved.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Models:
+      description: The model names.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [models]
+            properties:
+              models:
+                type: array
+                items: { type: string }
+    KeyHint:
+      description: The masked hint of the stored key, or `null` when none is stored. Never the key.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [hint]
+            properties:
+              hint: { type: [string, "null"], examples: ["sk-or-…cdef"] }
+    Forgotten:
+      description: How many notes were forgotten.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [forgotten]
+            properties:
+              forgotten: { type: integer, minimum: 0 }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, description: "A plain sentence." }
+    SpeakRefusal:
+      type: object
+      required: [ok, reason, message, error]
+      properties:
+        ok: { type: boolean, const: false }
+        reason: { type: string, enum: [no_voice, no_speaker, muted, busy, quiet_hours] }
+        message: { type: string }
+        error: { type: string, description: "The same as `message`." }
+    Announcement:
+      type: object
+      required: [text]
+      additionalProperties: false
+      properties:
+        text: { type: string, minLength: 1, description: "What to say (up to 2000 characters)." }
+        title: { type: string }
+        source: { type: string }
+        priority: { type: string, enum: [low, normal, urgent], default: normal }
+        reply:
+          type: boolean
+          default: false
+          description: Whether the user may answer by voice and have the reply sent to a bridge.
+        ttl_secs: { type: integer, minimum: 1, description: "How long the announcement stays valid." }
+        endpoint: { type: string, maxLength: 32, description: "With an administrator session, the endpoint to use." }
+    AnnounceOutcome:
+      type: object
+      required: [queued]
+      properties:
+        queued: { type: boolean }
+        id: { type: integer }
+        coalesced: { type: boolean }
+        filtered: { type: string, enum: [muted, below_priority, ignored_kind] }
+    Reply:
+      type: object
+      required: [id, endpoint, event_id, session_ref, kind, text, created_at]
+      properties:
+        id: { type: integer }
+        endpoint: { type: string }
+        event_id: { type: integer }
+        session_ref: { type: [string, "null"] }
+        kind: { type: string, enum: [ack, instruct] }
+        text: { type: string, description: "Speech-to-text output; it may contain errors." }
+        created_at: { type: integer }
+    AuthState:
+      type: object
+      required: [mode, version, peer_private]
+      properties:
+        mode: { type: string, enum: [setup, password, open] }
+        version: { type: string }
+        legacy: { type: boolean }
+        open_allowed: { type: boolean }
+        peer_private: { type: boolean }
+        reset_window_secs: { type: integer, minimum: 0 }
+    SessionGrant:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [password, open] }
+        token: { type: string, description: "A session token (password mode)." }
+    Endpoint:
+      type: object
+      required: [name, adapter, enabled, created_at]
+      properties:
+        name: { type: string }
+        adapter: { type: string }
+        enabled: { type: boolean }
+        created_at: { type: integer }
+    AgentEvent:
+      type: object
+      required: [id, endpoint, source, title, text, state, received_at]
+      properties:
+        id: { type: integer }
+        endpoint: { type: string }
+        source: { type: string }
+        title: { type: string }
+        text: { type: string }
+        state: { type: string, enum: [new, announced, acknowledged, dismissed, snoozed] }
+        received_at: { type: integer }
+    Overview:
+      type: object
+      required: [now, endpoints, events]
+      properties:
+        now: { type: integer }
+        endpoints:
+          type: array
+          items: { $ref: "#/components/schemas/Endpoint" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/AgentEvent" }
+    Hardware:
+      type: object
+      properties:
+        board: { type: string, description: "`echo-dot`, `raspberry-pi`, `pc` or `unknown`." }
+        model: { type: string }
+        cpu: { type: string }
+        cores: { type: integer }
+        ram_mb: { type: integer }
+        arch: { type: string }
+        os: { type: string }
+        parts:
+          type: object
+          properties:
+            leds: { type: boolean }
+            bluetooth: { type: boolean }
+            wifi: { type: boolean }
+            screen: { type: boolean }
+            usb_serial: { type: boolean }
+    Status:
+      type: object
+      description: Every field is optional; a missing field means unknown.
+      properties:
+        version: { type: string }
+        hardware: { $ref: "#/components/schemas/Hardware" }
+        clock_valid: { type: boolean }
+        satellites: { type: integer, description: "Speakers connected." }
+        llm:
+          type: object
+          properties:
+            configured: { type: boolean }
+            model: { type: [string, "null"] }
+        usage:
+          type: object
+          properties:
+            requests_today: { type: integer }
+            spend_today: { type: number }
+            daily_spend_cap_usd: { type: [number, "null"] }
+            day: { type: integer, description: "The local day number today is." }
+            history:
+              type: array
+              items:
+                type: object
+                properties:
+                  day: { type: integer }
+                  requests: { type: integer }
+        speaker:
+          type: object
+          properties:
+            connected: { type: boolean }
+            available: { type: boolean }
+            name: { type: string, description: "`console` for terminal speech." }
+            state: { type: string, enum: [idle, listening, thinking, speaking, muted] }
+        voice:
+          type: object
+          properties:
+            configured: { type: boolean }
+        muted: { type: boolean }
+        quiet_hours:
+          type: object
+          properties:
+            set: { type: boolean }
+            active: { type: boolean }
+        tools: { description: "Counts and names of the tools; shape not fixed.", type: [object, array, "null"] }
+        stations: { type: array, items: { type: string } }
+        scheduled:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              label: { type: string }
+              seconds_left: { type: integer }
+    ScheduleSpec:
+      type: object
+      required: [kind]
+      additionalProperties: false
+      description: |
+        `timer` needs `seconds` (1 second to 7 days). `alarm` needs `hour` and `minute`, and rings once unless
+        `days` is given. `reminder` needs `label` (the text to say), `date` and `time` in the device's time zone,
+        in the future and within a year. Nothing can be scheduled until the device clock is set.
+      properties:
+        kind: { type: string, enum: [timer, alarm, reminder] }
+        label: { type: string, maxLength: 100 }
+        seconds: { type: integer }
+        hour: { type: integer, minimum: 0, maximum: 23 }
+        minute: { type: integer, minimum: 0, maximum: 59 }
+        days:
+          type: array
+          description: Weekdays, 0 = Monday to 6 = Sunday.
+          items: { type: integer, minimum: 0, maximum: 6 }
+        date: { type: string, format: date, examples: ["2026-11-09"] }
+        time: { type: string, pattern: "^[0-9]{1,2}:[0-9]{2}$", examples: ["15:30"] }
+    ScheduleItem:
+      type: object
+      required: [id, kind, label, fire_at, seconds_left]
+      properties:
+        id: { type: integer }
+        kind: { type: string, enum: [timer, alarm, reminder] }
+        label: { type: string }
+        fire_at: { type: integer, description: "Unix seconds." }
+        seconds_left: { type: integer }
+        repeat:
+          oneOf:
+            - type: object
+              properties:
+                hour: { type: integer }
+                minute: { type: integer }
+                days: { type: array, items: { type: integer } }
+                every_day: { type: boolean }
+            - type: "null"
+    ScheduleList:
+      type: object
+      required: [now, clock_valid, items]
+      properties:
+        id: { type: [integer, "null"], description: "The item that was added, changed or cancelled; null for a plain list." }
+        now: { type: integer }
+        clock_valid: { type: boolean }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ScheduleItem" }
+    Tier:
+      type: string
+      enum: [read_only, reversible, costly, destructive]
+    EnabledFlag:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+    ToolParam:
+      type: object
+      required: [type]
+      additionalProperties: false
+      properties:
+        type: { type: string, enum: [string, integer, number, boolean] }
+        description: { type: string }
+        enum: { type: array, items: { type: string } }
+        required: { type: boolean }
+    ToolDef:
+      type: object
+      required: [name, description, url]
+      additionalProperties: false
+      properties:
+        name: { type: string, description: "Lowercase letters, digits and underscores." }
+        description: { type: string }
+        method: { type: string, enum: [GET, POST, PUT, DELETE], default: GET }
+        url: { type: string, description: "`{param}` placeholders are allowed in the path and query, never in the host." }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        auth_env: { type: [string, "null"], description: "The *name* of an environment variable holding a bearer token." }
+        params:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ToolParam" }
+        tier: { oneOf: [{ $ref: "#/components/schemas/Tier" }, { type: "null" }] }
+        confirm: { type: boolean, default: true }
+        timeout_secs: { type: [integer, "null"], minimum: 1, maximum: 30 }
+    ServerDef:
+      type: object
+      required: [name, url]
+      additionalProperties: false
+      properties:
+        name: { type: string, description: "Lowercase letters, digits, `-` and `_`." }
+        url: { type: string, description: "The server's MCP endpoint." }
+        auth_env: { type: [string, "null"], description: "The *name* of an environment variable holding a bearer token." }
+        confirm: { type: boolean, default: true }
+        no_confirm: { type: array, items: { type: string } }
+        only: { type: array, items: { type: string } }
+        tiers:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/Tier" }
+        timeout_secs: { type: [integer, "null"], minimum: 1, maximum: 60 }
+    SkillBody:
+      type: object
+      required: [name, instructions]
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 40 }
+        instructions: { type: string, maxLength: 2000 }
+        tools:
+          type: array
+          maxItems: 16
+          items: { type: string }
+          description: When the user names the skill, only these tools can be used. Empty means no limit.
+        enabled: { type: boolean, default: false }
+    Tool:
+      type: object
+      required: [name, description, enabled, confirm, source]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        confirm: { type: boolean }
+        source: { type: string, enum: [builtin, http, mcp] }
+        origin: { type: string }
+        server: { type: string }
+        deletable: { type: boolean }
+        tier: { type: string, description: "The tier in force." }
+        tier_default: { type: string, description: "The tier it was declared with." }
+        tier_set: { type: boolean, description: "Whether the portal changed it." }
+        tier_options: { type: array, items: { type: string } }
+    McpServer:
+      type: object
+      required: [name, url, enabled, connected, tools]
+      properties:
+        name: { type: string }
+        url: { type: string }
+        enabled: { type: boolean }
+        connected: { type: boolean }
+        deletable: { type: boolean }
+        origin: { type: string }
+        error: { type: string }
+        token_env: { type: string, description: "The *name* of the variable, never its value." }
+        tools:
+          type: array
+          items: { $ref: "#/components/schemas/Tool" }
+    Skill:
+      type: object
+      required: [name, instructions, enabled]
+      properties:
+        name: { type: string }
+        instructions: { type: string }
+        tools:
+          type: array
+          items: { type: string }
+        enabled: { type: boolean }
+    ExtListing:
+      type: object
+      properties:
+        tools:
+          type: array
+          items: { $ref: "#/components/schemas/Tool" }
+        mcp:
+          type: array
+          items: { $ref: "#/components/schemas/McpServer" }
+        skills:
+          type: array
+          items: { $ref: "#/components/schemas/Skill" }
+        problems:
+          type: array
+          description: Portal entries that could not be loaded.
+          items:
+            type: object
+            required: [kind, name, reason]
+            properties:
+              kind: { type: string }
+              name: { type: string }
+              reason: { type: string }
+    ConnectionTest:
+      type: object
+      required: [connected]
+      additionalProperties: true
+      properties:
+        name: { type: string }
+        connected: { type: boolean, const: true }
+        tools:
+          type: array
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+    SettingField:
+      type: object
+      required: [value, source]
+      properties:
+        value: { type: [string, number, boolean, "null"] }
+        source: { type: string, enum: [default, file, saved, flag] }
+        live: { type: boolean, description: "Whether a change applies without a restart." }
+        saved: { type: boolean }
+        ignored: { type: boolean, description: "A saved value hidden by a command-line flag." }
+    Settings:
+      type: object
+      required: [fields]
+      properties:
+        fields:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/SettingField" }
+        restart_needed:
+          type: array
+          items: { type: string }
+        llm:
+          type: object
+          properties:
+            configured: { type: boolean }
+            key_present: { type: boolean }
+            key_hint:
+              type: [string, "null"]
+              description: The first and last few characters of the pasted key. Never the key.
+        speech_configured: { type: boolean }
+        voice_info:
+          type: object
+          properties:
+            language: { type: string }
+            stt_model: { type: string }
+            tts_model: { type: string }
+            provider: { type: [string, "null"] }
+        speakers_listen: { type: string }
+        note: { type: string }
+    AuditRecord:
+      type: object
+      required: [id, ts, turn, trigger, tool, tier, args, decision]
+      properties:
+        id: { type: integer }
+        ts: { type: integer }
+        turn: { type: integer }
+        trigger: { type: string }
+        tool: { type: string }
+        tier: { type: string }
+        args: { description: "Can come from outside; show as data." }
+        decision: { type: string }
+        held_id: { type: integer }
+        dry_run: { type: boolean }
+        status: { type: string }
+        result: { type: string }
+        detail: { type: string }
+        turn_cost_usd: { type: number }
+        note: { type: string }
+    AuditPage:
+      type: object
+      required: [records, next_before, log, policy]
+      properties:
+        records:
+          type: array
+          items: { $ref: "#/components/schemas/AuditRecord" }
+        next_before: { type: [integer, "null"] }
+        log:
+          type: object
+          properties:
+            bytes: { type: integer }
+            max_file_bytes: { type: integer }
+            corrupt_lines: { type: integer }
+            write_errors: { type: integer }
+        policy:
+          type: object
+          properties:
+            dry_run: { type: boolean }
+            max_actions_per_day: { type: integer }
+            max_costly_per_day: { type: integer }
+        note: { type: string }
+    NoteText:
+      type: object
+      required: [text]
+      additionalProperties: false
+      properties:
+        text: { type: string }
+    Note:
+      type: object
+      required: [id, text, ts]
+      properties:
+        id: { type: integer }
+        text: { type: string }
+        ts: { type: integer }
+    NotesList:
+      type: object
+      required: [enabled, notes, limits]
+      properties:
+        enabled: { type: boolean }
+        notes:
+          type: array
+          items: { $ref: "#/components/schemas/Note" }
+        limits:
+          type: object
+          properties:
+            max_notes: { type: integer }
+            max_note_chars: { type: integer }
+            max_total_bytes: { type: integer }
+        note: { type: string }
+    LogList:
+      type: object
+      required: [lines, max_lines]
+      properties:
+        lines:
+          type: array
+          items:
+            type: object
+            required: [ts, level, text]
+            properties:
+              ts: { type: integer }
+              level: { type: string }
+              text: { type: string }
+        max_lines: { type: integer }
+        note: { type: string }
+    Diagnostics:
+      type: object
+      required: [format]
+      additionalProperties: true
+      properties:
+        format: { type: string, const: clawdot-diagnostics }
+        generated_at: { type: integer }
+        version: { type: string }
+        build: { $ref: "#/components/schemas/BuildInfo" }
+        status: { description: "The same as `status` in `GET /api/status`." }
+        settings: { type: object, additionalProperties: true }
+        endpoints:
+          type: array
+          items: { $ref: "#/components/schemas/Endpoint" }
+        tools: { type: object, additionalProperties: true }
+        audit: { type: [object, "null"], additionalProperties: true }
+        recent_problems: { type: array, items: { type: object, additionalProperties: true } }
+        note: { type: string }
+    BuildInfo:
+      type: object
+      properties:
+        version: { type: string }
+        profile: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        features:
+          type: array
+          items: { type: string }
+    About:
+      type: object
+      required: [version, changelog]
+      properties:
+        version: { type: string }
+        build: { $ref: "#/components/schemas/BuildInfo" }
+        changelog: { type: string, description: "The release notes as Markdown text." }
+    UpdateStatus:
+      type: object
+      properties:
+        current: { type: string }
+        enabled: { type: boolean }
+        source: { type: string }
+        checking: { type: boolean }
+        last_checked: { type: [integer, "null"] }
+        error: { type: [string, "null"] }
+        available: { type: boolean }
+        latest:
+          oneOf:
+            - type: object
+              properties:
+                version: { type: string }
+                notes: { type: string }
+                page: { type: string }
+                published: { type: string }
+            - type: "null"
+        can_apply: { type: boolean }
+        cannot_apply_because: { type: [string, "null"] }
+        supervised: { type: boolean }
+        phase:
+          type: string
+          description: Empty when idle; otherwise downloading, verifying, installing, installed, restarting or failed.
+        apply_error: { type: [string, "null"] }
+        installed: { type: [string, "null"] }
