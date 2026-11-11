@@ -50,7 +50,14 @@ h4 {
 }
 p {
   margin: 0 0 var(--spacing-3);
-  max-width: 64ch;
+  max-width: 90ch;
+}
+/* A box says its whole message on as few lines as it can. */
+.soon p,
+.alert p,
+.empty,
+p.empty {
+  max-width: none;
 }
 a {
   color: inherit;
@@ -246,9 +253,6 @@ footer .fmark i {
   border: 0.2rem solid var(--color-live);
   border-radius: 50%;
 }
-main:has(.page) footer {
-  max-width: 62rem;
-}
 footer a {
   font-weight: 600;
   color: var(--color-text-primary);
@@ -340,7 +344,7 @@ footer a:hover {
 
 /* ---- Pages: a title, then cards. Settings, Clock, Bluetooth and Features share one column width ---- */
 .page {
-  max-width: 62rem;
+  max-width: none;
 }
 .pagehead {
   margin: 0 0 var(--spacing-6);
@@ -1602,18 +1606,17 @@ dialog.dlg textarea {
 
 /* ---- Choosing the picture of the device ---- */
 .lookgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: var(--spacing-3);
-  margin-top: var(--spacing-3);
+  margin: var(--spacing-2) 0 var(--spacing-4);
 }
 button.lookopt {
-  position: relative;
   display: grid;
   grid-template-rows: auto auto;
   gap: var(--spacing-2);
-  justify-items: stretch;
-  width: auto;
+  width: 9.5rem;
   min-height: 0;
   padding: var(--spacing-2);
   border: 2px solid var(--color-card-border);
@@ -1632,11 +1635,12 @@ button.lookopt.on {
   place-items: center;
   aspect-ratio: 4 / 3;
   overflow: hidden;
+  padding: var(--spacing-1);
   border-radius: calc(var(--radius-inner) - 4px);
 }
-.lookart .look,
-.lookart .lookphoto {
-  max-height: 100%;
+.lookart .look {
+  width: 100%;
+  height: 100%;
 }
 .lookname {
   font-size: var(--font-size-sm);
@@ -1651,9 +1655,42 @@ img.lookphoto {
 .devart img.lookphoto {
   aspect-ratio: 4 / 3;
 }
-.lookphotorow {
-  margin-bottom: var(--spacing-3);
+details.ownpic {
+  border: 0;
+  background: none;
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+details.ownpic > summary {
+  display: inline-flex;
+  min-height: 2rem;
+  padding: 0;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+details.ownpic .ownbody {
+  display: grid;
+  justify-items: center;
+  gap: var(--spacing-3);
   margin-top: var(--spacing-3);
+  padding: var(--spacing-4);
+  border: 1px dashed var(--color-card-border);
+  border-radius: var(--radius-inner);
+}
+details.ownpic .ownbody .row {
+  justify-content: center;
+}
+details.ownpic .addressrow input {
+  width: min(24rem, 100%);
+}
+details.ownpic p {
+  margin: 0;
+  max-width: 44ch;
 }
 label.filebtn {
   min-height: 2.5rem;
@@ -1665,4 +1702,98 @@ label.filebtn {
   color: var(--color-text-primary);
   font-size: var(--font-size-sm);
   font-weight: 650;
+}
+
+/* ---- Settings: a vertical list of sections beside the content, full width like Home ---- */
+.settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-4) var(--spacing-8);
+  align-items: start;
+}
+@media (min-width: 56rem) {
+  .settings {
+    grid-template-columns: 13rem minmax(0, 1fr);
+  }
+  .settings .tabs {
+    position: sticky;
+    top: var(--spacing-6);
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 2px;
+    margin: 0;
+    border-bottom: 0;
+  }
+  .settings .tabs a {
+    margin: 0;
+    padding: var(--spacing-2) var(--spacing-4);
+    border-bottom: 0;
+    border-left: 3px solid transparent;
+    border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
+  }
+  .settings .tabs a:focus-visible {
+    outline-offset: -3px;
+  }
+  .settings .tabs a:hover {
+    background: var(--color-background-muted);
+  }
+  .settings .tabs a[aria-current="page"] {
+    border-left-color: var(--color-live);
+    background: var(--color-background-muted);
+  }
+}
+
+/* ---- A time of day you can type ---- */
+.timefield {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  flex-wrap: wrap;
+}
+.timefield input[type="text"] {
+  width: 4rem;
+  max-width: 4rem;
+  min-height: 3rem;
+  padding: 0 var(--spacing-2);
+  text-align: center;
+  font-size: 1.375rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.timefield select {
+  width: auto;
+  min-width: 5rem;
+  min-height: 3rem;
+  font-size: 1.125rem;
+  font-weight: 650;
+}
+.timecolon {
+  font-size: 1.375rem;
+  font-weight: 700;
+}
+
+/* ---- A setting that is one switch or choice: words on the left, the control at the right edge ---- */
+.switchrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-6);
+  padding: var(--spacing-4) 0;
+  border-top: 1px solid var(--color-card-border);
+}
+.switchrow > div {
+  min-width: 0;
+}
+.switchrow label {
+  margin: 0;
+}
+.switchrow p {
+  margin: var(--spacing-1) 0 0;
+}
+.switchrow select {
+  width: 16rem;
+  max-width: 45%;
+}
+.card > .soon {
+  margin: var(--spacing-3) 0;
 }

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 // Keep in step with `CSP` in crates/core/src/ui.rs (the smoke test checks the page works under it).
 export const CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 export const PASSWORD = "correct horse battery";
 /** The recovery code the mock device holds in password mode. */
 export const RECOVERY = "ABCDE-FGHJK-MNPQR-STUVW";

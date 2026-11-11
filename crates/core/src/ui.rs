@@ -56,9 +56,10 @@ const PAGE: &str = include_str!(concat!(env!("OUT_DIR"), "/ui-page.html"));
 const PAGE_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui-page.html.gz"));
 /// The release notes, shown on the About card (REQ-CFG-013, 025).
 const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
-/// Only the page's own inline script and style, and only calls back to this origin. Images are only ones the page holds
-/// itself as data (the picture of the device a person chose), never from another site.
-const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; \
+/// Only the page's own inline script and style, and only calls back to this origin. Pictures are the one thing it may
+/// load from elsewhere, and only when a person gives an image address for the picture of their device (or has one saved
+/// in the page as data); nothing else on the page asks another site for anything.
+const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data: https: http:; \
                    base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 /// API bodies are tiny; refuse anything larger.
 const MAX_BODY: usize = 4096;
@@ -505,7 +506,7 @@ async fn voices() -> Resp {
         Err(e) => error(
             StatusCode::BAD_GATEWAY,
             &format!(
-                "The speech server does not list its voices ({e}). Type the voice name instead."
+                "This speech server does not share a list of its voices ({e}). Type the name of one it accepts; its documentation lists them."
             ),
         ),
     }
@@ -1069,6 +1070,9 @@ async fn recover_window(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp 
 #[serde(deny_unknown_fields)]
 struct Speak {
     text: String,
+    /// A voice to try for this phrase, so it can be heard before it is saved.
+    #[serde(default)]
+    voice: Option<String>,
 }
 
 /// "Test speak": queue a phrase for the speaker to say.
@@ -1089,7 +1093,15 @@ async fn speak(core: &Core, body: Incoming) -> Resp {
     if let Some((status, reason, message)) = speak_refusal(&core.ui_status()) {
         return speak_refused(status, reason, message);
     }
-    if core.queue_speech(text) {
+    let voice = req
+        .voice
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if voice.is_some_and(|v| v.len() > 128 || v.chars().any(char::is_control)) {
+        return error(StatusCode::BAD_REQUEST, "that voice name is not valid");
+    }
+    if core.queue_speech_as(text, voice) {
         json_reply(StatusCode::ACCEPTED, &json!({ "ok": true, "queued": true }))
     } else {
         speak_refused(

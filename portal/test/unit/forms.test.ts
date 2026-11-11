@@ -210,7 +210,7 @@ test("a settings file is checked before anything is sent", () => {
     const r = parseSettingsFile(t);
     return typeof r === "string" ? r : "loaded";
   };
-  const notOurs = "That is not a ClawDot settings file. Use a file made by “Save my settings”.";
+  const notOurs = "That is not a ClawDot settings file. Use a file made by “Download backup”.";
   for (const bad of [
     "{nope",
     "[]",

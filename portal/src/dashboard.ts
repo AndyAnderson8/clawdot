@@ -126,7 +126,7 @@ export function attention(st: Status | null, mode: string, update?: UpdateStatus
       id: "quiet",
       title: "Quiet hours are on",
       why: "Messages from your senders wait until the quiet window ends. Alarms and timers still ring.",
-      to: "#/settings/safety",
+      to: "#/settings/assistant",
       label: "Change quiet hours",
     });
   }
@@ -155,7 +155,7 @@ const REFUSALS: Record<SpeakRefusal, Omit<SpeakBlock, "reason">> = {
   muted: { text: "The speaker is muted. Press its mute button to turn it back on." },
   quiet_hours: {
     text: "Quiet hours are on.",
-    to: "#/settings/safety",
+    to: "#/settings/assistant",
     label: "Change quiet hours",
   },
 };

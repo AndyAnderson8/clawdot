@@ -1,8 +1,10 @@
 import type { JSX } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { reminderBody } from "../forms.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
+import { TimeField } from "../timefield.tsx";
+import { AddButton, Dialog } from "../dialog.tsx";
 import { DAYS, fmt, hhmm, parts, repeatText, span, whenText, zoneName } from "../time.ts";
 import type { ScheduleItem, ScheduleKind, ScheduleList } from "../types.ts";
 
@@ -41,8 +43,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const [days, setDays] = useState<number[]>([]);
   const [date, setDate] = useState(today());
   const [time2, setTime2] = useState("09:00");
-  const [focusTick, setFocusTick] = useState(0);
-  const formRef = useRef<HTMLFormElement>(null);
+  const [open, setOpen] = useState(false);
 
   usePolled(async () => {
     try {
@@ -54,14 +55,8 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
     }
   });
 
-  // After "Edit": bring the form into view and put the cursor in the name box.
-  useEffect(() => {
-    if (!focusTick) return;
-    formRef.current?.scrollIntoView({ block: "center" });
-    document.getElementById("rlabel")?.focus();
-  }, [focusTick]);
-
   const reset = () => {
+    setOpen(false);
     setEditing(0);
     setLabel("");
     setAmount("10");
@@ -105,7 +100,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
       setDate(q.date);
       setTime2(q.time);
     }
-    setFocusTick((n) => n + 1);
+    setOpen(true);
   };
 
   const cancel = async (i: ScheduleItem) => {
@@ -132,10 +127,20 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   return (
     <div class="stack">
       <section class="card" id="clocklist">
-        <h3>
-          {PLURAL[kind]}
-          <span class="count">{here.length}</span>
-        </h3>
+        <div class="head">
+          <h3>
+            {PLURAL[kind]}
+            <span class="count">{here.length}</span>
+          </h3>
+          <AddButton
+            label={ADD[kind]}
+            id="addclock"
+            onClick={() => {
+              reset();
+              setOpen(true);
+            }}
+          />
+        </div>
         <ul class="rows">
           {data && !here.length ? <li class="empty">{EMPTY[kind]}</li> : null}
           {here.map((i) => (
@@ -159,109 +164,110 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
         {note ? <p class="mut chartnote">{note}</p> : null}
       </section>
 
-      <form class="panel sgroup" ref={formRef} onSubmit={submit}>
-        <h3>{editing ? "Change this " + noun : ADD[kind]}</h3>
-        {kind === "timer" ? (
-          <div class="srow" id="rtimer">
+      <Dialog id="clockdialog" title={editing ? "Change this " + noun : ADD[kind]} open={open} onClose={reset}>
+        <form class="dlgform" onSubmit={submit}>
+          {kind === "timer" ? (
+            <div class="srow" id="rtimer">
+              <div class="slabel">
+                <label for="ramount">Length</label>
+              </div>
+              <div class="sctl">
+                <div class="row">
+                  <input
+                    id="ramount"
+                    type="number"
+                    min="1"
+                    max="10080"
+                    value={amount}
+                    onInput={(e) => setAmount(e.currentTarget.value)}
+                  />
+                  <select id="runit" aria-label="Unit" value={unit} onChange={(e) => setUnit(e.currentTarget.value)}>
+                    <option value="60">minutes</option>
+                    <option value="3600">hours</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {kind === "alarm" ? (
+            <div id="ralarm">
+              <div class="srow">
+                <div class="slabel">
+                  <label for="rtime">Time</label>
+                </div>
+                <div class="sctl">
+                  <TimeField id="rtime" value={time} onChange={setTime} />
+                </div>
+              </div>
+              <div class="srow">
+                <div class="slabel">
+                  <label>Repeat on</label>
+                  <p class="mut">Leave every day off to ring once, at the next time it comes round.</p>
+                </div>
+                <div class="sctl">
+                  <fieldset class="days">
+                    <legend class="sr">Repeat on</legend>
+                    {DAYS.map((d, i) => (
+                      <label key={d}>
+                        <input
+                          type="checkbox"
+                          value={i}
+                          checked={days.includes(i)}
+                          onChange={(e) =>
+                            setDays(e.currentTarget.checked ? [...days, i] : days.filter((x) => x !== i))
+                          }
+                        />
+                        {d}
+                      </label>
+                    ))}
+                  </fieldset>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {kind === "reminder" ? (
+            <div id="rrem">
+              <div class="srow">
+                <div class="slabel">
+                  <label for="rdate">Date</label>
+                </div>
+                <div class="sctl">
+                  <input id="rdate" type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} />
+                </div>
+              </div>
+              <div class="srow">
+                <div class="slabel">
+                  <label for="rtime2">Time</label>
+                </div>
+                <div class="sctl">
+                  <TimeField id="rtime2" value={time2} onChange={setTime2} />
+                </div>
+              </div>
+            </div>
+          ) : null}
+          <div class="srow">
             <div class="slabel">
-              <label for="ramount">Length</label>
+              <label for="rlabel">{kind === "reminder" ? "What should it say?" : "Name (optional)"}</label>
             </div>
             <div class="sctl">
-              <div class="row">
-                <input
-                  id="ramount"
-                  type="number"
-                  min="1"
-                  max="10080"
-                  value={amount}
-                  onInput={(e) => setAmount(e.currentTarget.value)}
-                />
-                <select id="runit" aria-label="Unit" value={unit} onChange={(e) => setUnit(e.currentTarget.value)}>
-                  <option value="60">minutes</option>
-                  <option value="3600">hours</option>
-                </select>
-              </div>
+              <input
+                id="rlabel"
+                type="text"
+                maxLength={100}
+                placeholder={PLACEHOLDER[kind]}
+                value={label}
+                onInput={(e) => setLabel(e.currentTarget.value)}
+              />
             </div>
           </div>
-        ) : null}
-        {kind === "alarm" ? (
-          <div id="ralarm">
-            <div class="srow">
-              <div class="slabel">
-                <label for="rtime">Time</label>
-              </div>
-              <div class="sctl">
-                <input id="rtime" type="time" value={time} onInput={(e) => setTime(e.currentTarget.value)} />
-              </div>
-            </div>
-            <div class="srow">
-              <div class="slabel">
-                <label>Repeat on</label>
-                <p class="mut">Leave every day off to ring once, at the next time it comes round.</p>
-              </div>
-              <div class="sctl">
-                <fieldset class="days">
-                  <legend class="sr">Repeat on</legend>
-                  {DAYS.map((d, i) => (
-                    <label key={d}>
-                      <input
-                        type="checkbox"
-                        value={i}
-                        checked={days.includes(i)}
-                        onChange={(e) => setDays(e.currentTarget.checked ? [...days, i] : days.filter((x) => x !== i))}
-                      />
-                      {d}
-                    </label>
-                  ))}
-                </fieldset>
-              </div>
-            </div>
-          </div>
-        ) : null}
-        {kind === "reminder" ? (
-          <div id="rrem">
-            <div class="srow">
-              <div class="slabel">
-                <label for="rdate">Date</label>
-              </div>
-              <div class="sctl">
-                <input id="rdate" type="date" value={date} onInput={(e) => setDate(e.currentTarget.value)} />
-              </div>
-            </div>
-            <div class="srow">
-              <div class="slabel">
-                <label for="rtime2">Time</label>
-              </div>
-              <div class="sctl">
-                <input id="rtime2" type="time" value={time2} onInput={(e) => setTime2(e.currentTarget.value)} />
-              </div>
-            </div>
-          </div>
-        ) : null}
-        <div class="srow">
-          <div class="slabel">
-            <label for="rlabel">{kind === "reminder" ? "What should it say?" : "Name (optional)"}</label>
-          </div>
-          <div class="sctl">
-            <input
-              id="rlabel"
-              type="text"
-              maxLength={100}
-              placeholder={PLACEHOLDER[kind]}
-              value={label}
-              onInput={(e) => setLabel(e.currentTarget.value)}
-            />
-          </div>
-        </div>
-        <div class="row">
-          <button>{editing ? "Save changes" : "Add"}</button>
-          {editing ? (
+          <div class="row dlgfoot">
+            <button>{editing ? "Save changes" : "Add"}</button>
             <button class="plain" type="button" onClick={reset}>
-              Stop editing
+              Cancel
             </button>
-          ) : null}
-        </div>
-      </form>
+          </div>
+        </form>
+      </Dialog>
     </div>
   );
 }

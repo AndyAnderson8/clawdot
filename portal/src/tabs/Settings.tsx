@@ -2,6 +2,7 @@ import type { JSX } from "preact";
 import { useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { currentText, FROM, labelOf, settingsPatch, type SettingSpec } from "../forms.ts";
+import { TimeField } from "../timefield.tsx";
 import { fail, get, say, set } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
 import type { Settings as SettingsData } from "../types.ts";
@@ -159,15 +160,7 @@ export function Group(props: {
             />
           );
         } else if (sp.kind === "voice") {
-          ctl = (
-            <VoiceControl
-              id={id}
-              value={v}
-              saved={current[sp.key] ?? ""}
-              off={sp.off}
-              onInput={(x) => setVals({ ...vals, [sp.key]: x })}
-            />
-          );
+          ctl = <VoiceControl id={id} value={v} off={sp.off} onInput={(x) => setVals({ ...vals, [sp.key]: x })} />;
         } else if (sp.kind === "area") {
           ctl = <textarea id={id} rows={7} maxLength={4000} value={v} onInput={input} />;
         } else if (sp.kind === "board") {
@@ -182,11 +175,19 @@ export function Group(props: {
             <select id={id} value={v} disabled={sp.off} onChange={input}>
               <option value="true">On</option>
               <option value="false">Off</option>
-              {f.saved ? <option value="">Go back to the default or configuration file</option> : null}
+              {f.saved ? <option value="">Go back to the default</option> : null}
             </select>
           );
         } else if (sp.kind === "time") {
-          ctl = <input id={id} type="time" value={v} disabled={sp.off} onInput={input} />;
+          ctl = (
+            <TimeField
+              id={id}
+              value={v}
+              disabled={sp.off}
+              clearable
+              onChange={(x) => setVals({ ...vals, [sp.key]: x })}
+            />
+          );
         } else if (sp.kind === "number") {
           const whole = sp.min !== undefined;
           ctl = (

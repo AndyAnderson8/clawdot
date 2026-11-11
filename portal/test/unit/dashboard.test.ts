@@ -53,7 +53,7 @@ test("attention lists each problem with where to fix it, most important first, a
   );
   assert.equal(all[0]!.to, "#/settings/assistant");
   assert.equal(all.find((a) => a.id === "password")!.to, "#/settings/security");
-  assert.equal(all.find((a) => a.id === "quiet")!.to, "#/settings/safety");
+  assert.equal(all.find((a) => a.id === "quiet")!.to, "#/settings/assistant");
   // A muted speaker is fixed with its own button, so there is no link, but the text says how.
   assert.equal(all.find((a) => a.id === "muted")!.to, undefined);
   assert.match(all.find((a) => a.id === "muted")!.why, /mute button/);

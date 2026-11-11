@@ -132,6 +132,14 @@ async function open(mode: "setup" | "password" | "open", hash = "", extra: Recor
 }
 const T = (expr: string) => b.ev(`T.${expr}`);
 const eq = async (expr: string, want: unknown, what: string) => assert.deepEqual(await b.ev(expr), want, what);
+/** Type a time (24-hour "HH:MM") into the hour, minute and AM or PM boxes of a time field. */
+const setTime = async (id: string, hhmm: string) => {
+  const [h = 0, m = 0] = hhmm.split(":").map(Number);
+  const twelve = await b.ev<boolean>(`!!T.q('#${id}-p')`);
+  await T(`set('#${id}', '${twelve ? h % 12 || 12 : h}')`);
+  await T(`set('#${id}-m', '${m}')`);
+  if (twelve) await T(`set('#${id}-p', '${h >= 12 ? "pm" : "am"}')`);
+};
 const section = async (id: string, label: string) => {
   await b.ev(`location.hash = "#/settings/${id}"`);
   await b.until(`T.text('.tabs a[aria-current="page"]') === ${JSON.stringify(label)}`, `the ${label} section`);
@@ -327,6 +335,19 @@ await step("Home: the picture of the device is chosen in a dialog, with a photo 
   await T(`click('.lookopt:nth-child(3)')`);
   await eq(`T.q('.lookopt:nth-child(3)').getAttribute('aria-checked')`, "true", "the choice is marked");
   await eq(`localStorage.getItem('clawdot-look')`, "computer", "and remembered by this browser");
+  await eq(`T.q('#ownpic').open`, false, "your own picture is a side option, folded away");
+  // an address must be a whole address, and must load as a picture
+  await T(`click('#ownpic summary')`);
+  await T(`set('#lookurl', 'nope')`);
+  await T(`submit('#ownpic form')`);
+  await b.until(`T.text('#msg').startsWith('Enter the whole address')`, "a half address is explained");
+  await T(`set('#lookurl', location.origin + '/none.png')`);
+  await T(`submit('#ownpic form')`);
+  await b.until(
+    `T.text('#msg') === 'That address did not load as a picture.'`,
+    "an address that is not a picture is said so",
+  );
+  await eq(`localStorage.getItem('clawdot-look')`, "computer", "and nothing changed");
   // a photo from this computer: made small, kept here, shown on Home
   await b.ev(`(async () => {
     const c = document.createElement('canvas'); c.width = 1200; c.height = 600;
@@ -416,13 +437,21 @@ await step("Clock: alarms, timers, reminders and the stopwatch each have their o
   await eq(`T.rows()[0].includes('Weekdays at')`, true, "repeat text");
   await eq(`T.text('#clocklist h3').startsWith('Alarms')`, true, "the list has a title and a count");
   await eq(`T.q('#rkind') === null`, true, "no type to choose: this page makes alarms");
-  await eq(`T.text('#panel form h3')`, "Add an alarm", "the form says what it makes");
-  await T(`set('#rtime', '06:30')`);
+  await eq(`T.q('#clockdialog').open`, false, "the form is not in the way");
+  await T(`click('#addclock')`);
+  await b.until(`T.q('#clockdialog').open === true`, "the dialog opens");
+  await eq(`T.text('#clockdialog h3')`, "Add an alarm", "it says what it makes");
+  await setTime("rtime", "06:30");
+  await eq(
+    `T.q('#rtime').tagName + T.q('#rtime-m').tagName`,
+    "INPUTINPUT",
+    "the hour and minute are plain boxes you can type in",
+  );
   await T(`set('#rlabel', 'gym')`);
   await T(`click('.days input[value="0"]')`);
   await T(`click('.days input[value="2"]')`);
-  await T(`submit('#panel form.panel')`);
-  await b.until(`T.rows().length === 2`, "alarm added");
+  await T(`submit('#clockdialog form')`);
+  await b.until(`T.rows().length === 2 && T.q('#clockdialog').open === false`, "alarm added, and the dialog closes");
   const post = mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").pop()!;
   assert.deepEqual(post.body, { kind: "alarm", label: "gym", hour: 6, minute: 30, days: [0, 2] });
   // Timers: the timer is listed here and the alarms are not.
@@ -431,15 +460,15 @@ await step("Clock: alarms, timers, reminders and the stopwatch each have their o
   await eq(`T.rows()[0].startsWith('pasta') && T.rows()[0].includes('Rings in 10 min')`, true, "timer text");
   await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Edit')`);
   await eq(`T.q('#rlabel').value`, "pasta", "edit loads the label");
-  await eq(`T.text('#panel form h3')`, "Change this timer", "edit title");
+  await eq(`T.text('#clockdialog h3')`, "Change this timer", "edit title");
   await T(`set('#rlabel', 'tea')`);
   await T(`set('#ramount', '20')`);
-  await T(`submit('#panel form.panel')`);
+  await T(`submit('#clockdialog form')`);
   await b.until(`T.rows()[0].startsWith('tea')`, "edit saved");
   const put = mock.log.find((l) => l.method === "PUT")!;
   assert.equal(put.path, "/api/schedule/1");
   assert.deepEqual(put.body, { kind: "timer", label: "tea", seconds: 1200 });
-  await eq(`T.text('#panel form h3')`, "Add a timer", "form left edit mode");
+  await eq(`T.q('#clockdialog').open`, false, "the editor closed after saving");
   await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Cancel')`);
   await b.until(
     `T.rows().length === 1 && T.q('#clocklist .empty') !== null`,
@@ -448,9 +477,10 @@ await step("Clock: alarms, timers, reminders and the stopwatch each have their o
   assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/schedule/1"));
   // Reminders: validation.
   await b.ev(`location.hash = '#/clock/reminders'`);
+  await T(`click('#addclock')`);
   await b.until(`!!T.q('#rdate')`, "the reminder form");
   await T(`set('#rdate', '')`);
-  await T(`submit('#panel form.panel')`);
+  await T(`submit('#clockdialog form')`);
   await eq(`T.text('#msg')`, "Pick a date and a time for the reminder.", "validation message");
   await eq(`(T.text('#clocklist p.mut') ?? '').length > 0`, true, "zone note present");
   // Stopwatch: used by voice, so this page explains and offers nothing that would not work.
@@ -544,17 +574,22 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
   await shot("settings-memory");
   await eq(`T.rows("#notelist > li")[0].includes("my printer is <b>Pixel</b>")`, true, "shown literally");
   await eq(`T.all("#panel #notelist b").length`, 0, "no markup from a memory");
+  await eq(`T.q("#notedialog").open`, false, "the add form is not in the way");
+  await T(`click("#addnote")`);
+  await b.until(`T.q("#notedialog").open === true`, "the dialog opens");
   await T(`set("#note-text", "the spare key is under the pot")`);
   await T(`submit("#noteform")`);
   await b.until(`T.rows("#notelist > li").length === 2`, "added");
   assert.deepEqual(mock.log.filter((l) => l.method === "POST" && l.path === "/api/notes").pop()!.body, {
     text: "the spare key is under the pot",
   });
-  await eq(`T.q("#note-text").value`, "", "box cleared");
+  await b.until(`T.q("#notedialog").open === false`, "the dialog closes once it is saved");
+  await T(`click("#addnote")`);
   await T(`set("#note-text", "the key is sk-abc")`);
   await T(`submit("#noteform")`);
   await b.until(`T.text("#noteform .errtext").includes("password or a key")`, "a refusal is shown in the form");
   await eq(`T.rows("#notelist > li").length`, 2, "nothing was added");
+  await T(`clickText("#notedialog", "Cancel")`);
   // forgetting asks first: declining does nothing
   await b.ev(`window.confirm = () => false`);
   await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
@@ -571,7 +606,7 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
   await section("memory", "Memory");
   await b.until(`!!T.q("#notesoff")`, "the off notice");
   await eq(`T.q("#notesoff a").getAttribute("href")`, "#/settings/features", "it says where to turn it on");
-  await eq(`T.q("#note-text").disabled`, true, "adding is disabled while memory is off");
+  await eq(`T.q("#addnote").disabled`, true, "adding is disabled while memory is off");
 });
 
 await step("Activity: plain outcomes, filters, paging, text only, read-only", async () => {
@@ -598,7 +633,6 @@ await step("Activity: plain outcomes, filters, paging, text only, read-only", as
   );
   await eq(`T.rows("#auditlist > li")[5].includes("waiting for your yes")`, true, "held is explained");
   await eq(`T.rows("#auditlist > li")[5].includes("token: [redacted]")`, true, "redacted argument shown");
-  await eq(`T.text("#policy").includes("100 actions, 20 of them")`, true, "policy line");
   await eq(
     `T.all("#panel button").map((x) => x.textContent).filter((x) => /delete|clear all|remove/i.test(x)).length`,
     0,
@@ -962,20 +996,21 @@ await step(
     );
     await eq(`T.q('#hearvoice').disabled`, true, "nothing to hear until a voice is chosen");
     await T(`set('#f-voice', 'nova')`);
-    await eq(`T.q('#hearvoice').disabled`, true, "a new choice must be saved before it can be heard");
-    await eq(`T.text('.voicepick .mut')`, "Save to hear this voice.", "and it says so");
+    await eq(`T.q('#hearvoice').disabled`, false, "a choice can be heard at once, before it is saved");
+    await T(`click('#hearvoice')`);
+    await b.until(`T.text('#msg').startsWith('Playing a sample')`, "the sample is on its way");
+    const heard = mock.log.filter((l) => l.path === "/api/speak").pop()!.body as { text: string; voice: string };
+    assert.ok(heard.text.startsWith("Hello. This is how I sound."));
+    assert.equal(heard.voice, "nova", "in the voice that was picked, not the saved one");
+    assert.ok(
+      !mock.log.some((l) => l.method === "PUT" && (l.body as { voice?: string }).voice === "nova"),
+      "and nothing was saved by listening",
+    );
     await b.ev(`T.q('#f-voice').form.requestSubmit()`);
-    await b.until(`T.text('#msg') === 'Saved.' && !T.q('#hearvoice').disabled`, "saved, so it can be heard");
+    await b.until(`T.text('#msg') === 'Saved.'`, "saved");
     assert.deepEqual(mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").pop()!.body, {
       voice: "nova",
     });
-    await T(`click('#hearvoice')`);
-    await b.until(`T.text('#msg').startsWith('Playing a sample')`, "the sample is on its way");
-    assert.ok(
-      String((mock.log.filter((l) => l.path === "/api/speak").pop()!.body as { text: string }).text).startsWith(
-        "Hello. This is how I sound.",
-      ),
-    );
     await eq(`T.q('#sayform') !== null`, true, "the speaker test is on this page, not among the settings");
 
     // Time zones show their offset, west to east.
@@ -1063,7 +1098,7 @@ await step("Settings: theme is light unless chosen, remembered, and never follow
 
 await step("Settings: sections in a tab strip, native dropdowns, no horizontal scroll at 360 px", async () => {
   await open("open", "#/settings");
-  await b.until(`T.all('.tabs a').length === 13`, "the section tabs");
+  await b.until(`T.all('.tabs a').length === 12`, "the section tabs");
   await eq(
     `T.all('.tabs a').map((a) => a.textContent)`,
     [
@@ -1077,15 +1112,14 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
       "Lights",
       "Memory",
       "Notifications",
-      "Safety",
       "Security",
       "About",
     ],
     "every kind of configuration has a named section",
   );
   await eq(`T.all('.tabs a[aria-current="page"]').map((a) => a.textContent)`, ["General"], "the first is shown");
-  await T(`click('.tabs a[href="#/settings/safety"]')`);
-  await b.until(`T.text('.tabs a[aria-current="page"]') === 'Safety'`, "a section");
+  await T(`click('.tabs a[href="#/settings/security"]')`);
+  await b.until(`T.text('.tabs a[aria-current="page"]') === 'Security'`, "a section");
   await viewport(360);
   await eq(`document.documentElement.scrollWidth <= document.documentElement.clientWidth`, true, "no sideways scroll");
   const pages = [
@@ -1108,7 +1142,6 @@ await step("Settings: sections in a tab strip, native dropdowns, no horizontal s
     "lights",
     "memory",
     "notifications",
-    "safety",
     "security",
     "about",
   ])
@@ -1150,7 +1183,6 @@ await step("every page uses the same card pattern: titles, rows, one width for i
     "tools",
     "memory",
     "notifications",
-    "safety",
     "security",
     "about",
   ])
@@ -1160,9 +1192,9 @@ await step("every page uses the same card pattern: titles, rows, one width for i
     await b.until(`!!T.q('#panel .card, #panel form.panel')`, `cards on ${hash}`);
     // Nothing sits loose on the page grey except the page title, a lead paragraph and the section tabs.
     const loose = await b.ev<string[]>(`(() => {
-      const root = document.querySelector('#panel .page > .stack, #panel .page > .features, #panel .page > .pane, #panel .page');
+      const root = document.querySelector('#panel .page > .settings > .pane, #panel .page > .stack, #panel .page > .features, #panel .page > .pane, #panel .page');
       return [...(root?.children ?? [])]
-        .filter((e) => !e.matches('.card, form.panel, .soon, .stack, .features, header.pagehead, nav.tabs, p.lead, .pane, details'))
+        .filter((e) => !e.matches('.card, form.panel, .soon, .stack, .features, header.pagehead, nav.tabs, p.lead, .pane, .settings, details'))
         .map((e) => e.tagName.toLowerCase() + (e.className ? '.' + e.className : ''));
     })()`);
     assert.deepEqual(loose, [], `loose blocks on ${hash}`);
@@ -1192,7 +1224,6 @@ await step("every page fits a 360 px and a 320 px phone with long content and a 
     "tools",
     "memory",
     "notifications",
-    "safety",
     "security",
     "about",
   ])
@@ -1279,17 +1310,17 @@ await step("Settings: numbers show their source and range, save only what change
   await b.ev(`T.q('#f-agent_max_rounds').form.querySelector('.head button').click()`);
   await b.until(`T.q('#f-agent_max_rounds').value === '8'`, "back to the default");
   assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { agent_max_rounds: null });
-  // safety: quiet hours
-  await section("safety", "Safety");
-  await eq(`T.q('#f-quiet_start').type`, "time", "quiet hours use a time box");
+  // quiet hours are on the Assistant tab
+  await section("assistant", "Assistant");
+  await eq(`T.q('#f-quiet_start').getAttribute('inputmode')`, "numeric", "quiet hours use a typed time");
   await eq(`T.q('#f-dry_run') === null`, true, "practice mode is a switch under Features");
-  await T(`set('#f-quiet_start', '22:00')`);
+  await setTime("f-quiet_start", "22:00");
   await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
   await b.until(
     `T.all('.errtext').some((e) => e.textContent.startsWith('Set both the quiet hours'))`,
     "needs both ends",
   );
-  await T(`set('#f-quiet_end', '07:00')`);
+  await setTime("f-quiet_end", "07:00");
   await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
   await b.until(`T.text('#msg') === 'Saved.'`, "quiet hours saved");
   assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, {
@@ -1482,6 +1513,7 @@ await step("Updates: Home says a new version exists, and Features can turn the d
 await step("a 10-second refresh keeps what you typed", async () => {
   await open("open", "#/clock/timers");
   await b.until(`T.rows().length === 1`, "rows");
+  await T(`click('#addclock')`);
   await T(`set('#rlabel', 'half typed')`);
   (mock.state["schedule"] as unknown[]).push({
     id: 9,

@@ -17,7 +17,7 @@ export const PHOTO_SIDE = 480;
 export function photoPref(): string {
   try {
     const v = localStorage.getItem(PHOTO) ?? "";
-    return v.startsWith("data:image/") ? v : "";
+    return v.startsWith("data:image/") || /^https?:\/\/\S+$/.test(v) ? v : "";
   } catch {
     return "";
   }
@@ -41,7 +41,7 @@ export function setLookPref(id: LookId): void {
   }
 }
 
-/** Keeps a photo (as a small picture inside this browser) and chooses it. An empty string removes it. */
+/** Keeps the person's own picture (a small photo inside this browser, or an image address) and chooses it. An empty string removes it. */
 export function setPhoto(dataUrl: string): void {
   try {
     if (dataUrl) {
@@ -89,16 +89,16 @@ export function Look(props: { id: LookId; state?: string }): JSX.Element {
     <svg class="look" data-state={props.state ?? "idle"} viewBox="0 0 160 120" aria-hidden="true">
       {props.id === "puck" ? (
         <>
-          <ellipse cx="80" cy="100" rx="62" ry="9" class="floor" />
-          <path d="M20 66v22c0 9 28 16 60 16s60-7 60-16V66Z" class="body" />
-          <ellipse cx="80" cy="66" rx="60" ry="16" class="top" />
-          <ellipse cx="80" cy="66" rx="50" ry="12" fill="none" class="led" />
-          <ellipse cx="80" cy="65" rx="42" ry="8.500" class="cap" />
+          <ellipse cx="80" cy="102" rx="62" ry="8" class="floor" />
+          <path d="M20 64v24c0 9 28 16 60 16s60-7 60-16V64Z" class="body" />
+          <ellipse cx="80" cy="64" rx="60" ry="16" class="top" />
+          <ellipse cx="80" cy="64" rx="53" ry="12.500" fill="none" class="led" />
+          <ellipse cx="80" cy="64" rx="45" ry="9.500" class="cap" />
           <g class="holes">
-            <circle cx="62" cy="64" r="1.600" />
-            <circle cx="72" cy="66" r="1.600" />
-            <circle cx="88" cy="66" r="1.600" />
-            <circle cx="98" cy="64" r="1.600" />
+            <ellipse cx="53" cy="64" rx="3.200" ry="1.400" />
+            <ellipse cx="68" cy="64" rx="3.200" ry="1.400" />
+            <ellipse cx="92" cy="64" rx="3.200" ry="1.400" />
+            <ellipse cx="107" cy="64" rx="3.200" ry="1.400" />
           </g>
         </>
       ) : null}
@@ -107,14 +107,11 @@ export function Look(props: { id: LookId; state?: string }): JSX.Element {
           <ellipse cx="80" cy="108" rx="34" ry="6" class="floor" />
           <path d="M46 28v72c0 5 15 9 34 9s34-4 34-9V28Z" class="body" />
           <ellipse cx="80" cy="28" rx="34" ry="9" class="top" />
-          <ellipse cx="80" cy="30" rx="34" ry="9" fill="none" class="led" />
+          <ellipse cx="80" cy="28" rx="30" ry="7" fill="none" class="led" />
           <g class="holes">
-            <circle cx="66" cy="62" r="1.400" />
-            <circle cx="80" cy="62" r="1.400" />
-            <circle cx="94" cy="62" r="1.400" />
-            <circle cx="66" cy="76" r="1.400" />
-            <circle cx="80" cy="76" r="1.400" />
-            <circle cx="94" cy="76" r="1.400" />
+            {[50, 62, 74, 86].flatMap((y) =>
+              [64, 80, 96].map((x) => <circle key={x + "-" + y} cx={x} cy={y} r="1.500" />),
+            )}
           </g>
         </>
       ) : null}
