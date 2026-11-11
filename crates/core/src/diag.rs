@@ -67,6 +67,25 @@ pub fn recent(limit: usize) -> Vec<Line> {
         .collect()
 }
 
+/// The commit this program was built from: the short hash, with `-dirty` when tracked files differed, or `unknown`
+/// when the build had no git (a source tarball). Set by `build.rs`.
+pub const COMMIT: &str = env!("CLAWDOT_BUILD_COMMIT");
+
+/// Whether tracked files differed from [`COMMIT`] when this was built.
+pub const DIRTY: bool = matches!(env!("CLAWDOT_BUILD_DIRTY").as_bytes(), b"1");
+
+/// The version and commit as one string, such as `0.0.0 (a1b2c3d4e)` or `0.0.0 (a1b2c3d4e-dirty)`. The version
+/// comes first and is unchanged, so anything that looks for it in the text still finds it.
+#[must_use]
+pub fn build_id() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match (COMMIT, DIRTY) {
+        ("unknown", _) => format!("{version} (unknown commit)"),
+        (c, true) => format!("{version} ({c}-dirty)"),
+        (c, false) => format!("{version} ({c})"),
+    }
+}
+
 /// What this program is: version, build profile, platform and the optional features compiled in (REQ-CFG-066).
 #[must_use]
 pub fn build_info() -> Value {
@@ -85,6 +104,9 @@ pub fn build_info() -> Value {
     }
     json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "commit": COMMIT,
+        "dirty": DIRTY,
+        "id": build_id(),
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -134,5 +156,17 @@ mod tests {
         assert!(["debug", "release"].contains(&b["profile"].as_str().unwrap()));
         assert!(b["os"].as_str().is_some_and(|s| !s.is_empty()));
         assert!(b["features"].is_array());
+    }
+
+    #[test]
+    fn the_build_id_keeps_the_version_first_and_names_the_commit() {
+        let b = build_info();
+        let id = build_id();
+        assert!(id.starts_with(env!("CARGO_PKG_VERSION")), "{id}");
+        assert_eq!(b["id"], id);
+        assert_eq!(b["commit"], COMMIT);
+        assert_eq!(b["dirty"], DIRTY);
+        assert!(id.contains(COMMIT) || COMMIT == "unknown", "{id}");
+        assert!(COMMIT.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 }

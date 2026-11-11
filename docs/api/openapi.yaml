@@ -2179,7 +2179,10 @@ components:
     BuildInfo:
       type: object
       properties:
-        version: { type: string }
+        version: { type: string, description: "The release version. Unchanged by the commit; the updater compares this." }
+        commit: { type: string, description: "Short git commit the program was built from, or `unknown` when built without git." }
+        dirty: { type: boolean, description: "Whether tracked files differed from the commit at build time." }
+        id: { type: string, description: "Version and commit as one line, such as `0.0.0 (a1b2c3d4e-dirty)`; the same text `clawdot --version` prints after the name." }
         profile: { type: string }
         os: { type: string }
         arch: { type: string }
