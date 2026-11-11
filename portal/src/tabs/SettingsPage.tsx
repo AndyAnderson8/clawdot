@@ -1,5 +1,4 @@
 import type { JSX } from "preact";
-import { Fragment } from "preact";
 import { useState } from "preact/hooks";
 import { api, keep } from "../api.ts";
 import { restartText, type SettingSpec } from "../forms.ts";
@@ -195,6 +194,19 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
         intro="How far the assistant may go to answer one request. Lower numbers make it stop sooner and cost less."
         specs={LIMITS}
       />
+      <Group
+        title="Quiet hours"
+        settings={s}
+        intro={
+          "From the first time to the second, messages from your senders wait unless they are urgent. Alarms, timers, and reminders you set still ring. Leave both empty for no quiet hours. Times are in " +
+          zoneName(String(sv("zone") || "UTC")) +
+          "."
+        }
+        specs={[
+          { key: "quiet_start", kind: "time" },
+          { key: "quiet_end", kind: "time", hint: "A window that ends earlier than it starts runs past midnight." },
+        ]}
+      />
     </>
   );
 }
@@ -298,56 +310,6 @@ function MemorySection(): JSX.Element {
   return <Notes />;
 }
 
-function Safety(props: { s: SettingsData }): JSX.Element {
-  const s = props.s;
-  return (
-    <>
-      <Group
-        title="Usage limits"
-        settings={s}
-        specs={[
-          { key: "max_requests_per_day", kind: "number", hint: "Language model requests per day." },
-          { key: "daily_spend_usd", kind: "number", hint: "In US dollars. Empty for no limit." },
-        ]}
-      />
-      <Group
-        title="Daily action limits"
-        settings={s}
-        intro="A safety net for things the assistant does for you. Reading is never limited."
-        specs={[
-          {
-            key: "max_actions_per_day",
-            kind: "number",
-            min: 0,
-            max: 100000,
-            hint: "Anything that changes something, per day. 0 stops all of them.",
-          },
-          {
-            key: "max_costly_per_day",
-            kind: "number",
-            min: 0,
-            max: 100000,
-            hint: "The ones that ask you out loud first, which are part of the number above.",
-          },
-        ]}
-      />
-      <Group
-        title="Quiet hours"
-        settings={s}
-        intro={
-          "From the first time to the second, events from your inputs wait unless they are urgent. Alarms, timers, and reminders you set still ring. Leave both empty for no quiet hours. Times are in " +
-          zoneName(String(sv("zone") || "UTC")) +
-          "."
-        }
-        specs={[
-          { key: "quiet_start", kind: "time" },
-          { key: "quiet_end", kind: "time", hint: "A window that ends earlier than it starts runs past midnight." },
-        ]}
-      />
-    </>
-  );
-}
-
 function Security(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
@@ -418,13 +380,6 @@ function Security(): JSX.Element {
 
 function AboutSection(props: { s: SettingsData }): JSX.Element {
   const s = props.s;
-  const vi = s.voice_info ?? {};
-  const rows: [string, string][] = [
-    ["Speech language", vi.language || "Automatic"],
-    ["Transcription model", vi.stt_model || "None"],
-    ["Speech model", vi.tts_model || "None"],
-    ["Speakers connect on", s.speakers_listen || "Not listening"],
-  ];
   return (
     <>
       <About />
@@ -439,18 +394,6 @@ function AboutSection(props: { s: SettingsData }): JSX.Element {
           },
         ]}
       />
-      <section class="card">
-        <h3>From the configuration file</h3>
-        <p class="mut">These are set in the configuration file only.</p>
-        <dl class="kv">
-          {rows.map(([k, v]) => (
-            <Fragment key={k}>
-              <dt>{k}</dt>
-              <dd>{v}</dd>
-            </Fragment>
-          ))}
-        </dl>
-      </section>
     </>
   );
 }
@@ -471,7 +414,6 @@ export const SECTIONS: [Section, ...Section[]] = [
   { id: "lights", label: "Lights", view: Lights },
   { id: "memory", label: "Memory", view: MemorySection },
   { id: "notifications", label: "Notifications", view: Notifications },
-  { id: "safety", label: "Safety", view: Safety },
   { id: "security", label: "Security", view: Security },
   { id: "about", label: "About", view: AboutSection },
 ];
@@ -479,7 +421,7 @@ export const SECTIONS: [Section, ...Section[]] = [
 /** Everything you set once, in sections along the top. */
 export function SettingsPage(props: { sub: string }): JSX.Element {
   const s = useApp();
-  const sub = props.sub === "inputs" ? "notifications" : props.sub;
+  const sub = props.sub === "inputs" ? "notifications" : props.sub === "safety" ? "assistant" : props.sub;
   const active = SECTIONS.find((x) => x.id === sub) ?? SECTIONS[0];
   const need = s.settings?.restart_needed ?? [];
   const View = active.view;
@@ -489,26 +431,28 @@ export function SettingsPage(props: { sub: string }): JSX.Element {
         <h2>Settings</h2>
         <p>Everything you can change, in sections. Features are the switches for what the assistant does.</p>
       </header>
-      <nav aria-label="Settings sections" class="tabs">
-        {SECTIONS.map((x) => (
-          <a key={x.id} href={"#/settings/" + x.id} aria-current={x.id === active.id ? "page" : undefined}>
-            {x.label}
-          </a>
-        ))}
-      </nav>
-      <section class="pane stack" id="pane" aria-label={active.label}>
-        {need.length ? (
-          <div class="soon" role="status">
-            <h4>Restart needed</h4>
-            <p>These saved values are not running yet: {restartText(need)}.</p>
-            <p>
-              ClawDot cannot restart itself safely from this page. Restart it on the device: for example run sudo
-              systemctl restart clawdot if it runs as a service, or stop the program and start it again.
-            </p>
-          </div>
-        ) : null}
-        {s.settings ? <View key={s.settingsRev} s={s.settings} /> : <p class="empty">Loading the settings.</p>}
-      </section>
+      <div class="settings">
+        <nav aria-label="Settings sections" class="tabs">
+          {SECTIONS.map((x) => (
+            <a key={x.id} href={"#/settings/" + x.id} aria-current={x.id === active.id ? "page" : undefined}>
+              {x.label}
+            </a>
+          ))}
+        </nav>
+        <section class="pane stack" id="pane" aria-label={active.label}>
+          {need.length ? (
+            <div class="soon" role="status">
+              <h4>Restart needed</h4>
+              <p>These saved values are not running yet: {restartText(need)}.</p>
+              <p>
+                ClawDot cannot restart itself safely from this page. Restart it on the device: for example run sudo
+                systemctl restart clawdot if it runs as a service, or stop the program and start it again.
+              </p>
+            </div>
+          ) : null}
+          {s.settings ? <View key={s.settingsRev} s={s.settings} /> : <p class="empty">Loading the settings.</p>}
+        </section>
+      </div>
     </div>
   );
 }

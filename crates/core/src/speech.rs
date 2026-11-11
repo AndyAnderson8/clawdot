@@ -462,12 +462,23 @@ async fn list_at(base_url: &str, key: &str, path: &str, what: &str) -> Result<Ve
     Ok(names)
 }
 
-/// The voices a speech server offers, from `GET <base>/audio/voices` (not every server has it).
+/// The voices a speech server offers, from `GET <base>/audio/voices` or the other places servers put them (not every server has a list).
 ///
 /// # Errors
 /// A plain description of why the list could not be had.
 pub async fn list_voices(base_url: &str, key: &str) -> Result<Vec<String>, String> {
-    list_at(base_url, key, "/audio/voices", "voices").await
+    // Servers that list their voices put the list in a few different places: OpenAI-compatible ones under
+    // /audio/voices (Kokoro, the Piper helper), others at /voices or /audio/speech/voices.
+    let mut first = None;
+    for path in ["/audio/voices", "/voices", "/audio/speech/voices"] {
+        match list_at(base_url, key, path, "voices").await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                first.get_or_insert(e);
+            }
+        }
+    }
+    Err(first.unwrap_or_else(|| "no list".to_owned()))
 }
 
 /// The models a language-model server offers, from `GET <base>/models` (the OpenAI-style list that OpenRouter, Ollama

@@ -187,9 +187,9 @@ export function Activity(): JSX.Element {
           </h3>
           {meta ? (
             <p class="mut" id="policy">
-              {meta.policy.dry_run ? "Dry run is on: actions are described, not done. " : ""}
-              Limits per day: {meta.policy.max_actions_per_day} actions, {meta.policy.max_costly_per_day} of them ones
-              that ask you first. <a href="#/settings">Change in Settings</a>.
+              {meta.policy.dry_run
+                ? "Practice mode is on: actions are described, not done."
+                : "Everything the assistant did that changed something is listed here."}
             </p>
           ) : null}
           {missing ? (

@@ -47,7 +47,6 @@ const FEATURES: Feature[] = [
     title: "Practice mode",
     text: "It only says what it would do, and nothing changes. Good for trying out a new tool.",
     icon: "M12 3 4 7v5c0 5 3.500 8 8 9 4.500-1 8-4 8-9V7Z",
-    more: { href: "#/settings/safety", label: "Safety limits" },
   },
 ];
 

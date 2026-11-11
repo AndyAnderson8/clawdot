@@ -123,6 +123,12 @@ export function About(): JSX.Element {
               <dd id="buildinfo">{buildText(about)}</dd>
             </>
           ) : null}
+          {s.settings?.speakers_listen ? (
+            <>
+              <dt>Speakers connect on</dt>
+              <dd>{s.settings.speakers_listen}</dd>
+            </>
+          ) : null}
         </dl>
         <details id="about">
           <summary>Release notes</summary>
@@ -133,11 +139,11 @@ export function About(): JSX.Element {
       <Updates />
 
       <section class="card">
-        <h3>When something is wrong</h3>
+        <h3>Troubleshooting</h3>
         <p class="mut">
-          Download a diagnostics file and send it with your bug report. It has the version, your settings without any
-          password or key, the names of your senders, how many tools and records there are, and the latest problems. It
-          never has audio, anything you said, what it remembers, or a sender token.
+          If something is not working, download a diagnostics file and send it with your bug report. It has the version,
+          your settings without any password or key, the names of your senders, how many tools and records there are,
+          and the latest problems. It never has audio, anything you said, what it remembers, or a sender token.
         </p>
         <div class="row">
           <button type="button" id="diagdl" onClick={diagnostics}>
@@ -178,19 +184,19 @@ export function About(): JSX.Element {
       </section>
 
       <section class="card sgroup">
-        <h3>Move settings to another device</h3>
+        <h3>Back up and restore settings</h3>
         <p class="mut">
-          Save your settings as a file and load it on another ClawDot. Passwords and keys are never in the file; a key
-          is only the name of the variable that holds it.
+          Keep a copy of your settings as a file. Restore it later, or load it on another ClawDot to copy your setup.
+          Passwords and keys are never in the file; a key is only the name of the variable that holds it.
         </p>
         <div class="srow">
           <div class="slabel">
-            <label for="exportdl">Save your settings</label>
-            <p class="mut">Downloads a small file.</p>
+            <label for="exportdl">Back up</label>
+            <p class="mut">Downloads your settings as a small file.</p>
           </div>
           <div class="sctl">
             <button class="plain" type="button" id="exportdl" onClick={exportSettings}>
-              Save my settings
+              Download backup
             </button>
           </div>
         </div>
@@ -203,8 +209,8 @@ export function About(): JSX.Element {
           }}
         >
           <div class="slabel">
-            <label for="importfile">Load a settings file</label>
-            <p class="mut">A file made by Save my settings. You see what would change before anything does.</p>
+            <label for="importfile">Restore from a backup</label>
+            <p class="mut">Choose a backup file. You see what would change before anything does.</p>
           </div>
           <div class="sctl">
             <input id="importfile" type="file" accept="application/json,.json" onChange={choose} />
@@ -222,7 +228,7 @@ export function About(): JSX.Element {
                       </li>
                     ))}
                   </ul>
-                  <button>Load these settings</button>
+                  <button>Restore these settings</button>
                 </>
               ) : (
                 <p id="importsame">Everything in this file is already how it is here.</p>

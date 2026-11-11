@@ -1037,6 +1037,22 @@ fn build_registered_speech(
     Ok((stt, tts))
 }
 
+/// Make every speech client use `voice` now, and return the voice they were using (none when there is no client).
+fn swap_live_voice(voice: &str) -> Option<String> {
+    let h = SPEECH_HANDLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut old = None;
+    for slot in &h.voices {
+        let mut v = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        old.get_or_insert_with(|| v.clone());
+        *v = voice.to_owned();
+    }
+    old
+}
+
 /// Apply the voice and language that are now set to every speech client.
 fn apply_speech(live: &serde_json::Map<String, serde_json::Value>) {
     let h = SPEECH_HANDLES
@@ -1706,12 +1722,17 @@ async fn main() -> ExitCode {
                 core.set_ui_status(brain.status_json(announcer.connected(), &view, &station_names, &tool_counts));
                 // Spoken text is echoed only to an interactive console: in server mode stdout goes to a
                 // journal or container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
-                while let Some(phrase) = core.take_speech() {
+                while let Some((phrase, preview)) = core.take_speech_as() {
                     if args.console || args.echo_speech {
                         println!("speaker> {phrase}");
                     }
                     if announcer.connected() > 0 {
+                        // A voice being tried is used for this phrase only; the voice in use comes back after.
+                        let before = preview.as_deref().and_then(swap_live_voice);
                         announcer.announce(&phrase).await;
+                        if let Some(old) = before {
+                            swap_live_voice(&old);
+                        }
                     }
                 }
                 for fired in brain.assistant.tick() {

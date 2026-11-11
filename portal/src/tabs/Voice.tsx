@@ -10,8 +10,6 @@ export const SAMPLE = "Hello. This is how I sound. I can set timers, answer ques
 export function VoiceControl(props: {
   id: string;
   value: string;
-  /** What is saved now: a sample plays the saved voice, so a changed choice must be saved first. */
-  saved: string;
   off?: boolean;
   onInput: (v: string) => void;
 }): JSX.Element {
@@ -28,13 +26,12 @@ export function VoiceControl(props: {
   }, [props.off]);
   const sample = async () => {
     try {
-      await api("POST", "/api/speak", { text: SAMPLE });
+      await api("POST", "/api/speak", { text: SAMPLE, voice: props.value });
       say("Playing a sample. Listen for the speaker.");
     } catch (x) {
       fail(x);
     }
   };
-  const unsaved = props.value !== props.saved;
   const list = voices ? (voices.includes(props.value) || !props.value ? voices : [props.value, ...voices]) : null;
   return (
     <div class="voicepick">
@@ -69,10 +66,9 @@ export function VoiceControl(props: {
       )}
       {!props.off ? (
         <div class="row">
-          <button class="plain small" type="button" id="hearvoice" disabled={unsaved || !props.value} onClick={sample}>
+          <button class="plain small" type="button" id="hearvoice" disabled={!props.value} onClick={sample}>
             Hear a sample
           </button>
-          {unsaved && props.value ? <span class="mut">Save to hear this voice.</span> : null}
         </div>
       ) : null}
       {!list && why && !props.off ? <p class="mut">{why}</p> : null}

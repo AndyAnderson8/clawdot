@@ -242,7 +242,7 @@ export function Dashboard(): JSX.Element {
           id="stat-requests"
           label="Model requests today"
           value={u ? String(u.requests_today) : "-"}
-          note={u ? `of ${u.max_requests_per_day} allowed` : ""}
+          note="to the language model"
         />
         <Stat
           id="stat-spend"

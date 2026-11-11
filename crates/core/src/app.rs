@@ -206,7 +206,7 @@ pub struct Core {
     notify: Notify,
     admin: Mutex<crate::admin::Admin>,
     status: Mutex<serde_json::Value>,
-    speech: Mutex<std::collections::VecDeque<String>>,
+    speech: Mutex<std::collections::VecDeque<(String, Option<String>)>>,
     tools: Mutex<serde_json::Value>,
     settings: Mutex<Option<crate::settings::SettingsState>>,
     jobs: Mutex<Option<tokio::sync::mpsc::Sender<portal::Job>>>,
@@ -738,6 +738,11 @@ impl Core {
     /// Ask the speaker to say `text` (the UI's "test speak"). At most [`MAX_PENDING_SPEECH`] requests wait, each
     /// up to [`MAX_SPEECH_CHARS`] characters. Returns false if refused.
     pub fn queue_speech(&self, text: &str) -> bool {
+        self.queue_speech_as(text, None)
+    }
+
+    /// Like [`Core::queue_speech`], with the voice to try for this one phrase (a preview before it is saved).
+    pub fn queue_speech_as(&self, text: &str, voice: Option<&str>) -> bool {
         let text = text.trim();
         if text.is_empty() || text.chars().count() > MAX_SPEECH_CHARS {
             return false;
@@ -746,12 +751,17 @@ impl Core {
         if q.len() >= MAX_PENDING_SPEECH {
             return false;
         }
-        q.push_back(text.to_owned());
+        q.push_back((text.to_owned(), voice.map(str::to_owned)));
         true
     }
 
     /// The next queued test phrase, if any.
     pub fn take_speech(&self) -> Option<String> {
+        self.take_speech_as().map(|(text, _)| text)
+    }
+
+    /// The next queued test phrase and the voice to say it in, if one was asked for.
+    pub fn take_speech_as(&self) -> Option<(String, Option<String>)> {
         self.speech
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

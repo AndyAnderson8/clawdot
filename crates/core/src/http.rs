@@ -1212,6 +1212,31 @@ mod tests {
         );
         assert_eq!(h.core.take_speech().as_deref(), Some("hello there"));
         assert!(h.core.take_speech().is_none());
+        // A voice can be tried for one phrase before it is saved (REQ-CFG-081); a nonsense name is refused.
+        let with_voice = |v: &str| format!(r#"{{"text":"hi","voice":"{v}"}}"#);
+        assert_eq!(
+            call(h.addr, "POST", "/api/speak", &auth, &with_voice("nova"))
+                .await
+                .0,
+            202
+        );
+        assert_eq!(
+            h.core.take_speech_as(),
+            Some(("hi".to_owned(), Some("nova".to_owned())))
+        );
+        assert_eq!(
+            call(
+                h.addr,
+                "POST",
+                "/api/speak",
+                &auth,
+                &with_voice(&"v".repeat(129))
+            )
+            .await
+            .0,
+            400
+        );
+        assert!(h.core.take_speech().is_none());
 
         for bad in [
             speak(""),

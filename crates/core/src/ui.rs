@@ -505,7 +505,7 @@ async fn voices() -> Resp {
         Err(e) => error(
             StatusCode::BAD_GATEWAY,
             &format!(
-                "The speech server does not list its voices ({e}). Type the voice name instead."
+                "This speech server does not share a list of its voices ({e}). Type the name of one it accepts; its documentation lists them."
             ),
         ),
     }
@@ -1069,6 +1069,9 @@ async fn recover_window(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp 
 #[serde(deny_unknown_fields)]
 struct Speak {
     text: String,
+    /// A voice to try for this phrase, so it can be heard before it is saved.
+    #[serde(default)]
+    voice: Option<String>,
 }
 
 /// "Test speak": queue a phrase for the speaker to say.
@@ -1089,7 +1092,15 @@ async fn speak(core: &Core, body: Incoming) -> Resp {
     if let Some((status, reason, message)) = speak_refusal(&core.ui_status()) {
         return speak_refused(status, reason, message);
     }
-    if core.queue_speech(text) {
+    let voice = req
+        .voice
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if voice.is_some_and(|v| v.len() > 128 || v.chars().any(char::is_control)) {
+        return error(StatusCode::BAD_REQUEST, "that voice name is not valid");
+    }
+    if core.queue_speech_as(text, voice) {
         json_reply(StatusCode::ACCEPTED, &json!({ "ok": true, "queued": true }))
     } else {
         speak_refused(

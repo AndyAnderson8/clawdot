@@ -205,11 +205,11 @@ export function shownValue(v: unknown): string {
   return typeof v === "string" || typeof v === "number" ? String(v) : JSON.stringify(v);
 }
 
-/** The settings in a file saved by "Save my settings", or the plain reason it cannot be one. */
+/** The settings in a file saved by "Download backup", or the plain reason it cannot be one. */
 export function parseSettingsFile(
   text: string,
 ): { settings: Record<string, string | number | boolean | null> } | string {
-  const notOurs = "That is not a ClawDot settings file. Use a file made by “Save my settings”.";
+  const notOurs = "That is not a ClawDot settings file. Use a file made by “Download backup”.";
   let doc: unknown;
   try {
     doc = JSON.parse(text);

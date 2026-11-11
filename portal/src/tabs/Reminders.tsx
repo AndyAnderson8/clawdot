@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { reminderBody } from "../forms.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
+import { TimeField } from "../timefield.tsx";
 import { DAYS, fmt, hhmm, parts, repeatText, span, whenText, zoneName } from "../time.ts";
 import type { ScheduleItem, ScheduleKind, ScheduleList } from "../types.ts";
 
@@ -191,7 +192,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
                 <label for="rtime">Time</label>
               </div>
               <div class="sctl">
-                <input id="rtime" type="time" value={time} onInput={(e) => setTime(e.currentTarget.value)} />
+                <TimeField id="rtime" value={time} onChange={setTime} />
               </div>
             </div>
             <div class="srow">
@@ -233,7 +234,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
                 <label for="rtime2">Time</label>
               </div>
               <div class="sctl">
-                <input id="rtime2" type="time" value={time2} onInput={(e) => setTime2(e.currentTarget.value)} />
+                <TimeField id="rtime2" value={time2} onChange={setTime2} />
               </div>
             </div>
           </div>
