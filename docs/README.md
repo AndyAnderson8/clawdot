@@ -42,6 +42,7 @@
 | Bridges | [../bridges/README.md](../bridges/README.md) | ntfy and Discord sidecars that make the speaker say messages, with filters, rate limits and no raw markup |
 | Guides | [guides/quick-start.md](guides/quick-start.md) | Start ClawDot on a computer, choose a language model, hear it answer, and keep it updated |
 | Guides | [guides/updates.md](guides/updates.md) | How ClawDot checks for, verifies and installs updates, and how the maintainer signs a release |
+| Guides | [guides/realtime-voice.md](guides/realtime-voice.md) | Optional realtime (speech-to-speech) voice: how to build it in, what it costs, what stays in ClawDot, and what is not yet verified against the real service |
 | Guides | [guides/local-speech.md](guides/local-speech.md) | Free local speech to text (whisper.cpp) and text to speech (Piper) with an OpenAI-compatible URL, for the PC voice loop |
 | Guides | [guides/forgot-password.md](guides/forgot-password.md) | Forgot the administrator password: the 10 second button hold, the desktop key, the command line, and the Echo Dot |
 | Guides | [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | B0 trial of the TECHO5 Dot base image on the maintainer's unit: backups, install, measurements, rollback, go/no-go |
