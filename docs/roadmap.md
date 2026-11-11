@@ -329,6 +329,19 @@ REQ-DEV-001..012 (proposed in [ADR-0015](adr/0015-own-the-device-layer.md); draf
 
 **Exit:** a fresh unlocked Dot reaches a voice turn through our daemon following only the guide.
 
+## B4b. ClawDot's own Linux layer (decided 2026-11-11)
+Today a Dot is made ready by installing someone else's operating system (TECHO5) and then removing its voice service to run ours. That is a stopgap, not a product: it ties ClawDot to another project's choices, release pace and install steps, and a person has to take in two projects to get one speaker. The aim is **our own base layer that we build, boot, update and support**, with TECHO5 (and its forks) as a reference and a source of findings, not a dependency.
+
+- **A reproducible image recipe of our own** (Buildroot or Alpine-based, whichever the kernel and the size budget allow) that boots the Dot straight into the ClawDot daemon: Wi-Fi, clock, audio, wake-word front end, the light ring, buttons and Bluetooth come from our board file ([B2](#b2-device-contract-and-the-portable-daemon-on-pc-and-pi-first)), not from a second program
+- **What we copy and what we do not.** Copy the findings (partition layout, kernel and driver choices, mixer routes, LED and button codes, boot flow) and, where the licence allows, code, with notices and credit; send fixes back. Never ship Amazon's files: the vendor firmware blobs the chip needs (Wi-Fi, Bluetooth) are read from the device's own partitions at install time, as the unlock tools already do
+- **Own the install path**: one guided install from an unlocked Dot to a working ClawDot speaker, one signed A/B update flow ([B5](#b5-image-build-and-signed-ab-update-pipeline)), SSH off by default and key-only, a restore path to stock kept, and no Home Assistant needed anywhere
+- **Be able to rebuild the kernel and drivers ourselves** (the vendor kernel here is 3.18 on an MT8163). The open question is how much of that is practical for one maintainer; the first step is to record exactly what TECHO5's image contains and which pieces are proprietary, GPL or MIT, so the plan rests on facts
+- Other boards (Raspberry Pi, a PC) use the same recipe with a different board file, so this is a generic base layer and the Dot is one target
+
+*Status: not started.* It follows the B3 feasibility gate, and the SSH push path ([dot-ssh guide](guides/dot-ssh.md)) makes trying images on the Dot much faster.
+
+**Exit:** a fresh unlocked Dot reaches a voice turn on an image built from our own recipe, following only our guide, with TECHO5 nowhere in it.
+
 ## B5. Image build and signed A/B update pipeline
 REQ-DEV-007
 
@@ -390,10 +403,27 @@ REQ-NFR-004, 010, 108; opt-in REQ-VOI-005, REQ-VOI-011, REQ-NFR-002 tuning
 What to do first after the portal work, in order. The first is chosen because it is small and adds one kind of provider, not a new subsystem.
 
 1. **Realtime voice providers (item 14 below).** A speech-to-speech provider as an optional choice on the Voice page. Start with an OpenAI-style realtime protocol. Tool calls go back through ClawDot's own tools and ask-first checks. Runs where ClawDot runs on a PC or Pi (or through a small relay), not inside the Dot's memory budget; the spend cap must count its audio time.
-2. **Push updates and files over SSH (item 17).** Turn on the opt-in, key-only SSH the Dot image already has (ADR-0019), so a build can be copied over the network instead of by USB.
-3. **Voice providers beyond the OpenAI style (item 15).** An adapter for services with cloned voices and their own voice lists.
-4. **Board files (item 19)**, so lights and Bluetooth can be described for hardware ClawDot does not know, and the Lights and Bluetooth pages can work for real.
-5. **Zigbee, then screens (items 11 and 12).**
+2. **Push updates and files over SSH (done for the Dot, item 17 below).** The image's own opt-in, key-only SSH, with a push script ([guide](guides/dot-ssh.md)).
+3. **ClawDot's own Linux layer ([B4b](#b4b-clawdots-own-linux-layer-decided-2026-11-11)).** Stop depending on TECHO5 as a base. Start by recording what its image contains and what is proprietary, GPL or MIT.
+4. **Hermes Agent as an optional brain (item 20 below)**, and a review of what other agent harnesses do well for our own loop (item 21). Hermes is the one brain candidate; opencode is only something to study.
+5. **Voice providers beyond the OpenAI style (item 15).** An adapter for services with cloned voices and their own voice lists.
+6. **Board files (item 19)**, so lights and Bluetooth can be described for hardware ClawDot does not know, and the Lights and Bluetooth pages can work for real.
+7. **Zigbee, then screens (items 11 and 12).**
+8. **The hive (item 25 below).** Several speakers in one home that share memories, skills and rules, where a change on one reaches the others and a speaker being offline breaks nothing. A design study is under way; its first milestone is meant to be small and useful on its own.
+
+## What a complete agentic smart speaker still needs
+An honest list of gaps, so the plan is not only the next few items. Each is a candidate to rank, not a promise.
+
+| Area | What is missing |
+|---|---|
+| Who is talking | **Speaker recognition** (a voice profile per person) so memory, permissions and "my calendar" follow the person; a spoken **PIN or passphrase** for risky actions instead of only "are you sure" |
+| Conversation | **Barge-in** (interrupt it while it talks, needs echo cancellation, B3); **follow-up listening** without repeating the wake word; **streaming replies** word by word, not only sentence by sentence; a **custom wake word** |
+| Acting for you | **Routines** ("when I say good night ...", "when the door sensor opens ...") that are visible, editable and safe; **proactive** speech with limits (it reaches out only for what you allowed); calendars, tasks and mail through MCP sources |
+| The house | Presence (who is home), **handoff between speakers** and rooms, intercom, sound events (a smoke alarm, glass breaking), device control through Zigbee, Home Assistant or Matter |
+| Trust | A hardware **mute** with an honest indicator; a **local-only mode** (no cloud at all, simple commands only); **export and delete everything** for a person; a visible record of what it did and why (Logs, built) |
+| Quality | An **evaluation set** that runs against the real brain and the real tools before a release (the harness exists, live runs are open); latency budget per step; false-wake tuning |
+| Running it | **The hive and backup**: several speakers that share knowledge and rules (item 25); a signed update path that needs no cable; remote diagnostics a person can read |
+| Accessibility | Large-text and high-contrast portal themes (themes built), a screen device for the hard of hearing, quiet-voice and whisper modes at night |
 
 ## Beyond v1.0 (planned, in rough priority order)
 Release early and often: tag `v0.x` releases as steps land, so the differentiator ships long before v1.0. Items below are *planned for*, meaning v1.0 designs must not preclude them (see [future-scope.md](future-scope.md) for conditions). The board layer and the Echo Dot target, listed here before, are now Phase B.
@@ -419,6 +449,12 @@ Release early and often: tag `v0.x` releases as steps land, so the differentiato
 | 17 | **SSH to the device for updates and files**: turn on the opt-in, key-only SSH user the image already has (ADR-0019), so a new build is copied over the network. The portal's own signed updater stays the way a person updates; SSH is for the person building it | No USB cable for each build | ADR-0019; the update marker and `.prev` rollback |
 | 18 | **Keep conversation text (opt-in)**: on the Logs page, off unless turned on, bounded and deletable; never audio | A real transcript for troubleshooting | The Logs page already has a Conversations tab that says nothing is kept |
 | 19 | **Board files**: a small file that says which lights, Bluetooth adapter and buttons a device has and how to reach them, so unknown hardware can be described instead of coded | Lights, Bluetooth and the rest work on more than one device | The hardware detection in the status; the Hardware support setting |
+| 20 | **Hermes Agent as an optional brain** (Nous Research, open source): Hermes runs the thinking and tool use, and ClawDot stays the voice front end, the device, the safety checks and the portal. The link is one of three, chosen after a spike: an OpenAI-compatible chat endpoint Hermes serves (which ClawDot's custom provider can already point at), ClawDot's own MCP server ([item 2](#beyond-v10-planned-in-rough-priority-order): `announce`, `ask_user`) with Hermes as the MCP client plus a webhook for results, or its own gateway. Anything that acts still goes through ClawDot's ask-first tiers. Details not yet verified against Hermes's own documentation | Use a strong agent harness for hard tasks without rebuilding it, and keep the speaker safe | Provider abstraction; assistant profiles (item 3); the MCP and webhook pieces already built |
+| 21 | **Learn from other agent harnesses for our own loop** (study only; none of these is a brain we plan to connect). From Hermes Agent: skills in the open SKILL.md format (our skills import already reads it, so keep the two compatible), a skill the agent drafts after solving something hard (always shown to the person to accept, never added silently), full-text search across remembered facts and past turns, scheduled jobs that deliver to any channel, and per-source tool filtering (we have per-tool switches). From opencode, which is a coding agent and not a fit as a brain: a client-server split with a published OpenAPI description of the portal API so third-party clients and screens can be built, a permissions engine (we have risk tiers), a plugin interface (our installable packs, item 4), and project-style memory files. Reading their designs is fine; copying their code needs a licence and fit check first, and most of it is TypeScript, so the ideas are what carry over | A better harness without a rewrite, and a portal API others can build on | Skills, memory, tiers and packs already exist; this is a review and a few additions |
+| 22 | **Skills compatibility**: skills written for other harnesses (the open SKILL.md format) load as they are, with their folder of helper files, still starting turned off and reviewed | A large body of ready-made skills | Skills import reads SKILL.md today |
+| 23 | **Memory that can be searched and summarised** once there are hundreds of facts, not 50 | Memory stays useful as it grows | Memories are bounded to 50 today (REQ-CFG-044) |
+| 24 | **OpenAPI description of the portal API** | Third-party clients, screens and scripts | The API is small and consistent |
+| 25 | **The hive**: speakers in one home form a group with no server and no cloud. They share what the household owns (memories, skills, tool and webhook definitions, routines and rules, household-wide settings, the spend count) and keep per device what belongs to the device (its name, voice output, hardware, lights). A change on one speaker propagates to the rest; a speaker that is offline catches up when it returns, and everything still works on the others and on its own. Pairing a new speaker and removing a lost one are deliberate acts with a code, the provider key and password are shared only over the encrypted pairing, and when several speakers hear the wake word they decide among themselves which answers. Design research first (eventually consistent data, discovery on a home network, membership, pairing and trust, who answers), then a small first milestone such as two speakers sharing memories and skills | A house full of speakers that act like one assistant, and that work when one is unplugged | Satellite protocol; bounded stores with ids and dates; the update marker; the resource budget (spec 0002)
 | 16 | ESP32-S3 satellite (a satellite only, never the brain); scheduled routines such as a morning briefing; rules that act | Platform and feature breadth | Protocol; scheduler; bounded stores |
 
 Moved into Phase A on 2026-11-09: standing "do X when Y" rules (first version tell-me and remind-me only) and opt-in bounded notes are in A5b. Item 2 (the ClawDot MCP server) follows the rules work, because it needs the no-act and scope machinery first.
