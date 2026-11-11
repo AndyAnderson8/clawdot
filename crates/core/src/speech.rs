@@ -364,6 +364,53 @@ fn failure(dialect: Dialect, code: u16, msg: &str) -> String {
     }
 }
 
+/// Why a call to a speech or model service failed, by the kinds a caller acts on. `Display` is the text a person reads;
+/// it never holds a key (the service's own message is cut to 200 characters and the key is only ever sent, not kept).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderError {
+    /// There is no key to send and this service needs one.
+    NoKey(String),
+    /// The service answered 401 or 403: the key was not accepted.
+    Unauthorized(String),
+    /// Anything else: a network failure, another HTTP status, an unreadable answer.
+    Other(String),
+}
+
+impl ProviderError {
+    /// The key is missing or was refused, so the fix is the key and not the service.
+    #[must_use]
+    pub fn is_key_problem(&self) -> bool {
+        matches!(self, Self::NoKey(_) | Self::Unauthorized(_))
+    }
+
+    /// The service refused the key (HTTP 401 or 403).
+    #[must_use]
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, Self::Unauthorized(_))
+    }
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::NoKey(t) | Self::Unauthorized(t) | Self::Other(t)) = self;
+        f.write_str(t)
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
+impl From<String> for ProviderError {
+    fn from(text: String) -> Self {
+        Self::Other(text)
+    }
+}
+
+impl From<ProviderError> for String {
+    fn from(e: ProviderError) -> Self {
+        e.to_string()
+    }
+}
+
 struct Client {
     endpoint: Endpoint,
     key: String,
@@ -398,11 +445,16 @@ impl Client {
         self.key.clone()
     }
 
-    async fn post(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+    async fn post(
+        &self,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>, ProviderError> {
         self.send(Method::POST, path, content_type, body).await
     }
 
-    async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
+    async fn get(&self, path: &str) -> Result<Vec<u8>, ProviderError> {
         self.send(Method::GET, path, "application/json", Vec::new())
             .await
     }
@@ -413,7 +465,7 @@ impl Client {
         path: &str,
         content_type: &str,
         body: Vec<u8>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, ProviderError> {
         // The other dialects' paths start with /v1 themselves; an address that already ends in it still works.
         let base = self.endpoint.base.as_str();
         let base = if self.dialect == Dialect::OpenAi {
@@ -430,10 +482,10 @@ impl Client {
             .header("user-agent", "clawdot");
         let key = self.current_key();
         if key.is_empty() && self.dialect.needs_key() {
-            return Err(format!(
+            return Err(ProviderError::NoKey(format!(
                 "No key is set for {}. Paste one in the voice settings, or name an environment variable that holds it.",
                 self.dialect.title()
-            ));
+            )));
         }
         if !key.is_empty() {
             req = match self.dialect {
@@ -444,7 +496,7 @@ impl Client {
         }
         let request = req
             .body(Full::new(Bytes::from(body)))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
         let work = async {
             let response = self.connector.request(&self.endpoint, request).await?;
             let status = response.status();
@@ -455,7 +507,7 @@ impl Client {
                 if let Some(d) = frame.data_ref() {
                     all.extend_from_slice(d);
                     if all.len() > MAX_RESPONSE {
-                        return Err("response too large".to_owned());
+                        return Err(ProviderError::Other("response too large".to_owned()));
                     }
                 }
             }
@@ -467,12 +519,16 @@ impl Client {
                     .ok()
                     .map(|v| error_text(self.dialect, &v))
                     .unwrap_or_default();
-                Err(failure(self.dialect, status.as_u16(), &msg))
+                let text = failure(self.dialect, status.as_u16(), &msg);
+                Err(match status.as_u16() {
+                    401 | 403 => ProviderError::Unauthorized(text),
+                    _ => ProviderError::Other(text),
+                })
             }
         };
-        timeout(self.deadline, work)
-            .await
-            .map_err(|_| format!("no response within {} s", self.deadline.as_secs()))?
+        timeout(self.deadline, work).await.map_err(|_| {
+            ProviderError::Other(format!("no response within {} s", self.deadline.as_secs()))
+        })?
     }
 }
 
@@ -815,7 +871,7 @@ const DEEPGRAM_VOICES: [(&str, &str); 12] = [
 ];
 
 /// The voices ElevenLabs lists for this key, cloned ones included, with their names. Pages of 100, at most 10 pages.
-async fn elevenlabs_voices(base_url: &str, key: &str) -> Result<Vec<VoiceInfo>, String> {
+async fn elevenlabs_voices(base_url: &str, key: &str) -> Result<Vec<VoiceInfo>, ProviderError> {
     let mut c = Client::new(base_url, key, Duration::from_secs(10))?;
     c.dialect = Dialect::ElevenLabs;
     let mut out = Vec::new();
@@ -829,7 +885,7 @@ async fn elevenlabs_voices(base_url: &str, key: &str) -> Result<Vec<VoiceInfo>, 
         }
         let raw = c.get(&path).await?;
         let v: Value = serde_json::from_slice(&raw)
-            .map_err(|_| "the list of voices is not readable".to_owned())?;
+            .map_err(|_| ProviderError::from("the list of voices is not readable".to_owned()))?;
         for x in v["voices"].as_array().into_iter().flatten() {
             let (Some(id), name) = (x["voice_id"].as_str(), x["name"].as_str()) else {
                 continue;
@@ -853,7 +909,7 @@ async fn elevenlabs_voices(base_url: &str, key: &str) -> Result<Vec<VoiceInfo>, 
     out.dedup_by(|a, b| a.id == b.id);
     out.truncate(1000);
     if out.is_empty() {
-        return Err("the service did not list any voices".into());
+        return Err("the service did not list any voices".to_owned().into());
     }
     Ok(out)
 }
@@ -867,7 +923,7 @@ pub async fn list_voice_details(
     dialect: Dialect,
     base_url: &str,
     key: &str,
-) -> Result<(Vec<VoiceInfo>, &'static str), String> {
+) -> Result<(Vec<VoiceInfo>, &'static str), ProviderError> {
     match dialect {
         Dialect::OpenAi => {
             let names = list_voices(base_url, key).await?;
@@ -928,14 +984,22 @@ pub fn names_in(v: &Value) -> Vec<String> {
     names
 }
 
-async fn list_at(base_url: &str, key: &str, path: &str, what: &str) -> Result<Vec<String>, String> {
+async fn list_at(
+    base_url: &str,
+    key: &str,
+    path: &str,
+    what: &str,
+) -> Result<Vec<String>, ProviderError> {
     let c = Client::new(base_url, key, Duration::from_secs(10))?;
     let raw = c.get(path).await?;
-    let v: Value = serde_json::from_slice(&raw)
-        .map_err(|_| format!("the server's list of {what} is not readable"))?;
+    let v: Value = serde_json::from_slice(&raw).map_err(|_| {
+        ProviderError::Other(format!("the server's list of {what} is not readable"))
+    })?;
     let names = names_in(&v);
     if names.is_empty() {
-        return Err(format!("the server did not list any {what}"));
+        return Err(ProviderError::Other(format!(
+            "the server did not list any {what}"
+        )));
     }
     Ok(names)
 }
@@ -944,7 +1008,7 @@ async fn list_at(base_url: &str, key: &str, path: &str, what: &str) -> Result<Ve
 ///
 /// # Errors
 /// A plain description of why the list could not be had.
-pub async fn list_voices(base_url: &str, key: &str) -> Result<Vec<String>, String> {
+pub async fn list_voices(base_url: &str, key: &str) -> Result<Vec<String>, ProviderError> {
     // Servers that list their voices put the list in a few different places: OpenAI-compatible ones under
     // /audio/voices (Kokoro, the Piper helper), others at /voices or /audio/speech/voices.
     let mut first = None;
@@ -956,7 +1020,7 @@ pub async fn list_voices(base_url: &str, key: &str) -> Result<Vec<String>, Strin
             }
         }
     }
-    Err(first.unwrap_or_else(|| "no list".to_owned()))
+    Err(first.unwrap_or_else(|| ProviderError::Other("no list".to_owned())))
 }
 
 /// The models a language-model server offers, from `GET <base>/models` (the OpenAI-style list that OpenRouter, Ollama
@@ -964,7 +1028,7 @@ pub async fn list_voices(base_url: &str, key: &str) -> Result<Vec<String>, Strin
 ///
 /// # Errors
 /// A plain description of why the list could not be had.
-pub async fn list_models(base_url: &str, key: &str) -> Result<Vec<String>, String> {
+pub async fn list_models(base_url: &str, key: &str) -> Result<Vec<String>, ProviderError> {
     list_at(base_url, key, "/models", "models").await
 }
 
@@ -1267,12 +1331,12 @@ mod tests {
         let e = list_voices(&format!("http://127.0.0.1:{port}/v1"), "")
             .await
             .unwrap_err();
-        assert!(e.contains("404"), "{e}");
+        assert!(e.to_string().contains("404"), "{e}");
         let (port, _s) = serve_once("200 OK", "application/json", b"[]".to_vec()).await;
         let e = list_voices(&format!("http://127.0.0.1:{port}/v1"), "")
             .await
             .unwrap_err();
-        assert!(e.contains("did not list any voices"), "{e}");
+        assert!(e.to_string().contains("did not list any voices"), "{e}");
     }
 
     // REQ-VOI-021
@@ -1554,7 +1618,9 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            e.contains("401") && e.contains("key was not accepted"),
+            e.is_unauthorized()
+                && e.to_string().contains("401")
+                && e.to_string().contains("key was not accepted"),
             "{e}"
         );
         let (port, _s) = serve_once(
@@ -1570,7 +1636,66 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(e.contains("did not list any voices"), "{e}");
+        assert!(e.to_string().contains("did not list any voices"), "{e}");
+    }
+
+    #[test]
+    fn provider_error_text_is_the_text_shown_and_kinds_are_exclusive() {
+        let a = ProviderError::Unauthorized("HTTP 401: x".into());
+        let n = ProviderError::NoKey("No key is set for X.".into());
+        let o = ProviderError::Other("HTTP 500".into());
+        assert_eq!(
+            (a.to_string(), n.to_string(), o.to_string()),
+            (
+                "HTTP 401: x".into(),
+                "No key is set for X.".into(),
+                "HTTP 500".into()
+            )
+        );
+        assert_eq!(String::from(o.clone()), "HTTP 500");
+        assert_eq!(
+            [&a, &n, &o].map(|e| (e.is_unauthorized(), e.is_key_problem())),
+            [(true, true), (false, true), (false, false)]
+        );
+    }
+
+    // The error for a refused key carries the service's words, never the key that was sent.
+    #[tokio::test]
+    async fn failures_are_typed_by_kind_and_never_hold_the_key() {
+        let key = "sk-secret-0123456789abcdef";
+        for (status, want) in [
+            ("401 Unauthorized", "unauthorized"),
+            ("403 Forbidden", "unauthorized"),
+            ("429 Too Many Requests", "other"),
+            ("500 Internal Server Error", "other"),
+        ] {
+            let (port, _s) = serve_once(
+                status,
+                "application/json",
+                br#"{"error":{"message":"status 401 in the text"}}"#.to_vec(),
+            )
+            .await;
+            let e = list_models(&format!("http://127.0.0.1:{port}/v1"), key)
+                .await
+                .unwrap_err();
+            let got = match &e {
+                ProviderError::Unauthorized(_) => "unauthorized",
+                ProviderError::Other(_) => "other",
+                ProviderError::NoKey(_) => "nokey",
+            };
+            assert_eq!(got, want, "{status}: {e}");
+            assert!(!e.to_string().contains(key), "{e}");
+        }
+        // No key for a service that needs one is its own kind, said before anything is sent.
+        let e = list_voice_details(Dialect::ElevenLabs, "http://127.0.0.1:1", "")
+            .await
+            .unwrap_err();
+        assert!(matches!(e, ProviderError::NoKey(_)), "{e}");
+        assert!(e.is_key_problem() && !e.is_unauthorized());
+        // A network failure is neither.
+        let e = list_models("http://127.0.0.1:1/v1", key).await.unwrap_err();
+        assert!(!e.is_key_problem(), "{e}");
+        assert!(!e.to_string().contains(key), "{e}");
     }
 
     fn deepgram_tts(port: u16, rate: u32) -> HttpSynthesizer {

@@ -1234,6 +1234,8 @@ mod tests {
     }
 
     // REQ-CFG-038
+    // Uses named time zones, which only a build with the time zone database accepts.
+    #[cfg(feature = "tz")]
     #[test]
     fn layers_apply_defaults_then_file_then_saved_then_flags() {
         let dir = TempDir::new("layers");
@@ -1275,6 +1277,8 @@ mod tests {
     }
 
     // A file saved before the request cap was removed still starts, and the old value is dropped.
+    // Uses named time zones, which only a build with the time zone database accepts.
+    #[cfg(feature = "tz")]
     #[test]
     fn a_retired_setting_in_an_old_file_is_skipped() {
         let dir = TempDir::new("retired");
@@ -1288,6 +1292,8 @@ mod tests {
     }
 
     // REQ-CFG-038
+    // Uses named time zones, which only a build with the time zone database accepts.
+    #[cfg(feature = "tz")]
     #[test]
     fn saved_settings_survive_a_restart() {
         let dir = TempDir::new("persist");
@@ -1351,6 +1357,8 @@ mod tests {
     }
 
     // REQ-CFG-040
+    // Uses named time zones, which only a build with the time zone database accepts.
+    #[cfg(feature = "tz")]
     #[test]
     fn bad_values_are_refused_with_what_to_fix_and_nothing_changes() {
         let dir = TempDir::new("validate");
@@ -1397,6 +1405,8 @@ mod tests {
     }
 
     // REQ-CFG-040
+    // Uses named time zones, which only a build with the time zone database accepts.
+    #[cfg(feature = "tz")]
     #[test]
     fn a_valid_model_group_is_accepted_together() {
         let dir = TempDir::new("llm");
@@ -1421,6 +1431,8 @@ mod tests {
     }
 
     // REQ-CFG-039
+    // Uses named time zones, which only a build with the time zone database accepts.
+    #[cfg(feature = "tz")]
     #[test]
     fn live_settings_are_listed_for_the_assistant_and_restart_ones_are_reported() {
         let dir = TempDir::new("restart");

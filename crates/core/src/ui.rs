@@ -656,7 +656,7 @@ async fn models(core: &Core, query: Option<&str>) -> Resp {
 async fn fetch_models(url: &str, key: &str) -> Resp {
     match crate::speech::list_models(url, key).await {
         Ok(models) => json_reply(StatusCode::OK, &json!({ "models": models })),
-        Err(e) if e.contains("401") || e.contains("403") => error(
+        Err(e) if e.is_unauthorized() => error(
             StatusCode::UNAUTHORIZED,
             "The service did not accept that key. Check that it is the whole key and that it is for this service.",
         ),
@@ -845,7 +845,7 @@ async fn voices(core: &Core) -> Resp {
             }),
         ),
         Err(e) if dialect != crate::speech::Dialect::OpenAi => {
-            let status = if e.contains("401") || e.contains("403") || e.contains("No key is set") {
+            let status = if e.is_key_problem() {
                 StatusCode::UNAUTHORIZED
             } else {
                 StatusCode::BAD_GATEWAY

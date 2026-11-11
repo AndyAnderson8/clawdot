@@ -405,6 +405,8 @@ async fn the_portal_manages_tools_connections_and_skills() {
 }
 
 // REQ-CFG-037, REQ-CFG-038, REQ-CFG-039, REQ-CFG-040, REQ-CFG-041
+// Uses named time zones, which only a build with the time zone database accepts.
+#[cfg(feature = "tz")]
 #[tokio::test]
 async fn settings_are_saved_validated_and_need_the_administrator() {
     let p = start(true).await;
@@ -1312,4 +1314,44 @@ async fn unknown_paths_are_404_and_wrong_methods_405_after_the_sign_in() {
             .0,
         404
     );
+}
+
+/// A server that answers one request with `status` and a JSON `body`.
+async fn answer_once(status: &'static str, body: &'static str) -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut c, _) = l.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = c.read(&mut buf).await;
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = c.write_all(resp.as_bytes()).await;
+    });
+    port
+}
+
+// REQ-CFG-081: the status follows the KIND of failure, not digits that happen to appear in its text.
+#[tokio::test]
+async fn model_list_status_follows_the_kind_of_failure() {
+    for (status, body, want) in [
+        (
+            "401 Unauthorized",
+            r#"{"error":{"message":"bad key"}}"#,
+            401,
+        ),
+        ("403 Forbidden", r#"{"error":{"message":"no"}}"#, 401),
+        (
+            "500 Internal Server Error",
+            r#"{"error":{"message":"request 401 failed"}}"#,
+            502,
+        ),
+        ("429 Too Many Requests", "{}", 502),
+    ] {
+        let port = answer_once(status, body).await;
+        let r = fetch_models(&format!("http://127.0.0.1:{port}/v1"), "k").await;
+        assert_eq!(r.status().as_u16(), want, "{status}");
+    }
 }
