@@ -329,6 +329,18 @@ REQ-DEV-001..012 (proposed in [ADR-0015](adr/0015-own-the-device-layer.md); draf
 
 **Exit:** a fresh unlocked Dot reaches a voice turn through our daemon following only the guide.
 
+## B4b. ClawDot's own Linux layer
+REQ-DEV-032..037
+
+Today the Dot is prepared by installing T5D's image and replacing `echod`. B4b makes the base layer ClawDot's own: a `clawdot-os` repository (created by the maintainer) holding the recipe, with T5D's design ported under MIT notices, Amazon files read from the unit at install time and never shipped, our own signing key and installer, and later our own kernel build. The research, inventory, options, risks and milestones are in [R-12](research/12-own-linux-layer.md) (recommendation: fork the T5D design, not its image, in the order recipe, updates, installer, kernel; 6.1 kernel as a separate spike).
+
+- B4b-0 repository and the no-Amazon-files check; B4b-1 reproducible PC build; B4b-2 first boot on the maintainer's unit; B4b-3 signed A/B updates (this is B5); B4b-4 installer and guide for a normal person (this is the B4 exit); B4b-5 own kernel build; B4b-6 safe boot-image updates; B4b-7 kernel 6.1 spike; B4b-8 no live dependency on TECHO5 or LibreEcho. Each has an exit test in R-12 section 5.1
+- Every device write needs the maintainer's explicit go; B4b-0, B4b-1 and the PC halves of the others need none
+
+*Status: research done (R-12, 2026-11-11); open questions for the maintainer are in R-12 section 7; nothing is built.*
+
+**Exit:** a person who has not seen the repository, on an unlocked Dot, reaches a voice turn with no TECHO5 or LibreEcho download in the path, and a deliberately broken update rolls back.
+
 ## B5. Image build and signed A/B update pipeline
 REQ-DEV-007
 
