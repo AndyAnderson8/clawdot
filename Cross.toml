@@ -1,0 +1,4 @@
+# Settings for `cross` (the armv7 Dot build in .github/workflows/ci.yml). The build runs in a container that has
+# no checkout git trusts, so the commit that `clawdot --version` reports is passed in from the host instead.
+[build.env]
+passthrough = ["CLAWDOT_BUILD_COMMIT", "CLAWDOT_BUILD_DIRTY"]
