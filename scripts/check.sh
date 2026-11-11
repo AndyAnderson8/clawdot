@@ -256,6 +256,10 @@ if [ -f Cargo.toml ]; then
     if [ "$fast" -eq 0 ]; then
       step "rust: unit and integration tests"
       run scripts/cargo.sh test --workspace --locked
+      # Optional features that the default build leaves out (ADR-0020): lint and test them too.
+      step "rust: optional realtime voice feature (clippy and tests)"
+      run scripts/cargo.sh clippy -p clawdot-core --features realtime --all-targets --locked -- -D warnings
+      run scripts/cargo.sh test -p clawdot-core --features realtime --locked --lib realtime
       # The agent-loop scenarios (REQ-AST-016): scripted model, no network, no spend. `cargo test` above runs
       # them too; this names the gate and prints which scenario broke. Live mode is never run here.
       if [ -d evals/scenarios ]; then

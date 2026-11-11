@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.40 |
+| **Version** | 0.41 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -333,6 +333,18 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | REQ-UPD-010 | The configuration MAY set `updates.check`, `updates.url` (`https` only) and `updates.public_key`; a bad value is refused at start with a message that names it. | Should | A6 | T |
 | REQ-UPD-011 | A new version that runs for two minutes is considered proven and the `update-pending` marker is removed. A supervisor script MAY use a marker that is still there, together with a crash soon after start, to put `<name>.prev` back. | Should | A6 | T |
 
+### 4.12 Realtime voice (`RTV`)
+
+| ID | Requirement | Pri | Ms | Ver |
+|---|---|---|---|---|
+| REQ-RTV-001 | The system MAY offer a speech-to-speech ("realtime") provider as an alternative to separate listen, think and speak steps. It MUST be compiled only with the cargo feature `realtime` (off by default, adding no dependency, leaving the default build and the budget of spec 0002 unchanged), and MUST be used only when the administrator chooses it. The separate steps stay the default and the fallback. ADR-0020. | Must | A7 | T |
+| REQ-RTV-002 | A realtime provider MUST sit behind a small dialect interface (session setup with the offered tools, microphone audio in, audio out, user transcript, function calls, function results, errors) so that a provider is added without changing the engine. The first dialect is the OpenAI Realtime WebSocket protocol with 24 kHz 16-bit mono PCM. | Must | A7 | T |
+| REQ-RTV-003 | Function calls from the realtime model MUST be run by ClawDot's own tool host through the same turn code as any other turn, so that risk tiers, host-held confirmation, the taint rule, skill allow-lists, dry-run, daily caps, turn limits, per-call timeouts and the audit log apply (REQ-SEC-010 to REQ-SEC-016, REQ-AST-008, REQ-AST-019). A call at or above the costly tier MUST be asked out loud and released only by the user's own next words as read by the host; nothing the model says or sends releases it. The tool list offered to the model MUST be the one the host offers. Results from tools that return outside text MUST be labelled as untrusted data when handed to the model. | Must | A7 | T |
+| REQ-RTV-004 | The audio time of a realtime session MUST count toward the daily spend cap (REQ-AST-011). The core MUST measure the audio it sends and receives itself, price it with configured per-minute rates, add it to the usage counters while the session runs, refuse to start when the cap is already reached, and end a running session with a spoken explanation when it is reached. A session MUST also end at a maximum length (default 5 minutes). | Must | A7 | T |
+| REQ-RTV-005 | Audio and transcripts MUST NOT be written to disk or to any log. Audio is forwarded and dropped; the transcript is held in memory for the session only, to read a yes or no and to start tool turns. The API key MUST come from the secrets store or an environment variable name, never a literal in a file, and MUST NOT appear in any message shown to the user or logged. | Must | A7 | T |
+| REQ-RTV-006 | Errors MUST end the session cleanly (a close frame is sent when the connection is still up) and be mapped to plain, spoken messages: not reachable, key not accepted, quota or rate limit, the provider's own error (clipped, one line), the provider closed the connection, the spend cap, the time limit, and a protocol problem. | Must | A7 | T |
+| REQ-RTV-007 | The feature is meant to run where the core runs on a PC or Raspberry Pi, or behind a relay, and not inside the Echo Dot Gen 2 memory budget. Its documentation MUST say that audio leaves the device for a third party while a session is open, what it costs, and what is not verified against the real service. | Must | A7 | I |
+
 ## 5. Key user scenarios (acceptance)
 
 - **AC-1 Q&A:** Given the device idle, when the user says the wake word and "what's the capital of Australia", then a spoken answer begins ≤ 2.5 s after speech ends.
@@ -409,3 +421,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.38 | 2026-11-10 | A provider key can be pasted, checked and kept on the device, shown only masked (CFG-082); the backup and summary model settings are removed |
 | 0.39 | 2026-11-11 | The device reports what it is and which parts it has (CFG-083); Settings is grouped, hides what the device cannot use, and calls senders webhooks |
 | 0.40 | 2026-11-11 | Themes, built in and uploaded (CFG-084) |
+| 0.41 | 2026-11-11 | Optional realtime (speech-to-speech) voice provider (section 4.12, RTV-001..007, ADR-0020): behind a cargo feature and off unless chosen; tool calls go through the host with tiers and confirmation; audio time counts toward the spend cap; no audio or transcript stored |

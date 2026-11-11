@@ -2177,6 +2177,14 @@ fn offered<H: ToolHost>(host: &H, cfg: &TurnConfig) -> Vec<ToolSpec> {
         .collect()
 }
 
+/// The tools to offer a model that runs outside [`run_turn`] (a realtime voice session, REQ-RTV-003): the
+/// same list a turn offers, so destructive tools stay out unless the administrator enabled them.
+pub fn tools_for<H: ToolHost>(host: &H, conv: &Conversation, cfg: &TurnConfig) -> Vec<ToolSpec> {
+    let mut tools = offered(host, cfg);
+    tools.extend(pseudo_tools(conv));
+    tools
+}
+
 /// End a turn with words the host chose, keeping the history well formed.
 fn finish_with(conv: &mut Conversation, mut result: TurnResult, speech: &str) -> TurnResult {
     speech.clone_into(&mut result.speech);
