@@ -5,14 +5,16 @@ import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
 import { whenText } from "../time.ts";
-import type { NotesList } from "../types.ts";
+import type { Note, NotesList } from "../types.ts";
 
+/** What the assistant remembers: short facts, listed like tools, each with a pencil to change it and an X to forget it. */
 export function Notes(): JSX.Element {
   const [data, setData] = useState<NotesList | null>(null);
   const [missing, setMissing] = useState(false);
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
-  const [adding, setAdding] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<Note | null>(null);
 
   const load = async () => {
     try {
@@ -25,16 +27,25 @@ export function Notes(): JSX.Element {
   };
   usePolled(load);
 
-  const add = async (ev: Event) => {
+  const close = () => {
+    setOpen(false);
+    setEditing(null);
+    setText("");
+    setErr("");
+  };
+  const save = async (ev: Event) => {
     ev.preventDefault();
     setErr("");
     try {
-      setData(await api<NotesList>("POST", "/api/notes", { text }));
-      setText("");
-      setAdding(false);
-      say("Saved. The assistant will see it from now on.");
+      setData(
+        editing
+          ? await api<NotesList>("PUT", "/api/notes/" + editing.id, { text })
+          : await api<NotesList>("POST", "/api/notes", { text }),
+      );
+      say(editing ? "Saved." : "Saved. The assistant will see it from now on.");
+      close();
     } catch (x) {
-      if (x instanceof ApiError && (x.status === 400 || x.status === 409)) setErr(x.message);
+      if (x instanceof ApiError && [400, 404, 409].includes(x.status)) setErr(x.message);
       else fail(x);
     }
   };
@@ -90,24 +101,59 @@ export function Notes(): JSX.Element {
               <h3>
                 What it remembers<span class="count">{data.notes.length}</span>
               </h3>
-              <span title={data.enabled ? undefined : "Turn memory on under Features first."}>
-                <AddButton label="Add a memory" id="addnote" onClick={() => setAdding(true)} disabled={!data.enabled} />
+              <span class="headacts" title={data.enabled ? undefined : "Turn memory on under Features first."}>
+                {data.notes.length ? (
+                  <button class="plain small" type="button" id="forgetall" onClick={forgetAll}>
+                    Forget everything
+                  </button>
+                ) : null}
+                <AddButton
+                  label="Add a memory"
+                  id="addnote"
+                  onClick={() => {
+                    setEditing(null);
+                    setText("");
+                    setOpen(true);
+                  }}
+                  disabled={!data.enabled}
+                />
               </span>
             </div>
             {data.notes.length ? (
-              <ul class="rows" id="notelist">
+              <ul class="rows tools" id="notelist">
                 {data.notes.map((n) => (
-                  <li key={n.id}>
-                    <div class="pre">{n.text}</div>
-                    <div class="mut">Saved {whenText(n.ts, now, zone())}</div>
-                    <div class="acts">
+                  <li key={n.id} class="toolrow memrow">
+                    <div class="toolmain">
+                      <div class="memtext">{n.text}</div>
+                      <div class="toolorigin">Saved {whenText(n.ts, now, zone())}</div>
+                    </div>
+                    <div class="iconacts">
                       <button
-                        class="danger"
+                        class="iconbtn"
                         type="button"
+                        title="Change this memory"
+                        aria-label={"Change this memory: " + n.text}
+                        disabled={!data.enabled}
+                        onClick={() => {
+                          setEditing(n);
+                          setText(n.text);
+                          setOpen(true);
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="m4 20 1-4L16.500 4.500a2.100 2.100 0 0 1 3 3L8 19ZM14 7l3 3" />
+                        </svg>
+                      </button>
+                      <button
+                        class="iconbtn danger"
+                        type="button"
+                        title="Forget this memory"
                         aria-label={"Forget this memory: " + n.text}
                         onClick={() => forget(n.id)}
                       >
-                        Forget
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M6 6l12 12M18 6 6 18" />
+                        </svg>
                       </button>
                     </div>
                   </li>
@@ -118,16 +164,9 @@ export function Notes(): JSX.Element {
                 Nothing remembered yet. Use “Add a memory”, or say “remember that ...” to the speaker.
               </p>
             )}
-            {data.notes.length ? (
-              <div class="row">
-                <button class="danger" type="button" id="forgetall" onClick={forgetAll}>
-                  Forget everything
-                </button>
-              </div>
-            ) : null}
           </section>
-          <Dialog id="notedialog" title="Add a memory" open={adding} onClose={() => setAdding(false)}>
-            <form class="dlgform" id="noteform" onSubmit={add}>
+          <Dialog id="notedialog" title={editing ? "Change this memory" : "Add a memory"} open={open} onClose={close}>
+            <form class="dlgform" id="noteform" onSubmit={save}>
               <Field
                 id="note-text"
                 label="What to remember"
@@ -148,8 +187,8 @@ export function Notes(): JSX.Element {
                 </p>
               </Field>
               <div class="row dlgfoot">
-                <button disabled={!data.enabled}>Save memory</button>
-                <button class="plain" type="button" onClick={() => setAdding(false)}>
+                <button disabled={!data.enabled}>{editing ? "Save changes" : "Save memory"}</button>
+                <button class="plain" type="button" onClick={close}>
                   Cancel
                 </button>
               </div>

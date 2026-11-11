@@ -68,15 +68,15 @@ impl NoteError {
     #[must_use]
     pub fn plain(&self) -> String {
         match self {
-            Self::Off => "Notes are turned off. Turn them on in Settings, under Agent settings.".into(),
+            Self::Off => "Memory is turned off. Turn it on in Settings, under Features.".into(),
             Self::Empty => "Write what to remember.".into(),
-            Self::TooLong => format!("That is too long to keep. Notes are at most {MAX_NOTE_CHARS} characters."),
-            Self::Full => "The notes are full. Forget one first.".into(),
-            Self::Secret => "That looks like a password or a key, so it is not saved. Notes are shown to the assistant and are not a safe place for secrets.".into(),
-            Self::Duplicate => "That note is already saved.".into(),
-            Self::Missing => "There is no such note.".into(),
-            Self::Ambiguous(n) => format!("{n} notes match that."),
-            Self::Storage => "The notes could not be saved. Check that the data directory can be written.".into(),
+            Self::TooLong => format!("That is too long to keep. A memory is at most {MAX_NOTE_CHARS} characters."),
+            Self::Full => "Memory is full. Forget one first.".into(),
+            Self::Secret => "That looks like a password or a key, so it is not saved. Memories are shown to the assistant and are not a safe place for secrets.".into(),
+            Self::Duplicate => "That is already remembered.".into(),
+            Self::Missing => "There is no such memory.".into(),
+            Self::Ambiguous(n) => format!("{n} memories match that."),
+            Self::Storage => "The memories could not be saved. Check that the data directory can be written.".into(),
         }
     }
 
@@ -203,6 +203,51 @@ impl NoteStore {
             ts: now,
         };
         doc.notes.push(note.clone());
+        if let Err(e) = self.persist(&doc) {
+            *doc = before;
+            return Err(e);
+        }
+        Ok(note)
+    }
+
+    /// Change the text of one note, keeping its place and its date (the portal's pencil). The same checks as adding.
+    ///
+    /// # Errors
+    /// See [`NoteError`].
+    pub fn edit(&self, id: u64, text: &str) -> Result<Note, NoteError> {
+        if !self.enabled() {
+            return Err(NoteError::Off);
+        }
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return Err(NoteError::Empty);
+        }
+        if text.chars().count() > MAX_NOTE_CHARS {
+            return Err(NoteError::TooLong);
+        }
+        if crate::audit::redact_text(&text) != text {
+            return Err(NoteError::Secret);
+        }
+        let mut doc = lock(&self.doc);
+        let pos = doc
+            .notes
+            .iter()
+            .position(|n| n.id == id)
+            .ok_or(NoteError::Missing)?;
+        if doc
+            .notes
+            .iter()
+            .any(|n| n.id != id && n.text.eq_ignore_ascii_case(&text))
+        {
+            return Err(NoteError::Duplicate);
+        }
+        let total: usize = doc.notes.iter().map(|n| n.text.len()).sum();
+        if total - doc.notes[pos].text.len() + text.len() > MAX_TOTAL_BYTES {
+            return Err(NoteError::Full);
+        }
+        let before = doc.clone();
+        doc.notes[pos].text = text;
+        let note = doc.notes[pos].clone();
         if let Err(e) = self.persist(&doc) {
             *doc = before;
             return Err(e);
@@ -613,5 +658,39 @@ mod tests {
         ] {
             assert_eq!(p(no), None, "{no}");
         }
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    #[test]
+    fn editing_a_memory_keeps_its_place_and_date_and_is_checked_like_adding() {
+        let s = NoteStore::in_memory(true);
+        let a = s.add("the spare key is under the pot", 10).unwrap();
+        let b = s.add("the router is in the hall", 20).unwrap();
+        let edited = s.edit(a.id, "the spare key is under the blue pot").unwrap();
+        assert_eq!((edited.id, edited.ts), (a.id, 10), "same id and date");
+        let all = s.list();
+        assert_eq!(all[0].text, "the spare key is under the blue pot");
+        assert_eq!(all[1].id, b.id, "the order did not change");
+        assert_eq!(s.edit(a.id, "  ").unwrap_err(), NoteError::Empty);
+        assert_eq!(
+            s.edit(a.id, &"x".repeat(MAX_NOTE_CHARS + 1)).unwrap_err(),
+            NoteError::TooLong
+        );
+        assert_eq!(
+            s.edit(a.id, "the router is in the hall").unwrap_err(),
+            NoteError::Duplicate
+        );
+        assert_eq!(
+            s.edit(a.id, "my password is sk-abcdefghijklmnop1234")
+                .unwrap_err(),
+            NoteError::Secret
+        );
+        assert_eq!(s.edit(999, "anything").unwrap_err(), NoteError::Missing);
+        s.set_enabled(false);
+        assert_eq!(s.edit(a.id, "later").unwrap_err(), NoteError::Off);
     }
 }

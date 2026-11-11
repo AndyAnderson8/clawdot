@@ -496,15 +496,23 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         });
         if (m === "GET") return send(200, list());
         if (m === "POST") {
-          if (!st["notesOn"]) return err(409, "Notes are turned off. Turn them on in Settings, under Agent settings.");
+          if (!st["notesOn"]) return err(409, "Memory is turned off. Turn it on in Settings, under Features.");
           if (/sk-/.test(body.text)) return err(400, "That looks like a password or a key, so it is not saved.");
           if (notes.some((n) => n["text"].toLowerCase() === body.text.toLowerCase()))
-            return err(409, "That note is already saved.");
+            return err(409, "That is already remembered.");
           notes.push({ id: st["nextNote"]++, text: body.text, ts: now() });
           return send(200, list());
         }
+        if (m === "PUT" && seg[1]) {
+          const n = notes.find((x) => String(x["id"]) === seg[1]);
+          if (!n) return err(404, "There is no such memory.");
+          if (notes.some((x) => x !== n && x["text"].toLowerCase() === String(body.text).toLowerCase()))
+            return err(409, "That is already remembered.");
+          n["text"] = body.text;
+          return send(200, list());
+        }
         if (m === "DELETE" && seg[1]) {
-          if (!notes.some((n) => String(n["id"]) === seg[1])) return err(404, "no such note");
+          if (!notes.some((n) => String(n["id"]) === seg[1])) return err(404, "no such memory");
           st["notes"] = notes.filter((n) => String(n["id"]) !== seg[1]);
           return send(200, { forgotten: 1 });
         }

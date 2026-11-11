@@ -134,7 +134,7 @@ export const LABEL: Record<string, string> = {
   agent_tool_timeout_secs: "Seconds per tool call",
   plan_speech: "Say the plan first",
   progress_speech: "Say progress while working",
-  notes: "Keep notes",
+  notes: "Remember things",
   max_actions_per_day: "Actions per day",
   max_costly_per_day: "Actions that ask first, per day",
   dry_run: "Dry run",

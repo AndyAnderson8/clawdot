@@ -1968,3 +1968,57 @@ button.authgo {
   padding-left: 1.75rem;
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- Memory rows: like tools, without the switch ---- */
+.memrow {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.memtext {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.iconacts {
+  display: flex;
+  gap: var(--spacing-1);
+}
+button.iconbtn {
+  display: inline-grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-inner);
+  background: none;
+  color: var(--color-text-secondary);
+}
+button.iconbtn svg {
+  width: 1.125rem;
+  height: 1.125rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+button.iconbtn:hover:not(:disabled) {
+  border-color: var(--color-card-border);
+  background: var(--color-background-muted);
+  color: var(--color-text-primary);
+}
+button.iconbtn.danger:hover:not(:disabled) {
+  color: var(--color-error, #b3261e);
+  border-color: currentColor;
+}
+.headacts {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  flex-wrap: wrap;
+}
+@media (max-width: 48rem) {
+  .memrow {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}

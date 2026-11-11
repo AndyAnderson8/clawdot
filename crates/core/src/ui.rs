@@ -394,9 +394,10 @@ pub async fn handle(
         (&Method::GET, ["notes"]) => notes_list(core),
         (&Method::POST, ["notes"]) => notes_add(core, body).await,
         (&Method::DELETE, ["notes"]) => notes_forget(core, None),
+        (&Method::PUT, ["notes", id]) => notes_edit(core, id, body).await,
         (&Method::DELETE, ["notes", id]) => match id.parse::<u64>() {
             Ok(id) => notes_forget(core, Some(id)),
-            Err(_) => error(StatusCode::NOT_FOUND, "no such note"),
+            Err(_) => error(StatusCode::NOT_FOUND, "no such memory"),
         },
         (&Method::GET, ["models"]) => models(core, query).await,
         (&Method::POST, ["models"]) => models_with_key(core, body).await,
@@ -798,7 +799,7 @@ fn audit(core: &Core, query: Option<&str>) -> Resp {
 /// `GET /api/notes`: the notes the user asked the assistant to keep (REQ-AST-023, REQ-CFG-044).
 fn notes_list(core: &Core) -> Resp {
     let Some(store) = core.notes() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
     };
     json_reply(
         StatusCode::OK,
@@ -810,7 +811,7 @@ fn notes_list(core: &Core) -> Resp {
                 "max_note_chars": crate::notes::MAX_NOTE_CHARS,
                 "max_total_bytes": crate::notes::MAX_TOTAL_BYTES,
             },
-            "note": "Notes are written only when the user asks, by voice. Show their text as text.",
+            "note": "Memories are written only when the user asks, by voice or in the portal. Show their text as text.",
         }),
     )
 }
@@ -824,7 +825,7 @@ async fn notes_add(core: &Core, body: Incoming) -> Resp {
         text: String,
     }
     let Some(store) = core.notes() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
     };
     let req = match read_json::<NewNote>(body).await {
         Ok(r) => r,
@@ -844,10 +845,42 @@ async fn notes_add(core: &Core, body: Incoming) -> Resp {
     }
 }
 
+/// `PUT /api/notes/{id}` with `{"text":..}`: change what one memory says. The answer is the new list.
+async fn notes_edit(core: &Core, id: &str, body: Incoming) -> Resp {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Change {
+        text: String,
+    }
+    let Ok(id) = id.parse::<u64>() else {
+        return error(StatusCode::NOT_FOUND, "no such memory");
+    };
+    let Some(store) = core.notes() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
+    };
+    let req = match read_json::<Change>(body).await {
+        Ok(r) => r,
+        Err((s, _)) => return error(s, "expected {\"text\":..} with what to remember"),
+    };
+    match store.edit(id, &req.text) {
+        Ok(_) => notes_list(core),
+        Err(e) => {
+            use crate::notes::NoteError::{Duplicate, Full, Missing, Off, Storage};
+            let status = match e {
+                Missing => StatusCode::NOT_FOUND,
+                Off | Duplicate | Full => StatusCode::CONFLICT,
+                Storage => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            error(status, &e.plain())
+        }
+    }
+}
+
 /// `DELETE /api/notes/{id}` forgets one note, `DELETE /api/notes` forgets all of them.
 fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     let Some(store) = core.notes() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "Notes are not available.");
+        return error(StatusCode::SERVICE_UNAVAILABLE, "Memory is not available.");
     };
     let done = match id {
         Some(id) => store.forget(id).map(|()| 1),
@@ -855,7 +888,7 @@ fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     };
     match done {
         Ok(n) => json_reply(StatusCode::OK, &json!({ "forgotten": n })),
-        Err(crate::notes::NoteError::Missing) => error(StatusCode::NOT_FOUND, "no such note"),
+        Err(crate::notes::NoteError::Missing) => error(StatusCode::NOT_FOUND, "no such memory"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.plain()),
     }
 }

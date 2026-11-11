@@ -613,12 +613,30 @@ await step("Memory (Settings): add, refuse, forget one, forget all after a confi
   await b.until(`T.text("#noteform .errtext").includes("password or a key")`, "a refusal is shown in the form");
   await eq(`T.rows("#notelist > li").length`, 2, "nothing was added");
   await T(`clickText("#notedialog", "Cancel")`);
+  // the pencil changes a memory in place
+  await T(`click("#notelist > li:nth-child(2) button[title='Change this memory']")`);
+  await b.until(
+    `T.q("#notedialog").open === true && T.q("#note-text").value === "the spare key is under the pot"`,
+    "the pencil opens it with its words",
+  );
+  await eq(`T.text("#notedialog h3")`, "Change this memory", "and says it is a change");
+  await T(`set("#note-text", "the spare key is in the shed")`);
+  await T(`submit("#noteform")`);
+  await b.until(
+    `T.rows("#notelist > li")[1].includes("in the shed") && T.q("#notedialog").open === false`,
+    "changed in place",
+  );
+  assert.equal(
+    mock.log.filter((l) => l.method === "PUT" && l.path.startsWith("/api/notes/")).pop()!.path,
+    "/api/notes/2",
+  );
+  await eq(`T.all("#notelist > li button").length`, 4, "each memory has two buttons: a pencil and an X");
   // forgetting asks first: declining does nothing
   await b.ev(`window.confirm = () => false`);
-  await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
+  await T(`click("#notelist > li:nth-child(1) button[title='Forget this memory']")`);
   await eq(`T.rows("#notelist > li").length`, 2, "declined confirmation keeps the memory");
   await b.ev(`window.confirm = () => true`);
-  await T(`clickText("#notelist > li:nth-child(1)", "Forget")`);
+  await T(`click("#notelist > li:nth-child(1) button[title='Forget this memory']")`);
   await b.until(`T.rows("#notelist > li").length === 1`, "one forgotten");
   assert.ok(mock.log.some((l) => l.method === "DELETE" && l.path === "/api/notes/1"));
   await T(`click("#forgetall")`);

@@ -594,6 +594,40 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     assert_eq!(v["notes"].as_array().unwrap().len(), 2);
     assert_eq!(v["notes"][0]["text"], "my printer is called Pixel");
     assert_eq!(v["limits"]["max_notes"], 50);
+    // change one in place: the list comes back, a duplicate or a missing one is refused
+    let edit_path = format!("/api/notes/{}", second.id);
+    let (s, v) = call(
+        &p,
+        "PUT",
+        &edit_path,
+        &session,
+        r#"{"text":"the spare key is in the shed"}"#,
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(v["notes"][1]["text"], "the spare key is in the shed");
+    assert_eq!(
+        call(
+            &p,
+            "PUT",
+            &edit_path,
+            &session,
+            r#"{"text":"my printer is called pixel"}"#
+        )
+        .await
+        .0,
+        409
+    );
+    assert_eq!(
+        call(&p, "PUT", "/api/notes/999", &session, r#"{"text":"x"}"#)
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        call(&p, "PUT", &edit_path, "", r#"{"text":"x"}"#).await.0,
+        401
+    );
     // forget one by id, then a missing one, then all
     let path = format!("/api/notes/{}", second.id);
     assert_eq!(call(&p, "DELETE", &path, &session, "").await.0, 200);
@@ -607,7 +641,7 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     assert_eq!((s, v["forgotten"].as_u64()), (200, Some(1)));
     assert!(store.list().is_empty());
     // only the signed-in administrator writes through the page; other methods are refused
-    assert_eq!(call(&p, "PUT", "/api/notes", &session, "{}").await.0, 405);
+    assert_eq!(call(&p, "PATCH", "/api/notes", &session, "{}").await.0, 405);
 }
 
 // REQ-CFG-061, REQ-SEC-017
@@ -655,7 +689,7 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
     assert_eq!(v["notes"][0]["ts"], 1_794_225_600);
     // the same refusals as the spoken path, each with a plain reason and no write
     for (body, status, needle) in [
-        (add("my printer is pixel"), 409, "already saved"),
+        (add("my printer is pixel"), 409, "already remembered"),
         (add("   "), 400, "Write what"),
         (add(&"a".repeat(201)), 400, "too long"),
         (
