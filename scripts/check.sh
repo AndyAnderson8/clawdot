@@ -71,8 +71,8 @@ else
   skipped+=("shell checks")
 fi
 
-# The policy tests spin up scratch repositories and are slow (hundreds of process spawns; a quarter of an hour on
-# Windows). Locally they run only when the policy tooling itself changed (staged, or on this branch relative to dev):
+# The policy tests spin up scratch repositories and spawn thousands of processes (a quarter of an hour or more in Git
+# Bash; scripts/test-policy.sh therefore re-runs itself inside WSL on Windows, about 20 seconds). Locally they run only when the policy tooling itself changed (staged, or on this branch relative to dev):
 # the top-level scripts, hooks and agent guard. Helpers under scripts/dev/ are not policy tooling and do not set them
 # off. CI always runs them, which is the authoritative check. Never at commit time.
 policy_relevant() {
