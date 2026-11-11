@@ -10,6 +10,9 @@ use clawdot_core::app::{Adapters, Core, Limits, Stores};
 use clawdot_core::assistant::{Assistant, describe_fired};
 use clawdot_core::audit::{AuditConfig, AuditLog};
 use clawdot_core::cli::{self, Args};
+use clawdot_core::commands::{
+    announce_admin, bind_error, is_quit, print_snippet, reset_admin, say_command,
+};
 use clawdot_core::config::{AgentConfig, SpeechConfig};
 #[cfg(feature = "esphome-satellite")]
 use clawdot_core::esphome_cfg::EsphomeConfig;
@@ -47,69 +50,6 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
-/// `--reset-admin`: forget the administrator setting so first-run setup shows again (REQ-CFG-022).
-fn reset_admin(dir: &std::path::Path) -> ExitCode {
-    match clawdot_core::admin::reset(dir) {
-        Ok(removed) => {
-            println!(
-                "{}Start clawdot and open the web UI to set an administrator password again.\n\
-                 Until you do, the setup page can be completed by anyone on a private network who reaches it.",
-                if removed {
-                    "The web UI administrator setting was cleared. Endpoints and other state are unchanged.\n"
-                } else {
-                    "There was no administrator setting to clear.\n"
-                }
-            );
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("clawdot: cannot clear the administrator setting: {e}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-/// Tell the person at the console where the web UI is and how it is protected. No secret is printed: the
-/// device may have no visible console (REQ-CFG-018, REQ-CFG-021).
-fn announce_admin(core: &Core, public: &str) {
-    use clawdot_core::admin::Mode;
-    match core.admin_mode() {
-        Mode::Setup => {
-            println!(
-                "\nWeb UI: {public}/  (open it to finish first-run setup)\n\
-                 Until setup is done, the first person on a private network to open it can set the password."
-            );
-        }
-        Mode::Password => println!("\nWeb UI: {public}/"),
-        Mode::Open => println!(
-            "\nWeb UI: {public}/  is UNPROTECTED (open mode): anyone on your network can use it.\n\
-             Set a password in the page, or run `clawdot --reset-admin` and start again."
-        ),
-    }
-}
-
-/// True if a console line asks to leave (REQ-CFG-017).
-fn is_quit(line: &str) -> bool {
-    let word = line.trim().trim_end_matches(['.', '!']);
-    word.eq_ignore_ascii_case("quit") || word.eq_ignore_ascii_case("exit")
-}
-
-const DEFAULT_PORT: u16 = 3335;
-
-/// An actionable message for a failed bind (REQ-CFG-014).
-fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
-    let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
-        format!(
-            "another program is using port {}; choose a free one, for example --listen {}",
-            addr.port(),
-            SocketAddr::new(addr.ip(), DEFAULT_PORT)
-        )
-    } else {
-        "choose another address with --listen (or `listen` in the configuration file)".to_owned()
-    };
-    format!("cannot listen on {addr}: {e}. {hint}")
-}
-
 fn zone_for(name: Option<&str>) -> Result<Box<dyn Zone + Send + Sync>, String> {
     match name {
         None => Ok(Box::new(FixedOffset(0))),
@@ -118,35 +58,6 @@ fn zone_for(name: Option<&str>) -> Result<Box<dyn Zone + Send + Sync>, String> {
             .map(|z| Box::new(z) as Box<dyn Zone + Send + Sync>),
         #[cfg(not(feature = "tz"))]
         Some(_) => Err("this build has no time-zone database (feature `tz`)".to_owned()),
-    }
-}
-
-fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
-    println!(
-        "\nEndpoint `{endpoint}` created (adapter: {adapter}). The token is shown only now:\n  {token}\n"
-    );
-    if adapter == "claude-code" {
-        println!(
-            "Claude Code hooks: add to ~/.claude/settings.json (merge with what is already there):"
-        );
-        let hook = |event: &str| {
-            format!(
-                "    \"{event}\": [{{ \"hooks\": [{{ \"type\": \"http\", \"url\": \"{public}/hook/{endpoint}\", \"headers\": {{ \"Authorization\": \"Bearer {token}\" }}, \"timeout\": 5 }}] }}]"
-            )
-        };
-        println!(
-            "{{\n  \"hooks\": {{\n{},\n{}\n  }}\n}}\n",
-            hook("Stop"),
-            hook("Notification")
-        );
-        println!(
-            "Voice replies reach the agent through the bridge, on the machine where the agent runs:"
-        );
-        println!("  CLAWDOT_TOKEN=<token> clawdot-bridge --url {public} --endpoint {endpoint}\n");
-    } else {
-        println!(
-            "Post events with:\n  curl -X POST {public}/hook/{endpoint} -H 'Authorization: Bearer <token>' -d '{{\"title\":\"Backup finished\",\"summary\":\"12 GB copied\"}}'\n"
-        );
     }
 }
 
@@ -949,41 +860,6 @@ async fn voice_once(
     Ok(())
 }
 
-/// `clawdot say TEXT ...`: speak a message on a running ClawDot (REQ-INB-026).
-async fn say_command(rest: &[String]) -> ExitCode {
-    let say_args = match clawdot_core::say::parse(rest, |k| std::env::var(k).ok()) {
-        Ok(a) => a,
-        Err(m) if m.is_empty() => {
-            print!("{}", clawdot_core::say::HELP);
-            return ExitCode::SUCCESS;
-        }
-        Err(m) => {
-            eprintln!("clawdot say: {m}");
-            return ExitCode::from(2);
-        }
-    };
-    let token = std::env::var(&say_args.token_env)
-        .ok()
-        .filter(|t| !t.is_empty());
-    if token.is_none() && say_args.body.get("endpoint").is_none() {
-        eprintln!(
-            "clawdot say: set the environment variable {} to an endpoint token (or choose another with --token-env)",
-            say_args.token_env
-        );
-        return ExitCode::from(2);
-    }
-    match clawdot_core::say::run(&say_args, token.as_deref()).await {
-        Ok(line) => {
-            println!("{line}");
-            ExitCode::SUCCESS
-        }
-        Err(m) => {
-            eprintln!("clawdot say: {m}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -1581,51 +1457,5 @@ async fn main() -> ExitCode {
                 core.maintain();
             }
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    fn addr(s: &str) -> SocketAddr {
-        s.parse().unwrap()
-    }
-
-    #[test]
-    fn quit_and_exit_leave_the_console() {
-        for l in ["quit", "exit", "Quit", " EXIT ", "quit."] {
-            assert!(is_quit(l), "{l}");
-        }
-        for l in ["quit smoking", "what time is it", "exit the building", ""] {
-            assert!(!is_quit(l), "{l}");
-        }
-    }
-
-    #[test]
-    fn snippet_urls_follow_the_listen_address() {
-        assert_eq!(
-            public_url_from_listen(addr("192.168.1.20:9000")),
-            ("http://192.168.1.20:9000".to_owned(), false)
-        );
-        assert_eq!(
-            public_url_from_listen(addr("[fe80::1]:9000")),
-            ("http://[fe80::1]:9000".to_owned(), false)
-        );
-        for unspecified in ["0.0.0.0:9000", "[::]:9000"] {
-            assert_eq!(
-                public_url_from_listen(addr(unspecified)),
-                ("http://clawdot.local:9000".to_owned(), true)
-            );
-        }
-    }
-
-    #[test]
-    fn a_taken_port_gets_an_actionable_message() {
-        let e = std::io::Error::from(std::io::ErrorKind::AddrInUse);
-        let m = bind_error(addr("0.0.0.0:8080"), &e);
-        assert!(m.contains("0.0.0.0:8080"), "{m}");
-        assert!(m.contains("--listen 0.0.0.0:3335"), "{m}");
     }
 }

@@ -17,6 +17,7 @@ pub mod assistant;
 pub mod audit;
 pub mod cancel;
 pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod diag;
 #[cfg(feature = "esphome-satellite")]
