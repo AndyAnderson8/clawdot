@@ -2,6 +2,33 @@
 
 How one turn runs when the user asks for something that takes more than one step. The design is [agentic-scope.md](../design/agentic-scope.md) section 2; the requirements are REQ-AST-019 to REQ-AST-025, REQ-VOI-020, REQ-SEC-017 and REQ-CFG-044. The code is `session::run_turn_ctl` (the loop), `notes` (memory), `cancel` (the stop signal), `voice::Dialog` and `satellite::run_session` (audio). The measure of it is the `AGT` and `INJ` scenarios in [evals.md](evals.md).
 
+## Where a turn runs (ADR-0021, REQ-AST-026, REQ-AST-027)
+
+A turn does not run inside the main loop. The loop owns the state (the timers and built-in tools, the portal's tools, settings and skills, the usage files); a model turn is a task that gets what it needs and sends its results back:
+
+```
+ speaker says X ──► loop: fast path? ── yes ─► reply now
+                          │ no
+                          ▼
+              Hub::submit ── the speaker's Conversation moved into a new task, with a TurnKit:
+                          │     prompt + skills, limits, tool list, a read-only copy of the policy,
+                          │     clones of the HTTP/MCP clients, a handle on the usage counters
+                          ▼
+   turn task:  run_turn_ctl (the unchanged turn) ─ HTTP/MCP tool ─► called by the task itself
+                          │                      └ built-in tool ─► ToolReq ─► loop runs it on the assistant,
+                          │                                          answers with the result and its effects
+                          ▼
+              Finished { conversation, reply, effects } ─► loop: put the conversation back, save the counters,
+                                                            deliver the reply, start the speaker's next request
+```
+
+* **Conversations.** One per speaker (`speakers.rs`): a satellite connection (`sat:<random id>`, made per connection), the console, or any other conversing source. At most 8, each already bounded (20 messages, 24,000 bytes); one idle for 600 s is dropped; a full set gives the place of the speaker idle longest to a newcomer. The held action, the recent actions, the stored results and the "forget my notes?" question live in the conversation, so they are per speaker: a yes from another speaker or another connection releases nothing. A speaker's second request while its first runs waits (at most 2); another speaker is not held up.
+* **Snapshot.** A turn begins with the persona, skills, model, limits, tool list, which tools are off and the tiers the administrator chose, as they were at that moment. A portal change is applied by the loop at once and reaches the next turn; the turn in flight keeps its rules.
+* **The gate.** `session/gate.rs` (`Turn`) holds the tier check, hold and release, audit, caps, limits and cancel. The model-turn loop and the realtime path both call it; realtime has no scripted backend and no extra model request.
+* **Realtime and speech.** A realtime session is a task with its own conversation and the same link for built-in tools. Spoken lines (timers, portal phrases) and the agent-event announcements go through one speaker task, in order. None of them holds the loop.
+* **Counters.** The daily request and spend counters are a handle on one small cell that every turn counts into, so the spend cap sees all of them at once; the loop alone saves them and changes the limits.
+* **Still inline.** A change to tools or MCP servers in the portal runs in the loop (an MCP connect waits for its timeout, at most 60 s).
+
 ## One turn
 
 ```

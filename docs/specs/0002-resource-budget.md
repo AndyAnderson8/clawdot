@@ -74,7 +74,7 @@ Because the OS and drivers consume part of the 512 MB, the harness's share is bu
 
 - Single-threaded async runtime by default; threads only where needed (audio).
 - No dynamic linking, and no reflection-heavy or large-runtime dependencies.
-- Audio buffers are pre-allocated ring buffers; response text is streamed, not accumulated.
+- Conversation history is capped by tokens and bytes. Conversations are kept one per speaker, at most 8, each idle one dropped after 600 s (REQ-AST-026); a model turn or realtime session runs as a task on the same single-threaded runtime (ADR-0021), so the default one-speaker configuration holds one conversation and one turn at a time.
 - Conversation history is capped by tokens and bytes.
 - JSON file store with atomic writes, not an embedded SQL engine, unless measured otherwise.
 
