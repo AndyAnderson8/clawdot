@@ -35,6 +35,7 @@ pub mod notes;
 pub mod satellite;
 pub mod say;
 pub mod sched;
+pub mod secrets;
 pub mod session;
 pub mod settings;
 pub mod speech;

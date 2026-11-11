@@ -72,8 +72,6 @@ OPTIONS:
 LANGUAGE MODEL (optional; without it only the local fast path and fallback summaries work):
     --llm-url URL              OpenAI-compatible base URL, for example https://openrouter.ai/api/v1
     --llm-model NAME           Model for conversation and tool calls
-    --llm-fallback-model NAME  Tried if the primary model fails
-    --summary-model NAME       Cheaper model for spoken summaries (default: --llm-model)
     --llm-key-env VAR          Environment variable holding the API key (default: OPENROUTER_API_KEY)
     --persona-file FILE        Replace the default system prompt
     --daily-spend-usd X        Stop calling the model after this much spend per day
@@ -107,8 +105,6 @@ struct Args {
     echo_speech: bool,
     llm_url: Option<String>,
     llm_model: Option<String>,
-    llm_fallback: Option<String>,
-    summary_model: Option<String>,
     key_env: String,
     persona_file: Option<PathBuf>,
     tools: Vec<ToolDef>,
@@ -150,8 +146,6 @@ fn parse() -> Result<Args, String> {
         echo_speech: false,
         llm_url: None,
         llm_model: None,
-        llm_fallback: None,
-        summary_model: None,
         key_env: "OPENROUTER_API_KEY".into(),
         persona_file: None,
         tools: Vec::new(),
@@ -229,16 +223,6 @@ fn parse() -> Result<Args, String> {
                 a.flag_layer
                     .insert("llm_model".into(), value("--llm-model")?.into());
             }
-            "--llm-fallback-model" => {
-                a.flag_layer.insert(
-                    "llm_fallback_model".into(),
-                    value("--llm-fallback-model")?.into(),
-                );
-            }
-            "--summary-model" => {
-                a.flag_layer
-                    .insert("summary_model".into(), value("--summary-model")?.into());
-            }
             "--llm-key-env" => {
                 a.flag_layer
                     .insert("llm_key_env".into(), value("--llm-key-env")?.into());
@@ -290,11 +274,6 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     put("public_url", c.public_url.clone().map(Into::into));
     put("llm_url", c.llm.url.clone().map(Into::into));
     put("llm_model", c.llm.model.clone().map(Into::into));
-    put(
-        "llm_fallback_model",
-        c.llm.fallback_model.clone().map(Into::into),
-    );
-    put("summary_model", c.llm.summary_model.clone().map(Into::into));
     put("llm_key_env", c.llm.key_env.clone().map(Into::into));
     put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
     put("voice", c.speech.voice.clone().map(Into::into));
@@ -403,8 +382,6 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
     args.persona = text("persona").unwrap_or_default();
     args.llm_url = text("llm_url");
     args.llm_model = text("llm_model");
-    args.llm_fallback = text("llm_fallback_model");
-    args.summary_model = text("summary_model");
     args.key_env = text("llm_key_env").unwrap_or_default();
     args.daily_spend = state.get("daily_spend_usd").as_f64();
     if let Some(v) = text("voice") {
@@ -645,8 +622,6 @@ fn with_agent(cfg: TurnConfig, agent: &AgentConfig) -> TurnConfig {
 fn build_llm(
     url: Option<&str>,
     model: Option<&str>,
-    fallback: Option<&str>,
-    summary: Option<&str>,
     key_env: &str,
     max_tokens: u32,
     agent: &AgentConfig,
@@ -654,11 +629,13 @@ fn build_llm(
     let (Some(url), Some(model)) = (url, model) else {
         return Ok(None);
     };
-    let key = std::env::var(key_env).unwrap_or_default();
+    // A key pasted into the portal wins; otherwise the environment variable that was named.
+    let key = clawdot_core::secrets::get(clawdot_core::secrets::LLM_KEY)
+        .unwrap_or_else(|| std::env::var(key_env).unwrap_or_default());
     let backend = HttpBackend::new(url, &key, Duration::from_secs(30))?;
     Ok(Some(Llm {
         backend,
-        cfg: agent_turn_config(model, fallback, summary, max_tokens, agent),
+        cfg: agent_turn_config(model, None, None, max_tokens, agent),
     }))
 }
 
@@ -737,22 +714,14 @@ fn apply_live(
     if changed("quiet_start") || changed("quiet_end") {
         core.set_quiet_hours(quiet_from(live));
     }
-    if [
-        "llm_url",
-        "llm_model",
-        "llm_fallback_model",
-        "summary_model",
-        "llm_key_env",
-    ]
-    .iter()
-    .any(|k| changed(k))
+    if ["llm_url", "llm_model", "llm_key_env"]
+        .iter()
+        .any(|k| changed(k))
     {
         let max_tokens = brain.usage.limits().max_output_tokens_per_turn;
         match build_llm(
             text("llm_url"),
             text("llm_model"),
-            text("llm_fallback_model"),
-            text("summary_model"),
             text("llm_key_env").unwrap_or("OPENROUTER_API_KEY"),
             max_tokens,
             &brain.agent,
@@ -1250,6 +1219,7 @@ async fn main() -> ExitCode {
             "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and              reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
         );
     }
+    clawdot_core::secrets::init(&args.data_dir);
     match clawdot_core::admin::migrate_legacy(&args.data_dir) {
         Ok(true) => println!(
             "clawdot: the old administrator token still works: sign in with it, then set a password in the web UI"
@@ -1330,8 +1300,6 @@ async fn main() -> ExitCode {
     let llm = match build_llm(
         args.llm_url.as_deref(),
         args.llm_model.as_deref(),
-        args.llm_fallback.as_deref(),
-        args.summary_model.as_deref(),
         &args.key_env,
         limits.max_output_tokens_per_turn,
         &args.agent,
@@ -1648,6 +1616,13 @@ async fn main() -> ExitCode {
                 let answer = match job.op {
                     Op::Sched(op) => brain.assistant.admin_sched(op),
                     Op::Settings(live) => {
+                        apply_live(&mut brain, &core, &live, &mut applied);
+                        Ok(serde_json::json!({ "applied": true }))
+                    }
+                    Op::Rekey => {
+                        // Make the next comparison see a change, so the client is built again with the new key.
+                        let live = applied.clone();
+                        applied.insert("llm_key_env".into(), serde_json::Value::Null);
                         apply_live(&mut brain, &core, &live, &mut applied);
                         Ok(serde_json::json!({ "applied": true }))
                     }

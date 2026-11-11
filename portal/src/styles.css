@@ -1935,3 +1935,36 @@ button.authgo {
     opacity: 1;
   }
 }
+
+/* ---- The API key, a dollar amount ---- */
+.keyhint {
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--radius-inner);
+  background: var(--color-background-muted);
+  font-size: 0.9375rem;
+  letter-spacing: 0.02em;
+}
+.keyshown {
+  align-items: center;
+}
+.keyentry .row input {
+  flex: 1 1 14rem;
+}
+.moneybox {
+  position: relative;
+  max-width: 14rem;
+}
+.moneybox > span {
+  position: absolute;
+  top: 50%;
+  left: var(--spacing-3);
+  transform: translateY(-50%);
+  color: var(--color-text-secondary);
+  font-weight: 650;
+  pointer-events: none;
+}
+.moneybox input {
+  padding-left: 1.75rem;
+  font-variant-numeric: tabular-nums;
+}

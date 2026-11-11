@@ -1,6 +1,5 @@
-// Ready-made choices for "who answers questions", so a person picks a name instead of typing an address.
-// Every one speaks the OpenAI-style chat protocol that ClawDot uses. The key is never stored by ClawDot: only the
-// NAME of the environment variable that holds it is.
+// Ready-made choices for the provider, so a person picks a name instead of typing an address. Every one speaks the
+// OpenAI-style chat protocol that ClawDot uses. The key is pasted on the Assistant page and kept on the device.
 export interface Provider {
   id: string;
   name: string;
@@ -39,20 +38,12 @@ export const PROVIDERS: Provider[] = [
     note: "The makers of Claude, through their OpenAI-compatible address.",
   },
   {
-    id: "local",
-    name: "A model on your own network",
-    url: "http://localhost:11434/v1",
-    model: "",
-    keyEnv: "",
-    note: "A model you run yourself, with Ollama, LM Studio or similar. Change the address if it runs on another computer.",
-  },
-  {
     id: "custom",
-    name: "Something else",
+    name: "Custom",
     url: "",
     model: "",
     keyEnv: "",
-    note: "Any other service that speaks the OpenAI style of request. You give its address.",
+    note: "Any other service that speaks the OpenAI style of request, or a model you run yourself. You give its address.",
   },
 ];
 

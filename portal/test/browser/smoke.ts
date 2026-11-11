@@ -956,12 +956,13 @@ await step("Settings: save one group, errors stay in their form, provider preset
     true,
     "the service is a real dropdown",
   );
-  await eq(`T.q('#provider').value`, "custom", "an address that is no known service shows as something else");
+  await eq(`T.q('#provider').value`, "custom", "an address that is no known service shows as custom");
   await eq(`!!T.q('#f-llm_url')`, true, "and the address stays editable");
   await T(`set('#provider', 'openai')`);
   await eq(`T.q('#f-llm_url') === null`, true, "a known service hides its address");
   await eq(`T.q('#f-llm_model').value`, "gpt-4o-mini", "the preset fills in a model");
-  await eq(`T.q('#f-llm_key_env').value`, "OPENAI_API_KEY", "and the usual key variable");
+  await eq(`T.q('#f-llm_key_env') === null`, true, "and the key variable, which is only for custom setups");
+  await eq(`!!T.q('#apikey') || !!T.q('#keyhint')`, true, "a known service asks for its key instead");
   await T(`set('#provider', 'custom')`);
   await b.until(`!!T.q('#f-llm_url')`, "something else asks for the address");
   await T(`set('#f-llm_url', 'http://insecure.example.com')`);
@@ -1067,23 +1068,44 @@ await step(
       `T.all('#panel form.panel:first-of-type .slabel label').map((l) => l.textContent.replace('Optional', '').trim())`,
     );
     assert.deepEqual(
-      labels.slice(0, 4),
-      ["Provider", "Address", "API key", "Model"],
-      "provider, then its key, then the model",
+      labels.slice(0, 5),
+      ["Provider", "API key", "Address", "Key variable", "Model"],
+      "provider, then its key, then the rest",
     );
     await eq(`T.q('#loadmodels') === null`, true, "no button to press to see the models");
     await eq(
       `T.q('#f-llm_fallback_model') === null && T.q('#f-summary_model') === null`,
       true,
-      "optional models start out of the way",
+      "no backup or summary model to set",
     );
-    await T(`clickText('.addrow', '+ Add a backup model')`);
-    await b.until(`!!T.q('#f-llm_fallback_model')`, "the backup model box appears");
-    await eq(`T.text('.optional')`, "Optional", "and is marked optional");
-    await b.until(`T.q('#f-llm_fallback_model').tagName === 'SELECT'`, "as a list too");
-    await T(`set('#f-llm_fallback_model', 'free/model-c')`);
-    await T(`clickText('.sctl', 'Remove')`);
-    await b.until(`T.q('#f-llm_fallback_model') === null`, "removed again");
+    // The key: shown only as its first and last few characters, replaced by pasting another, checked before it is kept.
+    await T(`set('#provider', 'openrouter')`);
+    await b.until(`!!T.q('#keyhint')`, "the saved key is shown");
+    await eq(`T.text('#keyhint')`, "sk-or-…c9f2", "as its ends only");
+    await b.ev(`window.confirm = () => true`);
+    await T(`click('#keyremove')`);
+    await b.until(`!!T.q('#apikey')`, "removed: a box to paste a key appears");
+    await eq(`T.q('#f-llm_model').disabled`, true, "and the models wait for a key");
+    await T(`set('#apikey', 'nope')`);
+    await T(`click('#keycheck')`);
+    await b.until(
+      `T.text('#keymsg').startsWith('The service did not accept that key')`,
+      "a key that is refused says so",
+    );
+    assert.ok(
+      !mock.log.some(
+        (l) => l.method === "PUT" && l.path === "/api/llm/key" && (l.body as { key: string }).key === "nope",
+      ),
+      "and is not kept",
+    );
+    await T(`set('#apikey', 'sk-or-v1-abcdefghijklmnop1234')`);
+    await b.ev(
+      `document.getElementById('apikey').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`,
+    );
+    await b.until(`T.text('#keyhint') === 'sk-or-…1234'`, "Enter checks it, keeps it, and shows only its ends");
+    await b.until(`!T.q('#f-llm_model').disabled`, "and the models can be chosen");
+    await eq(`T.all('#f-llm_model option').length >= 3`, true, "from the list the provider gave");
+    await eq(`document.body.innerText.includes('abcdefghijklmnop')`, false, "the page never shows the key itself");
     // The Settings tabs wrap instead of scrolling.
     await eq(`getComputedStyle(T.q('.tabs')).overflowX`, "visible", "no scrollbar on the tab strip");
   },

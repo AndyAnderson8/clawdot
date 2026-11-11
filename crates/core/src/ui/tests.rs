@@ -78,6 +78,7 @@ async fn start(with_main_loop: bool) -> Portal {
                 let r = match job.op {
                     Op::Sched(op) => assistant.admin_sched(op),
                     Op::Settings(live) => Ok(Value::Object(live)),
+                    Op::Rekey => Ok(json!({ "applied": true })),
                     Op::Ext(op) => ext
                         .apply(op, &mut http, &mut mcp, &builtin, |n| {
                             (n == "HA_TOKEN").then(|| "x".to_owned())
@@ -980,4 +981,70 @@ fn a_query_value_is_decoded_and_a_missing_or_broken_one_is_none() {
         Some("%4"),
         "a lone percent sign stays as typed"
     );
+}
+
+// REQ-CFG-082
+#[tokio::test]
+async fn a_pasted_key_is_kept_masked_and_never_returned_whole() {
+    let p = start(true).await;
+    let dir = std::env::temp_dir().join(format!("clawdot-key-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::secrets::init(&dir);
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    // Not signed in: refused.
+    let put = r#"{"key":"sk-test-0123456789abcdef0123"}"#;
+    assert_eq!(call(&p, "PUT", "/api/llm/key", "", put).await.0, 401);
+    // Signed in: kept, and only the ends come back.
+    let (s, v) = call(&p, "PUT", "/api/llm/key", &session, put).await;
+    assert_eq!(s, 200);
+    assert_eq!(v["hint"], "sk-tes…0123");
+    assert!(!v.to_string().contains("0123456789abcdef"));
+    // The page can ask whether a key is in use, still only as a hint.
+    let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
+    assert_eq!(v["llm"]["key_hint"], "sk-tes…0123");
+    assert!(!v.to_string().contains("0123456789abcdef"));
+    // A bad key is refused with a reason; an empty one too.
+    assert_eq!(
+        call(
+            &p,
+            "PUT",
+            "/api/llm/key",
+            &session,
+            r#"{"key":"two words"}"#
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        call(&p, "PUT", "/api/llm/key", &session, r#"{"key":""}"#)
+            .await
+            .0,
+        400
+    );
+    // Asking for models needs a provider.
+    assert_eq!(
+        call(&p, "POST", "/api/models", &session, r#"{"url":""}"#)
+            .await
+            .0,
+        409
+    );
+    assert_eq!(
+        call(
+            &p,
+            "POST",
+            "/api/models",
+            "",
+            r#"{"url":"https://x.example/v1"}"#
+        )
+        .await
+        .0,
+        401
+    );
+    // Forgotten again.
+    let (s, v) = call(&p, "DELETE", "/api/llm/key", &session, "").await;
+    assert_eq!((s, v["hint"].is_null()), (200, true));
+    let _ = std::fs::remove_dir_all(&dir);
 }

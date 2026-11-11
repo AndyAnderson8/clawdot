@@ -108,8 +108,6 @@ function seed(mode: string): Json {
       persona: { value: "You are brief.", source: "default", live: true },
       llm_url: { value: "https://api.example.com/v1", source: "file", live: true },
       llm_model: { value: "model-a", source: "file", live: true },
-      llm_fallback_model: { value: null, source: "default", live: true },
-      summary_model: { value: null, source: "default", live: true },
       llm_key_env: { value: "API_KEY", source: "file", live: true },
       voice: { value: null, source: "default", live: true },
       speech_language: { value: null, source: "default", live: true },
@@ -233,6 +231,7 @@ function seed(mode: string): Json {
     },
     notesOn: true,
     speechOn: false,
+    keyHint: "sk-or-…c9f2",
     notes: [{ id: 1, text: "my printer is <b>Pixel</b>", ts: t - 3600 }],
     nextNote: 2,
     skills: [{ name: "Good night", instructions: "Turn off the lights.", tools: ["set_light"], enabled: true }],
@@ -263,7 +262,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
   const settingsJson = (note?: string) => ({
     fields: st["settings"],
     restart_needed: st["restart"],
-    llm: { key_present: true },
+    llm: { key_present: !!st["keyHint"], key_hint: st["keyHint"] || null },
     voice_info: { language: "en", stt_model: "whisper", tts_model: "voice-1", provider: "speech.example" },
     speech_configured: !!st["speechOn"],
     speakers_listen: "0.0.0.0:3336",
@@ -394,6 +393,25 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           changelog: "## [0.1.0]\n- First release",
         });
       if (m === "GET" && path === "/api/models") return send(200, { models: ["model-b", "model-a", "free/model-c"] });
+      if (m === "POST" && path === "/api/models") {
+        const key = typeof body.key === "string" ? body.key : "";
+        const ok = key ? key.startsWith("sk-") : !!st["keyHint"];
+        if (!ok)
+          return err(
+            401,
+            "The service did not accept that key. Check that it is the whole key and that it is for this service.",
+          );
+        return send(200, { models: ["model-b", "model-a", "free/model-c"] });
+      }
+      if (m === "PUT" && path === "/api/llm/key") {
+        const k = String(body.key ?? "");
+        st["keyHint"] = k.slice(0, 6) + "…" + k.slice(-4);
+        return send(200, { hint: st["keyHint"] });
+      }
+      if (m === "DELETE" && path === "/api/llm/key") {
+        st["keyHint"] = "";
+        return send(200, { hint: null });
+      }
       if (m === "GET" && path === "/api/voices") {
         if (!st["speechOn"]) return err(503, "No speech provider is set up, so there are no voices to choose from.");
         return send(200, { voices: ["alloy", "nova", "onyx"], source: "builtin" });

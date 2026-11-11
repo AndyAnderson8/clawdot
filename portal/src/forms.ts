@@ -121,10 +121,8 @@ export const LABEL: Record<string, string> = {
   persona: "Instructions",
   llm_url: "Address",
   llm_model: "Model",
-  llm_fallback_model: "Backup model",
-  summary_model: "Model for summaries",
   speech_language: "Language you speak",
-  llm_key_env: "API key",
+  llm_key_env: "Key variable",
   voice: "Voice",
   listen: "Portal address",
   public_url: "Address other programs use",
@@ -151,7 +149,7 @@ export const FROM: Record<string, string> = {
 };
 
 export type SettingKind =
-  "text" | "zone" | "area" | "board" | "number" | "bool" | "time" | "language" | "voice" | "model";
+  "text" | "zone" | "area" | "board" | "number" | "money" | "bool" | "time" | "language" | "voice" | "model";
 export interface SettingSpec {
   key: string;
   kind: SettingKind;
@@ -188,7 +186,8 @@ export function settingsPatch(
     const was = (current[sp.key] ?? "").trim();
     const v = (edited[sp.key] ?? "").trim();
     if (v === was) continue;
-    body[sp.key] = v === "" ? null : sp.kind === "number" ? Number(v) : sp.kind === "bool" ? v === "true" : v;
+    body[sp.key] =
+      v === "" ? null : sp.kind === "number" || sp.kind === "money" ? Number(v) : sp.kind === "bool" ? v === "true" : v;
   }
   return body;
 }
@@ -337,4 +336,12 @@ export function matching<T extends { name: string }>(rows: T[], query: string, t
     const hay = (r.name + " " + text(r)).toLowerCase();
     return words.every((w) => hay.includes(w));
   });
+}
+
+/** What was typed into a dollar amount, kept to digits and a point with at most two decimals ("12.5" stays, "12.567" becomes "12.56"). */
+export function cents(typed: string): string {
+  const t = typed.replace(/[^0-9.]/g, "");
+  const [whole = "", ...rest] = t.split(".");
+  if (!rest.length) return whole.replace(/^0+(?=\d)/, "");
+  return whole.replace(/^0+(?=\d)/, "") + "." + rest.join("").slice(0, 2);
 }

@@ -50,6 +50,8 @@ pub enum Op {
     Ext(crate::extensions::ExtOp),
     /// Apply the effective values of the settings that change without a restart (REQ-CFG-039).
     Settings(serde_json::Map<String, Value>),
+    /// The language-model key was stored, replaced or removed: build the client again with it.
+    Rekey,
 }
 
 /// One request and where to send the answer.

@@ -10,8 +10,8 @@ import { About } from "./About.tsx";
 import { Sources } from "./Connections.tsx";
 import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
-import { PROVIDERS, providerFor } from "../providers.ts";
 import { Field } from "../parts.tsx";
+import { PROVIDERS, providerFor } from "../providers.ts";
 import { TestSpeaker } from "./TestSpeaker.tsx";
 import { FeaturesSection } from "./Features.tsx";
 import { Skills } from "./Skills.tsx";
@@ -25,25 +25,16 @@ const MODEL: Spec = [
   {
     key: "llm_url",
     kind: "text",
-    hint: "Where the service is. It starts with https://, or http:// for a model on your own network.",
-    hideWhen: (v) => {
-      const p = providerFor(v["llm_url"] ?? "");
-      return !p || (p.id !== "custom" && p.id !== "local");
-    },
+    hint: "Where the service is. It starts with https://, or http:// for a model you run yourself.",
+    hideWhen: (v: Record<string, string>) => providerFor(v["llm_url"] ?? "")?.id !== "custom",
+  },
+  {
+    key: "llm_key_env",
+    kind: "text",
+    hint: "Optional. Instead of pasting a key, name an environment variable on the device that holds it.",
+    hideWhen: (v: Record<string, string>) => providerFor(v["llm_url"] ?? "")?.id !== "custom",
   },
   { key: "llm_model", kind: "model", hint: "The model that answers you. The list comes from your provider." },
-  {
-    key: "llm_fallback_model",
-    kind: "model",
-    hint: "Used instead if the main model is unavailable.",
-    optional: "Add a backup model",
-  },
-  {
-    key: "summary_model",
-    kind: "model",
-    hint: "A cheaper model for reading long results aloud in a few words.",
-    optional: "Add a model for summaries",
-  },
 ];
 const LIMITS: Spec = [
   {
@@ -124,55 +115,172 @@ function General(props: { s: SettingsData }): JSX.Element {
   );
 }
 
+/** The provider's key: pasted once, checked with the service, kept on the device, and shown only as its first and last few characters. */
+function KeyRow(props: {
+  s: SettingsData;
+  vals: Record<string, string>;
+  setVals: (v: Record<string, string>) => void;
+}): JSX.Element | null {
+  const { s, vals, setVals } = props;
+  const prov = providerFor(vals["llm_url"] ?? "");
+  const [typed, setTyped] = useState("");
+  const [replacing, setReplacing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [bad, setBad] = useState(false);
+  if (!prov) return null;
+  const hint = vals["_keyhint"] ?? s.llm?.key_hint ?? "";
+  const fromEnv = !hint && s.llm?.key_present === true && vals["_keyok"] !== "0";
+  const check = async () => {
+    const key = typed.trim();
+    if (!key) {
+      setMsg("Paste the key first.");
+      setBad(true);
+      return;
+    }
+    setBusy(true);
+    setMsg("");
+    try {
+      // The service is asked first, so a key that does not work is never kept.
+      const r = await api<{ models: string[] }>("POST", "/api/models", { url: vals["llm_url"] ?? "", key });
+      const k = await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
+      setTyped("");
+      setReplacing(false);
+      setBad(false);
+      setMsg(
+        "Key accepted. " + r.models.length + (r.models.length === 1 ? " model is" : " models are") + " available.",
+      );
+      setVals({ ...vals, _keyhint: k.hint ?? "", _keyok: "1", _keyrev: String(Date.now()) });
+    } catch (x) {
+      setBad(true);
+      setMsg(x instanceof Error ? x.message : "The key could not be checked.");
+    }
+    setBusy(false);
+  };
+  const remove = async () => {
+    if (!confirm("Remove the saved key? The assistant will stop answering until you add one.")) return;
+    try {
+      await api("DELETE", "/api/llm/key");
+      setMsg("");
+      setVals({ ...vals, _keyhint: "", _keyok: "0", _keyrev: String(Date.now()) });
+    } catch (x) {
+      fail(x);
+    }
+  };
+  const showing = hint && !replacing;
+  return (
+    <div class="srow" id="keyrow">
+      <div class="slabel">
+        <label for="apikey">API key</label>
+        <p class="mut">
+          {prov.id === "custom"
+            ? "If the service needs one. It is checked, then kept on this device; only its first and last few characters are shown."
+            : "From your " +
+              prov.name +
+              " account. It is checked, then kept on this device; only its first and last few characters are shown."}
+        </p>
+      </div>
+      <div class="sctl">
+        {showing ? (
+          <div class="row keyshown">
+            <code id="keyhint" class="keyhint">
+              {hint}
+            </code>
+            <button class="plain small" type="button" id="keyreplace" onClick={() => setReplacing(true)}>
+              Replace
+            </button>
+            <button class="plain small" type="button" id="keyremove" onClick={() => void remove()}>
+              Remove
+            </button>
+          </div>
+        ) : (
+          <div class="keyentry">
+            {fromEnv ? <p class="mut">Using the key from the environment variable on the device.</p> : null}
+            <div class="row">
+              <input
+                id="apikey"
+                type="password"
+                autoComplete="off"
+                placeholder="Paste your API key"
+                value={typed}
+                onInput={(e) => setTyped(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void check();
+                  }
+                }}
+              />
+              <button class="plain small" type="button" id="keycheck" disabled={busy} onClick={() => void check()}>
+                {busy ? "Checking..." : "Check key"}
+              </button>
+              {replacing ? (
+                <button class="plain small" type="button" onClick={() => setReplacing(false)}>
+                  Cancel
+                </button>
+              ) : null}
+            </div>
+          </div>
+        )}
+        {msg ? (
+          <p class={bad ? "errtext" : "mut"} role={bad ? "alert" : "status"} id="keymsg">
+            {msg}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function Assistant(props: { s: SettingsData }): JSX.Element {
   const s = props.s;
-  const keyHint =
-    "The name of the environment variable that holds your key, for example OPENROUTER_API_KEY. ClawDot never stores the key itself. " +
-    (s.llm?.key_present ? "That variable is set." : "That variable is not set where ClawDot runs.");
   return (
     <>
       <Group
         title="Provider and model"
         settings={s}
         intro="The service that runs the AI behind your speaker. Without one, the speaker understands only simple commands such as timers."
-        specs={[...MODEL.slice(0, 1), { key: "llm_key_env", kind: "text", hint: keyHint }, ...MODEL.slice(1)]}
+        specs={MODEL}
         extra={({ vals, setVals }) => {
           const cur = providerFor(vals["llm_url"] ?? "");
           return (
-            <div class="srow">
-              <div class="slabel">
-                <label for="provider">Provider</label>
-                <p class="mut">{cur?.note ?? "Choose the service that will answer you."}</p>
+            <>
+              <div class="srow">
+                <div class="slabel">
+                  <label for="provider">Provider</label>
+                  <p class="mut">{cur?.note ?? "Choose the service that will answer you."}</p>
+                </div>
+                <div class="sctl">
+                  <select
+                    id="provider"
+                    required
+                    value={cur?.id ?? ""}
+                    onChange={(e) => {
+                      const p = PROVIDERS.find((x) => x.id === e.currentTarget.value);
+                      if (!p) return;
+                      setVals({
+                        ...vals,
+                        llm_url: p.id === "custom" ? "https://" : p.url,
+                        llm_model: p.id === "custom" ? "" : p.model,
+                        _keyrev: String(Date.now()),
+                      });
+                    }}
+                  >
+                    {cur ? null : (
+                      <option value="" disabled>
+                        Choose a provider
+                      </option>
+                    )}
+                    {PROVIDERS.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-              <div class="sctl">
-                <select
-                  id="provider"
-                  required
-                  value={cur?.id ?? ""}
-                  onChange={(e) => {
-                    const p = PROVIDERS.find((x) => x.id === e.currentTarget.value);
-                    if (!p) return;
-                    setVals({
-                      ...vals,
-                      llm_url: p.id === "custom" ? "https://" : p.url,
-                      llm_model: p.id === "custom" ? "" : p.model,
-                      llm_key_env: p.keyEnv || vals["llm_key_env"] || "",
-                    });
-                  }}
-                >
-                  {cur ? null : (
-                    <option value="" disabled>
-                      Choose a provider
-                    </option>
-                  )}
-                  {PROVIDERS.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
+              <KeyRow s={s} vals={vals} setVals={setVals} />
+            </>
           );
         }}
       />
@@ -198,7 +306,7 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
         title="Spending limit"
         settings={s}
         intro="Stops the assistant from using the language model once it has cost this much in a day. It starts again the next day."
-        specs={[{ key: "daily_spend_usd", kind: "number", hint: "In US dollars. Leave it empty for no limit." }]}
+        specs={[{ key: "daily_spend_usd", kind: "money", hint: "In US dollars. Leave it empty for no limit." }]}
       />
       <Group
         title="Quiet hours"
