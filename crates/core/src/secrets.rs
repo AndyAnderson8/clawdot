@@ -16,6 +16,8 @@ pub const SCHEMA: u32 = 1;
 /// The name the language-model key is kept under.
 pub const LLM_KEY: &str = "llm_key";
 
+/// The name the realtime voice key is kept under.
+pub const REALTIME_KEY: &str = "realtime_key";
 /// The name the speech-service key is kept under (REQ-VOI-023).
 pub const SPEECH_KEY: &str = "speech_key";
 

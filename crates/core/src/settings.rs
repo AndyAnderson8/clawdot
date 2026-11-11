@@ -63,7 +63,7 @@ pub struct Field {
 }
 
 /// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039).
-pub const FIELDS: [Field; 26] = [
+pub const FIELDS: [Field; 35] = [
     Field {
         key: "device_name",
         live: true,
@@ -169,6 +169,42 @@ pub const FIELDS: [Field; 26] = [
         key: "quiet_end",
         live: true,
     },
+    Field {
+        key: "realtime_enabled",
+        live: true,
+    },
+    Field {
+        key: "realtime_url",
+        live: true,
+    },
+    Field {
+        key: "realtime_model",
+        live: true,
+    },
+    Field {
+        key: "realtime_voice",
+        live: true,
+    },
+    Field {
+        key: "realtime_key_env",
+        live: true,
+    },
+    Field {
+        key: "realtime_transcription_model",
+        live: true,
+    },
+    Field {
+        key: "realtime_usd_per_min_in",
+        live: true,
+    },
+    Field {
+        key: "realtime_usd_per_min_out",
+        live: true,
+    },
+    Field {
+        key: "realtime_max_session_secs",
+        live: true,
+    },
 ];
 
 /// The default listen address (REQ-CFG-014).
@@ -191,6 +227,16 @@ const RETIRED: [&str; 3] = [
     "llm_fallback_model",
     "summary_model",
 ];
+
+/// Whether `n` can be the name of an environment variable (letters, digits and underscores, not starting
+/// with a digit).
+#[must_use]
+pub fn is_env_name(n: &str) -> bool {
+    n.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 fn is_field(key: &str) -> bool {
     FIELDS.iter().any(|f| f.key == key)
@@ -320,6 +366,60 @@ fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Resu
             }
             json!(n)
         }
+        "realtime_enabled" => json!(
+            v.as_bool()
+                .ok_or("Realtime voice must be on or off (true or false).")?
+        ),
+        "realtime_url" => {
+            let u = string("The realtime voice address", 300)?;
+            if u.contains(char::is_whitespace)
+                || !(u.starts_with("wss://") || u.starts_with("ws://"))
+            {
+                return Err("The realtime voice address must start with wss:// (or ws:// on your own network), for example wss://api.openai.com/v1/realtime.".into());
+            }
+            json!(u)
+        }
+        "realtime_model" => {
+            let s = string("The realtime model name", 100)?;
+            if s.is_empty()
+                || !s
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c))
+            {
+                return Err(
+                    "The realtime model name can use only letters, digits, and - _ . :".into(),
+                );
+            }
+            json!(s)
+        }
+        "realtime_voice" => json!(string("The realtime voice", 64)?),
+        "realtime_transcription_model" => json!(string("The transcription model", 100)?),
+        "realtime_key_env" => {
+            let n = string("The realtime key variable name", 64)?;
+            if !is_env_name(&n) {
+                return Err(
+                    "Enter the NAME of an environment variable (letters, digits, and underscores), not the key itself.".into(),
+                );
+            }
+            if crate::secrets::get(crate::secrets::REALTIME_KEY).is_none()
+                && env(&n).is_none_or(|v| v.is_empty())
+            {
+                return Err(format!(
+                    "The environment variable {n} is not set where ClawDot runs. Set it there (for example in the service's environment file), restart ClawDot, then save this again."
+                ));
+            }
+            json!(n)
+        }
+        "realtime_usd_per_min_in" | "realtime_usd_per_min_out" => {
+            let n = v
+                .as_f64()
+                .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))
+                .ok_or(
+                    "The price per minute of audio must be a number of dollars from 0 to 100.",
+                )?;
+            json!(n)
+        }
+        "realtime_max_session_secs" => whole(v, "Seconds per realtime conversation", 10, 3600)?,
         "voice" => json!(string("The voice", 64)?),
         "speech_provider" => {
             let t = string("The speech provider", 20)?;
@@ -402,6 +502,20 @@ fn check(
         && eff.get("quiet_start").map(|(v, _)| v) == eff.get("quiet_end").map(|(v, _)| v)
     {
         return Err("Quiet hours cannot start and end at the same time. Use different times, or clear both.".into());
+    }
+    if has("realtime_url") != has("realtime_model") {
+        return Err(
+            "Set both the realtime voice address and the model name, or clear both.".into(),
+        );
+    }
+    if eff
+        .get("realtime_enabled")
+        .is_some_and(|(v, _)| v.as_bool() == Some(true))
+        && !has("realtime_url")
+    {
+        return Err(
+            "Realtime voice needs an address and a model name before it can be turned on.".into(),
+        );
     }
     // ElevenLabs and Deepgram need no `speech` section: they have their own address (REQ-VOI-021).
     let own_service = eff
@@ -602,7 +716,9 @@ impl SettingsState {
         }
         let before = std::mem::replace(&mut self.saved, saved);
         let eff = self.effective();
-        if let Err(e) = check(&eff, self.speech_configured) {
+        if let Err(e) = check(&eff, self.speech_configured)
+            .and_then(|()| self.check_realtime_change(patch, &eff))
+        {
             self.saved = before;
             return Err(e);
         }
@@ -612,6 +728,36 @@ impl SettingsState {
             self.saved = before;
             return Err(format!(
                 "Could not save the settings file: {e}. Check that the data directory is writable."
+            ));
+        }
+        Ok(())
+    }
+
+    /// Turning realtime voice on needs a build that has it and a key to use. Checked only when a change touches
+    /// a realtime setting, never at start-up, so a device whose service environment lacks the key still starts
+    /// (REQ-RTV-008).
+    fn check_realtime_change(
+        &self,
+        patch: &Map<String, Value>,
+        eff: &BTreeMap<&'static str, (Value, Source)>,
+    ) -> Result<(), String> {
+        if !patch.keys().any(|k| k.starts_with("realtime_"))
+            || eff["realtime_enabled"].0.as_bool() != Some(true)
+        {
+            return Ok(());
+        }
+        if !crate::rtvoice::RtSettings::built() {
+            return Err("This build of ClawDot does not include realtime voice (it needs the `realtime` cargo feature), so it cannot be turned on.".into());
+        }
+        let key_env = eff["realtime_key_env"]
+            .0
+            .as_str()
+            .unwrap_or(crate::rtvoice::DEFAULT_KEY_ENV);
+        if crate::secrets::get(crate::secrets::REALTIME_KEY).is_none()
+            && (self.env)(key_env).is_none_or(|v| v.is_empty())
+        {
+            return Err(format!(
+                "Realtime voice needs an API key. Set the environment variable {key_env} where ClawDot runs, restart ClawDot, then turn this on."
             ));
         }
         Ok(())
@@ -646,6 +792,10 @@ impl SettingsState {
             );
         }
         let key_env = eff["llm_key_env"].0.as_str().unwrap_or("");
+        let rt = {
+            let live = self.values_of(&eff).into_iter().collect::<Map<_, _>>();
+            crate::rtvoice::RtSettings::from_live(&live)
+        };
         let mut out = json!({
             "fields": fields,
             "restart_needed": restart,
@@ -656,6 +806,13 @@ impl SettingsState {
                     || (self.env)(key_env).is_some_and(|v| !v.is_empty()),
                 // The first and last few characters of the key pasted into the page, never the key.
                 "key_hint": crate::secrets::hint(crate::secrets::LLM_KEY),
+            },
+            // Never the key: whether realtime voice can run, the provider, and the masked end of a pasted key.
+            "realtime": {
+                "configured": rt.configured_with(&*self.env),
+                "built": crate::rtvoice::RtSettings::built(),
+                "provider": crate::rtvoice::PROVIDER,
+                "key_hint": crate::secrets::hint(crate::secrets::REALTIME_KEY),
             },
             // The speech service key follows the same rules: only a masked hint, never the key (REQ-VOI-023).
             "speech": {
@@ -1065,6 +1222,80 @@ mod tests {
         assert_eq!(minute_of_day("07:30"), Some(450));
         assert_eq!(minute_of_day("23:59"), Some(1439));
         assert_eq!(minute_of_day("7:30"), None);
+    }
+
+    // REQ-RTV-008, REQ-RTV-005, REQ-CFG-038
+    #[test]
+    fn realtime_settings_are_layered_validated_live_and_expose_no_key() {
+        let dir = TempDir::new("realtime");
+        let file = layer(&[("realtime_voice", json!("verse"))]);
+        let mut st = open_in(&dir.0, file, Layer::new());
+        assert_eq!(source(&st, "realtime_voice"), "file");
+        st.change(&json!({
+            "realtime_url": "wss://api.openai.com/v1/realtime", "realtime_model": "gpt-realtime",
+            "realtime_usd_per_min_in": 0.05, "realtime_usd_per_min_out": 0.2,
+            "realtime_max_session_secs": 120, "realtime_transcription_model": "gpt-4o-mini-transcribe",
+        }))
+        .unwrap();
+        let live = st.live_values();
+        for k in [
+            "realtime_url",
+            "realtime_model",
+            "realtime_max_session_secs",
+            "realtime_voice",
+        ] {
+            assert!(!live[k].is_null(), "{k} applies without a restart");
+        }
+        assert_eq!(st.json()["restart_needed"], json!([]));
+        assert_eq!(st.json()["realtime"]["configured"], false, "not turned on");
+        assert_eq!(st.json()["realtime"]["provider"], "openai");
+        // Turning it on needs the build and a key; the answer says which is missing.
+        let e = st.change(&json!({"realtime_enabled": true})).unwrap_err();
+        if crate::rtvoice::RtSettings::built() {
+            assert!(e.contains("API key") && e.contains("OPENAI_API_KEY"), "{e}");
+            st.change(&json!({"realtime_key_env": "MY_KEY", "realtime_enabled": true}))
+                .unwrap();
+            assert_eq!(st.json()["realtime"]["configured"], true);
+        } else {
+            assert!(e.contains("does not include realtime voice"), "{e}");
+            assert_eq!(st.json()["realtime"]["built"], false);
+        }
+        let shown = st.json().to_string();
+        let saved = std::fs::read_to_string(dir.0.join("settings.json")).unwrap();
+        assert!(!shown.contains("secret-value") && !saved.contains("secret-value"));
+    }
+
+    // REQ-RTV-008, REQ-CFG-040
+    #[test]
+    fn bad_realtime_values_are_refused_with_what_to_fix_and_change_nothing() {
+        let mut st = SettingsState::in_memory(defaults(), false, env_with(&[]));
+        for (patch, needle) in [
+            (json!({"realtime_enabled": "yes"}), "on or off"),
+            (
+                json!({"realtime_url": "https://x/v1", "realtime_model": "m"}),
+                "wss://",
+            ),
+            (
+                json!({"realtime_url": "wss://x y/v1", "realtime_model": "m"}),
+                "wss://",
+            ),
+            (json!({"realtime_url": "wss://x/v1"}), "both"),
+            (json!({"realtime_model": "bad name&x"}), "letters, digits"),
+            (json!({"realtime_key_env": "sk-abc def"}), "NAME"),
+            (
+                json!({"realtime_key_env": "NOT_SET_ANYWHERE"}),
+                "NOT_SET_ANYWHERE is not set",
+            ),
+            (json!({"realtime_usd_per_min_in": -1}), "0 to 100"),
+            (json!({"realtime_usd_per_min_out": "free"}), "0 to 100"),
+            (json!({"realtime_max_session_secs": 5}), "10 to 3600"),
+            (json!({"realtime_max_session_secs": 4000}), "10 to 3600"),
+            (json!({"realtime_enabled": true}), "address and a model"),
+        ] {
+            let e = st.change(&patch).unwrap_err();
+            assert!(e.contains(needle), "{patch}: {e}");
+        }
+        assert!(st.get("realtime_url").is_null() && st.get("realtime_enabled").is_null());
     }
 
     // REQ-CFG-065

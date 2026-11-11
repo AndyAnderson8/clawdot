@@ -99,6 +99,100 @@ pub struct SpeechConfig {
     pub tts_sample_rate: Option<u32>,
 }
 
+/// Optional realtime (speech-to-speech) voice (ADR-0020, REQ-RTV-008). Needs a build with the `realtime`
+/// feature. The key is never here: it is read from the environment variable `key_env` names, or the key pasted
+/// into the portal.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RealtimeSection {
+    /// Use realtime voice for a turn after the wake word (default false).
+    pub enabled: Option<bool>,
+    /// The provider; only `openai` (the OpenAI Realtime protocol) exists.
+    pub provider: Option<String>,
+    /// `wss://` address, for example `wss://api.openai.com/v1/realtime`. Plain `ws://` only for this machine or
+    /// the home network.
+    pub url: Option<String>,
+    /// Model name.
+    pub model: Option<String>,
+    /// Voice name (default `alloy`).
+    pub voice: Option<String>,
+    /// Name of the environment variable that holds the API key (default `OPENAI_API_KEY`).
+    pub key_env: Option<String>,
+    /// Model that transcribes what you say so a spoken yes or no can be read; empty for none.
+    pub transcription_model: Option<String>,
+    /// Dollars per minute of audio sent (default 0.03).
+    pub usd_per_min_in: Option<f64>,
+    /// Dollars per minute of audio received (default 0.10).
+    pub usd_per_min_out: Option<f64>,
+    /// Longest a session may last, in seconds (default 300).
+    pub max_session_secs: Option<u64>,
+}
+
+/// Voice settings beyond the speech provider.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceConfig {
+    /// Realtime voice (optional feature `realtime`).
+    #[serde(default)]
+    pub realtime: RealtimeSection,
+}
+
+impl RealtimeSection {
+    fn validate(&self) -> Result<(), String> {
+        let bad = |m: &str| Err(format!("config: {m}"));
+        if let Some(p) = &self.provider
+            && p != crate::rtvoice::PROVIDER
+        {
+            return bad("`voice.realtime.provider` must be `openai`");
+        }
+        if self.url.is_some() != self.model.is_some() {
+            return bad("`voice.realtime.url` and `voice.realtime.model` must be set together");
+        }
+        if let Some(u) = &self.url
+            && (u.contains(char::is_whitespace)
+                || !(u.starts_with("wss://") || u.starts_with("ws://")))
+        {
+            return bad(
+                "`voice.realtime.url` must start with wss:// (or ws:// on this machine or your own network)",
+            );
+        }
+        if let Some(n) = &self.key_env
+            && !crate::settings::is_env_name(n)
+        {
+            return bad(
+                "`voice.realtime.key_env` is the NAME of an environment variable, not the key",
+            );
+        }
+        for (name, v) in [
+            ("usd_per_min_in", self.usd_per_min_in),
+            ("usd_per_min_out", self.usd_per_min_out),
+        ] {
+            if v.is_some_and(|x| !x.is_finite() || !(0.0..=100.0).contains(&x)) {
+                return Err(format!(
+                    "config: `voice.realtime.{name}` must be a number of dollars from 0 to 100"
+                ));
+            }
+        }
+        if self
+            .max_session_secs
+            .is_some_and(|s| !(10..=3600).contains(&s))
+        {
+            return bad("`voice.realtime.max_session_secs` must be from 10 to 3600");
+        }
+        if self.enabled == Some(true) {
+            if self.url.is_none() {
+                return bad(
+                    "`voice.realtime.enabled` needs `voice.realtime.url` and `voice.realtime.model`",
+                );
+            }
+            if !crate::rtvoice::RtSettings::built() {
+                return bad("`voice.realtime.enabled` needs a build with the `realtime` feature");
+            }
+        }
+        Ok(())
+    }
+}
+
 impl SpeechConfig {
     /// The dialect named by `provider` (the OpenAI style when unset or unknown; `validate` rejects unknown names).
     #[must_use]
@@ -169,6 +263,9 @@ pub struct Config {
     /// Speech provider.
     #[serde(default)]
     pub speech: SpeechConfig,
+    /// Voice settings beyond the speech provider (realtime voice).
+    #[serde(default)]
+    pub voice: VoiceConfig,
     /// Satellite server.
     #[serde(default)]
     pub satellite: SatelliteConfig,
@@ -329,6 +426,7 @@ impl Config {
         if sp.tts_sample_rate.is_some_and(|r| r < 8_000) {
             return Err("config: `speech.tts_sample_rate` must be at least 8000".into());
         }
+        self.voice.realtime.validate()?;
         for s in &self.stations {
             s.validate().map_err(|e| format!("config: {e}"))?;
         }
@@ -490,6 +588,51 @@ mod tests {
         ] {
             let e = Config::parse(text).unwrap_err();
             assert!(e.contains(needle), "{text}: {e}");
+        }
+    }
+
+    // REQ-RTV-008
+    #[test]
+    fn the_realtime_section_is_read_and_checked_with_plain_messages() {
+        let ok = r#"{"voice": {"realtime": {"provider": "openai", "url": "wss://api.openai.com/v1/realtime",
+            "model": "gpt-realtime", "voice": "verse", "key_env": "MY_RT_KEY", "transcription_model": "",
+            "usd_per_min_in": 0.05, "usd_per_min_out": 0.2, "max_session_secs": 120}}}"#;
+        let c = Config::parse(ok).unwrap();
+        let r = &c.voice.realtime;
+        assert_eq!(r.model.as_deref(), Some("gpt-realtime"));
+        assert_eq!((r.max_session_secs, r.enabled), (Some(120), None));
+        assert_eq!(
+            Config::parse("{}").unwrap().voice.realtime,
+            RealtimeSection::default()
+        );
+        for (section, needle) in [
+            (r#""provider": "other""#, "provider"),
+            (r#""url": "wss://x/v1""#, "together"),
+            (r#""model": "m""#, "together"),
+            (r#""url": "https://x/v1", "model": "m""#, "wss://"),
+            (
+                r#""url": "wss://x/v1", "model": "m", "key_env": "sk-abc def""#,
+                "NAME",
+            ),
+            (r#""usd_per_min_in": -1"#, "usd_per_min_in"),
+            (r#""max_session_secs": 5"#, "max_session_secs"),
+            (r#""enabled": true"#, "needs"),
+            (r#""keey_env": "X""#, "keey_env"),
+        ] {
+            let e = Config::parse(&format!(r#"{{"voice": {{"realtime": {{{section}}}}}}}"#))
+                .unwrap_err();
+            assert!(e.contains(needle), "{section}: {e}");
+        }
+        // Enabling needs a build with the feature; the message says so rather than failing silently.
+        let on = r#"{"voice": {"realtime": {"enabled": true, "url": "wss://x/v1", "model": "m"}}}"#;
+        if cfg!(feature = "realtime") {
+            assert!(Config::parse(on).is_ok());
+        } else {
+            assert!(
+                Config::parse(on)
+                    .unwrap_err()
+                    .contains("`realtime` feature")
+            );
         }
     }
 

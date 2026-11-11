@@ -25,6 +25,7 @@ use clawdot_core::llm::{ChatRequest, Message};
 use clawdot_core::mcp::{McpClient, ServerDef, WithMcp};
 use clawdot_core::media::Station;
 use clawdot_core::notes::NoteStore;
+use clawdot_core::rtvoice::{self, Realtime, RtSettings};
 use clawdot_core::satellite::{self, Answer, Ask};
 use clawdot_core::sched::{Clock, FixedOffset, Scheduler, SystemClock, Zone};
 use clawdot_core::session::{
@@ -343,6 +344,25 @@ fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
         c.limits.max_costly_per_day.map(Into::into),
     );
     put("dry_run", c.limits.dry_run.map(Into::into));
+    let r = &c.voice.realtime;
+    put("realtime_enabled", r.enabled.map(Into::into));
+    put("realtime_url", r.url.clone().map(Into::into));
+    put("realtime_model", r.model.clone().map(Into::into));
+    put("realtime_voice", r.voice.clone().map(Into::into));
+    put("realtime_key_env", r.key_env.clone().map(Into::into));
+    put(
+        "realtime_transcription_model",
+        r.transcription_model.clone().map(Into::into),
+    );
+    put("realtime_usd_per_min_in", r.usd_per_min_in.map(Into::into));
+    put(
+        "realtime_usd_per_min_out",
+        r.usd_per_min_out.map(Into::into),
+    );
+    put(
+        "realtime_max_session_secs",
+        r.max_session_secs.map(Into::into),
+    );
     Ok(())
 }
 
@@ -385,6 +405,19 @@ fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), Str
         ("max_actions_per_day", policy.max_actions_per_day.into()),
         ("max_costly_per_day", policy.max_costly_per_day.into()),
         ("dry_run", policy.dry_run.into()),
+        ("realtime_enabled", false.into()),
+        ("realtime_voice", rtvoice::DEFAULT_VOICE.into()),
+        ("realtime_key_env", rtvoice::DEFAULT_KEY_ENV.into()),
+        (
+            "realtime_transcription_model",
+            rtvoice::DEFAULT_TRANSCRIPTION.into(),
+        ),
+        ("realtime_usd_per_min_in", rtvoice::DEFAULT_USD_IN.into()),
+        ("realtime_usd_per_min_out", rtvoice::DEFAULT_USD_OUT.into()),
+        (
+            "realtime_max_session_secs",
+            rtvoice::DEFAULT_MAX_SESSION_SECS.into(),
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))
@@ -716,6 +749,12 @@ fn apply_live(
     if changed("voice") || changed("speech_language") {
         apply_speech(live);
     }
+    if live
+        .keys()
+        .any(|k| k.starts_with("realtime_") && changed(k))
+    {
+        brain.rt.set_settings(RtSettings::from_live(live));
+    }
     #[cfg(feature = "tls")]
     if changed("update_check") {
         clawdot_core::update::set_enabled(
@@ -812,6 +851,8 @@ struct Brain {
     agent: AgentConfig,
     /// A speech provider (address and speech model) is configured, so a speaker has a voice (REQ-CFG-070).
     voice_configured: bool,
+    /// The optional realtime voice: its settings, status and the way sessions reach this loop.
+    rt: Realtime,
 }
 
 /// What the portal is told about the speaker (REQ-CFG-070).
@@ -906,6 +947,7 @@ impl Brain {
             "satellites": satellites,
             "speaker": who,
             "voice": { "configured": self.voice_configured },
+            "realtime": self.rt.status(),
             // The satellite does not yet say whether it is muted or busy; both read as "not available".
             "muted": false,
             "quiet_hours": { "set": quiet_set, "active": quiet_active },
@@ -913,6 +955,86 @@ impl Brain {
             "stations": stations,
             "scheduled": scheduled,
         })
+    }
+
+    /// Run one realtime voice session for a speaker (REQ-RTV-009). The tools run through the same host stack,
+    /// audit log and notes as any turn; the cap is checked before the connection opens and audio cost is added
+    /// while it runs. This loop is busy until the session ends, which is at most `max_session_secs`.
+    #[cfg(feature = "realtime")]
+    async fn run_realtime(&mut self, job: rtvoice::Job, core: &Core) {
+        use clawdot_core::realtime::{Env, Io, serve::serve};
+        let settings = self.rt.settings();
+        self.rt.set_error(None);
+        core.patch_ui_status("realtime", self.rt.status());
+        let day = self.assistant.local_day();
+        let clock_src = Arc::clone(&self.clock);
+        let clock = move || (day, clock_src.now());
+        let turn_cfg = self.llm.as_ref().map(|l| l.cfg.clone()).unwrap_or_default();
+        // A fresh conversation per session: it holds the transcript and any held action in memory only.
+        let mut conv = Conversation::new(self.persona.clone(), 20, 24_000, 600);
+        if let Some(a) = core.audit() {
+            conv.set_audit(a);
+        }
+        if let Some(n) = core.notes() {
+            conv.set_notes(n);
+        }
+        let io = Io {
+            mic: job.mic,
+            speaker: job.speaker,
+        };
+        let finish = {
+            let mut host = WithPolicy {
+                inner: &mut WithMcp {
+                    inner: &mut WithHttp {
+                        inner: &mut self.assistant,
+                        http: &self.http_tools,
+                    },
+                    mcp: &self.mcp,
+                },
+                ext: &self.ext,
+                mcp: &self.mcp,
+                scope: None,
+            };
+            let mut env = Env {
+                host: &mut host,
+                conv: &mut conv,
+                turn_cfg: &turn_cfg,
+                usage: &mut self.usage,
+                clock: &clock,
+            };
+            serve(
+                &settings,
+                self.rt.key().as_deref(),
+                &self.persona,
+                io,
+                &mut env,
+            )
+            .await
+        };
+        if let Err(e) = self.usage.save(&self.usage_store) {
+            clawdot_core::diag::error(&format!("could not save usage counters: {e}"));
+        }
+        if let Some(e) = &finish.error {
+            clawdot_core::diag::error(&format!("realtime voice: {e}"));
+        }
+        self.rt.set_error(finish.error.clone());
+        let effects = self.assistant.take_effects();
+        let _ = job.done.send(rtvoice::Done {
+            speak: finish.speak,
+            failed: finish.failed,
+            effects,
+        });
+        core.patch_ui_status("realtime", self.rt.status());
+    }
+
+    /// Without the `realtime` feature no session can be configured; a stray job is answered at once.
+    #[cfg(not(feature = "realtime"))]
+    async fn run_realtime(&mut self, job: rtvoice::Job, _core: &Core) {
+        let _ = job.done.send(rtvoice::Done {
+            speak: Some("This build has no realtime voice.".into()),
+            failed: true,
+            effects: Vec::new(),
+        });
     }
 
     /// Answer locally if the fast path can, otherwise ask the language model.
@@ -1435,7 +1557,14 @@ async fn main() -> ExitCode {
         persona,
         agent: args.agent.clone(),
         voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
+        rt: Realtime::new(RtSettings::from_live(&settings_state.live_values())),
     };
+    if brain.rt.settings().enabled && !RtSettings::built() {
+        brain.rt.set_error(Some(
+            "Realtime voice is turned on, but this build of ClawDot does not include it.".into(),
+        ));
+    }
+    let mut rt_rx = brain.rt.attach();
 
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
@@ -1495,6 +1624,7 @@ async fn main() -> ExitCode {
             let (stt, tts) = build_registered_speech(&args.speech)?;
             let mut settings = satellite::Settings {
                 announcer: announcer.clone(),
+                realtime: Some(brain.rt.clone()),
                 ..satellite::Settings::default()
             };
             if let Some(var) = &args.satellite.token_env {
@@ -1558,6 +1688,7 @@ async fn main() -> ExitCode {
             let (stt, tts) = build_registered_speech(&args.speech)?;
             let mut settings = satellite::Settings {
                 announcer: announcer.clone(),
+                realtime: Some(brain.rt.clone()),
                 ..satellite::Settings::default()
             };
             if let Some(s) = args.satellite.follow_up_secs {
@@ -1681,6 +1812,9 @@ async fn main() -> ExitCode {
                 for e in &reply.effects {
                     println!("satellite> {e:?}");
                 }
+            }
+            Some(job) = rt_rx.recv() => {
+                brain.run_realtime(job, &core).await;
             }
             Some(ask) = ask_rx.recv() => {
                 let ctl = TurnCtl {

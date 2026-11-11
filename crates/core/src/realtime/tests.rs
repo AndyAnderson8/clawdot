@@ -10,11 +10,11 @@ use std::future::Future;
 use tokio::io::{DuplexStream, duplex};
 use tokio::sync::mpsc;
 
-type Srv = WebSocket<DuplexStream>;
+pub(super) type Srv = WebSocket<DuplexStream>;
 
 #[derive(Default)]
-struct Host {
-    ran: Vec<(String, Value)>,
+pub(super) struct Host {
+    pub(super) ran: Vec<(String, Value)>,
 }
 
 impl ToolHost for Host {
@@ -47,7 +47,9 @@ impl ToolHost for Host {
     }
 }
 
-async fn next(s: &mut Srv) -> Value {
+pub(super) async fn next<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    s: &mut WebSocket<S>,
+) -> Value {
     loop {
         match s.recv().await.unwrap() {
             Msg::Text(t) => {
@@ -61,22 +63,25 @@ async fn next(s: &mut Srv) -> Value {
     }
 }
 
-async fn put(s: &mut Srv, v: Value) {
+pub(super) async fn put<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    s: &mut WebSocket<S>,
+    v: Value,
+) {
     s.send_text(&v.to_string()).await.unwrap();
 }
 
-fn calls_done(calls: &[(&str, &str, &str)]) -> Value {
+pub(super) fn calls_done(calls: &[(&str, &str, &str)]) -> Value {
     json!({"type": "response.done", "response": {"status": "completed", "output":
         calls.iter().map(|(id, name, args)| json!({
             "type": "function_call", "status": "completed",
             "call_id": id, "name": name, "arguments": args})).collect::<Vec<_>>()}})
 }
 
-fn said(t: &str) -> Value {
+pub(super) fn said(t: &str) -> Value {
     json!({"type": "conversation.item.input_audio_transcription.completed", "transcript": t})
 }
 
-fn spoke() -> Value {
+pub(super) fn spoke() -> Value {
     json!({"type": "input_audio_buffer.speech_started"})
 }
 

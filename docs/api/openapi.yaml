@@ -965,7 +965,9 @@ paths:
         `deepgram`; needs a restart), `listen`, `public_url`, `daily_spend_usd`,
         `board`, `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`,
         `plan_speech`, `progress_speech`, `notes`, `update_check`, `max_actions_per_day`, `max_costly_per_day`,
-        `dry_run`, `quiet_start`, `quiet_end`. Values that apply live take effect at once; the rest are listed
+        `dry_run`, `quiet_start`, `quiet_end`, and the optional realtime voice (REQ-RTV-008) `realtime_enabled`,
+        `realtime_url`, `realtime_model`, `realtime_voice`, `realtime_key_env`, `realtime_transcription_model`,
+        `realtime_usd_per_min_in`, `realtime_usd_per_min_out`, `realtime_max_session_secs`. Values that apply live take effect at once; the rest are listed
         in `restart_needed`. If the running assistant could not apply them now, the answer carries a `note`.
       operationId: putSettings
       requestBody:
@@ -1740,6 +1742,13 @@ components:
           type: object
           properties:
             configured: { type: boolean }
+        realtime:
+          type: object
+          description: The optional realtime voice (REQ-RTV-011). No key, audio or transcript.
+          properties:
+            configured: { type: boolean, description: "A session can start: built in, turned on, addressed, keyed." }
+            active: { type: boolean, description: "A session is open." }
+            last_error: { type: [string, "null"], description: "The last failure as one plain line; null after a good session." }
         muted: { type: boolean }
         quiet_hours:
           type: object
@@ -1998,6 +2007,16 @@ components:
             key_hint:
               type: [string, "null"]
               description: The first and last few characters of the pasted key. Never the key.
+        realtime:
+          type: object
+          description: The optional realtime voice (REQ-RTV-008). Never the key.
+          properties:
+            configured: { type: boolean, description: "Built in, turned on, addressed and has a key." }
+            built: { type: boolean, description: "This build includes the `realtime` feature." }
+            provider: { type: string, examples: [openai] }
+            key_hint:
+              type: [string, "null"]
+              description: The first and last few characters of a key pasted into the portal. Never the key.
         speech:
           type: object
           description: The speech-service key, with the same rules as the language-model one.

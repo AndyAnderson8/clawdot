@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.44 |
+| **Version** | 0.45 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -356,6 +356,10 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | REQ-RTV-005 | Audio and transcripts MUST NOT be written to disk or to any log. Audio is forwarded and dropped; the transcript is held in memory for the session only, to read a yes or no and to start tool turns. The API key MUST come from the secrets store or an environment variable name, never a literal in a file, and MUST NOT appear in any message shown to the user or logged. | Must | A7 | T |
 | REQ-RTV-006 | Errors MUST end the session cleanly (a close frame is sent when the connection is still up) and be mapped to plain, spoken messages: not reachable, key not accepted, quota or rate limit, the provider's own error (clipped, one line), the provider closed the connection, the spend cap, the time limit, and a protocol problem. | Must | A7 | T |
 | REQ-RTV-007 | The feature is meant to run where the core runs on a PC or Raspberry Pi, or behind a relay, and not inside the Echo Dot Gen 2 memory budget. Its documentation MUST say that audio leaves the device for a third party while a session is open, what it costs, and what is not verified against the real service. | Must | A7 | I |
+| REQ-RTV-008 | **Configuration.** The `voice.realtime` section of the configuration file (`enabled`, `provider`, `url`, `model`, `voice`, `key_env`, `transcription_model`, `usd_per_min_in`, `usd_per_min_out`, `max_session_secs`) and the settings `realtime_enabled`, `realtime_url`, `realtime_model`, `realtime_voice`, `realtime_key_env`, `realtime_transcription_model`, `realtime_usd_per_min_in`, `realtime_usd_per_min_out` and `realtime_max_session_secs` MUST be layered, validated with plain messages and applied live like the speech settings (REQ-CFG-038 to REQ-CFG-040). The key is the one pasted into the portal or the environment variable that `realtime_key_env` names, never a value in a file, a setting or an API answer. `GET /api/settings` MUST expose `realtime: {configured, built, provider, key_hint}` and nothing more about the key. Turning it on in a build without the `realtime` feature, or without a key, MUST be refused with a message that says why; a saved value that has become impossible MUST NOT stop start-up. | Must | A7 | T |
+| REQ-RTV-009 | **Speaker loop.** When realtime voice is configured and a speaker is idle and unmuted, the wake word MUST start one realtime session in place of listen, think and speak: the speaker's microphone audio goes to the session, the model's audio comes back through the speaker's existing audio path with music ducked and resumed as for any reply, the model hearing the user speak or the wake word stops playback (barge-in), muting or the action button ends the session, and the session ends after a quiet period. Only one session runs at a time. Tool effects (volume, music) are applied when it ends. | Must | A7 | T |
+| REQ-RTV-010 | **Fallback and cap.** The spend cap MUST be checked before each session starts and the audio cost recorded as it runs (REQ-RTV-004). When a session cannot start or breaks (not reachable, key not accepted, quota, closed, cap, protocol), the speaker MUST say the plain message of REQ-RTV-006 and use the normal listen-think-speak path, including for the next requests, for the next 60 seconds. | Must | A7 | T |
+| REQ-RTV-011 | **Status.** `GET /api/status` MUST carry `realtime: {configured, active, last_error}`: whether a session can start, whether one is open, and the last failure as one plain line (null after a good session). It holds no key, no audio and no transcript. | Must | A7 | T |
 
 ### 4.13 Memory and skills (`MEM`, `SKL`)
 
@@ -452,3 +456,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.42 | 2026-11-11 | A ClawDot MCP server (announce, ask_user) for agent harnesses (EXT-011..018) |
 | 0.43 | 2026-11-11 | Speech providers beyond the OpenAI style: ElevenLabs and Deepgram, a speech key, voice list details (VOI-021..024) |
 | 0.44 | 2026-11-11 | Bounded, searchable memory and SKILL.md skill import with review (MEM-001..005, SKL-001..005) |
+| 0.45 | 2026-11-11 | Realtime voice is configured, settings-driven, and runs a turn after the wake word with a fallback (RTV-008..011) |
