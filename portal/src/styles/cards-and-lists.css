@@ -1,0 +1,211 @@
+/* ---- Cards: every block of content ---- */
+.card,
+form.panel,
+.soon {
+  background: var(--color-background-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--radius-card);
+  padding: var(--spacing-6);
+  margin: 0;
+  min-width: 0;
+}
+.card > h3:first-child,
+form.panel > h3:first-child,
+.soon > h3:first-child,
+.soon > h4:first-child,
+.head h3 {
+  margin: 0;
+}
+.card > h3 + p,
+form.panel > h3 + p {
+  margin-top: var(--spacing-2);
+}
+.card > h3 + .srow,
+form.panel > h3 + .srow,
+.card > h3 + .row,
+form.panel > h3 + .row {
+  margin-top: var(--spacing-3);
+}
+details + p,
+details + ul,
+details + .row {
+  margin-top: var(--spacing-3);
+}
+form.panel.flat {
+  border: 0;
+  padding: 0;
+  background: none;
+}
+details > form.panel.flat {
+  margin: 0 0 var(--spacing-2);
+}
+.lead {
+  margin: 0 0 var(--spacing-2);
+  color: var(--color-text-secondary);
+  max-width: 70ch;
+}
+.soon {
+  background: var(--color-background-muted);
+  border-color: transparent;
+}
+.soon h3,
+.soon h4 {
+  margin-bottom: var(--spacing-1);
+}
+.soon p:last-child {
+  margin-bottom: 0;
+}
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--spacing-3);
+}
+.head a {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+h4.sub {
+  margin: var(--spacing-6) 0 0;
+  font-size: 0.9375rem;
+}
+details > summary .count {
+  margin-left: 0;
+}
+details > summary .mut {
+  font-weight: 400;
+}
+.count {
+  display: inline-block;
+  min-width: 1.5rem;
+  margin-left: var(--spacing-2);
+  padding: 0 var(--spacing-2);
+  border-radius: 999px;
+  background: var(--color-background-muted);
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 650;
+  text-align: center;
+  vertical-align: 0.1em;
+}
+.badge {
+  display: inline-block;
+  padding: 0.0625rem 0.625rem;
+  border-radius: 999px;
+  background: var(--color-background-muted);
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 650;
+  max-width: 100%;
+}
+.badge.good {
+  background: var(--color-live-muted);
+  color: var(--color-live);
+}
+.badge.bad {
+  background: color-mix(in srgb, var(--color-text-error) 14%, transparent);
+  color: var(--color-text-error);
+}
+.badge.warn {
+  background: var(--color-warning-muted);
+  color: var(--color-text-warning);
+}
+
+/* Lists: rows with a divider between them, inside a card */
+ul.rows {
+  list-style: none;
+  margin: var(--spacing-3) 0 0;
+  padding: 0;
+}
+ul.rows > li {
+  padding: var(--spacing-3) 0;
+  border-top: 1px solid var(--color-card-border);
+  overflow-wrap: anywhere;
+}
+ul.rows > li:last-child {
+  padding-bottom: 0;
+}
+.rowhead {
+  display: flex;
+  gap: var(--spacing-3);
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.when {
+  font-variant-numeric: tabular-nums;
+}
+.acts {
+  display: flex;
+  gap: var(--spacing-2);
+  flex-wrap: wrap;
+  margin-top: var(--spacing-2);
+}
+.acts button {
+  min-height: 2.25rem;
+}
+.acts button.danger {
+  border-color: transparent;
+  padding: 0 var(--spacing-2);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: var(--spacing-1) 0;
+}
+pre {
+  margin: var(--spacing-2) 0;
+  padding: var(--spacing-3);
+  background: var(--color-background-muted);
+  border-radius: var(--radius-inner);
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 20rem;
+}
+.token {
+  display: block;
+  padding: var(--spacing-3);
+  border: 1px dashed var(--color-border-control);
+  border-radius: var(--radius-inner);
+  margin: var(--spacing-2) 0;
+  background: var(--color-background-muted);
+  font-family: var(--font-family-code);
+  font-size: 0.875rem;
+  word-break: break-all;
+}
+dl.kv {
+  margin: var(--spacing-3) 0 0;
+  display: grid;
+  grid-template-columns: 11rem minmax(0, 1fr);
+  gap: 0;
+}
+dl.kv dt,
+dl.kv dd {
+  margin: 0;
+  padding: var(--spacing-3) 0;
+  border-top: 1px solid var(--color-card-border);
+}
+dl.kv dt {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  padding-top: 0.9rem;
+}
+dl.kv dd {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 30rem) {
+  dl.kv {
+    grid-template-columns: 1fr;
+  }
+  dl.kv dt {
+    padding-bottom: 0;
+  }
+  dl.kv dd {
+    border-top: 0;
+    padding-top: var(--spacing-1);
+  }
+}

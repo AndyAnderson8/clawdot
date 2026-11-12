@@ -38,7 +38,9 @@ async function page() {
     define: { "process.env.NODE_ENV": '"development"' },
     logLevel: "silent",
   });
-  const css = readFileSync(src("tokens.css"), "utf8") + readFileSync(src("styles.css"), "utf8");
+  const css = (
+    await esbuild.build({ entryPoints: [src("styles/index.css")], bundle: true, write: false, logLevel: "silent" })
+  ).outputFiles[0].text;
   return readFileSync(src("index.html"), "utf8")
     .replace("/*@css*/", () => css)
     .replace("/*@js*/", () => js.outputFiles[0].text)
