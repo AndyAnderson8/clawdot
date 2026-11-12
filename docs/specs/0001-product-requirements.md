@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.52 |
+| **Version** | 0.53 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -469,3 +469,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.50 | 2026-11-11 | REQ-SEC-004: failed attempts are counted per address. REQ-CFG-024: changing the password needs the current one. REQ-INB-004: a change that could not be saved is not reported as saved. |
 | 0.51 | 2026-11-11 | REQ-INB-041: a message is spoken as its endpoint, by the name the user chose, never by the sender's label. REQ-EXT-019, REQ-EXT-020: MCP tools are approved as shown, a change needs approval again, and schema text is reduced. |
 | 0.52 | 2026-11-11 | REQ-CFG-083: the device is named by its own model string or a configured preset, never guessed in code; the unused board setting is retired (REQ-CFG-037, REQ-CFG-039). |
+| 0.53 | 2026-11-11 | Durations are monotonic and calendar points are wall time (REQ-TMR-002, 003, 006, 009; REQ-AST-007, 021; REQ-SEC-004, 011; REQ-CFG-019, 069). A countdown timer works before the clock is set (REQ-TMR-009). |
