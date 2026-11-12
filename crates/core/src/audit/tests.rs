@@ -641,3 +641,61 @@ fn an_action_counts_toward_the_caps_even_when_its_record_cannot_be_written() {
     assert_eq!(log.today(1), (2, 2), "the action ran, so it counts");
     assert!(log.health().write_errors >= 1);
 }
+
+// REQ-SEC-011, REQ-SEC-014: a name is a secret by its whole words, so ordinary names are heard and recorded.
+#[test]
+fn a_key_is_secret_by_its_words_not_by_letters_it_happens_to_contain() {
+    for secret in [
+        "token",
+        "api_key",
+        "apiKey",
+        "APIKey",
+        "X-Api-Key",
+        "x-auth-token",
+        "Authorization",
+        "auth",
+        "client_secret",
+        "clientSecret",
+        "accesstoken",
+        "refresh_tokens",
+        "password",
+        "passwordConfirm",
+        "private_key",
+        "sessionId",
+        "session",
+        "otp",
+        "cookie",
+        "credentials",
+        "signature",
+        "jwt",
+        "keys",
+    ] {
+        assert!(is_secret_name(secret), "{secret} names a secret");
+    }
+    for plain in [
+        "keyword",
+        "keywords",
+        "author",
+        "authors",
+        "authored_by",
+        "monkey",
+        "turkey",
+        "hotkeys",
+        "private",
+        "privately",
+        "tokenize",
+        "passenger",
+        "address",
+        "status",
+        "title",
+        "text",
+        "",
+    ] {
+        assert!(!is_secret_name(plain), "{plain} does not name a secret");
+    }
+    // The record and the read-back keep what is not a secret.
+    let v = redact_args(&json!({ "author": "Ada", "keywords": "tea, kettle", "api_key": "abc" }));
+    assert_eq!(v["author"], "Ada");
+    assert_eq!(v["keywords"], "tea, kettle");
+    assert_eq!(v["api_key"], REDACTED);
+}
