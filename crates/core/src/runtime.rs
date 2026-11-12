@@ -1,6 +1,7 @@
 //! The state the main loop owns and what it does with it (ADR-0021): the [`Brain`] (assistant, language model,
 //! tools and usage counters), live settings (`apply_live`), the status snapshot for the web UI, and turn
-//! dispatch (`dispatch`, `finish_turn`, `on_hub_event`). The binary's `main` wires these to its channels.
+//! dispatch (`dispatch`, `finish_turn`, `on_hub_event`). [`crate::app_loop::App`] calls these from its event
+//! methods; they take the brain, hub and core explicitly because the one-shot voice command uses them too.
 
 use crate::app::{Core, Job, Op};
 use crate::assistant::Assistant;
