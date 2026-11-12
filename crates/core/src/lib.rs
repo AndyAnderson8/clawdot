@@ -13,6 +13,7 @@
 pub mod admin;
 mod announce_api;
 pub mod app;
+pub mod app_loop;
 pub mod assistant;
 pub mod audit;
 pub mod cancel;

@@ -1678,10 +1678,7 @@ mod tests {
         let mut http = crate::httptools::HttpTools::new(Vec::new(), &[], |_| None).unwrap();
         ext.apply(
             ExtOp::McpEnable("a__b".into(), false),
-            &mut http,
-            &mut c,
-            &[],
-            |_| None,
+            crate::extensions::ToolSets::new(&mut http, &mut c, &[], &|_: &str| None),
         )
         .await
         .unwrap();

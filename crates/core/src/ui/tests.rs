@@ -89,9 +89,15 @@ pub(super) async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool
                     Op::Settings(live) => Ok(Value::Object(live)),
                     Op::Rekey => Ok(json!({ "applied": true })),
                     Op::Ext(op) => ext
-                        .apply(op, &mut http, &mut mcp, &builtin, |n| {
-                            (n == "HA_TOKEN").then(|| "x".to_owned())
-                        })
+                        .apply(
+                            op,
+                            crate::extensions::ToolSets::new(
+                                &mut http,
+                                &mut mcp,
+                                &builtin,
+                                &|n: &str| (n == "HA_TOKEN").then(|| "x".to_owned()),
+                            ),
+                        )
                         .await
                         .map(|()| ext.listing(&[], &http, &mcp)),
                 };

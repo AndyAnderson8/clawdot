@@ -113,7 +113,19 @@ pub struct Args {
 /// Parse `argv` (without the program name), reading the `--config` file first so flags override it.
 /// An empty error means help was asked for.
 pub fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut a = Args {
+    let mut a = defaults()?;
+    if let Some(i) = argv.iter().position(|x| x == "--config") {
+        let path = argv.get(i + 1).ok_or("--config needs a value")?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        seed_from_config(&mut a, &Config::parse(&text)?)?;
+    }
+    apply_flags(&mut a, argv)?;
+    Ok(a)
+}
+
+/// The arguments as they are with no file and no flags.
+fn defaults() -> Result<Args, String> {
+    Ok(Args {
         file_layer: Layer::new(),
         flag_layer: Layer::new(),
         persona_flag: false,
@@ -153,12 +165,11 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         daily_spend: None,
         actions: ActionPolicy::default(),
         agent: AgentConfig::default(),
-    };
-    if let Some(i) = argv.iter().position(|x| x == "--config") {
-        let path = argv.get(i + 1).ok_or("--config needs a value")?;
-        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        seed_from_config(&mut a, &Config::parse(&text)?)?;
-    }
+    })
+}
+
+/// Apply the command-line flags over `a`, so a flag overrides the file. An empty error means help was asked for.
+fn apply_flags(a: &mut Args, argv: &[String]) -> Result<(), String> {
     let mut it = argv.iter().cloned();
     while let Some(flag) = it.next() {
         let mut value = |n: &str| it.next().ok_or_else(|| format!("{n} needs a value"));
@@ -243,7 +254,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown option `{other}`")),
         }
     }
-    Ok(a)
+    Ok(())
 }
 
 #[cfg(test)]
