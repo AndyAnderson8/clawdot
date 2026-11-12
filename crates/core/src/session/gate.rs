@@ -25,6 +25,9 @@ pub(super) struct Turn<'a, H> {
     by_user: bool,
     day: i64,
     now: Ts,
+    /// Monotonic seconds: every window and idle time is measured on this, never on `now` (a wall-clock step
+    /// must not lengthen or shorten a confirmation window).
+    mono: i64,
 }
 
 /// An audit record for a call that was refused before it had a tier or arguments worth recording.
@@ -117,13 +120,14 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             usage,
             day,
             now,
+            mono,
         } = inputs;
         let cfg = cfg.clamped();
         let turn: Option<TurnLog> = conv
             .audit
             .as_ref()
             .map(|log| TurnLog::begin(log, label, day, now, usage.spend_today()));
-        if let Some(dropped) = conv.expire_if_idle(now) {
+        if let Some(dropped) = conv.expire_if_idle(mono) {
             note_resolved(
                 turn.as_ref(),
                 usage,
@@ -141,7 +145,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             conv.tainted = true;
             if let Some(old) = conv
                 .pending
-                .take_if(|p| now - p.proposed_at > CONFIRM_WINDOW_SECS)
+                .take_if(|p| mono - p.proposed_at > CONFIRM_WINDOW_SECS)
             {
                 note_resolved(
                     turn.as_ref(),
@@ -164,6 +168,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             by_user,
             day,
             now,
+            mono,
         }
     }
 
@@ -238,11 +243,11 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// The user's answer to "forget all my notes?" is read here, by the host. `Some` ends the turn.
     fn answer_forget_all(&mut self, user_text: &str) -> Option<TurnResult> {
-        let (by_user, now) = (self.by_user, self.now);
+        let (by_user, mono) = (self.by_user, self.mono);
         let conv = &mut *self.conv;
         let result = &mut self.result;
         if by_user && let Some(at) = conv.forget_all_asked.take() {
-            if now - at <= CONFIRM_WINDOW_SECS && is_yes(user_text) {
+            if mono - at <= CONFIRM_WINDOW_SECS && is_yes(user_text) {
                 let speech = match conv.notes.as_ref().map(|n| n.clear()) {
                     Some(Ok(n)) => format!(
                         "Okay, I forgot all {n} note{}.",
@@ -267,7 +272,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             return None;
         }
         let held = self.conv.pending.take()?;
-        if is_yes(user_text) && self.now - held.proposed_at > CONFIRM_WINDOW_SECS {
+        if is_yes(user_text) && self.mono - held.proposed_at > CONFIRM_WINDOW_SECS {
             let speech = "That took too long, so I dropped it. Please ask again.";
             return Some(self.drop_held(
                 held,
@@ -645,7 +650,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             outcome: None,
             note: Some(how.why),
         });
-        let mut p = PendingAction::new(&call.name, args.clone(), description, self.now, tier);
+        let mut p = PendingAction::new(&call.name, args.clone(), description, self.mono, tier);
         p.held_id = id;
         p.recent = Some(
             self.conv
@@ -752,7 +757,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             sent,
             not_run,
         } = d;
-        let (by_user, now) = (self.by_user, self.now);
+        let (by_user, mono) = (self.by_user, self.mono);
         if cancelled || self.ctl.cancel.is_cancelled() {
             if let Some(h) = held.take() {
                 self.resolved(&h, decision::CANCELLED, "the user cancelled");
@@ -762,7 +767,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         }
         if let Some(q) = ask {
             self.st.steps.push((ASK_USER.to_owned(), How::Asked));
-            self.conv.clarify = Some(Clarify { asked_at: now });
+            self.conv.clarify = Some(Clarify { asked_at: mono });
             self.result.end = TurnEnd::Asked;
             self.result.expects_reply = true;
             return Some(self.finish(&q));

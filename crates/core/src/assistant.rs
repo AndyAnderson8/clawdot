@@ -248,14 +248,13 @@ pub fn say_not_saved(say: &str) -> String {
     }
 }
 
-/// Fast-path intents whose answer or effect depends on the wall clock being right.
+/// Fast-path intents whose answer or effect depends on the wall clock being right. A countdown timer is not
+/// one: it runs on the monotonic clock and works on a device that has never had the time.
 fn needs_valid_clock(intent: &str) -> bool {
     matches!(
         intent,
         "time.query"
             | "date.query"
-            | "timer.set"
-            | "timer.query"
             | "stopwatch.start"
             | "stopwatch.lap"
             | "stopwatch.stop"
@@ -339,12 +338,12 @@ impl Assistant {
             Some(w) => {
                 // The state is read under the writer's lock, so this save is queued after, and carries at least
                 // everything in, any save queued before it.
-                match w.submit_with(store, || self.sched.encode(store)) {
+                match w.submit_with(store, || self.sched.encode(store, &*self.clock)) {
                     Some(ticket) => Durability::new(w, ticket, store.path()),
                     None => Durability::settled(Err(SaveError { disk_full: false })),
                 }
             }
-            None => match self.sched.save(store) {
+            None => match self.sched.save(store, &*self.clock) {
                 Ok(()) => Durability::settled(Ok(())),
                 Err(e) => {
                     crate::diag::error(&format!("could not save timers and alarms: {e}"));
@@ -395,9 +394,8 @@ impl Assistant {
     /// Timers, alarms, and reminders for display: kind, label, and seconds until they fire (soonest first, at most 20).
     #[must_use]
     pub fn scheduled(&self) -> Vec<(&'static str, String, i64)> {
-        let now = self.clock.now();
         self.sched
-            .list()
+            .list(&*self.clock)
             .into_iter()
             .take(20)
             .map(|i| {
@@ -406,7 +404,7 @@ impl Assistant {
                     Kind::Alarm => "alarm",
                     Kind::Reminder => "reminder",
                 };
-                (kind, i.label.clone(), (i.fire_at - now).max(0))
+                (kind, i.label.clone(), i.secs_left(&*self.clock))
             })
             .collect()
     }
@@ -419,7 +417,7 @@ impl Assistant {
 
     /// Ring again later.
     pub fn snooze_fired(&mut self, fired: &Fired, secs: i64) -> bool {
-        let ok = self.sched.snooze(self.clock.now(), fired, secs).is_ok();
+        let ok = self.sched.snooze(&*self.clock, fired, secs).is_ok();
         if ok {
             self.save();
         }
@@ -459,15 +457,15 @@ impl Assistant {
             "stopwatch.stop" => self.stopwatch_outcome(stopwatch::Action::Stop),
             "stopwatch.read" => self.stopwatch_outcome(stopwatch::Action::Read),
             "stopwatch.reset" => self.stopwatch_outcome(stopwatch::Action::Reset),
-            "timer.set" => self.timer_set(&m, now),
+            "timer.set" => self.timer_set(&m),
             "timer.cancel" => self.timer_cancel(&m),
-            "timer.query" => self.timer_query(&m, now),
+            "timer.query" => self.timer_query(&m),
             "alarm.set" => self.alarm_set(&m, now, None, ""),
             "alarm.set_daily" => self.alarm_set(&m, now, Some(days::ALL), "every day"),
             "alarm.set_weekdays" => self.alarm_set(&m, now, Some(days::WEEKDAYS), "on weekdays"),
             "alarm.set_weekend" => self.alarm_set(&m, now, Some(days::WEEKEND), "on weekends"),
             "alarm.cancel" => self.alarm_cancel(),
-            "reminder.set_in" => self.reminder_set_in(&m, now),
+            "reminder.set_in" => self.reminder_set_in(&m),
             "reminder.set_at" => self.reminder_set_at(&m, now),
             "time.query" => self.time_query(now),
             "date.query" => self.date_query(now),
@@ -520,10 +518,10 @@ impl Assistant {
         })
     }
 
-    fn reminder_set_in(&mut self, m: &Match, now: Ts) -> Option<Outcome> {
+    fn reminder_set_in(&mut self, m: &Match) -> Option<Outcome> {
         let secs = m.duration("duration")?;
         let text = m.text("text")?.to_owned();
-        match self.sched.set_reminder(now, now + secs, &text) {
+        match self.sched.set_reminder_in(&*self.clock, secs, &text) {
             Ok(_) => {
                 self.save();
                 Outcome::say(format!(
@@ -578,10 +576,10 @@ impl Assistant {
         Outcome::say(said)
     }
 
-    fn timer_set(&mut self, m: &Match, now: Ts) -> Option<Outcome> {
+    fn timer_set(&mut self, m: &Match) -> Option<Outcome> {
         let secs = m.duration("duration")?;
         let label = m.text("label").unwrap_or("").to_owned();
-        match self.sched.set_timer(now, secs, &label) {
+        match self.sched.set_timer(&*self.clock, secs, &label) {
             Ok(_) => {
                 self.save();
                 let dur = format_duration(secs);
@@ -596,13 +594,12 @@ impl Assistant {
     }
 
     fn matching_timers(&self, label: Option<&str>) -> Vec<(u64, String, i64)> {
-        let now = self.clock.now();
         self.sched
-            .list()
+            .list(&*self.clock)
             .into_iter()
             .filter(|i| i.kind == Kind::Timer)
             .filter(|i| label.is_none_or(|l| i.label.to_lowercase().contains(&l.to_lowercase())))
-            .map(|i| (i.id, i.label.clone(), (i.fire_at - now).max(0)))
+            .map(|i| (i.id, i.label.clone(), i.secs_left(&*self.clock)))
             .collect()
     }
 
@@ -622,7 +619,7 @@ impl Assistant {
         })
     }
 
-    fn timer_query(&self, m: &Match, _now: Ts) -> Option<Outcome> {
+    fn timer_query(&self, m: &Match) -> Option<Outcome> {
         let found = self.matching_timers(m.text("label"));
         if found.is_empty() {
             return Outcome::say("There are no timers running.");
@@ -722,6 +719,9 @@ mod tests {
 
     pub(super) struct TestClock(pub(super) AtomicI64);
     impl Clock for TestClock {
+        fn monotonic_secs(&self) -> i64 {
+            self.now()
+        }
         fn now(&self) -> Ts {
             self.0.load(Ordering::Relaxed)
         }
@@ -857,21 +857,30 @@ mod tests {
         for u in [
             "what time is it",
             "what's the date",
-            "set a timer for ten minutes",
             "set an alarm for 7 am",
             "set an alarm for 7 am every day",
             "remind me in 5 minutes to stretch",
             "remind me to call mum at 5 pm",
-            "how much time is left",
         ] {
             assert_eq!(say(&mut a, u), CLOCK_UNSET, "{u}");
         }
-        assert!(a.scheduled().is_empty(), "nothing may be scheduled");
+        assert!(a.scheduled().is_empty(), "no alarm or reminder may be set");
         // Commands that do not depend on the time still work.
         assert_eq!(
             say(&mut a, "cancel the timer"),
             "There are no timers to cancel."
         );
+        // A countdown timer needs no calendar: it is set, listed and answered on the monotonic clock.
+        assert_eq!(
+            say(&mut a, "set a timer for ten minutes"),
+            "Timer set for 10 minutes."
+        );
+        assert_eq!(
+            say(&mut a, "how much time is left"),
+            "10 minutes left on your timer."
+        );
+        assert_eq!(a.scheduled().len(), 1);
+        assert_eq!(say(&mut a, "cancel the timer"), "Timer cancelled.");
         // Once the clock is set, the same questions are answered.
         clock.0.store(utc(2026, 11, 7, 14, 42), Ordering::Relaxed);
         assert_eq!(say(&mut a, "what time is it"), "It's 2:42 PM.");
@@ -1072,8 +1081,8 @@ mod tests {
             );
             say(&mut a, "set a timer for ten minutes");
         }
-        let sched = Scheduler::load(&store, 16).unwrap();
-        assert_eq!(sched.list().len(), 1);
+        let sched = Scheduler::load(&store, 16, &*clock).unwrap();
+        assert_eq!(sched.list(&*clock).len(), 1);
     }
 
     // ----- music (REQ-MUS-001, 002) -----
@@ -1160,5 +1169,100 @@ mod tests {
             bare.handle("pause").unwrap().effects,
             vec![Effect::Media(MediaCmd::Pause)]
         );
+    }
+
+    // ----- a stepping wall clock (REQ-TMR-002, REQ-TMR-003, REQ-TMR-006) -----
+
+    fn stepping(
+        dir: Option<&crate::store::testutil::TempDir>,
+        wall: Ts,
+        mono: i64,
+    ) -> (Assistant, Arc<crate::sched::testclock::StepClock>) {
+        let clock = Arc::new(crate::sched::testclock::StepClock::with_mono(wall, mono));
+        let store = dir.map(|d| JsonStore::new(d.0.join("sched.json"), crate::sched::SCHEMA));
+        let sched = store.as_ref().map_or_else(
+            || Scheduler::new(16),
+            |s| Scheduler::load(s, 16, &*clock).unwrap(),
+        );
+        let a = Assistant::new(clock.clone(), Box::new(FixedOffset(0)), sched, store, None);
+        (a, clock)
+    }
+
+    // The failure in numbers: the clock is 3 h behind when the user says "ten minutes", and network time
+    // arrives 20 s later.
+    #[test]
+    fn a_spoken_timer_set_while_the_clock_is_behind_rings_on_time_after_the_clock_is_corrected() {
+        let (mut a, clock) = stepping(None, utc(2026, 11, 7, 11, 42), 100);
+        assert_eq!(
+            say(&mut a, "set a timer for ten minutes"),
+            "Timer set for 10 minutes."
+        );
+        clock.advance(20);
+        clock.step_wall(3 * 3600);
+        assert!(
+            a.tick().is_empty(),
+            "not announced as missed seconds after it was set"
+        );
+        assert_eq!(a.scheduled()[0].2, 580);
+        assert_eq!(
+            say(&mut a, "how much time is left"),
+            "9 minutes and 40 seconds left on your timer."
+        );
+        clock.advance(579);
+        assert!(a.tick().is_empty());
+        clock.advance(1);
+        let fired = a.tick();
+        assert!(
+            fired.len() == 1 && !fired[0].missed && fired[0].late_secs == 0,
+            "{fired:?}"
+        );
+    }
+
+    #[test]
+    fn a_backward_step_does_not_make_a_timer_ring_late() {
+        let (mut a, clock) = stepping(None, utc(2026, 11, 7, 14, 42), 100);
+        say(&mut a, "set a timer for ten minutes");
+        clock.advance(300);
+        clock.step_wall(-3 * 3600);
+        clock.advance(300);
+        assert_eq!(a.tick().len(), 1);
+    }
+
+    #[test]
+    fn a_reminder_after_a_delay_is_a_duration_but_a_reminder_at_a_time_is_a_calendar_point() {
+        let (mut a, clock) = stepping(None, utc(2026, 11, 7, 14, 42), 100);
+        say(&mut a, "remind me in 5 minutes to stretch");
+        say(&mut a, "remind me to call mum at 5 pm");
+        clock.advance(300);
+        clock.step_wall(-1800); // 14:17
+        let fired = a.tick();
+        assert_eq!(fired.len(), 1, "the delayed one rang on time: {fired:?}");
+        assert!(fired[0].label.contains("stretch"));
+        // The wall clock is corrected to 17:00: the calendar reminder rings then, not before.
+        clock.set_wall(utc(2026, 11, 7, 16, 59));
+        assert!(a.tick().is_empty());
+        clock.advance(60);
+        assert_eq!(a.tick().len(), 1);
+    }
+
+    #[test]
+    fn a_restart_takes_the_time_off_a_saved_timer_and_the_portal_listing_follows_the_clock() {
+        let dir = crate::store::testutil::TempDir::new("assistant-step");
+        let (mut a, clock) = stepping(Some(&dir), utc(2026, 11, 7, 14, 42), 100);
+        say(&mut a, "set a timer for ten minutes");
+        clock.advance(60);
+        // A different timer set later makes the file be written again with the first one's figure refreshed.
+        say(&mut a, "set a timer for an hour");
+        drop(a);
+        // The speaker was off for 90 s; the new process has a new monotonic origin.
+        let (a, after) = stepping(Some(&dir), clock.now() + 90, 5);
+        let left: Vec<i64> = a.scheduled().iter().map(|t| t.2).collect();
+        assert_eq!(left, [600 - 60 - 90, 3600 - 90]);
+        // What the portal shows is derived at read time: after a step it is the corrected wall time.
+        after.step_wall(3 * 3600);
+        let mut a = a;
+        let list = a.admin_sched(crate::app::SchedOp::List).unwrap();
+        assert_eq!(list["items"][0]["seconds_left"], 450);
+        assert_eq!(list["items"][0]["fire_at"], after.now() + 450);
     }
 }

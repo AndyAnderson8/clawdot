@@ -230,8 +230,10 @@ pub struct TurnKit<B> {
     pub system: String,
     /// Local day number and the clock reading at the start.
     pub day: i64,
-    /// Seconds on the assistant's clock at the start.
+    /// Wall-clock seconds on the assistant's clock at the start (for timestamps).
     pub now: Ts,
+    /// Monotonic seconds at the start (for confirmation windows and idle time).
+    pub mono: i64,
 }
 
 impl<B> std::fmt::Debug for TurnKit<B> {
@@ -279,6 +281,7 @@ where
         system,
         day,
         now,
+        mono,
     } = kit;
     conv.set_system(system);
     let mut link = BuiltinLink {
@@ -306,6 +309,7 @@ where
             usage: &mut usage,
             day,
             now,
+            mono,
         };
         run_turn_with(&ctl, &*backend, inputs, &line).await
     };
@@ -411,7 +415,7 @@ async fn run_realtime(kit: RtKit, job: crate::rtvoice::Job, tx: mpsc::Sender<Too
         tx,
         effects: Vec::new(),
     };
-    let now = move || (day, clock.now());
+    let now = move || (day, clock.now(), clock.monotonic_secs());
     let io = Io {
         mic: job.mic,
         speaker: job.speaker,
@@ -531,7 +535,7 @@ impl Hub {
     }
 
     /// Start a turn for `req` now if its speaker is free, or hold it until the speaker's turn ends. `kit`
-    /// builds the snapshot and is called only when a task starts. `now` is seconds on the assistant's clock.
+    /// builds the snapshot and is called only when a task starts. `now` is monotonic seconds ([`crate::sched::Clock::monotonic_secs`]).
     pub fn submit<B>(
         &mut self,
         req: Request,
@@ -655,6 +659,9 @@ mod tests {
     impl Clock for FastClock {
         fn now(&self) -> Ts {
             1_800_000_000 + i64::try_from(self.0.elapsed().as_millis() / 100).unwrap()
+        }
+        fn monotonic_secs(&self) -> i64 {
+            self.now()
         }
     }
 
@@ -786,6 +793,7 @@ mod tests {
                 system: self.persona.clone(),
                 day: 1,
                 now: 1_800_000_000,
+                mono: 1_800_000_000,
             }
         }
 
@@ -1206,8 +1214,8 @@ mod tests {
         writer.resume();
         let a = answer.await.unwrap();
         assert!(a.result.is_ok(), "{:?}", a.result);
-        let saved: Scheduler = Scheduler::load(&store, 8).unwrap();
-        assert_eq!(saved.list().len(), 1);
+        let saved: Scheduler = Scheduler::load(&store, 8, &crate::sched::SystemClock).unwrap();
+        assert_eq!(saved.list(&crate::sched::SystemClock).len(), 1);
     }
 
     /// REQ-TMR-003: a timer the model set that could not be saved is still set (it rings), and the tool result the
@@ -1267,6 +1275,12 @@ mod tests {
         .await;
         let text = answer.result.unwrap();
         assert!(!text.contains("could not be saved"), "{text}");
-        assert_eq!(Scheduler::load(&store, 8).unwrap().list().len(), 2);
+        assert_eq!(
+            Scheduler::load(&store, 8, &crate::sched::SystemClock)
+                .unwrap()
+                .list(&crate::sched::SystemClock)
+                .len(),
+            2
+        );
     }
 }

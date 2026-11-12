@@ -75,7 +75,7 @@ pub async fn serve<H: ToolHost>(
     mut io: Io,
     env: &mut Env<'_, H>,
 ) -> Finish {
-    let (day, _) = (env.clock)();
+    let (day, _, _) = (env.clock)();
     if let Err(limit) = env.usage.check(day) {
         return Finish::cap(&limit);
     }

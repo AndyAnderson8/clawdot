@@ -95,6 +95,39 @@ A successful result over 400 characters (`agent.summarize_over_chars`, 0 turns i
 
 A failed or timed-out call is an error result for the model, who may try one alternative. Two failed calls in a row end the turn with: which tool, how many times, "didn't work" or "did not answer in time", for a costly tool "I can't tell whether it went through, so check before you try again", and "You can ask me to try again, or ask me to do it another way." An empty model reply after a failure gets the same account instead of "Done.". A success in between resets the count.
 
+## Time: durations and calendar points (REQ-TMR-002, REQ-TMR-003, REQ-SEC-011)
+
+A device with no battery clock boots with a stale time and has it corrected by the network later, by minutes or hours, in one step. So the core reads two clocks through one trait (`sched::Clock`) and never mixes them.
+
+- `Clock::monotonic_secs()` counts seconds since an arbitrary origin, never goes backwards, and does not notice a step of the wall clock. It is `std::time::Instant` behind the system clock. Everything that is a **duration** uses it. A reading means nothing after a restart, and is compared only with another reading from the same process.
+- `Clock::now()` is the wall clock (UTC unix seconds). Everything that is a **point on the calendar** uses it.
+
+| Thing | Kind | Clock |
+|---|---|---|
+| Countdown timer, snooze, reminder "in ten minutes" | duration | monotonic |
+| Confirmation window of a held action (120 s), the clarifying-question window, the forget-all confirmation | duration | monotonic |
+| Conversation idle expiry (600 s), per-speaker idle eviction | duration | monotonic |
+| Administrator session (12 h), password-reset window (300 s) and its cooldown (60 s) | duration | monotonic |
+| Rate-limit buckets (hook, announce, failed sign-in attempts) | duration | monotonic |
+| Turn deadline and the spacing of progress phrases | duration | monotonic |
+| Alarm, reminder at a date and time, repeating alarm | calendar | wall |
+| Quiet hours, the day number for usage counters and caps | calendar | wall |
+| Stopwatch (REQ-TMR-011: time while the speaker was off counts) | calendar | wall |
+| Audit record time, event time shown to people, notes' dates | calendar | wall |
+| Announcement `ttl_secs`, inbox snooze, reply expiry, handled-event pruning | calendar (kept) | wall |
+
+The last row is a decision, not an oversight: those records are stored in files and compared across restarts, and their worst failure is a notification dropped or spoken late, with no security property. Moving them to the monotonic clock needs the same save-and-reconcile scheme the timers have (below) for the inbox and reply files; it is open work, not done.
+
+**A countdown across a restart.** The scheduler keeps a countdown as a monotonic due time in memory. In the file it is `remaining_secs` (what was left at the save) and `saved_at` (the wall time of the save, only if the wall clock was valid then). Both are recomputed at **every** save, because the file is rewritten only when the set of items changes. At load the time the program was off is taken off with the wall clock: `off = max(0, wall_now - saved_at)`, and nothing when the wall clock is not valid. A countdown that ran out meanwhile comes back late by the difference, and is announced as missed when over five minutes late (`MISSED_GRACE_SECS`). The older form, an absolute `fire_at` with no `remaining_secs`, loads as `fire_at - wall_now` seconds left. `fire_at` is still written (refreshed at each save) so an older build can read the file.
+
+**What a person is shown** (the portal's "rings at 14:05", `seconds_left`, "how much time is left") is derived at read time from the seconds left, so it stays right after a step of the clock.
+
+**The wall clock gate.** An alarm or a reminder at a time of day does not ring until the wall clock is valid (REQ-TMR-006) and cannot be set before that (REQ-TMR-009). A countdown needs no calendar, so it can be set, listed and rung on a device that has never had the time.
+
+**Suspend.** `Instant` is `CLOCK_MONOTONIC` on Linux and does not advance while the machine is suspended, so a timer on a suspended laptop would lose the time asleep. The devices this software targets do not suspend. `CLOCK_BOOTTIME` would fix it but needs a `libc` call or a new dependency, so it is not done.
+
+**One residual error.** The time the program was off is counted with the wall clock at load. If the clock is stale at that moment (not yet corrected by the network), the downtime is under-counted. That is the stale-boot problem of REQ-BRD-010 and is not closed here.
+
 ## What is not here
 
 Background tasks with ids (P2-3), rules (P2-1), token streaming, a local stop-word spotter and barge-in, and per-tool caps. The limits, the speech switches, the notes switch and the daily caps can be changed in the portal (Settings, "Agent settings", REQ-CFG-062) and apply to the next turn; notes are managed in the Notes tab.

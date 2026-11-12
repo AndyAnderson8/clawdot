@@ -20,12 +20,15 @@ struct Rig {
 }
 
 async fn rig(dir: &TempDir, extra: &[&str]) -> Rig {
+    rig_with(dir, extra, Arc::new(SystemClock)).await
+}
+
+async fn rig_with(dir: &TempDir, extra: &[&str], clock: Arc<dyn Clock + Send + Sync>) -> Rig {
     let mut argv = vec!["--data-dir".to_owned(), dir.0.display().to_string()];
     argv.extend(extra.iter().map(|s| (*s).to_owned()));
     let mut args = cli::parse(&argv).unwrap();
     let (state, _) = seed::resolve_settings(&mut args, &crate::env::Env::empty()).unwrap();
     let live = state.live_values();
-    let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
     let core = Arc::new(
         Core::open(
             clock.clone(),
@@ -239,4 +242,45 @@ async fn console_eof_drains_running_turns_before_leaving() {
         app.brain.usage.requests_today() >= 1,
         "and its request was counted"
     );
+}
+
+// REQ-AST-007, REQ-AST-026: a speaker's idle time is a duration, so the loop sweeps conversations on the
+// monotonic clock and a step of the wall clock neither keeps one alive nor drops it.
+#[tokio::test(flavor = "current_thread")]
+async fn speaker_eviction_follows_monotonic_time() {
+    use crate::sched::testclock::StepClock;
+    for (step, later, kept) in [
+        (-3 * 3600, crate::speakers::IDLE_SECS + 1, false),
+        (3 * 3600, crate::speakers::IDLE_SECS + 1, false),
+        (3 * 3600, 60, true),
+        (-3 * 3600, crate::speakers::IDLE_SECS, true),
+    ] {
+        let dir = TempDir::new("loop-evict");
+        let (open_tx, open) = watch::channel(false);
+        let port = gated_model(open, "Owls hoot.").await;
+        let url = format!("http://127.0.0.1:{port}/v1");
+        let clock = Arc::new(StepClock::at(1_794_225_600));
+        let Rig { mut app, .. } = rig_with(
+            &dir,
+            &["--llm-url", &url, "--llm-model", "m"],
+            clock.clone(),
+        )
+        .await;
+        app.on_console_line(Some("tell me about owls and their habits".into()))
+            .await;
+        open_tx.send_replace(true);
+        while app.hub.active() > 0 {
+            let ev = app.hub.next().await;
+            app.on_hub_event(ev).await;
+        }
+        assert_eq!(app.hub.speakers().len(), 1);
+        clock.step_wall(step);
+        clock.advance(later);
+        app.on_tick();
+        assert_eq!(
+            app.hub.speakers().len() == 1,
+            kept,
+            "step {step} s, {later} s on the monotonic clock"
+        );
+    }
 }

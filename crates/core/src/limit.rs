@@ -165,6 +165,9 @@ fn source_key(ip: IpAddr) -> IpAddr {
 
 /// Throttles failed authentication attempts per source address, with a larger ceiling over all of them.
 ///
+/// Every `now` taken here is a monotonic reading ([`crate::sched::Clock::monotonic_secs`]): a bucket refills with
+/// time that has passed, and a step of the wall clock must not hand an attacker a fresh budget.
+///
 /// One shared bucket lets anyone who can reach the port empty it with bad tokens, and then the administrator's
 /// right password is refused too. Here each source address (see [`source_key`]) has its own bucket, so one host
 /// can only use up its own share; the shared ceiling stays as a backstop against many hosts guessing together,

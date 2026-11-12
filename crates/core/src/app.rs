@@ -193,6 +193,8 @@ pub struct NextAnnouncement {
     pub more_waiting: usize,
 }
 
+/// A token bucket; `last` is a monotonic reading ([`Clock::monotonic_secs`]), so a step of the wall clock
+/// cannot refill it.
 #[derive(Debug)]
 struct Bucket {
     tokens: f64,
@@ -327,7 +329,7 @@ impl Core {
         inbox: Inbox,
         replies: ReplyQueue,
     ) -> Self {
-        let now = clock.now();
+        let mono = clock.monotonic_secs();
         let writer = stores
             .as_ref()
             .and_then(|_| persist::Writer::start().map(Arc::new));
@@ -357,7 +359,7 @@ impl Core {
                         per_sec: limits.auth_fail_overall_per_sec,
                     },
                     limits.auth_fail_sources,
-                    now,
+                    mono,
                 ),
             }),
             notify: Notify::new(),
@@ -661,12 +663,12 @@ impl Core {
         name: &str,
         token: &str,
         peer: IpAddr,
-        now: Ts,
+        mono: i64,
     ) -> Result<Endpoint, HookError> {
         if let Some(ep) = g.endpoints.authenticate(name, token) {
             return Ok(ep.clone());
         }
-        let ok = g.auth_failures.spend(peer, now);
+        let ok = g.auth_failures.spend(peer, mono);
         Err(if ok {
             HookError::Unauthorized
         } else {
@@ -686,16 +688,16 @@ impl Core {
         peer: IpAddr,
         body: &[u8],
     ) -> Result<HookOutcome, HookError> {
-        let now = self.clock.now();
+        let (now, mono) = (self.clock.now(), self.clock.monotonic_secs());
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, peer, now)?;
+        let ep = self.authenticate(&mut g, name, token, peer, mono)?;
         let bucket = g.buckets.entry(ep.name.clone()).or_insert(Bucket {
             tokens: self.limits.hook_burst,
-            last: now,
+            last: mono,
         });
         if !take(
             bucket,
-            now,
+            mono,
             self.limits.hook_burst,
             self.limits.hook_per_sec,
         ) {
@@ -730,9 +732,9 @@ impl Core {
         peer: IpAddr,
         after: u64,
     ) -> Result<Vec<Reply>, HookError> {
-        let now = self.clock.now();
+        let (now, mono) = (self.clock.now(), self.clock.monotonic_secs());
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, peer, now)?;
+        let ep = self.authenticate(&mut g, name, token, peer, mono)?;
         g.replies.expire(now);
         Ok(g.replies
             .pending_for(&ep.name, after)
@@ -752,9 +754,9 @@ impl Core {
         peer: IpAddr,
         reply_id: u64,
     ) -> Result<bool, HookError> {
-        let now = self.clock.now();
+        let mono = self.clock.monotonic_secs();
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, peer, now)?;
+        let ep = self.authenticate(&mut g, name, token, peer, mono)?;
         let acked = g.replies.ack(&ep.name, reply_id);
         if acked {
             self.persist(&g, Dirty::REPLIES);
@@ -767,9 +769,9 @@ impl Core {
     /// # Errors
     /// [`HookError::Unauthorized`] or [`HookError::RateLimited`].
     pub fn bridge_check(&self, name: &str, token: &str, peer: IpAddr) -> Result<(), HookError> {
-        let now = self.clock.now();
+        let mono = self.clock.monotonic_secs();
         let mut g = self.lock();
-        self.authenticate(&mut g, name, token, peer, now)
+        self.authenticate(&mut g, name, token, peer, mono)
             .map(|_| ())
     }
 
@@ -782,8 +784,8 @@ impl Core {
     /// Spend one attempt from `peer`'s authentication budget (and the backstop over everyone). False when either
     /// is used up.
     fn spend_attempt(&self, peer: IpAddr) -> bool {
-        let now = self.clock.now();
-        self.lock().auth_failures.spend(peer, now)
+        let mono = self.clock.monotonic_secs();
+        self.lock().auth_failures.spend(peer, mono)
     }
 
     /// Give back an attempt that turned out to be a success, so signing in with the right password costs nothing.
@@ -799,13 +801,13 @@ impl Core {
     /// The administrator state the page needs to decide what to show.
     #[must_use]
     pub fn admin_state(&self) -> serde_json::Value {
-        let now = self.clock.now();
+        let mono = self.clock.monotonic_secs();
         let mut a = self.admin_lock();
         serde_json::json!({
             "mode": a.mode().label(),
             "legacy": a.legacy(),
             "open_allowed": a.open_allowed(),
-            "reset_window_secs": a.window_left(now),
+            "reset_window_secs": a.window_left(mono),
         })
     }
 
@@ -821,8 +823,8 @@ impl Core {
     /// [`AdminError::SetupRequired`], [`AdminError::NotPrivate`], [`AdminError::Unauthorized`], or
     /// [`AdminError::RateLimited`].
     pub fn check_admin(&self, bearer: Option<&str>, peer: IpAddr) -> Result<(), AdminError> {
-        let now = self.clock.now();
-        let r = self.admin_lock().authorize(bearer, peer, now);
+        let mono = self.clock.monotonic_secs();
+        let r = self.admin_lock().authorize(bearer, peer, mono);
         match r {
             Err(AdminError::Unauthorized) if !self.spend_attempt(peer) => {
                 Err(AdminError::RateLimited)
@@ -856,8 +858,8 @@ impl Core {
     /// # Errors
     /// See [`AdminError`].
     pub fn admin_setup_password(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
-        let now = self.clock.now();
-        self.admin_lock().setup_password(peer, hash, now)
+        let mono = self.clock.monotonic_secs();
+        self.admin_lock().setup_password(peer, hash, mono)
     }
 
     /// Start a sign-in from `peer`: spends an attempt from its budget and returns the stored hash to verify
@@ -891,9 +893,9 @@ impl Core {
     /// # Errors
     /// If the OS cannot supply random bytes.
     pub fn admin_login_finish(&self, peer: IpAddr) -> Result<String, AdminError> {
-        let now = self.clock.now();
+        let mono = self.clock.monotonic_secs();
         self.refund_attempt(peer);
-        self.admin_lock().new_session(now)
+        self.admin_lock().new_session(mono)
     }
 
     /// End the session `bearer`.
@@ -940,12 +942,12 @@ impl Core {
         proved: Option<&str>,
         hash: String,
     ) -> Result<String, AdminError> {
-        let now = self.clock.now();
+        let mono = self.clock.monotonic_secs();
         let mut a = self.admin_lock();
         if a.password_hash().as_deref() != proved {
             return Err(AdminError::WrongCurrent);
         }
-        let r = a.set_password(hash, now);
+        let r = a.set_password(hash, mono);
         drop(a);
         self.refund_attempt(peer);
         match (&r, proved) {
@@ -976,8 +978,8 @@ impl Core {
     /// # Errors
     /// [`AdminError::NoPassword`] unless a password is set; [`AdminError::RateLimited`] during the cooldown.
     pub fn admin_open_reset_window(&self) -> Result<i64, AdminError> {
-        let now = self.clock.now();
-        let r = self.admin_lock().open_window(now);
+        let mono = self.clock.monotonic_secs();
+        let r = self.admin_lock().open_window(mono);
         match &r {
             Ok(_) => self.audit_admin("reset window opened", true),
             Err(_) => self.audit_admin("reset window refused", false),
@@ -994,8 +996,8 @@ impl Core {
         if !self.spend_attempt(peer) {
             return Err(AdminError::RateLimited);
         }
-        let now = self.clock.now();
-        self.admin_lock().check_window(peer, now)
+        let mono = self.clock.monotonic_secs();
+        self.admin_lock().check_window(peer, mono)
     }
 
     /// Finish a reset through the window (REQ-CFG-069). Returns a new session.
@@ -1003,8 +1005,8 @@ impl Core {
     /// # Errors
     /// As [`Core::admin_window_begin`], plus storage and randomness failures.
     pub fn admin_window_finish(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
-        let now = self.clock.now();
-        let r = self.admin_lock().reset_in_window(peer, hash, now);
+        let mono = self.clock.monotonic_secs();
+        let r = self.admin_lock().reset_in_window(peer, hash, mono);
         if r.is_ok() {
             self.audit_admin("reset window used", true);
         }
@@ -1280,6 +1282,9 @@ mod tests {
 
     pub(crate) struct TestClock(pub AtomicI64);
     impl Clock for TestClock {
+        fn monotonic_secs(&self) -> i64 {
+            self.now()
+        }
         fn now(&self) -> Ts {
             self.0.load(Ordering::Relaxed)
         }
@@ -1962,6 +1967,96 @@ mod tests {
         assert_eq!(
             c.ui_status(),
             serde_json::json!({"version": "9", "realtime": {"active": true}})
+        );
+    }
+
+    // ----- durations run on the monotonic clock (REQ-CFG-019, REQ-CFG-069, REQ-SEC-004) -----
+
+    fn stepping_core() -> (Core, Arc<crate::sched::testclock::StepClock>) {
+        let clock = Arc::new(crate::sched::testclock::StepClock::at(1_800_000_000));
+        let core = Core::in_memory(clock.clone(), Adapters::builtin(), Limits::default());
+        (core, clock)
+    }
+
+    // REQ-CFG-019: a sign-in lasts 12 hours of real time, whatever the wall clock does.
+    #[test]
+    fn an_administrator_session_does_not_get_longer_or_shorter_when_the_wall_clock_steps() {
+        for (step, later, alive) in [
+            (-24 * 3600, crate::admin::SESSION_SECS + 1, false),
+            (24 * 3600, crate::admin::SESSION_SECS + 1, false),
+            (-24 * 3600, crate::admin::SESSION_SECS - 1, true),
+            (24 * 3600, 60, true),
+        ] {
+            let (c, clock) = stepping_core();
+            let hash = crate::admin::hash_password("correct horse").unwrap();
+            let token = c.admin_setup_password(peer("192.168.1.2"), hash).unwrap();
+            let who = peer("192.168.1.2");
+            assert_eq!(c.check_admin(Some(&token), who), Ok(()));
+            clock.advance(later);
+            clock.step_wall(step);
+            assert_eq!(
+                c.check_admin(Some(&token), who).is_ok(),
+                alive,
+                "step {step} s, {later} s on the monotonic clock"
+            );
+        }
+    }
+
+    // REQ-CFG-069: 300 s window, 60 s cooldown; both durations.
+    #[test]
+    fn the_reset_window_and_its_cooldown_do_not_get_longer_when_the_wall_clock_steps_back() {
+        let who = peer("192.168.1.9");
+        // Stepped back: the window still closes after 300 s.
+        let (c, clock) = stepping_core();
+        c.admin_setup_password(who, crate::admin::hash_password("correct horse").unwrap())
+            .unwrap();
+        assert_eq!(c.admin_open_reset_window(), Ok(300));
+        clock.advance(299);
+        clock.step_wall(-3600);
+        assert_eq!(c.admin_window_begin(who), Ok(()), "299 s: still open");
+        clock.advance(1);
+        assert_eq!(
+            c.admin_window_begin(who),
+            Err(AdminError::WindowClosed),
+            "300 s: closed, though the wall clock reads 59 minutes earlier"
+        );
+        // The cooldown after it also counts real time: refused at 59 s, allowed at 60 s.
+        clock.advance(59);
+        assert_eq!(c.admin_open_reset_window(), Err(AdminError::RateLimited));
+        clock.advance(1);
+        clock.step_wall(-3600);
+        assert_eq!(c.admin_open_reset_window(), Ok(300));
+        // Stepped forward: it does not close early.
+        let (c, clock) = stepping_core();
+        c.admin_setup_password(who, crate::admin::hash_password("correct horse").unwrap())
+            .unwrap();
+        c.admin_open_reset_window().unwrap();
+        clock.advance(100);
+        clock.step_wall(6 * 3600);
+        assert_eq!(c.admin_window_begin(who), Ok(()));
+    }
+
+    // REQ-SEC-004: a step of the wall clock must not hand a guesser a fresh budget.
+    #[test]
+    fn a_forward_step_of_the_wall_clock_does_not_refill_the_failed_attempt_budget() {
+        let (c, clock) = stepping_core();
+        let a = peer("192.168.1.10");
+        let mut n = 0;
+        while c.ingest_hook("x", "cdt_guess", a, b"{}") != Err(HookError::RateLimited) {
+            n += 1;
+            assert!(n <= 20, "never throttled");
+        }
+        clock.step_wall(24 * 3600);
+        assert_eq!(
+            c.ingest_hook("x", "cdt_guess", a, b"{}"),
+            Err(HookError::RateLimited),
+            "no real time has passed"
+        );
+        clock.advance(2);
+        assert_eq!(
+            c.ingest_hook("x", "cdt_guess", a, b"{}"),
+            Err(HookError::Unauthorized),
+            "real time refills it"
         );
     }
 }

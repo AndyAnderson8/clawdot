@@ -51,7 +51,7 @@ Optional features of `clawdot-core` (all off except the first two): `tz` (time-z
 
 ### A turn
 
-An utterance (or a typed line) goes to the local fast path first (`fastpath.rs`, `assistant.rs`): timers, alarms, volume, music, with no model call. Anything else becomes a model turn (`turns.rs`) in a task, with that speaker's own conversation (`speakers.rs`: at most 8 conversations, bounded in messages, bytes and idle time). The turn runs `session::run_turn_with`, which loops: ask the model, validate its calls, pass each call through the **gate** (`session/gate.rs`), add the result, repeat until a limit or an answer. Details: [agent loop](agent-loop.md), [action safety](action-safety.md).
+An utterance (or a typed line) goes to the local fast path first (`fastpath.rs`, `assistant.rs`): timers, alarms, volume, music, with no model call. Anything else becomes a model turn (`turns.rs`) in a task, with that speaker's own conversation (`speakers.rs`: at most 8 conversations, bounded in messages, bytes and idle time). The turn runs `session::run_turn_with`, which loops: ask the model, validate its calls, pass each call through the **gate** (`session/gate.rs`), add the result, repeat until a limit or an answer. Durations (timers, confirmation windows, sessions) are measured on a monotonic clock, so a correction of the wall clock cannot stretch or cut them; calendar points (alarms, reminders at a time) follow the wall clock. Details: [agent loop](agent-loop.md) (see "Time"), [action safety](action-safety.md).
 
 The gate decides every call: risk tier, a spoken read-back and a plain "yes" held by the host for costly actions, the audit record, the daily caps, dry-run, cancel. The model cannot release a held action. Realtime voice calls the same gate.
 

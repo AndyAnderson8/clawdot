@@ -237,8 +237,7 @@ static TOOLS: &[Tool] = &[
         },
         &["seconds"],
         Assistant::run_set_timer,
-    )
-    .needs_clock(),
+    ),
     Tool::new(
         "list_timers",
         "List running timers and the time left on each.",
@@ -246,8 +245,7 @@ static TOOLS: &[Tool] = &[
         &[],
         Assistant::run_list_timers,
     )
-    .tier(Rule::Fixed(Tier::ReadOnly))
-    .needs_clock(),
+    .tier(Rule::Fixed(Tier::ReadOnly)),
     Tool::new(
         "cancel_timers",
         "Cancel timers. With a label, only timers whose name contains it; without, all timers.",
@@ -467,11 +465,11 @@ impl Assistant {
         self.stopwatch(action)
     }
 
-    fn run_set_timer(&mut self, args: &Value, now: Ts) -> Result<String, String> {
+    fn run_set_timer(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
         let secs = int(args, "seconds")?;
         let label = opt_text(args, "label").to_owned();
         self.sched
-            .set_timer(now, secs, &label)
+            .set_timer(&*self.clock, secs, &label)
             .map_err(|e| e.to_string())?;
         self.save();
         Ok(format!("Timer set for {}.", format_duration(secs)))
@@ -553,11 +551,11 @@ impl Assistant {
         Ok(format!("Cancelled {n} alarm(s)."))
     }
 
-    fn run_set_reminder(&mut self, args: &Value, now: Ts) -> Result<String, String> {
+    fn run_set_reminder(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
         let secs = int(args, "seconds")?;
         let what = text(args, "text")?.to_owned();
         self.sched
-            .set_reminder(now, now.saturating_add(secs), &what)
+            .set_reminder_in(&*self.clock, secs, &what)
             .map_err(|e| e.to_string())?;
         self.save();
         Ok(format!(
@@ -720,8 +718,6 @@ mod tests {
             .0
             .store(utc(2010, 1, 1, 0, 3), std::sync::atomic::Ordering::Relaxed);
         for (tool, args) in [
-            ("set_timer", json!({"seconds": 60})),
-            ("list_timers", json!({})),
             ("set_alarm", json!({"hour": 7, "minute": 0})),
             ("set_reminder", json!({"seconds": 60, "text": "x"})),
             ("current_time", json!({})),
@@ -729,6 +725,16 @@ mod tests {
             let e = call(&mut a, tool, args).unwrap_err();
             assert!(e.contains("clock isn't set"), "{tool}: {e}");
         }
+        // A countdown timer runs on the monotonic clock and needs no calendar (REQ-TMR-009).
+        assert_eq!(
+            call(&mut a, "set_timer", json!({"seconds": 60})).unwrap(),
+            "Timer set for 1 minute."
+        );
+        assert!(
+            call(&mut a, "list_timers", json!({}))
+                .unwrap()
+                .contains("1 minute")
+        );
     }
 
     #[test]
@@ -968,6 +974,7 @@ mod tests {
                 usage: &mut usage,
                 day: 1,
                 now: 1000,
+                mono: 1000,
             },
             user,
         )
