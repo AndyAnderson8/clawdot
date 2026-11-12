@@ -25,7 +25,7 @@ pub mod ws;
 use crate::llm::{Role, ToolCall, ToolSpec};
 use crate::sched::Ts;
 use crate::session::{
-    Conversation, ToolHost, TurnConfig, TurnEnd, answer_held_action, is_no, is_yes,
+    Conversation, ToolHost, TurnConfig, TurnEnd, TurnInputs, answer_held_action, is_no, is_yes,
     run_proposed_calls, tools_for,
 };
 use crate::usage::{LimitReached, UsageTracker};
@@ -691,16 +691,15 @@ where
     };
     let answered = is_yes(text) || is_no(text);
     let (day, now) = (env.clock)();
-    let res = answer_held_action(
-        &mut *env.host,
-        &mut *env.conv,
-        env.turn_cfg,
-        &mut *env.usage,
+    let inputs = TurnInputs {
+        host: &mut *env.host,
+        conv: &mut *env.conv,
+        cfg: env.turn_cfg,
+        usage: &mut *env.usage,
         day,
         now,
-        text,
-    )
-    .await;
+    };
+    let res = answer_held_action(inputs, text).await;
     if !answered {
         // Anything else dropped the held action as an unrelated request (the host did that); it is
         // the next tool turn's text.
@@ -777,17 +776,15 @@ where
             arguments: c.arguments.clone(),
         })
         .collect();
-    let res = run_proposed_calls(
-        &mut *env.host,
-        &mut *env.conv,
-        env.turn_cfg,
-        &mut *env.usage,
+    let inputs = TurnInputs {
+        host: &mut *env.host,
+        conv: &mut *env.conv,
+        cfg: env.turn_cfg,
+        usage: &mut *env.usage,
         day,
         now,
-        &user_text,
-        &script,
-    )
-    .await;
+    };
+    let res = run_proposed_calls(inputs, &user_text, &script).await;
     if env.conv.pending().is_some() {
         st.barrier = st.started;
     }

@@ -35,7 +35,8 @@ use crate::mcp::{McpClient, WithMcp};
 use crate::satellite::Answer;
 use crate::sched::Ts;
 use crate::session::{
-    ChatBackend, Conversation, Risk, ToolHost, TurnConfig, TurnCtl, TurnEnd, run_turn_ctl,
+    ChatBackend, Conversation, Risk, ToolHost, TurnConfig, TurnCtl, TurnEnd, TurnInputs,
+    run_turn_with,
 };
 use crate::speakers::{Checkout, SpeakerId, Speakers};
 use crate::usage::UsageTracker;
@@ -260,10 +261,15 @@ where
             mcp: &mcp,
             scope: None,
         };
-        run_turn_ctl(
-            &ctl, &*backend, &mut host, &mut conv, &cfg, &mut usage, day, now, &line,
-        )
-        .await
+        let inputs = TurnInputs {
+            host: &mut host,
+            conv: &mut conv,
+            cfg: &cfg,
+            usage: &mut usage,
+            day,
+            now,
+        };
+        run_turn_with(&ctl, &*backend, inputs, &line).await
     };
     let failed = match &r.end {
         TurnEnd::Failed(e) => Some(format!("{e}")),
@@ -710,7 +716,7 @@ mod tests {
             let ext_view = Arc::new(ext.snapshot());
             Self {
                 assistant,
-                hub: Hub::new(|| Conversation::new("persona", 20, 24_000, 600)),
+                hub: Hub::new(|| Conversation::standard("persona")),
                 backend: Fake::new(delay_ms),
                 usage: UsageTracker::new(UsageLimits::default()),
                 http: Arc::new(http),
@@ -1027,7 +1033,7 @@ mod tests {
             builtin: ToolHost::tool_specs(&lab.assistant),
             day: 1,
             clock: Arc::new(FastClock(Instant::now())),
-            conv: Conversation::new("persona", 20, 24_000, 600),
+            conv: Conversation::standard("persona"),
         };
         let (_mic_tx, mic) = mpsc::channel(8);
         let (speaker, _spk_rx) = mpsc::channel(8);

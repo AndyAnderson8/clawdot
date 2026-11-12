@@ -201,7 +201,8 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--reset-admin" => a.reset_admin = true,
             "--rotate-admin-token" => {
                 return Err(
-                    "--rotate-admin-token was removed: the web UI now asks for a password on first run; \n                     use --reset-admin to start setup again"
+                    "--rotate-admin-token was removed: the web UI now asks for a password on first run; \
+                     use --reset-admin to start setup again"
                         .into(),
                 );
             }

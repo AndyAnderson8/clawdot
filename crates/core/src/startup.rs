@@ -150,7 +150,7 @@ pub async fn build_brain(
     let hub = Hub::new({
         let persona = persona.clone();
         move || {
-            let mut c = Conversation::new(persona.clone(), 20, 24_000, 600);
+            let mut c = Conversation::standard(persona.clone());
             c.set_audit(Arc::clone(&audit_for_conv));
             c.set_notes(Arc::clone(&notes_for_conv));
             c
@@ -176,7 +176,6 @@ pub async fn build_brain(
             core.env().lookup(),
             core.secrets().clone(),
         ),
-        env: core.env().clone(),
         connects,
     };
     if brain.rt.settings().enabled && !RtSettings::built() {

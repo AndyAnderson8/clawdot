@@ -237,8 +237,6 @@ pub struct Brain {
     pub voice_configured: bool,
     /// The optional realtime voice: its settings, status and the way sessions reach this loop.
     pub rt: Realtime,
-    /// The environment as it was at start-up (see [`crate::env`]); keys named by settings are looked up here.
-    pub env: crate::env::Env,
     /// MCP connections being made beside the loop, for servers added in the portal.
     pub connects: Connects,
 }
@@ -272,7 +270,12 @@ impl Brain {
     }
 
     /// Carry out a change from the portal and refresh what the page shows.
-    pub async fn ext_apply(&mut self, op: ExtOp) -> Result<serde_json::Value, crate::app::Fail> {
+    /// Keys named by the change are looked up in `env`, the core's snapshot of the environment.
+    pub async fn ext_apply(
+        &mut self,
+        op: ExtOp,
+        env: &crate::env::Env,
+    ) -> Result<serde_json::Value, crate::app::Fail> {
         // A turn that is running holds its own copies of the clients; `make_mut` gives this loop a private
         // one to change, and the turn keeps what it began with.
         let applied = self
@@ -282,12 +285,21 @@ impl Brain {
                 Arc::make_mut(&mut self.http_tools),
                 Arc::make_mut(&mut self.mcp),
                 &self.builtin,
-                &self.env.lookup(),
+                &env.lookup(),
             )
             .await;
         self.ext_view = Arc::new(self.ext.snapshot());
         applied?;
         Ok(self.listing())
+    }
+
+    /// How many tools of each kind are on offer, for the status page.
+    pub fn tool_counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "builtin": self.builtin.len(),
+            "http": self.http_tools.specs().len(),
+            "mcp": self.mcp.tools().len(),
+        })
     }
 
     /// A snapshot for the web UI. Contains no secrets and no agent text.
@@ -313,7 +325,14 @@ impl Brain {
             .assistant
             .scheduled()
             .into_iter()
-            .map(|(kind, label, secs)| serde_json::json!({ "kind": kind, "label": label, "seconds_left": secs }))
+            .map(|(kind, label, secs)| {
+                serde_json::json!({ "kind": kind, "label": label, "seconds_left": secs })
+            })
+            .collect();
+        let (day, history) = self.usage.request_days();
+        let history: Vec<serde_json::Value> = history
+            .iter()
+            .map(|(d, n)| serde_json::json!({ "day": d, "requests": n }))
             .collect();
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
@@ -322,8 +341,8 @@ impl Brain {
                 "model": self.llm.as_ref().map(|l| l.cfg.model.clone()),
             },
             "usage": {
-                "day": self.usage.request_days().0,
-                "history": self.usage.request_days().1.iter().map(|(d, n)| serde_json::json!({ "day": d, "requests": n })).collect::<Vec<_>>(),
+                "day": day,
+                "history": history,
                 "daily_spend_cap_usd": self.usage.limits().daily_spend_cap_usd,
                 "requests_today": self.usage.requests_today(),
                 "spend_today": self.usage.spend_today(),
@@ -352,7 +371,7 @@ impl Brain {
         self.rt.set_error(None);
         core.patch_ui_status("realtime", self.rt.status());
         // A fresh conversation per session: it holds the transcript and any held action in memory only.
-        let mut conv = Conversation::new(self.persona.clone(), 20, 24_000, 600);
+        let mut conv = Conversation::standard(self.persona.clone());
         if let Some(a) = core.audit() {
             conv.set_audit(a);
         }
@@ -397,10 +416,9 @@ impl Brain {
     }
 
     /// What a model turn starts from, copied or shared now: the prompt, the tools, the policy and the limits
-    /// (ADR-0021). A change made in the portal while the turn runs reaches the next turn. `None` without a
-    /// language model.
-    pub fn kit(&mut self) -> Option<TurnKit<HttpBackend>> {
-        let l = self.llm.as_ref()?;
+    /// (ADR-0021), for the language model `l`. A change made in the portal while the turn runs reaches the next
+    /// turn. Building it is not free, so a caller builds it only when a turn will start.
+    pub fn kit(&mut self, l: &Llm) -> TurnKit<HttpBackend> {
         let host = WithPolicy {
             inner: &mut WithMcp {
                 inner: &mut WithHttp {
@@ -416,7 +434,7 @@ impl Brain {
         // The enabled skills ride along in the system prompt, after the persona (REQ-CFG-036).
         let available: Vec<String> = host.tool_specs().into_iter().map(|t| t.name).collect();
         let system = format!("{}{}", self.persona, self.ext.skills_prompt(&available));
-        Some(TurnKit {
+        TurnKit {
             backend: Arc::clone(&l.backend),
             cfg: l.cfg.clone(),
             usage: self.usage.clone(),
@@ -427,7 +445,7 @@ impl Brain {
             system,
             day: self.assistant.local_day(),
             now: self.clock.now(),
-        })
+        }
     }
 
     /// Save the usage counters. The loop is their only writer to disk.
@@ -462,7 +480,9 @@ pub fn dispatch(brain: &mut Brain, hub: &mut Hub, req: Request) -> Option<(Origi
     if let Some(reply) = brain.fast(&req.line) {
         return Some((req.origin, reply));
     }
-    let Some(kit) = brain.kit() else {
+    // Only the handle on the model is copied here; the kit (tool specs, system prompt) is built by the hub
+    // when a task starts, not for a request that is queued or refused.
+    let Some(llm) = brain.llm.clone() else {
         return Some((
             req.origin,
             Reply {
@@ -472,7 +492,7 @@ pub fn dispatch(brain: &mut Brain, hub: &mut Hub, req: Request) -> Option<(Origi
         ));
     };
     let now = brain.clock.now();
-    match hub.submit(req, now, || kit) {
+    match hub.submit(req, now, || brain.kit(&llm)) {
         Submitted::Started | Submitted::Queued => None,
         Submitted::Refused(req) => Some((
             req.origin,
@@ -577,7 +597,7 @@ pub async fn portal_op(
             match brain
                 .ext
                 .mcp_prepare(&v, &brain.mcp, brain.connects.portal_len(), |v| {
-                    brain.env.get(v)
+                    core.env().get(v)
                 }) {
                 Ok(pending) => {
                     brain.connects.start(pending, reply);
@@ -676,7 +696,7 @@ async fn sync_op(
             Ok(serde_json::json!({ "applied": true }))
         }
         Op::Ext(op) => {
-            let r = brain.ext_apply(op).await;
+            let r = brain.ext_apply(op, core.env()).await;
             if let Ok(listing) = &r {
                 core.set_ui_tools(listing.clone());
             }
@@ -1074,6 +1094,29 @@ mod tests {
         assert!(!brain.mcp.has_server("stuck") && brain.mcp.owns("good__ping"));
     }
 
+    // A connection task that dies is answered like any other failed connection, and the name can be tried
+    // again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_connect_task_that_dies_answers_the_request_and_frees_the_name() {
+        let dir = TempDir::new("mcp-died");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let mut done_rx = brain.connects.attach();
+        brain.connects.make_next_task_die();
+        let (job, answer) = ask(add_home(9));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        let done = done_rx.recv().await.unwrap();
+        mcp_connected(&mut brain, &core, done);
+        assert!(matches!(
+            answer.await.unwrap(),
+            Err(Fail::Invalid(m)) if m == "The connection could not be made."
+        ));
+        assert!(!brain.mcp.has_server("home") && brain.connects.is_empty());
+        let (job, _again) = ask(add_home(9));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(brain.connects.is_connecting("home"));
+    }
+
     // A server that cannot be used is reported to the request and leaves nothing behind.
     #[tokio::test(flavor = "current_thread")]
     async fn a_connect_that_fails_answers_the_request_and_adds_nothing() {
@@ -1118,7 +1161,7 @@ mod tests {
     async fn the_fast_path_answers_without_a_model_and_other_requests_say_one_is_needed() {
         let dir = TempDir::new("dispatch");
         let (mut brain, _core, _live) = started(&dir, &[]).await;
-        let mut hub = Hub::new(|| Conversation::new(String::new(), 20, 24_000, 600));
+        let mut hub = Hub::new(|| Conversation::standard(String::new()));
         let ask = |line: &str| Request {
             speaker: "console".into(),
             line: line.to_owned(),

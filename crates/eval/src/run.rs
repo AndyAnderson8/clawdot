@@ -177,12 +177,7 @@ pub async fn run_scenario<M: Model>(
         },
         ..AuditConfig::default()
     }));
-    let mut conv = Conversation::new(
-        s.setup.system.as_deref().unwrap_or(DEFAULT_PERSONA),
-        20,
-        24_000,
-        600,
-    );
+    let mut conv = Conversation::standard(s.setup.system.as_deref().unwrap_or(DEFAULT_PERSONA));
     conv.set_audit(Arc::clone(&log));
     let notes = Arc::new(NoteStore::in_memory(s.setup.notes));
     if s.setup.notes {

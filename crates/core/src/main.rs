@@ -85,7 +85,7 @@ async fn main() -> ExitCode {
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
     if !clock.wall_clock_valid() {
         eprintln!(
-            "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and              reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
+            "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
         );
     }
     match clawdot_core::admin::migrate_legacy(&args.data_dir) {
@@ -170,7 +170,7 @@ async fn main() -> ExitCode {
             &mut brain,
             &mut hub,
             &args.speech,
-            core.secrets(),
+            &core,
             &input,
             args.voice_out.as_deref(),
         )
@@ -298,7 +298,7 @@ async fn main() -> ExitCode {
             }
             _ = tick.tick() => {
                 hub.sweep(brain.clock.now());
-                let tool_counts = serde_json::json!({ "builtin": brain.builtin.len(), "http": brain.http_tools.specs().len(), "mcp": brain.mcp.tools().len() });
+                let tool_counts = brain.tool_counts();
                 let view = SpeakerView {
                     available: announcer.connected() > 0 && voice.available.load(Ordering::Relaxed),
                     console: args.console || args.echo_speech,

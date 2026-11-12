@@ -1,6 +1,7 @@
 //! The speech clients (speech to text, text to speech) built from the `speech` configuration section, and
 //! the registry that lets a change of voice or language in the portal reach them while running.
 
+use crate::app::Core;
 use crate::config::SpeechConfig;
 use crate::env::Env;
 use crate::runtime::{Brain, respond_inline};
@@ -137,11 +138,11 @@ pub async fn voice_once(
     brain: &mut Brain,
     hub: &mut Hub,
     speech: &SpeechConfig,
-    secrets: &Secrets,
+    core: &Core,
     input: &std::path::Path,
     output: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let (stt, tts) = build_speech(speech, secrets, &brain.env)?;
+    let (stt, tts) = build_speech(speech, core.secrets(), core.env())?;
     let bytes =
         std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let pcm = parse_wav(&bytes).map_err(|e| format!("{}: {e}", input.display()))?;
