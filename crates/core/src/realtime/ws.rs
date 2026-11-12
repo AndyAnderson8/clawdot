@@ -8,10 +8,38 @@
 use super::b64;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Largest message accepted, in bytes.
-pub const MAX_MESSAGE: usize = 1024 * 1024;
+/// Largest message accepted, in bytes. A realtime event is JSON text and a base64 audio chunk is far below it.
+const MAX_MESSAGE: usize = 1024 * 1024;
 /// Largest handshake reply accepted, in bytes.
 const MAX_HEAD: usize = 16 * 1024;
+
+// Frame layout and opcodes, RFC 6455 section 5.2.
+/// First byte: this frame ends its message.
+const FIN: u8 = 0x80;
+/// First byte: the three reserved bits, which must be zero (no extension is negotiated).
+const RESERVED: u8 = 0x70;
+/// First byte: the opcode.
+const OPCODE: u8 = 0x0f;
+/// Opcodes with this bit set are control frames.
+const CONTROL: u8 = 0x8;
+/// Second byte: the payload is masked (clients mask, servers do not).
+const MASK_BIT: u8 = 0x80;
+/// Length field value: a 16-bit length follows.
+const LEN_16: u8 = 126;
+/// Length field value: a 64-bit length follows.
+const LEN_64: u8 = 127;
+/// The most a control frame may carry (section 5.5).
+const MAX_CONTROL_PAYLOAD: u8 = 125;
+const OP_CONTINUATION: u8 = 0x0;
+const OP_TEXT: u8 = 0x1;
+const OP_BINARY: u8 = 0x2;
+const OP_CLOSE: u8 = 0x8;
+const OP_PING: u8 = 0x9;
+const OP_PONG: u8 = 0xa;
+/// The HTTP status of an accepted upgrade.
+const SWITCHING_PROTOCOLS: u16 = 101;
+/// Close status 1000, normal closure (section 7.4.1).
+const CLOSE_NORMAL: u16 = 1000;
 
 /// Why a WebSocket operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +146,7 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or(WsError::Protocol("not an HTTP reply"))?;
-    if status != 101 {
+    if status != SWITCHING_PROTOCOLS {
         return Err(WsError::Refused(status));
     }
     if !head.contains("upgrade: websocket") {
@@ -136,6 +164,99 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The header of one frame, read from the front of the receive buffer.
+struct FrameHead {
+    fin: bool,
+    op: u8,
+    mask: Option<[u8; 4]>,
+    /// Where the payload begins in the buffer.
+    data_at: usize,
+    /// Payload length in bytes.
+    len: usize,
+}
+
+impl FrameHead {
+    /// Read the header at the front of `b`, or `None` while more bytes are needed. `partial` is how much of a
+    /// fragmented message is already held. Hostile headers are refused from the header alone, before any
+    /// payload is waited for.
+    fn read(b: &[u8], partial: usize) -> Result<Option<Self>, WsError> {
+        if b.len() < 2 {
+            return Ok(None);
+        }
+        let fin = b[0] & FIN != 0;
+        if b[0] & RESERVED != 0 {
+            return Err(WsError::Protocol("reserved bits set"));
+        }
+        let op = b[0] & OPCODE;
+        let short = b[1] & !MASK_BIT;
+        // Control frames (close, ping, pong) are never fragmented and carry at most 125 bytes (RFC 6455
+        // section 5.5).
+        if op & CONTROL != 0 {
+            if !fin {
+                return Err(WsError::Protocol("a control frame was fragmented"));
+            }
+            if short > MAX_CONTROL_PAYLOAD {
+                return Err(WsError::Protocol("a control frame was too long"));
+            }
+        }
+        let Some((len, mut at)) = decode_len(b, short)? else {
+            return Ok(None);
+        };
+        if len > MAX_MESSAGE || partial + len > MAX_MESSAGE {
+            return Err(WsError::TooLarge);
+        }
+        let mask = if b[1] & MASK_BIT != 0 {
+            let Some(m) = b.get(at..at + 4) else {
+                return Ok(None);
+            };
+            at += 4;
+            Some([m[0], m[1], m[2], m[3]])
+        } else {
+            None
+        };
+        Ok(Some(Self {
+            fin,
+            op,
+            mask,
+            data_at: at,
+            len,
+        }))
+    }
+}
+
+/// The payload length of a frame whose header is at the front of `b` and whose 7-bit length field is
+/// `short`, with the offset where the length field ends. `None` while the extended length is incomplete.
+fn decode_len(b: &[u8], short: u8) -> Result<Option<(usize, usize)>, WsError> {
+    Ok(Some(match short {
+        LEN_16 => {
+            let Some(n) = b.get(2..4) else {
+                return Ok(None);
+            };
+            (usize::from(u16::from_be_bytes([n[0], n[1]])), 4)
+        }
+        LEN_64 => {
+            let Some(n) = b.get(2..10) else {
+                return Ok(None);
+            };
+            let mut be = [0u8; 8];
+            be.copy_from_slice(n);
+            let n = u64::from_be_bytes(be);
+            if n > MAX_MESSAGE as u64 {
+                return Err(WsError::TooLarge);
+            }
+            (n as usize, 10)
+        }
+        n => (usize::from(n), 2),
+    }))
+}
+
+/// Apply (or remove) the 4-byte masking key of RFC 6455 section 5.3.
+fn unmask(payload: &mut [u8], mask: [u8; 4]) {
+    for (i, byte) in payload.iter_mut().enumerate() {
+        *byte ^= mask[i % 4];
+    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> WebSocket<S> {
@@ -157,110 +278,62 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocket<S> {
         }
     }
 
-    /// Parse one complete message out of the buffer, if there is one.
+    /// Parse one complete message out of the buffer, if there is one. Frames that carry no message (pong,
+    /// binary) are consumed and the next one is tried.
     fn parse(&mut self) -> Result<Option<Msg>, WsError> {
         loop {
-            let b = &self.buf;
-            if b.len() < 2 {
+            let Some(head) = FrameHead::read(&self.buf, self.partial.len())? else {
+                return Ok(None);
+            };
+            let end = head.data_at + head.len;
+            if self.buf.len() < end {
                 return Ok(None);
             }
-            let fin = b[0] & 0x80 != 0;
-            if b[0] & 0x70 != 0 {
-                return Err(WsError::Protocol("reserved bits set"));
+            let mut payload = self.buf[head.data_at..end].to_vec();
+            if let Some(mask) = head.mask {
+                unmask(&mut payload, mask);
             }
-            let op = b[0] & 0x0f;
-            // Control frames (close, ping, pong) are never fragmented and carry at most 125 bytes (RFC 6455
-            // section 5.5). Refused from the header alone, before waiting for a payload that should not exist.
-            if op & 0x8 != 0 {
-                if !fin {
-                    return Err(WsError::Protocol("a control frame was fragmented"));
-                }
-                if b[1] & 0x7f > 125 {
-                    return Err(WsError::Protocol("a control frame was too long"));
-                }
+            self.buf.drain(..end);
+            if let Some(msg) = self.on_frame(head.fin, head.op, &payload)? {
+                return Ok(Some(msg));
             }
-            let masked = b[1] & 0x80 != 0;
-            let (len, mut at) = match b[1] & 0x7f {
-                126 => {
-                    if b.len() < 4 {
-                        return Ok(None);
-                    }
-                    (usize::from(u16::from_be_bytes([b[2], b[3]])), 4)
+        }
+    }
+
+    /// One whole frame arrived: the message it completes, if any.
+    fn on_frame(&mut self, fin: bool, op: u8, payload: &[u8]) -> Result<Option<Msg>, WsError> {
+        match op {
+            OP_CLOSE => Ok(Some(Msg::Close)),
+            OP_PING => Ok(Some(Msg::Ping(payload.to_vec()))),
+            OP_PONG => Ok(None),
+            OP_BINARY => {
+                // Binary is ignored, but the rest of a fragmented binary message must not be read as text.
+                if self.fragment == Fragment::Idle && !fin {
+                    self.fragment = Fragment::Binary;
                 }
-                127 => {
-                    if b.len() < 10 {
-                        return Ok(None);
-                    }
-                    let mut n = [0u8; 8];
-                    n.copy_from_slice(&b[2..10]);
-                    let n = u64::from_be_bytes(n);
-                    if n > MAX_MESSAGE as u64 {
-                        return Err(WsError::TooLarge);
-                    }
-                    (n as usize, 10)
-                }
-                n => (usize::from(n), 2),
-            };
-            if len > MAX_MESSAGE || self.partial.len() + len > MAX_MESSAGE {
-                return Err(WsError::TooLarge);
+                Ok(None)
             }
-            let mask = if masked {
-                if b.len() < at + 4 {
-                    return Ok(None);
+            OP_TEXT => {
+                if self.fragment != Fragment::Idle {
+                    return Err(WsError::Protocol("a new message began inside another"));
                 }
-                let m = [b[at], b[at + 1], b[at + 2], b[at + 3]];
-                at += 4;
-                Some(m)
-            } else {
-                None
-            };
-            if b.len() < at + len {
-                return Ok(None);
+                self.partial.extend_from_slice(payload);
+                Ok(self.text_piece(fin)?.map(Msg::Text))
             }
-            let mut payload = b[at..at + len].to_vec();
-            if let Some(m) = mask {
-                for (i, byte) in payload.iter_mut().enumerate() {
-                    *byte ^= m[i % 4];
+            OP_CONTINUATION => match self.fragment {
+                Fragment::Idle => Err(WsError::Protocol("a continuation with nothing to continue")),
+                Fragment::Binary => {
+                    if fin {
+                        self.fragment = Fragment::Idle;
+                    }
+                    Ok(None)
                 }
-            }
-            self.buf.drain(..at + len);
-            match op {
-                0x8 => return Ok(Some(Msg::Close)),
-                0x9 => return Ok(Some(Msg::Ping(payload))),
-                0xa => {} // pong: ignored
-                0x2 => {
-                    // Binary is ignored, but the rest of a fragmented binary message must not be read as text.
-                    if self.fragment == Fragment::Idle && !fin {
-                        self.fragment = Fragment::Binary;
-                    }
+                Fragment::Text => {
+                    self.partial.extend_from_slice(payload);
+                    Ok(self.text_piece(fin)?.map(Msg::Text))
                 }
-                0x1 => {
-                    if self.fragment != Fragment::Idle {
-                        return Err(WsError::Protocol("a new message began inside another"));
-                    }
-                    self.partial.extend_from_slice(&payload);
-                    if let Some(text) = self.text_piece(fin)? {
-                        return Ok(Some(Msg::Text(text)));
-                    }
-                }
-                0x0 => match self.fragment {
-                    Fragment::Idle => {
-                        return Err(WsError::Protocol("a continuation with nothing to continue"));
-                    }
-                    Fragment::Binary => {
-                        if fin {
-                            self.fragment = Fragment::Idle;
-                        }
-                    }
-                    Fragment::Text => {
-                        self.partial.extend_from_slice(&payload);
-                        if let Some(text) = self.text_piece(fin)? {
-                            return Ok(Some(Msg::Text(text)));
-                        }
-                    }
-                },
-                _ => return Err(WsError::Protocol("unknown opcode")),
-            }
+            },
+            _ => Err(WsError::Protocol("unknown opcode")),
         }
     }
 
@@ -278,16 +351,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocket<S> {
 
     async fn send_frame(&mut self, op: u8, payload: &[u8]) -> Result<(), WsError> {
         let mut f = Vec::with_capacity(payload.len() + 14);
-        f.push(0x80 | op);
-        let mask_bit = if self.client { 0x80 } else { 0 };
+        f.push(FIN | op);
+        let mask_bit = if self.client { MASK_BIT } else { 0 };
         match payload.len() {
-            n if n < 126 => f.push(mask_bit | n as u8),
+            n if n < usize::from(LEN_16) => f.push(mask_bit | n as u8),
             n if n <= usize::from(u16::MAX) => {
-                f.push(mask_bit | 126);
+                f.push(mask_bit | LEN_16);
                 f.extend_from_slice(&(n as u16).to_be_bytes());
             }
             n => {
-                f.push(mask_bit | 127);
+                f.push(mask_bit | LEN_64);
                 f.extend_from_slice(&(n as u64).to_be_bytes());
             }
         }
@@ -309,7 +382,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocket<S> {
     /// # Errors
     /// Stream failures.
     pub async fn send_text(&mut self, text: &str) -> Result<(), WsError> {
-        self.send_frame(0x1, text.as_bytes()).await
+        self.send_frame(OP_TEXT, text.as_bytes()).await
     }
 
     /// Answer a ping.
@@ -317,7 +390,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocket<S> {
     /// # Errors
     /// Stream failures.
     pub async fn send_pong(&mut self, payload: &[u8]) -> Result<(), WsError> {
-        self.send_frame(0xa, &payload[..payload.len().min(125)])
+        let limit = usize::from(MAX_CONTROL_PAYLOAD);
+        self.send_frame(OP_PONG, &payload[..payload.len().min(limit)])
             .await
     }
 
@@ -326,7 +400,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocket<S> {
     /// # Errors
     /// Stream failures.
     pub async fn send_close(&mut self) -> Result<(), WsError> {
-        self.send_frame(0x8, &1000u16.to_be_bytes()).await
+        self.send_frame(OP_CLOSE, &CLOSE_NORMAL.to_be_bytes()).await
     }
 }
 
