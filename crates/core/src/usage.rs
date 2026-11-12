@@ -154,7 +154,7 @@ impl UsageTracker {
     }
 
     /// Replace the limits; the counters for today are kept.
-    pub fn set_limits(&mut self, limits: UsageLimits) {
+    pub fn set_limits(&self, limits: UsageLimits) {
         self.cell().limits = limits;
     }
 
@@ -168,7 +168,7 @@ impl UsageTracker {
     ///
     /// # Errors
     /// The limit that has been reached.
-    pub fn check(&mut self, day: i64) -> Result<(), LimitReached> {
+    pub fn check(&self, day: i64) -> Result<(), LimitReached> {
         let mut c = self.cell();
         c.roll(day);
         if c.state.requests >= c.limits.max_requests_per_day {
@@ -183,7 +183,7 @@ impl UsageTracker {
     }
 
     /// Record one request and its reported cost.
-    pub fn record(&mut self, day: i64, usage: Option<&Usage>) {
+    pub fn record(&self, day: i64, usage: Option<&Usage>) {
         let mut c = self.cell();
         c.roll(day);
         c.state.requests = c.state.requests.saturating_add(1);
@@ -200,7 +200,7 @@ impl UsageTracker {
 
     /// Add spend that is not a model request, such as the audio time of a realtime voice session
     /// (REQ-RTV-004). The request count is not changed; the daily spend cap sees the cost.
-    pub fn add_cost(&mut self, day: i64, usd: f64) {
+    pub fn add_cost(&self, day: i64, usd: f64) {
         let mut c = self.cell();
         c.roll(day);
         if usd.is_finite() && usd > 0.0 {
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn added_cost_counts_toward_the_spend_cap_without_counting_a_request() {
-        let mut t = UsageTracker::new(UsageLimits {
+        let t = UsageTracker::new(UsageLimits {
             daily_spend_cap_usd: Some(0.10),
             ..UsageLimits::default()
         });
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn past_days_are_kept_for_the_chart() {
-        let mut t = UsageTracker::new(UsageLimits::default());
+        let t = UsageTracker::new(UsageLimits::default());
         t.record(100, None);
         t.record(100, None);
         t.record(102, None);
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn the_request_cap_stops_requests_and_resets_the_next_day() {
-        let mut t = UsageTracker::new(UsageLimits {
+        let t = UsageTracker::new(UsageLimits {
             max_requests_per_day: 2,
             ..UsageLimits::default()
         });
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn the_spend_cap_uses_the_cost_the_provider_reports() {
-        let mut t = UsageTracker::new(UsageLimits {
+        let t = UsageTracker::new(UsageLimits {
             daily_spend_cap_usd: Some(0.01),
             ..UsageLimits::default()
         });
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn bad_cost_values_are_ignored() {
-        let mut t = UsageTracker::new(UsageLimits::default());
+        let t = UsageTracker::new(UsageLimits::default());
         for c in [f64::NAN, f64::INFINITY, -1.0] {
             t.record(1, Some(&usage(Some(c))));
         }
@@ -332,11 +332,11 @@ mod tests {
     // REQ-AST-011: turns that run side by side count into the same counters, so the cap sees all of them.
     #[test]
     fn clones_count_into_the_same_counters_and_see_the_same_cap() {
-        let mut a = UsageTracker::new(UsageLimits {
+        let a = UsageTracker::new(UsageLimits {
             daily_spend_cap_usd: Some(0.10),
             ..UsageLimits::default()
         });
-        let mut b = a.clone();
+        let b = a.clone();
         a.record(5, Some(&usage(Some(0.06))));
         b.record(5, Some(&usage(Some(0.05))));
         assert_eq!(a.requests_today(), 2);
@@ -362,7 +362,7 @@ mod tests {
     fn counters_survive_a_restart() {
         let dir = TempDir::new("usage");
         let store = JsonStore::new(dir.0.join("usage.json"), SCHEMA);
-        let mut t = UsageTracker::new(UsageLimits::default());
+        let t = UsageTracker::new(UsageLimits::default());
         t.record(7, Some(&usage(Some(0.5))));
         t.save(&store).unwrap();
         let back = UsageTracker::load(&store, UsageLimits::default()).unwrap();
