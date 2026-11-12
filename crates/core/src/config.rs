@@ -230,6 +230,94 @@ pub struct SatelliteConfig {
     pub token_env: Option<String>,
     /// Seconds after a reply during which listening stays open without the wake word (default 8; 0 = off).
     pub follow_up_secs: Option<u64>,
+    /// How the microphone endpointer is tuned for these satellites (REQ-VOI-025).
+    #[serde(default)]
+    pub listening: ListeningConfig,
+}
+
+/// Tuning for the endpointer that finds where an utterance starts and ends (REQ-VOI-025). Every key is optional
+/// and falls back to the default in [`crate::vad::Config`], which suits a quiet room and a close microphone. A
+/// device with a different microphone gain, or a far-field array, sets what it needs. The same keys are read
+/// in `satellite` and in each ESPHome device entry; the device's own values win.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ListeningConfig {
+    /// Quietest level (RMS of 16-bit samples) that can count as speech: 1 to 10000 (default 400).
+    pub min_level: Option<f32>,
+    /// Speech must be this many times louder than the background: 1 to 20 (default 3).
+    pub noise_ratio: Option<f32>,
+    /// Consecutive loud 20 ms frames that start an utterance: 1 to 50 (default 3).
+    pub start_frames: Option<usize>,
+    /// Silence that ends an utterance, in milliseconds: 100 to 5000 (default 700).
+    pub silence_ms: Option<usize>,
+    /// Shorter utterances are treated as noise, in milliseconds: 20 to 2000 (default 250).
+    pub min_speech_ms: Option<usize>,
+    /// Utterances are cut at this length, in milliseconds: 1000 to 60000 (default 15000).
+    pub max_utterance_ms: Option<usize>,
+    /// Give up when nobody speaks within this time after a wake, in milliseconds: 1000 to 60000 (default 6000).
+    pub no_speech_ms: Option<usize>,
+    /// Audio kept from before speech was detected, in milliseconds: 0 to 2000 (default 300).
+    pub preroll_ms: Option<usize>,
+}
+
+impl ListeningConfig {
+    /// `base` with the keys set here replacing its values.
+    #[must_use]
+    pub fn apply(&self, base: crate::vad::Config) -> crate::vad::Config {
+        crate::vad::Config {
+            min_level: self.min_level.unwrap_or(base.min_level),
+            noise_ratio: self.noise_ratio.unwrap_or(base.noise_ratio),
+            start_frames: self.start_frames.unwrap_or(base.start_frames),
+            silence_ms: self.silence_ms.unwrap_or(base.silence_ms),
+            min_speech_ms: self.min_speech_ms.unwrap_or(base.min_speech_ms),
+            max_utterance_ms: self.max_utterance_ms.unwrap_or(base.max_utterance_ms),
+            no_speech_ms: self.no_speech_ms.unwrap_or(base.no_speech_ms),
+            preroll_ms: self.preroll_ms.unwrap_or(base.preroll_ms),
+        }
+    }
+
+    /// Check each value against its range. `place` names the object for the message, for example
+    /// `satellite.listening`.
+    ///
+    /// # Errors
+    /// A message naming the key and the range.
+    pub fn validate(&self, place: &str) -> Result<(), String> {
+        let float = |key: &str, v: Option<f32>, lo: f32, hi: f32| match v {
+            Some(v) if !(v.is_finite() && (lo..=hi).contains(&v)) => Err(format!(
+                "config: `{place}.{key}` must be a number from {lo} to {hi}"
+            )),
+            _ => Ok(()),
+        };
+        let whole = |key: &str, v: Option<usize>, lo: usize, hi: usize| match v {
+            Some(v) if !(lo..=hi).contains(&v) => Err(format!(
+                "config: `{place}.{key}` must be a whole number from {lo} to {hi}"
+            )),
+            _ => Ok(()),
+        };
+        float("min_level", self.min_level, 1.0, 10_000.0)?;
+        float("noise_ratio", self.noise_ratio, 1.0, 20.0)?;
+        whole("start_frames", self.start_frames, 1, 50)?;
+        whole("silence_ms", self.silence_ms, 100, 5_000)?;
+        whole("min_speech_ms", self.min_speech_ms, 20, 2_000)?;
+        whole("max_utterance_ms", self.max_utterance_ms, 1_000, 60_000)?;
+        whole("no_speech_ms", self.no_speech_ms, 1_000, 60_000)?;
+        whole("preroll_ms", self.preroll_ms, 0, 2_000)
+    }
+
+    /// Check the values that only make sense together, after these keys replace `base`: an utterance must be able
+    /// to be longer than the shortest one that counts.
+    ///
+    /// # Errors
+    /// A message naming the two keys.
+    pub fn validate_combined(&self, base: crate::vad::Config, place: &str) -> Result<(), String> {
+        let v = self.apply(base);
+        if v.min_speech_ms >= v.max_utterance_ms {
+            return Err(format!(
+                "config: `{place}.min_speech_ms` must be less than `max_utterance_ms`"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Parts the operating system cannot show, or shows wrongly, declared by the person who set the device up. Each is
@@ -451,9 +539,21 @@ impl Config {
                 "config: `satellite.listen` is needed for the other `satellite` settings".into(),
             );
         }
+        self.satellite.listening.validate("satellite.listening")?;
+        self.satellite
+            .listening
+            .validate_combined(crate::vad::Config::default(), "satellite.listening")?;
         #[cfg(feature = "esphome-satellite")]
         {
             self.esphome.validate()?;
+            let base = self
+                .satellite
+                .listening
+                .apply(crate::vad::Config::default());
+            for d in &self.esphome.devices {
+                let place = format!("esphome.devices[{}].listening", d.name);
+                d.listening.validate_combined(base, &place)?;
+            }
             if !self.esphome.is_empty()
                 && self.speech.url.is_none()
                 && self.speech.dialect().default_url().is_none()
@@ -779,5 +879,62 @@ mod tests {
         ] {
             assert!(Config::parse(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn req_voi_025_listening_is_read_checked_and_defaults_to_the_endpointer_defaults() {
+        let c = Config::parse(
+            r#"{"satellite": {"listening": {"min_level": 150, "silence_ms": 900, "start_frames": 2}}}"#,
+        )
+        .unwrap();
+        let v = c.satellite.listening.apply(crate::vad::Config::default());
+        assert!((v.min_level - 150.0).abs() < f32::EPSILON);
+        assert_eq!((v.silence_ms, v.start_frames), (900, 2));
+        assert_eq!(v.preroll_ms, crate::vad::Config::default().preroll_ms);
+        // Nothing set: today's defaults.
+        let none = Config::parse("{}").unwrap();
+        assert_eq!(
+            none.satellite
+                .listening
+                .apply(crate::vad::Config::default()),
+            crate::vad::Config::default()
+        );
+        for (text, needle) in [
+            (r#"{"min_level": 0}"#, "min_level"),
+            (r#"{"min_level": 100000}"#, "min_level"),
+            (r#"{"noise_ratio": 0.5}"#, "noise_ratio"),
+            (r#"{"start_frames": 0}"#, "start_frames"),
+            (r#"{"silence_ms": 10}"#, "silence_ms"),
+            (r#"{"min_speech_ms": 5000}"#, "min_speech_ms"),
+            (r#"{"max_utterance_ms": 100}"#, "max_utterance_ms"),
+            (r#"{"no_speech_ms": 999999}"#, "no_speech_ms"),
+            (r#"{"preroll_ms": 5000}"#, "preroll_ms"),
+            (r#"{"silence": 5}"#, "silence"),
+            (
+                r#"{"min_speech_ms": 2000, "max_utterance_ms": 1500}"#,
+                "less than",
+            ),
+        ] {
+            let e =
+                Config::parse(&format!(r#"{{"satellite": {{"listening": {text}}}}}"#)).unwrap_err();
+            assert!(e.contains(needle), "{text}: {e}");
+        }
+    }
+
+    #[cfg(feature = "esphome-satellite")]
+    #[test]
+    fn req_voi_025_a_device_value_is_checked_against_the_satellite_section() {
+        let speech = r#""speech": {"url": "https://x/v1", "stt_model": "w", "tts_model": "t", "voice": "v"}"#;
+        let ok = format!(
+            r#"{{{speech}, "satellite": {{"listening": {{"max_utterance_ms": 2000}}}},
+                "esphome": {{"devices": [{{"name": "a", "address": "h", "listening": {{"min_speech_ms": 500}}}}]}}}}"#
+        );
+        assert!(Config::parse(&ok).is_ok());
+        let bad = format!(
+            r#"{{{speech}, "satellite": {{"listening": {{"max_utterance_ms": 2000}}}},
+                "esphome": {{"devices": [{{"name": "a", "address": "h", "listening": {{"min_speech_ms": 2000}}}}]}}}}"#
+        );
+        let e = Config::parse(&bad).unwrap_err();
+        assert!(e.contains("esphome.devices[a].listening"), "{e}");
     }
 }

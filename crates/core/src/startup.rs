@@ -598,6 +598,7 @@ fn satellite_parts(
     if let Some(s) = args.satellite.follow_up_secs {
         settings.dialog.follow_up_secs = s;
     }
+    settings.dialog.vad = args.satellite.listening.apply(settings.dialog.vad);
     Ok((Arc::new(stt), Arc::new(tts), settings))
 }
 
