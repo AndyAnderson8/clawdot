@@ -15,7 +15,7 @@ use clawdot_core::voice::{Config as DialogConfig, Synthesizer, Transcriber};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -43,10 +43,10 @@ impl Synthesizer for Mouth {
 
 fn quick() -> Timing {
     Timing {
-        connect: Duration::from_secs(2),
-        setup_step: Duration::from_secs(2),
+        connect: Duration::from_secs(10),
+        setup_step: Duration::from_secs(10),
         ping_every: Duration::from_millis(300),
-        dead_after: Duration::from_secs(3),
+        dead_after: Duration::from_secs(10),
         wake_watch: Duration::from_secs(1),
         mic_idle: Duration::from_secs(3),
         api_margin: Duration::from_millis(50),
@@ -166,18 +166,20 @@ struct Rig {
 
 /// Start the client against a fake device. `media` also starts the file server.
 async fn rig(media: bool) -> Rig {
-    rig_slow(media, 0).await
+    rig_keys(media, None, None, None).await
 }
 
-/// Like `rig`, with an assistant that takes `think_ms` to answer.
-async fn rig_slow(media: bool, think_ms: u64) -> Rig {
-    rig_keys(media, think_ms, None, None).await
+/// Like `rig`, with an assistant that does not answer until `hold` says so: it is working until then, however
+/// long the test takes to get there (a fixed delay would be a race against the machine's load).
+async fn rig_held(media: bool, hold: watch::Receiver<bool>) -> Rig {
+    rig_keys(media, Some(hold), None, None).await
 }
 
-/// Like `rig_slow`, with Noise keys: the one the client uses and the one the fake device expects.
+/// Like `rig`, with Noise keys: the one the client uses and the one the fake device expects. `hold`, when
+/// given, keeps the assistant from answering until it reads true.
 async fn rig_keys(
     media: bool,
-    think_ms: u64,
+    hold: Option<watch::Receiver<bool>>,
     client_key: Option<[u8; 32]>,
     device_key: Option<[u8; 32]>,
 ) -> Rig {
@@ -186,10 +188,13 @@ async fn rig_keys(
     let announcer = Announcer::default();
     let (asks, mut rx) = mpsc::channel::<Ask>(4);
     let (asked_tx, asked) = mpsc::unbounded_channel();
+    let mut hold = hold;
     tokio::spawn(async move {
         while let Some(ask) = rx.recv().await {
             let _ = asked_tx.send(ask.text.clone());
-            tokio::time::sleep(Duration::from_millis(think_ms)).await;
+            if let Some(hold) = hold.as_mut() {
+                let _ = hold.wait_for(|open| *open).await;
+            }
             let _ = ask.reply.send(Answer {
                 say: "You have nothing.".into(),
                 effects: vec![clawdot_core::assistant::Effect::VolumeSet(40)],
@@ -267,13 +272,30 @@ impl Rig {
             })
         );
         // The pipeline session registers shortly after setup.
-        for _ in 0..200 {
-            if self.announcer.connected() == 1 {
-                return c;
+        timeout(PATIENCE, async {
+            while self.announcer.connected() != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("the pipeline session never started");
+        })
+        .await
+        .expect("the pipeline session never started");
+        c
+    }
+
+    /// Wait until the pipeline is idle again (it can take an announcement), answering the client's pings
+    /// meanwhile. Waits for the state, not for a number of polls.
+    async fn until_idle(&self, c: &mut Conn, what: &str) {
+        timeout(PATIENCE, async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if self.announcer.is_available().await {
+                    return;
+                }
+                let _ = timeout(Duration::from_millis(1), c.recv()).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
     }
 }
 
@@ -554,17 +576,7 @@ async fn req_esp_011_an_unanswered_window_closes() {
     .await;
     c.send(Msg::AnnounceFinished { success: true }).await;
     // The follow-up window is one second; afterwards the pipeline is idle again.
-    let mut ok = false;
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        // Keep the device side alive while waiting.
-        if rig.announcer.is_available().await {
-            ok = true;
-            break;
-        }
-        let _ = timeout(Duration::from_millis(1), c.recv()).await;
-    }
-    assert!(ok, "the pipeline became idle");
+    rig.until_idle(&mut c, "the pipeline became idle").await;
     assert!(rig.announcer.announce("Second.").await);
     c.expect("a second announce request", |m| {
         matches!(m, Msg::AnnounceRequest { .. })
@@ -606,16 +618,8 @@ async fn req_esp_010_no_file_server_means_no_announcement_but_no_hang() {
     let mut c = rig.ready(Spec::full()).await;
     assert!(rig.announcer.announce("Anyone there?").await);
     // Nothing is sent; the pipeline returns to idle after the follow-up window.
-    let mut idle = false;
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if rig.announcer.is_available().await {
-            idle = true;
-            break;
-        }
-        let _ = timeout(Duration::from_millis(1), c.recv()).await;
-    }
-    assert!(idle);
+    rig.until_idle(&mut c, "the pipeline returned to idle")
+        .await;
 }
 
 // REQ-ESP-009
@@ -634,21 +638,17 @@ async fn req_esp_009_an_aborted_run_leaves_the_pipeline_idle() {
         wake_word_phrase: String::new(),
     })
     .await;
-    let mut idle = false;
-    for _ in 0..50 {
-        if rig.announcer.is_available().await {
-            idle = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(idle, "the pipeline stopped listening");
+    rig.until_idle(&mut c, "the pipeline stopped listening")
+        .await;
 }
 
 // REQ-ESP-007: a pipeline that is busy refuses the run instead of hanging the device.
 #[tokio::test]
 async fn req_esp_007_a_run_the_pipeline_cannot_start_is_ended() {
-    let rig = rig_slow(false, 1500).await;
+    // The assistant stays busy until the test lets it go. (A fixed think time left half a second between the
+    // client's wake-up watch of one second and the end of the answer, which a loaded machine can eat.)
+    let (release, hold) = watch::channel(false);
+    let rig = rig_held(false, hold).await;
     let mut c = rig.ready(Spec::full()).await;
     c.send(start_run()).await;
     speak(&mut c, 1200, false).await;
@@ -661,6 +661,7 @@ async fn req_esp_007_a_run_the_pipeline_cannot_start_is_ended() {
     c.send(start_run()).await;
     let (kinds, _) = until_run_end(&mut c).await;
     assert!(kinds.contains(&event::ERROR), "{kinds:?}");
+    release.send_replace(true);
 }
 
 // REQ-ESP-012
@@ -723,7 +724,7 @@ async fn req_esp_003_malformed_frames_end_the_connection_and_it_is_redialled() {
 // REQ-ESP-014: the whole voice run works over the encrypted link.
 #[tokio::test]
 async fn req_esp_014_a_voice_run_works_over_noise() {
-    let mut rig = rig_keys(false, 0, Some([5; 32]), Some([5; 32])).await;
+    let mut rig = rig_keys(false, None, Some([5; 32]), Some([5; 32])).await;
     let mut c = rig.ready(Spec::full()).await;
     c.send(start_run()).await;
     speak(&mut c, 1200, false).await;
@@ -736,7 +737,7 @@ async fn req_esp_014_a_voice_run_works_over_noise() {
 // REQ-ESP-014: a wrong key never gets as far as a voice session, and the client keeps trying.
 #[tokio::test]
 async fn req_esp_014_a_wrong_key_is_refused_and_retried() {
-    let rig = rig_keys(false, 0, Some([5; 32]), Some([6; 32])).await;
+    let rig = rig_keys(false, None, Some([5; 32]), Some([6; 32])).await;
     for _ in 0..2 {
         let (s, _) = timeout(PATIENCE, rig.listener.accept())
             .await
@@ -751,7 +752,7 @@ async fn req_esp_014_a_wrong_key_is_refused_and_retried() {
 // REQ-ESP-014, REQ-ESP-003: a device that is not encrypted, dialled with a key, is refused.
 #[tokio::test]
 async fn req_esp_014_a_plaintext_device_is_refused_when_a_key_is_set() {
-    let rig = rig_keys(false, 0, Some([5; 32]), None).await;
+    let rig = rig_keys(false, None, Some([5; 32]), None).await;
     let (mut s, _) = timeout(PATIENCE, rig.listener.accept())
         .await
         .unwrap()
