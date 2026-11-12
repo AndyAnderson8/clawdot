@@ -85,7 +85,7 @@ async fn main() -> ExitCode {
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
     if !clock.wall_clock_valid() {
         eprintln!(
-            "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and              reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
+            "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
         );
     }
     match clawdot_core::admin::migrate_legacy(&args.data_dir) {
