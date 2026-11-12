@@ -851,3 +851,79 @@ async fn helper_files_are_bounded_in_the_prompt_and_rejected_when_runnable() {
         "{p}"
     );
 }
+
+fn state_of(ext: &Extensions) -> String {
+    format!("{:?}|{:?}|{:?}", ext.tools, ext.conns, ext.skills)
+}
+
+// A save that fails leaves memory exactly as it was, whichever change was asked for.
+#[tokio::test]
+async fn every_change_is_undone_in_memory_when_the_save_fails() {
+    let dir = crate::store::testutil::TempDir::new("ext-rollback");
+    let builtin = vec!["set_timer".to_owned()];
+    let mut http = HttpTools::new(Vec::new(), &builtin, env).unwrap();
+    let (mut mcp, _) = McpClient::connect(Vec::new(), &builtin, env).await.unwrap();
+    let mut ext = Extensions::open(&dir.0).unwrap();
+    macro_rules! ok {
+        ($op:expr) => {
+            ext.apply($op, &mut http, &mut mcp, &builtin, env)
+                .await
+                .unwrap()
+        };
+    }
+    ok!(ExtOp::ToolAdd(light()));
+    ok!(ExtOp::SkillAdd(
+        json!({"name":"good night","instructions":"Turn off the lights.","enabled":true})
+    ));
+    ok!(ExtOp::SkillImport(json!({
+        "format": EXPORT_FORMAT, "version": 1,
+        "skills": [{"name":"imported","instructions":"Do a thing.","tools":[],"enabled":false}]
+    })));
+    ok!(ExtOp::ToolTier("set_light".into(), Some(Tier::Reversible)));
+    let pending = ext
+        .mcp_prepare(
+            &json!({"name":"hub","url":"http://127.0.0.1:9/mcp"}),
+            &mcp,
+            0,
+            env,
+        )
+        .unwrap();
+    ext.mcp_commit(&pending, Vec::new(), &http, &mut mcp, &builtin)
+        .unwrap();
+    // From here on every save fails: a directory sits where each temporary file would be written.
+    for f in ["tools.tmp", "connections.tmp", "skills.tmp"] {
+        std::fs::create_dir(dir.0.join(f)).unwrap();
+    }
+    let body = json!({"name":"second","instructions":"Another."});
+    let ops = vec![
+        ExtOp::ToolAdd(json!({
+            "name": "other_light", "description": "x", "method": "GET", "url": "http://ha.local:8123/x"
+        })),
+        ExtOp::ToolDelete("set_light".into()),
+        ExtOp::ToolEnable("set_light".into(), false),
+        ExtOp::ToolEnable("set_timer".into(), false),
+        ExtOp::ToolTier("set_light".into(), None),
+        ExtOp::ToolTier("set_timer".into(), Some(Tier::Costly)),
+        ExtOp::McpDelete("hub".into()),
+        ExtOp::McpEnable("hub".into(), false),
+        ExtOp::SkillAdd(body.clone()),
+        ExtOp::SkillEdit("good night".into(), body.clone()),
+        ExtOp::SkillDelete("good night".into()),
+        ExtOp::SkillEnable("good night".into(), false),
+        ExtOp::SkillAccept("imported".into()),
+        ExtOp::SkillImport(json!({
+            "format": EXPORT_FORMAT, "version": 1,
+            "skills": [{"name":"more","instructions":"Do more.","tools":[],"enabled":false}]
+        })),
+    ];
+    for op in ops {
+        let before = state_of(&ext);
+        let label = format!("{op:?}");
+        let r = ext.apply(op, &mut http, &mut mcp, &builtin, env).await;
+        assert!(matches!(r, Err(Fail::Unavailable(_))), "{label}: {r:?}");
+        assert_eq!(state_of(&ext), before, "{label} left memory changed");
+        assert!(http.owns("set_light"), "{label}");
+        assert!(!http.owns("other_light"), "{label}");
+        assert!(mcp.has_server("hub"), "{label}");
+    }
+}
