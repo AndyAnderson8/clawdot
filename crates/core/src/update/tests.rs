@@ -495,3 +495,45 @@ fn supervision_is_read_from_the_environment_snapshot() {
     assert!(on(&[("CLAWDOT_SUPERVISED", "1")]));
     assert!(on(&[("INVOCATION_ID", "abc")]));
 }
+
+// REQ-UPD-009: two requests at once start one install, not two.
+#[test]
+fn two_requests_at_once_start_exactly_one_install() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let kp = keypair();
+    let port = rt.block_on(newer_release(&kp, b"p", b"p"));
+    let found = {
+        let r = rig(port, Some(public(&kp)));
+        rt.block_on(r.updater.check()).unwrap();
+        let latest = r.updater.lock().latest.clone();
+        latest.unwrap()
+    };
+    for _ in 0..200 {
+        let r = rig(port, Some(public(&kp)));
+        r.updater.lock().latest = Some(found.clone());
+        let gate = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (u, g, h) = (
+                    Arc::clone(&r.updater),
+                    Arc::clone(&gate),
+                    rt.handle().clone(),
+                );
+                std::thread::spawn(move || {
+                    let _in = h.enter();
+                    g.wait();
+                    u.start_apply("99.0.0").is_ok()
+                })
+            })
+            .collect();
+        let started = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(started, 1, "exactly one request may start the install");
+    }
+}
