@@ -497,18 +497,23 @@ fn rank(notes: &[Note], utterance: &str, context: &str) -> Vec<(usize, f64)> {
     let (lo, hi) = notes
         .iter()
         .fold((Ts::MAX, Ts::MIN), |(l, h), x| (l.min(x.ts), h.max(x.ts)));
+    // Notes containing each term, counted once: it does not depend on the note being scored.
+    let dfs: Vec<f64> = terms
+        .iter()
+        .map(|(t, _)| {
+            docs.iter()
+                .filter(|dd| dd.iter().any(|x| matches(t, x)))
+                .count() as f64
+        })
+        .collect();
     let mut out: Vec<(usize, f64)> = Vec::with_capacity(docs.len());
     for (i, d) in docs.iter().enumerate() {
         let mut score = 0.0;
-        for (t, w) in &terms {
+        for ((t, w), df) in terms.iter().zip(&dfs) {
             let tf = d.iter().filter(|x| matches(t, x)).count() as f64;
             if tf == 0.0 {
                 continue;
             }
-            let df = docs
-                .iter()
-                .filter(|dd| dd.iter().any(|x| matches(t, x)))
-                .count() as f64;
             let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
             let norm = tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * d.len() as f64 / avg));
             score += w * idf * norm;
