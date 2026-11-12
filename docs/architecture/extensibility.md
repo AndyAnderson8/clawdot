@@ -1,6 +1,6 @@
 # Extensibility
 
-Status: Draft. Decision record: [ADR-0010](../adr/0010-extension-model.md). Requirements: [spec 0001 §4.9](../specs/0001-product-requirements.md).
+Status: the core and sidecar rings are built; installable packs are planned (section "Three rings"). Decision record: [ADR-0010](../adr/0010-extension-model.md). Requirements: [spec 0001 §4.9](../specs/0001-product-requirements.md).
 
 ## Principle
 
@@ -12,7 +12,7 @@ Status: Draft. Decision record: [ADR-0010](../adr/0010-extension-model.md). Requ
 flowchart TB
     subgraph Core["Core (one static binary; counts against the budget)"]
         direction TB
-        A[Wake, VAD, session, providers]
+        A[Dialog, VAD, turns, speech clients]
         B[Scheduler: timers, alarms, reminders]
         C[Fast-path matcher]
         D[Inbox + adapter engine]
@@ -20,7 +20,7 @@ flowchart TB
         F[MCP client + HTTP tools]
         G[Portal + API]
     end
-    subgraph Packs["Packs (data, installed from the portal)"]
+    subgraph Packs["Packs (planned: data, installed from the portal)"]
         P1[Inbox adapter mappings]
         P2[Fast-path grammar]
         P3[Tool presets: MCP, HTTP]
@@ -39,8 +39,8 @@ flowchart TB
 
 | Ring | What lives here | How it's added | Counts against budget? |
 |---|---|---|---|
-| **Core** | Wake word, STT/LLM/TTS clients, scheduler, fast-path, inbox with `claude-code` and `generic` adapters, portal, stream player, MCP client, HTTP tools | Part of the binary | Yes |
-| **Packs** | Adapter mappings, grammar, tool presets, prompt snippets | Portal: paste a URL or pick from an index; hash-pinned. **User-installable packs ship in v1.x**; in v1.0 the format is used internally for the bundled adapters. | Marginally (data) |
+| **Core** | STT/LLM/TTS clients, scheduler, fast-path, inbox with `claude-code` and `generic` adapters (declarative JSON embedded in the binary), portal, stream player, MCP client, HTTP tools, skills | Part of the binary | Yes |
+| **Packs** (planned, not built) | Adapter mappings, grammar, tool presets, prompt snippets | Intended: portal, paste a URL or pick from an index; hash-pinned. Today there is no pack installer; tools, connections and skills are added in the portal one by one (below). | Marginally (data) |
 | **Sidecars / servers** | Agent bridge, Home Assistant integration, Wi-Fi provisioner, MCP servers, heavy media backends | Docker, package, HACS, or another host | No (off-device) |
 
 **Bundle rule:** bundle if it is essential to the v1.0 definition *and* small (roughly under 100 KB, no heavy dependencies). Otherwise it is a pack or a sidecar.
@@ -49,13 +49,12 @@ flowchart TB
 
 | You want to... | Use |
 |---|---|
-| Add a tool that calls an HTTP API (Home Assistant, a webhook) | **HTTP tool** (config or pack) |
+| Add a tool that calls an HTTP API (Home Assistant, a webhook) | **HTTP tool** (configuration file or portal) |
 | Add a rich or stateful tool set | **MCP server** (Streamable HTTP) |
-| Support another agent's hook format (Codex, Gemini, Home Assistant events) | **Adapter mapping** (pack) |
-| Add voice commands without an LLM call | **Fast-path grammar** (pack) |
+| Support another agent's hook format (Codex, Gemini, Home Assistant events) | The `generic` adapter today; installable adapter mappings are planned (packs) |
+| Add voice commands without an LLM call | Planned (fast-path grammar packs); the grammar is built in today |
 | Add a music/audio source | **Media backend** (see below) |
 | Talk to an agent that needs a long-lived process (Claude Code resume) | **Agent bridge** (sidecar, pulls replies over SSE) |
-| Show state on a screen | Read semantic **display events** (satellite) or the `/display` page |
 
 ## Media-source interface
 
@@ -122,6 +121,8 @@ Skills written for other agent harnesses are a folder with a `SKILL.md` (a `---`
 This is the minimal useful definition; richer skills (triggers, parameters, bundled tools) are future scope. The decision is logged in [open-questions.md](../open-questions.md).
 
 ## Trust model for packs and tools
+
+Packs are planned; these are the rules they must meet. Rules 3 and 4 already hold for tools and skills.
 
 1. Packs are data. No code executes on the device because of a pack.
 2. A pack declares the tools, endpoints, and policies it adds; the portal shows this before install and requires explicit approval.
