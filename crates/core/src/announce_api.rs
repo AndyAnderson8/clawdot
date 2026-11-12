@@ -1,6 +1,7 @@
 //! `POST /api/announce`: the HTTP side of the one-way announce path (REQ-INB-021, REQ-INB-025).
 //!
-//! Credentials are checked before the body is read. A token that starts with `cdt_` is an endpoint token;
+//! Credentials are checked before the body is read. A token that the endpoint list recognises
+//! (`Core::is_endpoint_token`: its hash matches a stored endpoint) is an endpoint token, whatever it looks like;
 //! anything else (or nothing, in open mode) is treated as an administrator session. The response never
 //! repeats the text and carries nothing the caller could mistake for a decision.
 

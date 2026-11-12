@@ -37,10 +37,12 @@ pure logic, tested with synthetic audio and fake providers, so they run in CI wi
 
 `speech::HttpTranscriber` (batch upload of a WAV to `/audio/transcriptions`) and `speech::HttpSynthesizer`
 (`/audio/speech` as raw PCM, resampled to 16 kHz) speak the OpenAI-compatible API that OpenAI, many hosted services,
-and self-hosted servers such as Whisper and Piper wrappers provide. Audio is sensitive, so plain `http://` is
+and self-hosted servers such as Whisper and Piper wrappers provide. Two other wire formats, ElevenLabs and Deepgram,
+are selected with the `speech` dialect ([speech providers](../guides/speech-providers.md)). Audio is sensitive, so plain `http://` is
 accepted only for localhost and private-network hosts (REQ-SEC-001); anything else needs `https://`. Audio is
-never stored or logged, and errors never include it or the key. Verified against a fake server only; no real
-provider has been called.
+never stored or logged, and errors never include it or the key. Checked against a fake server and, in the
+[proving pass](../reports/2026-11-11-proving-pass.md), against local Whisper and Piper servers. ElevenLabs and Deepgram
+have been checked only against stand-ins.
 
 ## Failure behaviour
 
@@ -53,9 +55,9 @@ provider has been called.
 
 ## Not built yet
 
-- Wake-word detection (push-to-talk exists). The desktop satellite can feed live microphone audio and play the reply through
-  external programs ([guides/pc-voice-loop.md](../guides/pc-voice-loop.md)), but it has only been exercised with scripted
-  processes and recordings, not with a real microphone.
+- Wake-word detection in the core. It runs on the device side (`crates/wake`, used by `crates/device`); the core
+  accepts a satellite's `wake` event. Push-to-talk also exists. The desktop satellite can feed live microphone audio and
+  play the reply through external programs ([guides/pc-voice-loop.md](../guides/pc-voice-loop.md)).
 - Opt-in barge-in and adaptive end-of-utterance thresholds (REQ-VOI-005, REQ-VOI-011, both later milestones).
 - Starting synthesis while the model is still streaming: replies are split into sentences after they are complete.
   (Plan and progress phrases are spoken as each model round returns; token streaming from the provider is not

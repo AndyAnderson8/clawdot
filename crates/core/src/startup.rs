@@ -1,27 +1,38 @@
-//! Start-up phases of the `clawdot` binary, in the order `main` runs them: build the [`Brain`] and its
-//! conversation hub from the effective settings, then start the satellite servers, hive discovery and
-//! the update check. Each returns what `main` needs to print and exit with when it fails.
+//! Start-up of the `clawdot` binary as one explicit sequence, [`start`]: the effective settings, the clock,
+//! the core and its stores, the management commands, the [`Brain`] and its conversation hub, a recorded
+//! utterance if asked for, the listening socket, the satellite servers, hive discovery and the update check,
+//! ending in a running [`App`]. Each phase is a function below and fails with the message to print and the
+//! exit code. The order is part of the contract: nothing that reveals a token is printed before the socket
+//! is bound (REQ-CFG-015).
 
-use crate::app::Core;
+use crate::app::{Adapters, Core, Limits, Stores};
+use crate::app_loop::{App, Inbox, Speaker};
 use crate::assistant::Assistant;
 use crate::audit::{AuditConfig, AuditLog};
 use crate::cli::Args;
+use crate::commands::{announce_admin, bind_error, run_endpoint_commands, spawn_console};
 use crate::connects::Connects;
+use crate::env::Env;
 use crate::extensions::Extensions;
+use crate::http::{ServeOptions, serve};
 use crate::httptools::HttpTools;
 use crate::mcp::McpClient;
 use crate::notes::NoteStore;
 use crate::rtvoice::{Realtime, RtSettings};
-use crate::runtime::{Brain, build_llm};
+use crate::runtime::{Brain, build_llm, mcp_connected, settings_extra, zone_for};
 use crate::satellite::{self, Ask};
-use crate::sched::{Clock, Scheduler, Zone};
+use crate::sched::{Clock, Scheduler, SystemClock, Zone};
 use crate::session::{Conversation, ToolHost};
-use crate::speechio::build_registered_speech;
+use crate::settings::{SettingsState, public_url_from_listen};
+use crate::speaker::{Say, Voice, speak};
+use crate::speechio::{build_registered_speech, voice_once};
 use crate::store::JsonStore;
 use crate::turns::Hub;
 use crate::usage::{UsageLimits, UsageTracker};
 use std::net::SocketAddr;
+use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
@@ -34,6 +45,286 @@ pub struct Failure {
 
 fn fail(code: u8, message: String) -> Failure {
     Failure { code, message }
+}
+
+/// How start-up ended when it did not fail.
+#[derive(Debug)]
+pub enum Started {
+    /// A command that did its work and leaves (`--create`, `--rotate`, `--voice-in`).
+    Done(ExitCode),
+    /// The server is up; run it.
+    Run(Box<App>),
+}
+
+/// The brain with its hub and the channels that report to it, between building and the first event.
+struct Running {
+    brain: Brain,
+    hub: Hub,
+    core: Arc<Core>,
+    applied: serde_json::Map<String, serde_json::Value>,
+    mcp_rx: mpsc::Receiver<crate::connects::Done>,
+    realtime_rx: mpsc::Receiver<crate::rtvoice::Job>,
+}
+
+/// Run the start-up sequence for `args`: settings, clock, core, management commands, brain, a recorded
+/// utterance if asked for, the bound socket, satellites, hive, the admin announcement and the server.
+pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
+    let (settings, warnings) =
+        crate::seed::resolve_settings(&mut args, &env).map_err(|e| fail(2, e))?;
+    for w in warnings {
+        eprintln!("clawdot: {w}");
+    }
+    let zone = zone_for(args.zone.as_deref()).map_err(|e| fail(2, e))?;
+    let clock = check_clock();
+    migrate_admin_token(&args)?;
+    let core = open_core(&args, &clock, env)?;
+
+    let public = announce_public_address(&args);
+    let failed = run_endpoint_commands(&core, &args.create, &args.rotate, &public);
+    if args.manage {
+        // A management command: the token is printed; do not start a server (REQ-CFG-015).
+        return Ok(Started::Done(ExitCode::from(u8::from(failed))));
+    }
+
+    let stations: Vec<String> = args.stations.iter().map(|s| s.name.clone()).collect();
+    let running = build_running(&mut args, settings, zone, &clock, core).await?;
+    if let Some(input) = args.voice_in.clone() {
+        return one_utterance(running, &args, &input)
+            .await
+            .map(Started::Done);
+    }
+
+    // Bind before anything is created or printed, so a server that cannot start never reveals a token
+    // (REQ-CFG-015).
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .map_err(|e| fail(1, bind_error(args.listen, &e)))?;
+    // Satellites (speakers) connect here; their questions come back to the loop through `asks`.
+    let (ask_tx, asks) = mpsc::channel::<Ask>(8);
+    let announcer = satellite::Announcer::default();
+    start_satellites(
+        &args,
+        &running.core,
+        running.brain.realtime(),
+        &announcer,
+        &ask_tx,
+    )
+    .await
+    .map_err(|e| fail(1, e))?;
+    #[cfg(feature = "hive")]
+    start_hive(&args, &running.core);
+
+    running.core.set_listen_ip(args.listen.ip());
+    announce_admin(&running.core, &public);
+    println!(
+        "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
+        args.listen,
+        running.core.endpoints().len(),
+        if running.brain.has_model() {
+            "connected"
+        } else {
+            "not configured"
+        }
+    );
+    spawn_server(&running.core, listener);
+
+    let (line_tx, lines) = mpsc::channel::<String>(8);
+    if args.console {
+        spawn_console(line_tx);
+        println!("clawdot: console ready. Type what you would say; \"quit\" or Ctrl-D to leave.");
+    }
+    let inbox = Inbox {
+        portal: running.core.attach_portal(),
+        mcp: running.mcp_rx,
+        realtime: running.realtime_rx,
+        asks,
+        lines,
+        console: args.console,
+    };
+    let speaker = spawn_speaker(
+        &running.brain,
+        &running.core,
+        announcer,
+        args.console || args.echo_speech,
+    );
+    let app = App::new(
+        running.brain,
+        running.hub,
+        running.core,
+        running.applied,
+        inbox,
+        speaker,
+    )
+    .with_stations(stations);
+    Ok(Started::Run(Box::new(app)))
+}
+
+/// Warn when the wall clock is not set; timers cannot fire until it is (REQ-TMR-006).
+fn check_clock() -> Arc<dyn Clock + Send + Sync> {
+    let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
+    if !clock.wall_clock_valid() {
+        eprintln!(
+            "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
+        );
+    }
+    clock
+}
+
+/// Convert an administrator token from before passwords, if one is on disk.
+fn migrate_admin_token(args: &Args) -> Result<(), Failure> {
+    match crate::admin::migrate_legacy(&args.data_dir) {
+        Ok(true) => println!(
+            "clawdot: the old administrator token still works: sign in with it, then set a password in the web UI"
+        ),
+        Ok(false) => {}
+        Err(e) => {
+            return Err(fail(
+                1,
+                format!("cannot convert the old administrator token: {e}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Open the core over the data directory, keeping the process environment it was started with.
+fn open_core(
+    args: &Args,
+    clock: &Arc<dyn Clock + Send + Sync>,
+    env: Env,
+) -> Result<Arc<Core>, Failure> {
+    Core::open(
+        clock.clone(),
+        Adapters::builtin(),
+        Limits::default(),
+        Stores::in_dir(&args.data_dir),
+    )
+    .map(|c| Arc::new(c.with_env(env)))
+    .map_err(|e| fail(1, format!("cannot open {}: {e}", args.data_dir.display())))
+}
+
+/// The address snippets name for this server, with a note when it is only a guess. Returns it.
+fn announce_public_address(args: &Args) -> String {
+    let public = args.public_url.clone().unwrap_or_default();
+    let (derived, assumed) = public_url_from_listen(args.listen);
+    if assumed && public == derived {
+        eprintln!(
+            "clawdot: {} is not reachable as written, so snippets use {derived}; set the public address to change that",
+            args.listen.ip()
+        );
+    }
+    public
+}
+
+/// Build the brain and hub, claim the channels that report to them, and publish what the web UI shows.
+async fn build_running(
+    args: &mut Args,
+    mut settings: SettingsState,
+    zone: Box<dyn Zone + Send + Sync>,
+    clock: &Arc<dyn Clock + Send + Sync>,
+    core: Arc<Core>,
+) -> Result<Running, Failure> {
+    let (mut brain, hub) = build_brain(args, &settings.live_values(), zone, clock, &core).await?;
+    let realtime_rx = brain.attach_realtime();
+    let mcp_rx = brain.attach_connects().ok_or_else(|| {
+        fail(
+            1,
+            "cannot start: the connection results were already claimed".to_owned(),
+        )
+    })?;
+
+    core.set_ui_tools(brain.listing());
+    let applied = settings.live_values();
+    if let Some(url) = &args.speech.url {
+        core.set_speech_origin(crate::speech::SpeechOrigin::new(
+            url,
+            args.speech.key_env.as_deref(),
+            args.speech.dialect(),
+        ));
+    }
+    #[cfg(feature = "tls")]
+    start_updates(args, &applied, &core);
+    settings.set_extra(settings_extra(args));
+    core.set_settings(settings);
+    Ok(Running {
+        brain,
+        hub,
+        core,
+        applied,
+        mcp_rx,
+        realtime_rx,
+    })
+}
+
+/// Answer one recorded utterance and leave. There is no loop to serve meanwhile, so wait for the MCP sources
+/// to answer first, as the single turn should have their tools.
+async fn one_utterance(
+    mut r: Running,
+    args: &Args,
+    input: &std::path::Path,
+) -> Result<ExitCode, Failure> {
+    while r.brain.is_connecting() {
+        let Some(done) = r.mcp_rx.recv().await else {
+            break;
+        };
+        mcp_connected(&mut r.brain, &r.core, done);
+    }
+    voice_once(
+        &mut r.brain,
+        &mut r.hub,
+        &args.speech,
+        &r.core,
+        input,
+        args.voice_out.as_deref(),
+    )
+    .await
+    .map(|()| ExitCode::SUCCESS)
+    .map_err(|e| fail(1, e))
+}
+
+/// Serve the web UI and the webhooks on `listener` in a task.
+fn spawn_server(core: &Arc<Core>, listener: TcpListener) {
+    let core = Arc::clone(core);
+    tokio::spawn(async move {
+        if let Err(e) = serve(
+            listener,
+            core,
+            ServeOptions::default(),
+            std::future::pending(),
+        )
+        .await
+        {
+            eprintln!("clawdot: server stopped: {e}");
+        }
+    });
+}
+
+/// Start the speaker task and return the loop's side of it.
+fn spawn_speaker(
+    brain: &Brain,
+    core: &Arc<Core>,
+    announcer: satellite::Announcer,
+    console: bool,
+) -> Speaker {
+    let (usage, usage_store) = brain.usage_handles();
+    let voice = Arc::new(Voice {
+        announcer: announcer.clone(),
+        core: Arc::clone(core),
+        usage,
+        usage_store,
+        echo: console,
+        available: AtomicBool::new(false),
+        polling: AtomicBool::new(false),
+    });
+    let (tx, rx) = mpsc::unbounded_channel::<Say>();
+    tokio::spawn(speak(Arc::clone(&voice), rx));
+    Speaker {
+        tx,
+        voice,
+        announcer,
+        console,
+        lost: false,
+    }
 }
 
 /// Open the stores and build the [`Brain`] and the per-speaker conversation [`Hub`] (REQ-AST-026) from the
@@ -246,7 +537,16 @@ pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Val
                 .get("update_check")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true);
-            match crate::update::start(cfg, on, Some(args.data_dir.clone())) {
+            // After an install the updater asks for an orderly stop: flush the store writer, then exit (not `exit`
+            // alone, which would drop writes still queued on the writer thread).
+            let writer = core.writer();
+            let stop: crate::update::StopFn = std::sync::Arc::new(move |code| {
+                if let Some(w) = &writer {
+                    w.flush_blocking();
+                }
+                std::process::exit(code);
+            });
+            match crate::update::start(cfg, on, Some(args.data_dir.clone()), stop) {
                 Ok(u) => core.set_updater(u),
                 Err(e) => crate::diag::error(&format!("updates are not available: {e}")),
             }

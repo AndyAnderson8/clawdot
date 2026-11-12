@@ -445,32 +445,9 @@ impl Assistant {
                 self.player.stop();
                 Outcome::effect("", Effect::StopPlayback)
             }
-            "media.play" if self.player.is_configured() => {
-                let q = m.text("name").unwrap_or("").to_owned();
-                let r = self.player.play(&q);
-                self.media(r)
+            "media.play" | "media.pause" | "media.resume" | "media.next" | "media.previous" => {
+                self.media_intent(&m)
             }
-            "media.play" => None,
-            "media.pause" if self.player.is_configured() => {
-                let r = self.player.pause();
-                self.media(r)
-            }
-            "media.resume" if self.player.is_configured() => {
-                let r = self.player.resume();
-                self.media(r)
-            }
-            "media.next" if self.player.is_configured() => {
-                let r = self.player.next_station();
-                self.media(r)
-            }
-            "media.previous" if self.player.is_configured() => {
-                let r = self.player.previous_station();
-                self.media(r)
-            }
-            "media.pause" => Outcome::effect("", Effect::Media(MediaCmd::Pause)),
-            "media.resume" => Outcome::effect("", Effect::Media(MediaCmd::Resume)),
-            "media.next" => Outcome::effect("", Effect::Media(MediaCmd::Next)),
-            "media.previous" => Outcome::effect("", Effect::Media(MediaCmd::Previous)),
             "volume.up" => Outcome::effect("", Effect::VolumeUp),
             "volume.down" => Outcome::effect("", Effect::VolumeDown),
             "volume.set" => {
@@ -489,67 +466,111 @@ impl Assistant {
             "alarm.set_daily" => self.alarm_set(&m, now, Some(days::ALL), "every day"),
             "alarm.set_weekdays" => self.alarm_set(&m, now, Some(days::WEEKDAYS), "on weekdays"),
             "alarm.set_weekend" => self.alarm_set(&m, now, Some(days::WEEKEND), "on weekends"),
-            "alarm.cancel" => {
-                let n = self.sched.cancel_kind(Kind::Alarm);
-                self.save();
-                Outcome::say(match n {
-                    0 => "You have no alarms set.".to_owned(),
-                    1 => "Alarm cancelled.".to_owned(),
-                    n => format!("{n} alarms cancelled."),
-                })
-            }
-            "reminder.set_in" => {
-                let secs = m.duration("duration")?;
-                let text = m.text("text")?.to_owned();
-                match self.sched.set_reminder(now, now + secs, &text) {
-                    Ok(_) => {
-                        self.save();
-                        Outcome::say(format!(
-                            "Okay, I'll remind you to {text} in {}.",
-                            format_duration(secs)
-                        ))
-                    }
-                    Err(e) => Outcome::say(format!("Sorry, {e}.")),
-                }
-            }
-            "reminder.set_at" => {
-                let text = m.text("text")?.to_owned();
-                let (h, mi, at) = self.resolve(m.time("time")?, now, days::ALL)?;
-                match self.sched.set_reminder(now, at, &text) {
-                    Ok(_) => {
-                        self.save();
-                        Outcome::say(format!(
-                            "Okay, I'll remind you to {text} at {} {}.",
-                            format_clock(h, mi),
-                            day_phrase(&*self.zone, now, at)
-                        ))
-                    }
-                    Err(e) => Outcome::say(format!("Sorry, {e}.")),
-                }
-            }
-            "time.query" => {
-                let minute = self.zone.local_minute_of_day(now);
-                Outcome::say(format!(
-                    "It's {}.",
-                    format_clock(
-                        u8::try_from(minute / 60).ok()?,
-                        u8::try_from(minute % 60).ok()?
-                    )
-                ))
-            }
-            "date.query" => {
-                let day = self.zone.local_day(now);
-                let (_, mo, d) = civil_from_days(day);
-                Outcome::say(format!(
-                    "Today is {}, {} {}.",
-                    WEEKDAYS[usize::from(weekday(day))],
-                    MONTHS[usize::try_from(mo - 1).ok()? % 12],
-                    ordinal(d)
-                ))
-            }
+            "alarm.cancel" => self.alarm_cancel(),
+            "reminder.set_in" => self.reminder_set_in(&m, now),
+            "reminder.set_at" => self.reminder_set_at(&m, now),
+            "time.query" => self.time_query(now),
+            "date.query" => self.date_query(now),
             other if other.starts_with("inbox.") => self.inbox(&m, now),
             _ => None,
         }
+    }
+
+    /// Play, pause, resume, next and previous: through the station player when radio is configured, else as a
+    /// plain command to the satellite (only `media.play` has nothing to say then, and is left to the model).
+    fn media_intent(&mut self, m: &Match) -> Option<Outcome> {
+        let configured = self.player.is_configured();
+        match m.intent.as_str() {
+            "media.play" if configured => {
+                let q = m.text("name").unwrap_or("").to_owned();
+                let r = self.player.play(&q);
+                self.media(r)
+            }
+            "media.pause" if configured => {
+                let r = self.player.pause();
+                self.media(r)
+            }
+            "media.resume" if configured => {
+                let r = self.player.resume();
+                self.media(r)
+            }
+            "media.next" if configured => {
+                let r = self.player.next_station();
+                self.media(r)
+            }
+            "media.previous" if configured => {
+                let r = self.player.previous_station();
+                self.media(r)
+            }
+            "media.pause" => Outcome::effect("", Effect::Media(MediaCmd::Pause)),
+            "media.resume" => Outcome::effect("", Effect::Media(MediaCmd::Resume)),
+            "media.next" => Outcome::effect("", Effect::Media(MediaCmd::Next)),
+            "media.previous" => Outcome::effect("", Effect::Media(MediaCmd::Previous)),
+            _ => None,
+        }
+    }
+
+    fn alarm_cancel(&mut self) -> Option<Outcome> {
+        let n = self.sched.cancel_kind(Kind::Alarm);
+        self.save();
+        Outcome::say(match n {
+            0 => "You have no alarms set.".to_owned(),
+            1 => "Alarm cancelled.".to_owned(),
+            n => format!("{n} alarms cancelled."),
+        })
+    }
+
+    fn reminder_set_in(&mut self, m: &Match, now: Ts) -> Option<Outcome> {
+        let secs = m.duration("duration")?;
+        let text = m.text("text")?.to_owned();
+        match self.sched.set_reminder(now, now + secs, &text) {
+            Ok(_) => {
+                self.save();
+                Outcome::say(format!(
+                    "Okay, I'll remind you to {text} in {}.",
+                    format_duration(secs)
+                ))
+            }
+            Err(e) => Outcome::say(format!("Sorry, {e}.")),
+        }
+    }
+
+    fn reminder_set_at(&mut self, m: &Match, now: Ts) -> Option<Outcome> {
+        let text = m.text("text")?.to_owned();
+        let (h, mi, at) = self.resolve(m.time("time")?, now, days::ALL)?;
+        match self.sched.set_reminder(now, at, &text) {
+            Ok(_) => {
+                self.save();
+                Outcome::say(format!(
+                    "Okay, I'll remind you to {text} at {} {}.",
+                    format_clock(h, mi),
+                    day_phrase(&*self.zone, now, at)
+                ))
+            }
+            Err(e) => Outcome::say(format!("Sorry, {e}.")),
+        }
+    }
+
+    fn time_query(&self, now: Ts) -> Option<Outcome> {
+        let minute = self.zone.local_minute_of_day(now);
+        Outcome::say(format!(
+            "It's {}.",
+            format_clock(
+                u8::try_from(minute / 60).ok()?,
+                u8::try_from(minute % 60).ok()?
+            )
+        ))
+    }
+
+    fn date_query(&self, now: Ts) -> Option<Outcome> {
+        let day = self.zone.local_day(now);
+        let (_, mo, d) = civil_from_days(day);
+        Outcome::say(format!(
+            "Today is {}, {} {}.",
+            WEEKDAYS[usize::from(weekday(day))],
+            MONTHS[usize::try_from(mo - 1).ok()? % 12],
+            ordinal(d)
+        ))
     }
 
     fn stopwatch_outcome(&mut self, action: stopwatch::Action) -> Option<Outcome> {

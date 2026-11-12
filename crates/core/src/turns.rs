@@ -809,10 +809,12 @@ mod tests {
             self.ext
                 .apply(
                     op,
-                    Arc::make_mut(&mut self.http),
-                    Arc::make_mut(&mut self.mcp),
-                    &self.builtin,
-                    env,
+                    crate::extensions::ToolSets::new(
+                        Arc::make_mut(&mut self.http),
+                        Arc::make_mut(&mut self.mcp),
+                        &self.builtin,
+                        &env,
+                    ),
                 )
                 .await
                 .unwrap();

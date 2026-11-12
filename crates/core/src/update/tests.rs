@@ -74,7 +74,7 @@ fn rig(port: u16, key: Option<[u8; 32]>) -> Rig {
 
 /// A server with a newer release whose files are signed by `signer`, whose signed hash is of `hashed`, and whose
 /// program file is `program`.
-async fn newer_release(signer: &Ed25519KeyPair, program: &[u8], hashed: &[u8]) -> u16 {
+pub(super) async fn newer_release(signer: &Ed25519KeyPair, program: &[u8], hashed: &[u8]) -> u16 {
     let name = asset_name();
     let sums = format!(
         "{}  {name}

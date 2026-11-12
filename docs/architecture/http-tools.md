@@ -39,16 +39,21 @@ file (REQ-AST-014). The core never runs third-party code (REQ-EXT-001); it only 
 - It cannot choose the URL, host, headers, or credential.
 - Placeholder values are percent-encoded, so a value cannot add path segments or query parameters.
 - For `GET` and `DELETE` the other parameters go in the query string; for `POST` and `PUT` they go in a JSON body.
-- With `confirm` on, the host holds the call: it speaks the tool and exact arguments, and runs them only after the user says yes in a later turn
-  (REQ-AST-008, REQ-SEC-011; see [action-safety.md](action-safety.md)). The model gets no `confirmed` parameter; a `confirmed` argument is dropped.
+- With the default tier (`costly`) the host holds the call: it speaks the tool and the exact arguments in full, then
+  asks yes or no, and runs them only after the user says yes in a later turn within 120 seconds
+  (REQ-AST-008, REQ-SEC-011; see [action-safety.md](action-safety.md)). A read-back of more than about 700 characters
+  is not held at all: the model gets an error saying by how much it is over. A value that looks like a secret is
+  not spoken ("a hidden key"), and the call is sent with it as it is. The model gets no `confirmed` parameter; a `confirmed` argument is dropped.
 - Responses are clipped to 1000 characters and are treated as data, not instructions.
 
 ## Limits
 
-- Calls count toward the usual request caps because they ride on model turns (REQ-AST-011).
+- Calls count toward a turn's tool-call limit and, unless `read_only`, the daily action caps
+  (`limits.max_actions_per_day`, `limits.max_costly_per_day`, REQ-SEC-015). They ride on model turns, so the daily
+  spend cap applies to the turns that call them (REQ-AST-011). There is no cap on the number of requests.
 - `https://` works when the build has the default `tls` feature; otherwise use `http://` on a trusted network.
 - No retries and no redirects: a failed call is reported to the model, which tells the user.
-- Setting `confirm` to `false` is your choice for harmless actions (a light). Keep it on for anything that spends
+- Setting `tier` to `reversible` (or the older `confirm: false`) is your choice for harmless actions (a light). Keep the default (`costly`) for anything that spends
   money, unlocks something, or cannot be undone.
 
 ## Adding tools from the portal

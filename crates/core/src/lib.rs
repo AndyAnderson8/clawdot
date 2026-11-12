@@ -1,18 +1,21 @@
-//! ClawDot core.
+//! ClawDot core: the assistant program (see `docs/architecture/overview.md`).
 //!
-//! * [`inbox`]: events from agents and services, announced and answered by voice.
-//! * [`admin`]: the web UI administrator (password or open mode), sessions, and the local reset window.
-//! * [`app`]: the shared state behind one lock, with every operation a front end needs.
-//! * [`http`]: webhook ingress and the SSE reply stream for agent bridges.
-//! * [`sched`]: timers, alarms, and reminders.
-//! * [`fastpath`] and [`assistant`]: local command recognition and dispatch, with no LLM or network.
-//! * [`audit`]: the append-only record of every action, the daily caps and dry-run.
-//! * [`store`]: atomic, versioned JSON persistence.
+//! * [`startup`] and [`app_loop`]: the start-up sequence and the one loop that owns the state. [`runtime`] holds the
+//!   brain; [`turns`] and [`speaker`] run model turns and speech as tasks beside the loop (ADR-0021).
+//! * [`session`]: one model turn and the gate that decides every tool call. [`speakers`] keeps a conversation each.
+//! * [`fastpath`] and [`assistant`]: local command recognition and the built-in tools, with no model or network.
+//! * [`extensions`], [`httptools`], [`mcp`] and `mcp_server`: tools, connections and skills, and the MCP client and server.
+//! * [`inbox`], [`app`] and [`http`]: events from agents, the shared state behind one lock, and the webhook, announce and bridge routes.
+//! * [`ui`], [`settings`], [`admin`] and [`secrets`]: the portal's API, layered settings, the administrator, stored keys.
+//! * [`satellite`], [`voice`], [`speech`] and [`vad`]: the satellite server and the voice dialog; the optional `realtime`, `esphome` and `hive` modules.
+//! * [`sched`]: timers, alarms and reminders. [`audit`]: the record of every action and the daily caps.
+//! * [`store`]: atomic, versioned JSON persistence. `update`: signed updates.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod admin;
 mod announce_api;
 pub mod app;
+pub mod app_loop;
 pub mod assistant;
 pub mod audit;
 pub mod cancel;

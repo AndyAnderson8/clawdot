@@ -248,6 +248,8 @@ pub struct Core {
     asks: Mutex<Vec<ask::PendingAsk>>,
     secrets: crate::secrets::Secrets,
     env: crate::env::Env,
+    /// The machine's host name, read once by [`Core::with_env`]; the Host check reads this, not the system.
+    machine: Option<String>,
     speech_handles: crate::speechio::SpeechHandles,
     speech_origin: std::sync::OnceLock<crate::speech::SpeechOrigin>,
     /// Saves of the core's own three files that could not be made inline or encoded.
@@ -370,6 +372,7 @@ impl Core {
             asks: Mutex::new(Vec::new()),
             secrets,
             env: crate::env::Env::empty(),
+            machine: None,
             speech_handles: crate::speechio::SpeechHandles::default(),
             speech_origin: std::sync::OnceLock::new(),
             save_errors: AtomicU64::new(0),
@@ -430,8 +433,22 @@ impl Core {
     /// given one sees no variables, so tests never depend on the machine they run on.
     #[must_use]
     pub fn with_env(mut self, env: crate::env::Env) -> Self {
+        self.machine = crate::hostguard::machine_name(&env);
         self.env = env;
         self
+    }
+
+    /// Set the machine host name the portal answers to, instead of the one read from the system (tests, embedding).
+    #[must_use]
+    pub fn with_machine_name(mut self, name: Option<&str>) -> Self {
+        self.machine = name.map(str::to_owned);
+        self
+    }
+
+    /// The machine's host name as read at start-up, if it could be.
+    #[must_use]
+    pub fn machine_name(&self) -> Option<&str> {
+        self.machine.as_deref()
     }
 
     /// The environment as it was at start-up. Look variables up here, never in the process.

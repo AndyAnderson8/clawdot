@@ -19,7 +19,7 @@ impl Clock for Noon {
     }
 }
 
-struct Portal {
+pub(super) struct Portal {
     addr: SocketAddr,
     core: Arc<Core>,
     _stop: tokio::sync::oneshot::Sender<()>,
@@ -31,7 +31,7 @@ async fn start(with_main_loop: bool) -> Portal {
 }
 
 /// Like [`start`], with the core's files in `dir` when given (so a pasted key has somewhere to be kept).
-async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool) -> Portal {
+pub(super) async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool) -> Portal {
     let core = Arc::new(match dir {
         None => Core::in_memory(Arc::new(Noon), Adapters::builtin(), Limits::default()),
         Some(d) => Core::open(
@@ -89,9 +89,15 @@ async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool) -> Portal
                     Op::Settings(live) => Ok(Value::Object(live)),
                     Op::Rekey => Ok(json!({ "applied": true })),
                     Op::Ext(op) => ext
-                        .apply(op, &mut http, &mut mcp, &builtin, |n| {
-                            (n == "HA_TOKEN").then(|| "x".to_owned())
-                        })
+                        .apply(
+                            op,
+                            crate::extensions::ToolSets::new(
+                                &mut http,
+                                &mut mcp,
+                                &builtin,
+                                &|n: &str| (n == "HA_TOKEN").then(|| "x".to_owned()),
+                            ),
+                        )
                         .await
                         .map(|()| ext.listing(&[], &http, &mcp)),
                 };
@@ -106,7 +112,13 @@ async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool) -> Portal
     }
 }
 
-async fn call(p: &Portal, method: &str, path: &str, auth: &str, body: &str) -> (u16, Value) {
+pub(super) async fn call(
+    p: &Portal,
+    method: &str,
+    path: &str,
+    auth: &str,
+    body: &str,
+) -> (u16, Value) {
     let mut s = TcpStream::connect(p.addr).await.unwrap();
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",

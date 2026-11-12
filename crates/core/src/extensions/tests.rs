@@ -26,16 +26,16 @@ async fn ready() -> (Extensions, HttpTools, McpClient, Vec<String>) {
 #[tokio::test]
 async fn a_tool_can_be_added_switched_and_deleted() {
     let (mut ext, mut http, mut mcp, builtin) = ready().await;
-    ext.apply(ExtOp::ToolAdd(light()), &mut http, &mut mcp, &builtin, env)
-        .await
-        .unwrap();
+    ext.apply(
+        ExtOp::ToolAdd(light()),
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+    )
+    .await
+    .unwrap();
     assert!(http.owns("set_light"));
     ext.apply(
         ExtOp::ToolEnable("set_light".into(), false),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -45,20 +45,14 @@ async fn a_tool_can_be_added_switched_and_deleted() {
     assert_eq!(l["tools"][0]["deletable"], true);
     ext.apply(
         ExtOp::ToolEnable("set_light".into(), true),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
     assert!(!ext.is_disabled("set_light", &mcp));
     ext.apply(
         ExtOp::ToolDelete("set_light".into()),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -66,10 +60,7 @@ async fn a_tool_can_be_added_switched_and_deleted() {
     let again = ext
         .apply(
             ExtOp::ToolDelete("set_light".into()),
-            &mut http,
-            &mut mcp,
-            &builtin,
-            env,
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
         )
         .await;
     assert!(matches!(again, Err(Fail::NotFound(_))));
@@ -82,7 +73,10 @@ async fn bad_tools_say_what_to_fix_and_secrets_are_names_only() {
     let mut missing = light();
     missing["auth_env"] = json!("NOT_SET_ANYWHERE");
     let e = ext
-        .apply(ExtOp::ToolAdd(missing), &mut http, &mut mcp, &builtin, env)
+        .apply(
+            ExtOp::ToolAdd(missing),
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+        )
         .await;
     assert!(
         matches!(&e, Err(Fail::Invalid(m)) if m.contains("NOT_SET_ANYWHERE") && m.contains("never the token")),
@@ -91,31 +85,43 @@ async fn bad_tools_say_what_to_fix_and_secrets_are_names_only() {
     let mut clash = light();
     clash["name"] = json!("set_timer");
     assert!(matches!(
-        ext.apply(ExtOp::ToolAdd(clash), &mut http, &mut mcp, &builtin, env)
-            .await,
+        ext.apply(
+            ExtOp::ToolAdd(clash),
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env)
+        )
+        .await,
         Err(Fail::Invalid(_))
     ));
     let mut bad_url = light();
     bad_url["url"] = json!("ftp://x/{service}");
     assert!(matches!(
-        ext.apply(ExtOp::ToolAdd(bad_url), &mut http, &mut mcp, &builtin, env)
-            .await,
+        ext.apply(
+            ExtOp::ToolAdd(bad_url),
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env)
+        )
+        .await,
         Err(Fail::Invalid(_))
     ));
     let mut extra = light();
     extra["token"] = json!("abc123");
     assert!(
         matches!(
-            ext.apply(ExtOp::ToolAdd(extra), &mut http, &mut mcp, &builtin, env)
-                .await,
+            ext.apply(
+                ExtOp::ToolAdd(extra),
+                ToolSets::new(&mut http, &mut mcp, &builtin, &env)
+            )
+            .await,
             Err(Fail::Invalid(_))
         ),
         "a secret field is refused, not stored"
     );
     assert!(http.defs().next().is_none());
-    ext.apply(ExtOp::ToolAdd(light()), &mut http, &mut mcp, &builtin, env)
-        .await
-        .unwrap();
+    ext.apply(
+        ExtOp::ToolAdd(light()),
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+    )
+    .await
+    .unwrap();
     let saved = serde_json::to_string(&ext.listing(&[], &http, &mcp)).unwrap();
     assert!(
         !saved.contains("secret-value"),
@@ -133,28 +139,19 @@ async fn config_tools_can_be_switched_but_not_deleted_and_builtins_can_be_switch
     let e = ext
         .apply(
             ExtOp::ToolDelete("set_light".into()),
-            &mut http,
-            &mut mcp,
-            &builtin,
-            env,
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
         )
         .await;
     assert!(matches!(&e, Err(Fail::Invalid(m)) if m.contains("configuration file")));
     ext.apply(
         ExtOp::ToolEnable("set_light".into(), false),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
     ext.apply(
         ExtOp::ToolEnable("set_timer".into(), false),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -162,10 +159,7 @@ async fn config_tools_can_be_switched_but_not_deleted_and_builtins_can_be_switch
     let e = ext
         .apply(
             ExtOp::ToolEnable("nope".into(), false),
-            &mut http,
-            &mut mcp,
-            &builtin,
-            env,
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
         )
         .await;
     assert!(matches!(e, Err(Fail::NotFound(_))));
@@ -179,22 +173,25 @@ async fn changes_persist_in_the_data_directory_without_secrets() {
     let mut http = HttpTools::new(Vec::new(), &builtin, env).unwrap();
     let (mut mcp, _) = McpClient::connect(Vec::new(), &builtin, env).await.unwrap();
     let mut ext = Extensions::open(&dir.0).unwrap();
-    ext.apply(ExtOp::ToolAdd(light()), &mut http, &mut mcp, &builtin, env)
-        .await
-        .unwrap();
+    ext.apply(
+        ExtOp::ToolAdd(light()),
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+    )
+    .await
+    .unwrap();
     ext.apply(
         ExtOp::ToolEnable("set_timer".into(), false),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
     let skill = json!({"name":"good night","instructions":"Turn off the lights.","tools":["set_light"],"enabled":true});
-    ext.apply(ExtOp::SkillAdd(skill), &mut http, &mut mcp, &builtin, env)
-        .await
-        .unwrap();
+    ext.apply(
+        ExtOp::SkillAdd(skill),
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+    )
+    .await
+    .unwrap();
     let text = std::fs::read_to_string(dir.0.join("tools.json")).unwrap();
     assert!(text.contains("HA_TOKEN") && !text.contains("secret-value"));
 
@@ -224,7 +221,7 @@ async fn skills_are_validated_listed_edited_and_shape_the_prompt() {
     let (mut ext, mut http, mut mcp, builtin) = ready().await;
     macro_rules! go {
         ($op:expr) => {
-            ext.apply($op, &mut http, &mut mcp, &builtin, env)
+            ext.apply($op, ToolSets::new(&mut http, &mut mcp, &builtin, &env))
         };
     }
     go!(ExtOp::SkillAdd(json!({"name":"Tea","instructions":"Remind me after 4 minutes.","tools":["set_timer","gone"],"enabled":true}))).await.unwrap();
@@ -285,10 +282,7 @@ async fn imported_skills_arrive_turned_off_and_export_round_trips() {
     let (mut ext, mut http, mut mcp, builtin) = ready().await;
     ext.apply(
         ExtOp::SkillAdd(json!({"name":"a","instructions":"one","enabled":true})),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -297,10 +291,7 @@ async fn imported_skills_arrive_turned_off_and_export_round_trips() {
     other
         .apply(
             ExtOp::SkillImport(exported.clone()),
-            &mut http,
-            &mut mcp,
-            &builtin,
-            env,
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
         )
         .await
         .unwrap();
@@ -310,10 +301,7 @@ async fn imported_skills_arrive_turned_off_and_export_round_trips() {
     let again = other
         .apply(
             ExtOp::SkillImport(exported),
-            &mut http,
-            &mut mcp,
-            &builtin,
-            env,
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
         )
         .await;
     assert!(
@@ -323,10 +311,7 @@ async fn imported_skills_arrive_turned_off_and_export_round_trips() {
     let wrong = other
         .apply(
             ExtOp::SkillImport(json!({"hello": 1})),
-            &mut http,
-            &mut mcp,
-            &builtin,
-            env,
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
         )
         .await;
     assert!(matches!(wrong, Err(Fail::Invalid(m)) if m.contains("skills file")));
@@ -357,10 +342,7 @@ async fn a_tool_that_is_off_is_hidden_and_refused() {
     let mut base = Fixed(vec![spec("set_timer"), spec("current_time")]);
     ext.apply(
         ExtOp::ToolEnable("set_timer".into(), false),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -391,9 +373,12 @@ async fn the_skill_the_user_names_limits_the_tools_for_that_turn() {
         json!({"name":"Planning","instructions":"Plan.","enabled":true}),
         json!({"name":"Secret","instructions":"x","tools":["current_time"],"enabled":false}),
     ] {
-        ext.apply(ExtOp::SkillAdd(v), &mut http, &mut mcp, &builtin, env)
-            .await
-            .unwrap();
+        ext.apply(
+            ExtOp::SkillAdd(v),
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+        )
+        .await
+        .unwrap();
     }
     let spec = |n: &str| ToolSpec {
         name: n.into(),
@@ -442,10 +427,7 @@ async fn the_skill_the_user_names_limits_the_tools_for_that_turn() {
     // A scope never turns a tool back on.
     ext.apply(
         ExtOp::ToolEnable("set_timer".into(), false),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -463,9 +445,12 @@ async fn the_skill_the_user_names_limits_the_tools_for_that_turn() {
 #[tokio::test]
 async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_in_one() {
     let (mut ext, mut http, mut mcp, builtin) = ready().await;
-    ext.apply(ExtOp::ToolAdd(light()), &mut http, &mut mcp, &builtin, env)
-        .await
-        .unwrap();
+    ext.apply(
+        ExtOp::ToolAdd(light()),
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+    )
+    .await
+    .unwrap();
     let mut base = Fixed(vec![ToolSpec {
         name: "set_timer".into(),
         description: "d".into(),
@@ -505,10 +490,7 @@ async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_
     // Lowering a web tool applies at once and is listed.
     ext.apply(
         ExtOp::ToolTier("set_light".into(), Some(Tier::Reversible)),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -534,10 +516,7 @@ async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_
     // A built-in tool is raised, never lowered, and its baseline rises with it.
     ext.apply(
         ExtOp::ToolTier("set_timer".into(), Some(Tier::ReadOnly)),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -554,10 +533,7 @@ async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_
     );
     ext.apply(
         ExtOp::ToolTier("set_timer".into(), Some(Tier::Costly)),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -578,29 +554,20 @@ async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_
     let e = ext
         .apply(
             ExtOp::ToolTier("set_light".into(), Some(Tier::Destructive)),
-            &mut http,
-            &mut mcp,
-            &builtin,
-            env,
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
         )
         .await;
     assert!(matches!(e, Err(Fail::Invalid(m)) if m.contains("Destructive")));
     let e = ext
         .apply(
             ExtOp::ToolTier("nope".into(), Some(Tier::Costly)),
-            &mut http,
-            &mut mcp,
-            &builtin,
-            env,
+            ToolSets::new(&mut http, &mut mcp, &builtin, &env),
         )
         .await;
     assert!(matches!(e, Err(Fail::NotFound(_))));
     ext.apply(
         ExtOp::ToolTier("set_light".into(), None),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -619,10 +586,7 @@ async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_
     // Deleting the tool forgets its tier.
     ext.apply(
         ExtOp::ToolTier("set_light".into(), Some(Tier::ReadOnly)),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -642,10 +606,7 @@ async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_
     );
     ext.apply(
         ExtOp::ToolDelete("set_light".into()),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -662,10 +623,7 @@ async fn a_chosen_tier_survives_a_restart() {
     let mut ext = Extensions::open(&dir.0).unwrap();
     ext.apply(
         ExtOp::ToolTier("set_timer".into(), Some(Tier::Costly)),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -679,7 +637,7 @@ async fn a_skill_folder_imports_off_and_marked_and_needs_accepting_before_use() 
     let (mut ext, mut http, mut mcp, builtin) = ready().await;
     macro_rules! go {
         ($op:expr) => {
-            ext.apply($op, &mut http, &mut mcp, &builtin, env)
+            ext.apply($op, ToolSets::new(&mut http, &mut mcp, &builtin, &env))
         };
     }
     let folder = json!({"format": SKILL_FOLDER_FORMAT, "files": [
@@ -786,9 +744,12 @@ async fn an_exported_skills_file_is_marked_for_review_too_and_old_files_still_lo
         {"name":"b","instructions":"two"},
         {"name":"c","instructions":"x","files":[{"path":"run.py","text":"print(1)"}]},
     ]});
-    ext.apply(ExtOp::SkillImport(file), &mut http, &mut mcp, &builtin, env)
-        .await
-        .unwrap();
+    ext.apply(
+        ExtOp::SkillImport(file),
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+    )
+    .await
+    .unwrap();
     let l = ext.listing(&[], &http, &mcp);
     let s = l["skills"].as_array().unwrap();
     assert_eq!(s.len(), 2, "the one with a runnable helper file is refused");
@@ -830,10 +791,7 @@ async fn helper_files_are_bounded_in_the_prompt_and_rejected_when_runnable() {
             matches!(
                 ext.apply(
                     ExtOp::SkillAdd(bad.clone()),
-                    &mut http,
-                    &mut mcp,
-                    &builtin,
-                    env
+                    ToolSets::new(&mut http, &mut mcp, &builtin, &env)
                 )
                 .await,
                 Err(Fail::Invalid(_))
@@ -847,10 +805,7 @@ async fn helper_files_are_bounded_in_the_prompt_and_rejected_when_runnable() {
         .collect();
     ext.apply(
         ExtOp::SkillAdd(json!({"name":"s","instructions":"x","enabled":true,"files":files})),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -880,7 +835,7 @@ async fn every_change_is_undone_in_memory_when_the_save_fails() {
     let mut ext = Extensions::open(&dir.0).unwrap();
     macro_rules! ok {
         ($op:expr) => {
-            ext.apply($op, &mut http, &mut mcp, &builtin, env)
+            ext.apply($op, ToolSets::new(&mut http, &mut mcp, &builtin, &env))
                 .await
                 .unwrap()
         };
@@ -902,8 +857,12 @@ async fn every_change_is_undone_in_memory_when_the_save_fails() {
             env,
         )
         .unwrap();
-    ext.mcp_commit(&pending, Vec::new(), &http, &mut mcp, &builtin)
-        .unwrap();
+    ext.mcp_commit(
+        &pending,
+        Vec::new(),
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+    )
+    .unwrap();
     // From here on every save fails: a directory sits where each temporary file would be written.
     for f in ["tools.json", "connections.json", "skills.json"] {
         std::fs::create_dir(crate::store::temp_path(&dir.0.join(f))).unwrap();
@@ -933,7 +892,9 @@ async fn every_change_is_undone_in_memory_when_the_save_fails() {
     for op in ops {
         let before = state_of(&ext);
         let label = format!("{op:?}");
-        let r = ext.apply(op, &mut http, &mut mcp, &builtin, env).await;
+        let r = ext
+            .apply(op, ToolSets::new(&mut http, &mut mcp, &builtin, &env))
+            .await;
         assert!(matches!(r, Err(Fail::Unavailable(_))), "{label}: {r:?}");
         assert_eq!(state_of(&ext), before, "{label} left memory changed");
         assert!(http.owns("set_light"), "{label}");
@@ -979,10 +940,7 @@ async fn accept(ext: &mut Extensions, mcp: &mut McpClient, tool: Option<&str>) -
     let mut http = HttpTools::new(Vec::new(), &builtin, env).unwrap();
     ext.apply(
         ExtOp::McpAccept("home".into(), tool.map(str::to_owned)),
-        &mut http,
-        mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, mcp, &builtin, &env),
     )
     .await
 }
@@ -1031,10 +989,7 @@ async fn a_changed_or_new_mcp_tool_waits_for_review_and_accepting_it_survives_a_
     // The administrator adds the connection and sees two tools: both are approved as shown.
     ext.apply(
         ExtOp::McpAdd(home(port)),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -1043,19 +998,13 @@ async fn a_changed_or_new_mcp_tool_waits_for_review_and_accepting_it_survives_a_
     // Settings the administrator chose for tools.
     ext.apply(
         ExtOp::ToolTier("home__lamp".into(), Some(Tier::Reversible)),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
     ext.apply(
         ExtOp::ToolEnable("home__fan".into(), false),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();
@@ -1152,10 +1101,7 @@ async fn a_changed_or_new_mcp_tool_waits_for_review_and_accepting_it_survives_a_
     // Removing the connection forgets its approvals.
     ext.apply(
         ExtOp::McpDelete("home".into()),
-        &mut http,
-        &mut c,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut c, &builtin, &env),
     )
     .await
     .unwrap();
@@ -1214,10 +1160,7 @@ async fn a_server_that_did_not_answer_is_not_recorded_and_a_failed_accept_change
     let (mut mcp, _) = McpClient::connect(Vec::new(), &builtin, env).await.unwrap();
     ext.apply(
         ExtOp::McpAdd(home(port)),
-        &mut http,
-        &mut mcp,
-        &builtin,
-        env,
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
     )
     .await
     .unwrap();

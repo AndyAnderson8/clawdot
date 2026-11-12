@@ -6,7 +6,7 @@ use crate::cli::Args;
 use crate::config::{AgentConfig, Config};
 use crate::env::Env;
 use crate::inbox::endpoint::QuietHours;
-use crate::settings::{self, Layer, SettingsState};
+use crate::settings::{self, SettingsState, Sources};
 
 pub fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     if let Some(d) = &c.data_dir {
@@ -124,12 +124,13 @@ pub fn resolve_settings(
         };
         layer.insert("persona".into(), text.into());
     }
-    let defaults: Layer = settings::built_in_defaults();
     let (state, warnings) = SettingsState::open(
         Some(&args.data_dir),
-        defaults,
-        std::mem::take(&mut args.file_layer),
-        std::mem::take(&mut args.flag_layer),
+        Sources {
+            defaults: settings::built_in_defaults(),
+            file: std::mem::take(&mut args.file_layer),
+            flags: std::mem::take(&mut args.flag_layer),
+        },
         args.speech.url.is_some(),
         env.lookup(),
     )?;

@@ -1,13 +1,14 @@
 //! The state the main loop owns and what it does with it (ADR-0021): the [`Brain`] (assistant, language model,
 //! tools and usage counters), live settings (`apply_live`), the status snapshot for the web UI, and turn
-//! dispatch (`dispatch`, `finish_turn`, `on_hub_event`). The binary's `main` wires these to its channels.
+//! dispatch (`dispatch`, `finish_turn`, `on_hub_event`). [`crate::app_loop::App`] calls these from its event
+//! methods; they take the brain, hub and core explicitly because the one-shot voice command uses them too.
 
 use crate::app::{Core, Job, Op};
 use crate::assistant::Assistant;
 use crate::cli::Args;
 use crate::config::AgentConfig;
 use crate::connects::{Connects, Done, Source};
-use crate::extensions::{ExtOp, Extensions, WithPolicy};
+use crate::extensions::{ExtOp, Extensions, ToolSets, WithPolicy};
 use crate::httptools::{HttpTools, WithHttp};
 use crate::mcp::{McpClient, WithMcp};
 use crate::rtvoice::{self, Realtime, RtSettings};
@@ -366,10 +367,12 @@ impl Brain {
             .ext
             .apply(
                 op,
-                Arc::make_mut(&mut self.http_tools),
-                Arc::make_mut(&mut self.mcp),
-                &self.builtin,
-                &env.lookup(),
+                ToolSets::new(
+                    Arc::make_mut(&mut self.http_tools),
+                    Arc::make_mut(&mut self.mcp),
+                    &self.builtin,
+                    &|n: &str| env.get(n),
+                ),
             )
             .await;
         self.ext_view = Arc::new(self.ext.snapshot());
@@ -838,9 +841,12 @@ pub fn mcp_connected(brain: &mut Brain, core: &Core, done: Done) {
             let applied = brain.ext.mcp_commit(
                 &done.pending,
                 tools,
-                &brain.http_tools,
-                Arc::make_mut(&mut brain.mcp),
-                &brain.builtin,
+                ToolSets::new(
+                    Arc::make_mut(&mut brain.http_tools),
+                    Arc::make_mut(&mut brain.mcp),
+                    &brain.builtin,
+                    &|n: &str| core.env().get(n),
+                ),
             );
             brain.ext_view = Arc::new(brain.ext.snapshot());
             applied.map(|()| {

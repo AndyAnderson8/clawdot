@@ -160,6 +160,13 @@ export function customTheme(): CustomTheme | null {
   }
 }
 
+/** The stylesheet of the uploaded theme (index.html applies it before the first paint and marks it). */
+type ThemeSheet = CSSStyleSheet & { customTheme?: boolean };
+
+function removeThemeSheet(): void {
+  document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => !(s as ThemeSheet).customTheme);
+}
+
 /** Keep an uploaded theme and use it now. */
 export function setCustomTheme(t: CustomTheme): void {
   try {
@@ -168,13 +175,13 @@ export function setCustomTheme(t: CustomTheme): void {
   } catch {
     /* it lasts until the page closes */
   }
-  let el = document.getElementById("customtheme");
-  if (!el) {
-    el = document.createElement("style");
-    el.id = "customtheme";
-    document.head.appendChild(el);
-  }
-  el.textContent = themeCss(t);
+  removeThemeSheet();
+  // A constructed stylesheet, not a <style> element: the page's content-security policy refuses inline styles that
+  // are not its own, and this CSS comes from a file the person uploaded.
+  const sheet = new CSSStyleSheet() as ThemeSheet;
+  sheet.replaceSync(themeCss(t));
+  sheet.customTheme = true;
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
   setThemePref("custom");
 }
 
@@ -186,7 +193,7 @@ export function clearCustomTheme(): void {
   } catch {
     /* nothing to do */
   }
-  document.getElementById("customtheme")?.remove();
+  removeThemeSheet();
   if (document.documentElement.dataset["theme"] === "custom") setThemePref("light");
 }
 
