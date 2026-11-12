@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.2 |
+| **Version** | 0.3 |
 | **Created** | 2026-11-09 |
 | **Related** | [0003](0003-satellite-protocol.md), [0002](0002-resource-budget.md), [R-08](../research/08-existing-echo-dot-projects.md) section 4.2, roadmap B8, [ADR-0014](../adr/0014-language-rust-core-polyglot-edges.md) |
 
@@ -130,3 +130,4 @@ Findings are in [NOTICE](../../NOTICE) and [open-questions.md](../open-questions
 |---|---|---|
 | 0.1 | 2026-11-09 | First draft: REQ-ESP-001 to REQ-ESP-017 |
 | 0.2 | 2026-11-09 | Implemented behind `esphome-satellite` and `esphome-noise`; size record and verification notes (section 7); REQ-ESP-002 clarified: a default build keeps the section unparsed and refuses it unless empty |
+| 0.3 | 2026-11-12 | REQ-ESP-002: a device takes `reply`, `whole` (the default) or `streamed`. REQ-ESP-008: with `streamed`, a reply to a run starts playing from its first sentence, over API audio or as a file with no declared length; not yet tried on a device |

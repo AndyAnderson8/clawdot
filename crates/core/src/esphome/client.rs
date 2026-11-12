@@ -906,6 +906,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
         match &l.sink {
             Sink::Api => {
                 if let Some(o) = &mut self.out {
+                    if o.pos >= o.pcm.len() {
+                        // The sender had run dry while this sentence was made. Pace from now: its schedule is
+                        // as old as the gap, and following it would send the whole sentence at once.
+                        o.next = o.next.max(now);
+                    }
                     o.pcm.extend_from_slice(payload);
                 }
             }
