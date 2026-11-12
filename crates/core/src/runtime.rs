@@ -11,19 +11,20 @@ use crate::connects::{Connects, Done, Source};
 use crate::extensions::{ExtOp, Extensions, ToolSets, WithPolicy};
 use crate::httptools::{HttpTools, WithHttp};
 use crate::mcp::{McpClient, WithMcp};
-use crate::rtvoice::{self, Realtime, RtSettings};
+use crate::rtvoice::{self, Realtime};
 use crate::sched::{Clock, Fired, FixedOffset, Ts, Zone};
-use crate::seed::{agent_from, policy_from, quiet_from};
 #[cfg(feature = "realtime")]
 use crate::session::Conversation;
 use crate::session::{ToolHost, TurnConfig, TurnCtl};
-use crate::settings::{self, Group};
 use crate::store::JsonStore;
 use crate::transport::HttpBackend;
 use crate::turns::{self, Event as HubEvent, Hub, Origin, Reply, Request, Submitted, TurnKit};
 use crate::usage::UsageTracker;
 use std::sync::Arc;
 use std::time::Duration;
+
+mod live;
+pub use live::apply_live;
 
 pub fn zone_for(name: Option<&str>) -> Result<Box<dyn Zone + Send + Sync>, String> {
     match name {
@@ -134,97 +135,6 @@ pub fn model_prices(
 ) -> (Option<f64>, Option<f64>) {
     let price = |k: &str| live.get(k).and_then(serde_json::Value::as_f64);
     (price("llm_usd_per_mtok_in"), price("llm_usd_per_mtok_out"))
-}
-
-/// Switch to the new values of the settings that apply without a restart (REQ-CFG-039). `applied` holds
-/// what is already in effect, so only real changes do any work.
-pub fn apply_live(
-    brain: &mut Brain,
-    core: &Core,
-    live: &serde_json::Map<String, serde_json::Value>,
-    applied: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    let changed = |k: &str| live.get(k) != applied.get(k);
-    let text = |k: &str| live.get(k).and_then(|v| v.as_str());
-    if changed("zone") {
-        let z = text("zone").filter(|z| *z != "UTC");
-        match zone_for(z) {
-            Ok(zone) => brain.assistant.set_zone(zone),
-            Err(e) => crate::diag::error(&format!("cannot switch time zone: {e}")),
-        }
-    }
-    if changed("persona")
-        && let Some(p) = text("persona")
-    {
-        p.clone_into(&mut brain.persona);
-    }
-    if changed("daily_spend_usd") {
-        let mut l = brain.usage.limits();
-        l.daily_spend_cap_usd = live
-            .get("daily_spend_usd")
-            .and_then(serde_json::Value::as_f64);
-        brain.usage.set_limits(l);
-    }
-    if changed("llm_usd_per_mtok_in") || changed("llm_usd_per_mtok_out") {
-        let mut l = brain.usage.limits();
-        (l.llm_usd_per_mtok_in, l.llm_usd_per_mtok_out) = model_prices(live);
-        brain.usage.set_limits(l);
-    }
-    if settings::group_changed(Group::Agent, live, applied) {
-        brain.agent = agent_from(live, brain.agent.summarize_over_chars);
-        if let Some(llm) = &mut brain.llm {
-            llm.cfg = with_agent(llm.cfg.clone(), &brain.agent);
-        }
-    }
-    if settings::group_changed(Group::Speech, live, applied) {
-        core.speech_handles().apply(live);
-    }
-    if settings::group_changed(Group::Realtime, live, applied) {
-        brain.rt.set_settings(RtSettings::from_live(live));
-    }
-    #[cfg(feature = "tls")]
-    if changed("update_check")
-        && let Some(u) = core.updater()
-    {
-        u.set_enabled(
-            live.get("update_check")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true),
-        );
-    }
-    if changed("notes")
-        && let Some(n) = core.notes()
-    {
-        n.set_enabled(
-            live.get("notes")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-        );
-    }
-    if settings::group_changed(Group::Policy, live, applied)
-        && let Some(a) = core.audit()
-    {
-        a.set_policy(policy_from(live));
-    }
-    if settings::group_changed(Group::Quiet, live, applied) {
-        core.set_quiet_hours(quiet_from(live));
-    }
-    if settings::group_changed(Group::Llm, live, applied) {
-        let max_tokens = brain.usage.limits().max_output_tokens_per_turn;
-        match build_llm(
-            text("llm_url"),
-            text("llm_model"),
-            core.secrets(),
-            core.env(),
-            text("llm_key_env").unwrap_or("OPENROUTER_API_KEY"),
-            max_tokens,
-            &brain.agent,
-        ) {
-            Ok(l) => brain.llm = l,
-            Err(e) => crate::diag::error(&format!("cannot switch language model: {e}")),
-        }
-    }
-    *applied = live.clone();
 }
 
 /// Everything needed to answer one thing the user said, whether it was typed or spoken.
