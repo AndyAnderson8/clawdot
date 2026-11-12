@@ -950,28 +950,83 @@ fn clean_name(s: &str) -> String {
     clip(&cleaned, MAX_NAME_CHARS)
 }
 
-/// Whether a key names something secret.
+/// Words that name a secret when they are a whole word of a key (`api_key`, `apiKey`, `X-Auth-Token`).
+const SECRET_WORDS: [&str; 20] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "passcode",
+    "key",
+    "auth",
+    "oauth",
+    "authorization",
+    "authentication",
+    "bearer",
+    "jwt",
+    "cookie",
+    "credential",
+    "signature",
+    "session",
+    "otp",
+    "apikey",
+];
+
+/// Endings that name a secret when a key is written as one word (`accesstoken`, `clientsecret`, `sessionid`).
+const SECRET_ENDINGS: [&str; 12] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "passphrase",
+    "apikey",
+    "accesskey",
+    "secretkey",
+    "privatekey",
+    "authkey",
+    "passkey",
+    "sessionid",
+];
+
+/// The words of a key, in lower case: split at anything that is not a letter or digit, and where a capital
+/// follows a small letter or digit (`apiKey`).
+fn key_words(key: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut after_small = false;
+    for c in key.chars() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            after_small = false;
+            continue;
+        }
+        if c.is_uppercase() && after_small && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        after_small = c.is_lowercase() || c.is_numeric();
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// Whether a key names something secret. It is decided on the key's whole words, so `keyword`, `author`,
+/// `monkey` or `privately` are not taken for secrets: a value hidden for no reason is one the person cannot
+/// hear before they say yes to an action (REQ-SEC-011), and one missing from the record of what ran.
 fn sensitive_key(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "pwd",
-        "passphrase",
-        "key",
-        "auth",
-        "bearer",
-        "cookie",
-        "credential",
-        "private",
-        "signature",
-        "session",
-        "otp",
-    ]
-    .iter()
-    .any(|s| k.contains(s))
+    key_words(key).iter().any(|w| {
+        // `tokens`, `keys`, `credentials`.
+        let one = w.strip_suffix('s').filter(|b| b.len() >= 3).unwrap_or(w);
+        SECRET_WORDS.contains(&one)
+            || SECRET_WORDS.contains(&w.as_str())
+            || SECRET_ENDINGS.iter().any(|e| one.ends_with(e))
+    })
 }
 
 /// Start of well-known credential formats.
