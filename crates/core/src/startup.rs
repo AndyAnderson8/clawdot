@@ -19,7 +19,7 @@ use crate::httptools::HttpTools;
 use crate::mcp::McpClient;
 use crate::notes::NoteStore;
 use crate::rtvoice::{Realtime, RtSettings};
-use crate::runtime::{Brain, build_llm, mcp_connected, settings_extra, zone_for};
+use crate::runtime::{Brain, build_llm, settings_extra, zone_for};
 use crate::satellite::{self, Ask};
 use crate::sched::{Clock, Scheduler, SystemClock, Zone};
 use crate::session::{Conversation, ToolHost};
@@ -256,30 +256,19 @@ async fn build_running(
     })
 }
 
-/// Answer one recorded utterance and leave. There is no loop to serve meanwhile, so wait for the MCP sources
+/// Answer one recorded utterance and leave. There is no loop to serve meanwhile, so wait for the MCP inbox
 /// to answer first, as the single turn should have their tools.
 async fn one_utterance(
-    mut r: Running,
+    r: Running,
     args: &Args,
     input: &std::path::Path,
 ) -> Result<ExitCode, Failure> {
-    while r.brain.is_connecting() {
-        let Some(done) = r.mcp_rx.recv().await else {
-            break;
-        };
-        mcp_connected(&mut r.brain, &r.core, done);
-    }
-    voice_once(
-        &mut r.brain,
-        &mut r.hub,
-        &args.speech,
-        &r.core,
-        input,
-        args.voice_out.as_deref(),
-    )
-    .await
-    .map(|()| ExitCode::SUCCESS)
-    .map_err(|e| fail(1, e))
+    let mut app = App::one_shot(r.brain, r.hub, r.core, r.applied, Inbox::mcp_only(r.mcp_rx));
+    app.wait_for_connections().await;
+    voice_once(&mut app, &args.speech, input, args.voice_out.as_deref())
+        .await
+        .map(|()| ExitCode::SUCCESS)
+        .map_err(|e| fail(1, e))
 }
 
 /// Serve the web UI and the webhooks on `listener` in a task.
@@ -467,7 +456,7 @@ struct Tools {
     connects: Connects,
 }
 
-/// Load the portal's saved tools and skills, define the HTTP tools, and declare the MCP sources. Takes the
+/// Load the portal's saved tools and skills, define the HTTP tools, and declare the MCP inbox. Takes the
 /// tool and server definitions out of `args`.
 fn declare_tools(args: &mut Args, core: &Core, assistant: &Assistant) -> Result<Tools, Failure> {
     let builtin: Vec<String> = ToolHost::tool_specs(assistant)
@@ -494,7 +483,7 @@ fn declare_tools(args: &mut Args, core: &Core, assistant: &Assistant) -> Result<
     let http_tools =
         HttpTools::new(tool_defs, &builtin, |v| core.env().get(v)).map_err(|e| fail(1, e))?;
 
-    // Saved and configured MCP sources are declared here and connected in tasks once the loop runs
+    // Saved and configured MCP inbox are declared here and connected in tasks once the loop runs
     // (ADR-0021): a dead server delays only itself, never the start of the speaker. Bad definitions still
     // stop start-up.
     let (mcp, pending) =

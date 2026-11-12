@@ -2,16 +2,25 @@
 //! directly and its effects are read from the state the loop owns.
 
 use super::*;
-use crate::app::{Adapters, Limits, Stores};
+use crate::app::{Adapters, Fail, Limits, Op, Stores};
+use crate::extensions::ExtOp;
 use crate::sched::{Clock, SystemClock};
+use crate::session::ToolHost;
 use crate::speaker::Say;
 use crate::startup::build_brain;
+use crate::store::JsonStore;
 use crate::store::testutil::TempDir;
 use crate::{cli, seed};
 use std::sync::atomic::AtomicBool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+
+mod connections;
+mod portal;
+mod turns;
+
+type Map = serde_json::Map<String, serde_json::Value>;
 
 /// An application over a scratch data directory, and what the speaker task would receive.
 struct Rig {
@@ -77,6 +86,41 @@ async fn rig_with(dir: &TempDir, extra: &[&str], clock: Arc<dyn Clock + Send + S
     };
     let app = App::new(brain, hub, core, live, inbox, speaker);
     Rig { app, said }
+}
+
+/// `live` with `changes` put over it.
+fn with(live: &Map, changes: &[(&str, serde_json::Value)]) -> Map {
+    let mut m = live.clone();
+    for (k, v) in changes {
+        m.insert((*k).to_owned(), v.clone());
+    }
+    m
+}
+
+/// How many timers are saved in the data directory `dir`.
+fn timers_on_disk(dir: &TempDir) -> usize {
+    let store = JsonStore::new(dir.0.join("timers.json"), crate::sched::SCHEMA);
+    crate::sched::Scheduler::load(&store, 64, &crate::sched::SystemClock)
+        .unwrap()
+        .list(&crate::sched::SystemClock)
+        .len()
+}
+
+/// A portal job for `op`, and the receiver its answer arrives on.
+fn ask(
+    op: Op,
+) -> (
+    Job,
+    tokio::sync::oneshot::Receiver<Result<serde_json::Value, Fail>>,
+) {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    (Job { op, reply }, answer)
+}
+
+fn add_home(port: u16) -> Op {
+    Op::Ext(ExtOp::McpAdd(serde_json::json!({
+        "name": "home", "url": format!("http://127.0.0.1:{port}/mcp"),
+    })))
 }
 
 /// A loopback language model that answers every request with `reply`, but only once `open` says so.
@@ -170,7 +214,7 @@ async fn a_lost_speaker_task_does_not_stop_the_tick() {
     drop(said);
     assert!(app.core.queue_speech("anyone there"));
     app.on_tick();
-    assert!(app.speaker.lost);
+    assert!(app.speaker.as_ref().is_some_and(|s| s.lost));
     app.on_tick();
     assert!(!app.core.ui_status().is_null());
 }
@@ -283,4 +327,57 @@ async fn speaker_eviction_follows_monotonic_time() {
             "step {step} s, {later} s on the monotonic clock"
         );
     }
+}
+
+/// The one-shot command's application: the pieces of `app`, with no speaker task and only the connection
+/// results as a source.
+fn one_shot(app: App) -> App {
+    App::one_shot(
+        app.brain,
+        app.hub,
+        app.core,
+        app.applied,
+        Inbox::mcp_only(mpsc::channel(1).1),
+    )
+}
+
+// The recorded-utterance command answers through the same methods as the loop, with no loop and no speaker
+// task: a fast-path line, a line that needs the model (its turn runs beside, and the call waits for it).
+#[tokio::test(flavor = "current_thread")]
+async fn a_one_shot_app_answers_through_the_loops_methods_without_a_loop() {
+    let dir = TempDir::new("loop-one-shot");
+    let (open_tx, open) = watch::channel(true);
+    let port = gated_model(open, "Owls hoot.").await;
+    let url = format!("http://127.0.0.1:{port}/v1");
+    let Rig { app, .. } = rig(&dir, &["--llm-url", &url, "--llm-model", "m"]).await;
+    let mut app = one_shot(app);
+    assert!(app.speaker.is_none());
+
+    let timer = app.respond_inline("set a timer for 5 minutes").await;
+    assert!(timer.say.starts_with("Timer set"), "{}", timer.say);
+    assert_eq!(app.brain.assistant.scheduled().len(), 1);
+
+    let reply = app
+        .respond_inline("tell me about owls and their habits")
+        .await;
+    assert_eq!(reply.say, "Owls hoot.");
+    assert_eq!(app.hub.active(), 0);
+    assert!(app.brain.usage.requests_today() >= 1, "and it was counted");
+
+    // There is no speaker task to hand anything to, so a tick does nothing.
+    app.on_tick();
+    assert!(app.core.ui_status().is_null());
+    drop(open_tx);
+}
+
+// With no model configured the one-shot command says so, as the loop does.
+#[tokio::test(flavor = "current_thread")]
+async fn a_one_shot_app_without_a_model_says_one_is_needed() {
+    let dir = TempDir::new("loop-one-shot-no-model");
+    let Rig { app, .. } = rig(&dir, &[]).await;
+    let mut app = one_shot(app);
+    let reply = app
+        .respond_inline("tell me about owls and their habits")
+        .await;
+    assert_eq!(reply.say, crate::app_loop::turns::NO_LLM);
 }

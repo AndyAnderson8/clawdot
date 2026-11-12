@@ -1,28 +1,33 @@
 //! The running application: the one loop that owns the [`Brain`] and the conversation [`Hub`] (ADR-0021).
 //!
-//! [`App`] holds what the loop owns (the brain, the hub, the settings in effect, the receivers it listens
-//! on, the tick and the handle on the speaker task) and has one small method per kind of event. [`App::run`]
-//! only chooses which event is next. Turns, realtime sessions, speech and MCP connections are tasks beside
-//! the loop; they report back through the receivers, and nothing here waits for them. The start-up sequence
-//! that builds an `App` is in `startup`.
+//! [`App`] holds what the loop owns (the brain, the hub, the settings in effect, the [`Inbox`] it listens on,
+//! the tick and the handle on the speaker task) and has one method per kind of event; all of the loop's
+//! behaviour is on it, split by concern: `turns` (a request becomes a turn, a turn ends, a reply is delivered),
+//! `portal` (changes asked for in the web UI) and `connections` (MCP connections made beside the loop).
+//! [`App::run`] only chooses which event is next. Turns, realtime sessions, speech and MCP connections are
+//! tasks beside the loop; they report back through the inbox, and nothing here waits for them. The start-up
+//! sequence that builds an `App` is in `startup`; `--voice-in` builds one with [`App::one_shot`] and drives the
+//! same methods without running the loop.
 
 use crate::app::{Core, Job};
 use crate::assistant::describe_fired;
 use crate::connects::Done;
 use crate::rtvoice;
-use crate::runtime::{
-    Brain, SpeakerView, deliver_confirmed, dispatch, drain, mcp_connected, on_hub_event, portal_op,
-};
+use crate::runtime::{Brain, SpeakerView};
 use crate::satellite::{Announcer, Ask};
 use crate::session::TurnCtl;
 use crate::speaker::{Say, Voice};
-use crate::turns::{Event as HubEvent, Hub, Origin, Request};
+use crate::turns::{Hub, Origin, Request};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Interval;
+
+mod connections;
+mod portal;
+mod turns;
 
 /// What the loop does after an event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +53,29 @@ pub struct Inbox {
     pub console: bool,
 }
 
-/// The loop's side of the speaker task: everything that speaks is handed over and said in order, so the wait
+impl Inbox {
+    /// Only the finished connections, for the one-shot command: every other source is closed.
+    #[must_use]
+    pub fn mcp_only(mcp: mpsc::Receiver<Done>) -> Self {
+        Self {
+            mcp,
+            ..Self::closed()
+        }
+    }
+
+    fn closed() -> Self {
+        Self {
+            portal: mpsc::channel(1).1,
+            mcp: mpsc::channel(1).1,
+            realtime: mpsc::channel(1).1,
+            asks: mpsc::channel(1).1,
+            lines: mpsc::channel(1).1,
+            console: false,
+        }
+    }
+}
+
+/// The loop's end of the speaker task: everything that speaks is handed over and said in order, so the wait
 /// for a voice or a summary never holds the loop.
 #[derive(Debug)]
 pub struct Speaker {
@@ -81,7 +108,8 @@ pub struct App {
     /// The settings in effect, so a change does work only where something differs.
     pub(crate) applied: serde_json::Map<String, serde_json::Value>,
     pub(crate) inbox: Inbox,
-    pub(crate) speaker: Speaker,
+    /// The speaker task, or `None` for the one-shot command, which has nothing to speak and no tick.
+    pub(crate) speaker: Option<Speaker>,
     /// Names of the music stations, for the status page.
     pub(crate) stations: Vec<String>,
     tick: Interval,
@@ -98,13 +126,27 @@ impl App {
         inbox: Inbox,
         speaker: Speaker,
     ) -> Self {
+        let mut app = Self::one_shot(brain, hub, core, applied, inbox);
+        app.speaker = Some(speaker);
+        app
+    }
+
+    /// An application that is not run as a loop: the one-shot command answers a recorded utterance by
+    /// calling the event methods itself. It has no speaker task, so it has no tick.
+    pub fn one_shot(
+        brain: Brain,
+        hub: Hub,
+        core: Arc<Core>,
+        applied: serde_json::Map<String, serde_json::Value>,
+        inbox: Inbox,
+    ) -> Self {
         Self {
             brain,
             hub,
             core,
             applied,
             inbox,
-            speaker,
+            speaker: None,
             stations: Vec::new(),
             tick: tokio::time::interval(Duration::from_secs(1)),
         }
@@ -155,21 +197,11 @@ impl App {
         }
     }
 
-    /// A change the web UI asked for.
-    pub async fn on_portal_job(&mut self, job: Job) {
-        portal_op(&mut self.brain, &self.core, &mut self.applied, job).await;
-    }
-
-    /// A connection task reported.
-    pub fn on_mcp_connected(&mut self, done: Done) {
-        mcp_connected(&mut self.brain, &self.core, done);
-    }
-
     /// A line from the terminal. `None` means the terminal was closed: the turns that are running finish and
     /// show their replies first. "quit" leaves at once.
     pub async fn on_console_line(&mut self, line: Option<String>) -> Flow {
         let Some(line) = line else {
-            drain(&mut self.brain, &mut self.hub, &self.core).await;
+            self.drain().await;
             self.save_all();
             return Flow::Exit;
         };
@@ -204,64 +236,51 @@ impl App {
         });
     }
 
-    /// A turn task, tool call or realtime session reported.
-    pub async fn on_hub_event(&mut self, ev: HubEvent) {
-        on_hub_event(&mut self.brain, &mut self.hub, &self.core, ev).await;
-    }
-
     /// A speaker asked for a realtime voice session.
     pub fn on_realtime_job(&mut self, job: rtvoice::Job) {
         self.brain.start_realtime(job, &self.core, &mut self.hub);
     }
 
-    /// Once a second: sweep stale conversations, publish the status, hand what is due to the speaker.
+    /// Once a second: sweep stale conversations, publish the status, hand what is due to the speaker task.
+    /// Without a speaker task (the one-shot command) there is no tick, and this does nothing.
     pub fn on_tick(&mut self) {
+        let Some(speaker) = self.speaker.as_mut() else {
+            return;
+        };
         self.hub.sweep(self.brain.mono());
-        self.publish_status();
+        publish_status(&self.core, &self.brain, speaker, &self.stations);
         // Everything that speaks is handed to the speaker task (ADR-0021).
         while let Some((text, preview)) = self.core.take_speech_as() {
-            self.speaker.say(Say::Phrase { text, preview });
+            speaker.say(Say::Phrase { text, preview });
         }
         for fired in self.brain.tick() {
-            self.speaker.say(Say::Line(describe_fired(&fired)));
+            speaker.say(Say::Line(describe_fired(&fired)));
         }
-        if !self.speaker.voice.polling.swap(true, Ordering::Relaxed) {
+        if !speaker.voice.polling.swap(true, Ordering::Relaxed) {
             let poll = Say::Poll {
                 minute: self.brain.minute_of_day(),
                 day: self.brain.local_day(),
                 llm: self.brain.model(),
             };
-            self.speaker.say(poll);
+            speaker.say(poll);
         }
         self.core.maintain();
-    }
-
-    /// Handle something a speaker said: the fast path answers at once, anything else becomes a turn.
-    fn submit(&mut self, req: Request) {
-        if let Some((origin, reply)) = dispatch(&mut self.brain, &mut self.hub, req) {
-            deliver_confirmed(&self.brain, origin, reply);
-        }
-    }
-
-    fn publish_status(&self) {
-        let connected = self.speaker.announcer.connected();
-        let view = SpeakerView {
-            available: connected > 0 && self.speaker.voice.available.load(Ordering::Relaxed),
-            console: self.speaker.console,
-            quiet: self.core.quiet_hours(),
-        };
-        self.core.set_ui_status(self.brain.status_json(
-            connected,
-            &view,
-            &self.stations,
-            &self.brain.tool_counts(),
-        ));
     }
 
     fn save_all(&self) {
         self.brain.save_usage();
         self.core.flush_blocking();
     }
+}
+
+fn publish_status(core: &Core, brain: &Brain, speaker: &Speaker, stations: &[String]) {
+    let connected = speaker.announcer.connected();
+    let view = SpeakerView {
+        available: connected > 0 && speaker.voice.available.load(Ordering::Relaxed),
+        console: speaker.console,
+        quiet: core.quiet_hours(),
+    };
+    core.set_ui_status(brain.status_json(connected, &view, stations, &brain.tool_counts()));
 }
 
 #[cfg(test)]
