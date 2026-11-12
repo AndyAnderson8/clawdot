@@ -795,9 +795,16 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
         "diag-api-test could not do a thing with Bearer abcdefghijklmnopqrstuvwxyz123456",
     );
 
+    // A reminder the user set: its label is their own words, so the file says only that one is scheduled.
+    p.core.set_ui_status(json!({
+        "scheduled": [{ "kind": "reminder", "label": "call the clinic about results", "seconds_left": 90 }],
+    }));
+
     let (s, d) = call(&p, "GET", "/api/diagnostics", &session, "").await;
     assert_eq!(s, 200, "{d}");
     assert_eq!(d["format"], "clawdot-diagnostics");
+    assert_eq!(d["status"]["scheduled"][0]["kind"], "reminder");
+    assert!(d["status"]["scheduled"][0].get("label").is_none(), "{d}");
     assert_eq!(d["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(d["settings"]["fields"]["device_name"]["value"], "Den");
     assert_eq!(d["settings"]["fields"]["device_name"]["source"], "saved");
@@ -808,6 +815,7 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
         token.as_str(),
         "token_hash",
         "Secret persona text",
+        "call the clinic",
         "abcdefghijklmnopqrstuvwxyz123456",
     ] {
         assert!(

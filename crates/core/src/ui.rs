@@ -955,12 +955,22 @@ fn diagnostics(core: &Core) -> Resp {
                 .collect()
         })
         .unwrap_or_default();
+    // The status snapshot lists what is scheduled with its label ("call the doctor"): the user's own words. A bug
+    // report needs how many there are and of what kind, not what they say.
+    let mut status = core.ui_status();
+    if let Some(items) = status.get_mut("scheduled").and_then(Value::as_array_mut) {
+        for item in items {
+            if let Some(o) = item.as_object_mut() {
+                o.remove("label");
+            }
+        }
+    }
     let doc = json!({
         "format": "clawdot-diagnostics",
         "generated_at": core.now(),
         "version": env!("CARGO_PKG_VERSION"),
         "build": crate::diag::build_info(),
-        "status": core.ui_status(),
+        "status": status,
         "settings": {
             "fields": settings["fields"], "restart_needed": settings["restart_needed"],
             "llm_key_present": settings["llm"]["key_present"],
