@@ -891,8 +891,8 @@ async fn every_change_is_undone_in_memory_when_the_save_fails() {
     ext.mcp_commit(&pending, Vec::new(), &http, &mut mcp, &builtin)
         .unwrap();
     // From here on every save fails: a directory sits where each temporary file would be written.
-    for f in ["tools.tmp", "connections.tmp", "skills.tmp"] {
-        std::fs::create_dir(dir.0.join(f)).unwrap();
+    for f in ["tools.json", "connections.json", "skills.json"] {
+        std::fs::create_dir(crate::store::temp_path(&dir.0.join(f))).unwrap();
     }
     let body = json!({"name":"second","instructions":"Another."});
     let ops = vec![
