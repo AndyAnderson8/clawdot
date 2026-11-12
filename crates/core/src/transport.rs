@@ -22,6 +22,24 @@ const MAX_BODY: usize = 1024 * 1024;
 /// Largest error body kept for diagnostics.
 const MAX_ERROR_BODY: usize = 2048;
 
+/// Longest message from a provider that is passed on to be shown.
+const MAX_SHOWN: usize = 300;
+
+/// A remote server's message made safe to show: its first line only, with `secret` replaced everywhere (before the
+/// cut, so a key straddling the limit leaves no prefix behind), at most `max` characters.
+pub(crate) fn scrub(text: &str, secret: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    let line = if secret.is_empty() {
+        line.to_owned()
+    } else {
+        line.replace(secret, "***")
+    };
+    if line.chars().count() <= max {
+        return line;
+    }
+    line.chars().take(max).collect::<String>() + "…"
+}
+
 /// A parsed `http(s)://host[:port][/base]` URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -36,6 +54,17 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// The value of the `Host` header: the port is part of it unless it is the scheme's default (RFC 9110
+    /// section 7.2). A name-based proxy in front of a server on its own port picks the site by it.
+    #[must_use]
+    pub fn host_header(&self) -> String {
+        if self.port == if self.tls { 443 } else { 80 } {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+
     /// Parse a base URL such as `https://openrouter.ai/api/v1`.
     ///
     /// # Errors
@@ -53,7 +82,14 @@ impl Endpoint {
             Some((h, p)) => (h, p.parse::<u16>().map_err(|_| format!("bad port `{p}`"))?),
             None => (hostport, if tls { 443 } else { 80 }),
         };
-        if host.is_empty() || host.contains(char::is_whitespace) {
+        // Letters, digits, dots, dashes and underscores only: no user name (`user@host`), query, fragment or
+        // bracket. Such a text is not a name that resolves, but it can end in `.local` or `localhost` and so pass
+        // the plain-http rule for the home network (REQ-SEC-001) while naming something else.
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        {
             return Err("the URL has no valid host".into());
         }
         let base = path.trim_matches('/');
@@ -124,6 +160,10 @@ impl HttpBackend {
         mut on_text: impl FnMut(&str) + Send,
     ) -> Result<Completion, LlmError> {
         match timeout(self.deadline, self.exchange(req, &mut on_text)).await {
+            // The provider's words are shown to the person: never with the key in them.
+            Ok(Err(LlmError::Provider(m))) => {
+                Err(LlmError::Provider(scrub(&m, &self.api_key, MAX_SHOWN)))
+            }
             Ok(r) => r,
             Err(_) => Err(LlmError::Transport(format!(
                 "no complete response within {} s",
@@ -142,7 +182,7 @@ impl HttpBackend {
         let mut builder = Request::builder()
             .method(Method::POST)
             .uri(format!("{}/chat/completions", self.endpoint.base))
-            .header("host", &self.endpoint.host)
+            .header("host", self.endpoint.host_header())
             .header(CONTENT_TYPE, "application/json")
             .header("accept", "text/event-stream, application/json")
             .header("connection", "close")
@@ -402,9 +442,33 @@ mod tests {
         let l = Endpoint::parse("http://localhost:11434/v1").unwrap();
         assert_eq!((l.tls, l.port, l.base.as_str()), (false, 11434, "/v1"));
         assert_eq!(Endpoint::parse("http://h").unwrap().base, "");
-        for bad in ["ftp://h", "h", "http://", "http://h:x", "http://a b"] {
+        for (url, host) in [
+            ("http://h", "h"),
+            ("http://h:80/x", "h"),
+            ("http://h:8080", "h:8080"),
+            ("https://h:443", "h"),
+            ("https://h:8443/v1", "h:8443"),
+            ("https://h:80", "h:80"),
+        ] {
+            assert_eq!(Endpoint::parse(url).unwrap().host_header(), host, "{url}");
+        }
+        for bad in [
+            "ftp://h",
+            "h",
+            "http://",
+            "http://h:x",
+            "http://a b",
+            "http://x@evil.example.local",
+            "http://evil.example#.local/",
+            "http://evil.example?.local",
+            "http://[::1]:8080",
+            "http://h\u{e9}/",
+        ] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
+        // The plain-http rule cannot be passed with such a host.
+        let d = Duration::from_secs(1);
+        assert!(HttpBackend::new("http://evil.example#.local/v1", "", d).is_err());
     }
 
     #[test]
@@ -459,6 +523,12 @@ mod tests {
                 .contains("authorization: bearer sk-test")
         );
         assert!(seen.contains("\"stream\":true") && seen.contains("\"max_tokens\":50"));
+        // The port is part of the Host header when it is not the default one.
+        assert!(
+            seen.to_lowercase()
+                .contains(&format!("host: 127.0.0.1:{port}\r\n")),
+            "{seen}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -503,6 +573,32 @@ mod tests {
         assert!(
             matches!(b2.complete(&request()).await, Err(LlmError::Provider(m)) if m.contains("500"))
         );
+    }
+
+    // REQ-SEC-001
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_provider_that_echoes_the_key_does_not_get_it_into_the_error() {
+        const ECHO: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"Bad key sk-secret-12345 for you\"}}";
+        let (port, _s) = fake_server(ECHO, false).await;
+        let backend = HttpBackend::new(
+            &format!("http://127.0.0.1:{port}"),
+            "sk-secret-12345",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let err = backend.complete(&request()).await.unwrap_err();
+        assert!(!err.to_string().contains("sk-secret-12345"), "{err}");
+        assert!(err.to_string().contains("Bad key"), "{err}");
+    }
+
+    #[test]
+    fn scrubbing_hides_the_key_clips_and_keeps_one_line() {
+        assert_eq!(scrub("a sk-1 b", "sk-1", 100), "a *** b");
+        assert_eq!(scrub("first\nsecond", "", 100), "first");
+        assert_eq!(scrub(&"x".repeat(500), "k", 300).chars().count(), 301);
+        // A key cut by the length limit must not survive as a prefix.
+        let msg = format!("{}sk-abcdef", "x".repeat(295));
+        assert!(!scrub(&msg, "sk-abcdef", 300).contains("sk-"));
     }
 
     #[tokio::test(flavor = "current_thread")]

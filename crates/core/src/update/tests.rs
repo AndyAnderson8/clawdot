@@ -158,6 +158,21 @@ fn versions_compare_the_way_people_expect() {
     }
 }
 
+// REQ-UPD-007
+#[test]
+fn the_new_program_must_report_exactly_the_announced_version() {
+    assert!(reports_version("clawdot 0.2.0 (abc1234)\n", "0.2.0"));
+    assert!(reports_version("clawdot v0.2.0\n", "0.2.0"));
+    for wrong in [
+        "clawdot 10.2.0 (abc)",
+        "clawdot 0.2.01 (abc)",
+        "clawdot 0.2.0-old (abc)",
+        "",
+    ] {
+        assert!(!reports_version(wrong, "0.2.0"), "{wrong}");
+    }
+}
+
 // REQ-UPD-003
 #[test]
 fn a_release_is_read_as_data_and_odd_ones_are_refused() {

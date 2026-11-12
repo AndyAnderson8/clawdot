@@ -280,7 +280,8 @@ impl fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 fn parse_usage(v: &Value) -> Option<Usage> {
-    let u = v.get("usage")?;
+    // Servers that stream usage send `"usage": null` on every chunk but the last: that is no usage.
+    let u = v.get("usage").filter(|u| u.is_object())?;
     Some(Usage {
         prompt_tokens: u
             .get("prompt_tokens")
@@ -372,11 +373,19 @@ struct PartialCall {
     arguments: String,
 }
 
+/// The most reply text plus tool-call arguments one streamed response may accumulate. A non-streamed body is
+/// capped at the same size in the transport; a stream has no length of its own, only the call deadline.
+const MAX_STREAMED: usize = 1024 * 1024;
+/// The most distinct tool calls one streamed response may open.
+const MAX_STREAMED_CALLS: usize = 32;
+
 /// Accumulates a streamed (SSE) response line by line.
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     text: String,
     calls: BTreeMap<usize, PartialCall>,
+    /// Bytes of text, names and arguments kept so far, against [`MAX_STREAMED`].
+    kept: usize,
     finish_reason: Option<String>,
     usage: Option<Usage>,
 }
@@ -411,6 +420,7 @@ impl StreamAccumulator {
             let delta = choice.get("delta").unwrap_or(&Value::Null);
             if let Some(t) = delta.get("content").and_then(Value::as_str) {
                 if !t.is_empty() {
+                    self.keep(t.len())?;
                     self.text.push_str(t);
                     events.push(StreamEvent::Text(t.to_owned()));
                 }
@@ -422,24 +432,43 @@ impl StreamAccumulator {
                         .and_then(Value::as_u64)
                         .and_then(|i| usize::try_from(i).ok())
                         .unwrap_or(0);
-                    let p = self.calls.entry(index).or_default();
-                    if let Some(id) = c
+                    if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
+                        return Err(LlmError::Malformed("too many tool calls".into()));
+                    }
+                    let id = c
                         .get("id")
                         .and_then(Value::as_str)
-                        .filter(|i| !i.is_empty())
-                    {
+                        .filter(|i| !i.is_empty());
+                    let name = c.pointer("/function/name").and_then(Value::as_str);
+                    let args = c.pointer("/function/arguments").and_then(Value::as_str);
+                    self.keep(
+                        id.map_or(0, str::len)
+                            + name.map_or(0, str::len)
+                            + args.map_or(0, str::len),
+                    )?;
+                    let p = self.calls.entry(index).or_default();
+                    if let Some(id) = id {
                         p.id = id.to_owned();
                     }
-                    if let Some(name) = c.pointer("/function/name").and_then(Value::as_str) {
+                    if let Some(name) = name {
                         p.name.push_str(name);
                     }
-                    if let Some(args) = c.pointer("/function/arguments").and_then(Value::as_str) {
+                    if let Some(args) = args {
                         p.arguments.push_str(args);
                     }
                 }
             }
         }
         Ok(events)
+    }
+
+    /// Count `n` more bytes kept, failing once a response is larger than any sane reply.
+    fn keep(&mut self, n: usize) -> Result<(), LlmError> {
+        self.kept = self.kept.saturating_add(n);
+        if self.kept > MAX_STREAMED {
+            return Err(LlmError::Malformed("response too large".into()));
+        }
+        Ok(())
     }
 
     /// The finished response.
@@ -519,9 +548,12 @@ impl SentenceSplitter {
                     // No terminator for a long time: split at the last comma or space.
                     (self.buf.len() > LONG_RUN)
                         .then(|| {
-                            self.buf[..LONG_RUN.min(self.buf.len())]
-                                .rfind([',', ';', ' '])
-                                .map(|p| p + 1)
+                            // LONG_RUN is a byte count: back up to a character boundary before slicing.
+                            let mut end = LONG_RUN;
+                            while !self.buf.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            self.buf[..end].rfind([',', ';', ' ']).map(|p| p + 1)
                         })
                         .flatten()
                 });
@@ -831,5 +863,52 @@ mod tests {
             parts.len() >= 2 && parts.iter().all(|p| p.len() <= 170),
             "{parts:?}"
         );
+    }
+
+    #[test]
+    fn a_long_run_of_multibyte_text_does_not_panic_the_splitter() {
+        // 3-byte characters put byte 160 inside a character; the cut must land on a boundary.
+        let long = "\u{4e16}\u{754c}\u{4e16}\u{754c} ".repeat(30);
+        let parts = split_all(&[&long]);
+        assert!(parts.len() >= 2, "{parts:?}");
+        assert_eq!(parts.join("").replace(' ', ""), long.replace(' ', ""));
+    }
+
+    #[test]
+    fn a_null_usage_field_is_no_usage() {
+        // OpenAI-compatible servers put `"usage": null` on every chunk but the last.
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(r#"data: {"choices":[{"delta":{"content":"a"}}],"usage":null}"#)
+            .unwrap();
+        assert_eq!(acc.finish().usage, None);
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(r#"data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#)
+            .unwrap();
+        acc.feed_line(r#"data: {"choices":[],"usage":null}"#)
+            .unwrap();
+        assert_eq!(acc.finish().usage.map(|u| u.prompt_tokens), Some(3));
+    }
+
+    #[test]
+    fn a_stream_that_never_ends_cannot_grow_the_reply_without_limit() {
+        let mut acc = StreamAccumulator::default();
+        let line = format!(
+            r#"data: {{"choices":[{{"delta":{{"content":"{}"}}}}]}}"#,
+            "x".repeat(60_000)
+        );
+        let failed = (0..100).any(|_| acc.feed_line(&line).is_err());
+        assert!(failed, "6 MB of reply text was accepted");
+    }
+
+    #[test]
+    fn a_stream_cannot_open_unbounded_tool_calls() {
+        let mut acc = StreamAccumulator::default();
+        let failed = (0..1000).any(|i| {
+            let line = format!(
+                r#"data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":{i},"function":{{"name":"a"}}}}]}}}}]}}"#
+            );
+            acc.feed_line(&line).is_err()
+        });
+        assert!(failed, "1000 tool calls were accepted");
     }
 }

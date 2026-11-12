@@ -874,3 +874,17 @@ async fn a_yes_for_a_held_tool_that_has_gone_runs_nothing_and_reports_the_error(
     assert_eq!(r.result, Ok(SessionEnd::Closed));
     assert!(r.host.ran.is_empty(), "nothing ran: {:?}", r.host.ran);
 }
+
+// REQ-SEC-001
+#[test]
+fn a_provider_message_is_one_short_line_without_the_key_even_when_the_cut_falls_inside_it() {
+    assert_eq!(
+        one_line("bad key sk-1234 sorry\nsecond", "sk-1234"),
+        "bad key *** sorry"
+    );
+    // The key begins before the 160-character limit and ends after it.
+    let message = format!("{}sk-abcdefghij", "x".repeat(155));
+    let said = one_line(&message, "sk-abcdefghij");
+    assert!(!said.contains("sk-"), "{said}");
+    assert_eq!(one_line("\n", "k"), "no details were given.");
+}

@@ -20,6 +20,8 @@ use std::fmt;
 const STEP_BUDGET: usize = 20_000;
 /// Linear patterns one template may expand to.
 const MAX_EXPANSIONS: usize = 512;
+/// Groups inside groups a template may have. The parser and the expander recurse once per level.
+const MAX_NESTING: usize = 8;
 
 /// Morning or afternoon marker spoken with a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,9 +162,13 @@ fn push_node(alts: &mut [Vec<Node>], node: Node) {
 }
 
 fn parse_alternatives(
+    depth: usize,
     it: &mut std::iter::Peekable<std::str::Chars<'_>>,
     close: Option<char>,
 ) -> Result<Vec<Vec<Node>>, GrammarError> {
+    if depth > MAX_NESTING {
+        return Err(GrammarError("groups are nested too deeply".into()));
+    }
     let mut alts: Vec<Vec<Node>> = vec![Vec::new()];
     loop {
         let Some(&c) = it.peek() else {
@@ -190,7 +196,7 @@ fn parse_alternatives(
             '(' | '[' => {
                 it.next();
                 let (end, optional) = if c == '(' { (')', false) } else { (']', true) };
-                let inner = parse_alternatives(it, Some(end))?;
+                let inner = parse_alternatives(depth + 1, it, Some(end))?;
                 let node = if optional {
                     Node::Opt(inner)
                 } else {
@@ -236,7 +242,7 @@ fn parse_alternatives(
                 if it.peek() == Some(&'[') {
                     // `word[s]` is "word" or "words": an optional suffix glued to the word.
                     it.next();
-                    let inner = parse_alternatives(it, Some(']'))?;
+                    let inner = parse_alternatives(depth + 1, it, Some(']'))?;
                     let suffix = match inner.as_slice() {
                         [alt] => match alt.as_slice() {
                             [Node::Word(s)] => Some(s.clone()),
@@ -308,7 +314,7 @@ fn expand_seq(nodes: &[Node]) -> Result<Vec<Vec<Item>>, GrammarError> {
 
 fn compile(template: &str) -> Result<Vec<Vec<Item>>, GrammarError> {
     let mut it = template.chars().peekable();
-    let alts = parse_alternatives(&mut it, None)?;
+    let alts = parse_alternatives(0, &mut it, None)?;
     let patterns = expand_alts(&alts)?;
     if patterns.iter().any(Vec::is_empty) {
         return Err(GrammarError(format!(
@@ -1441,6 +1447,17 @@ mod tests {
         ] {
             assert!(Matcher::new(&[("x", &[bad])]).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn deeply_nested_templates_are_refused_instead_of_overflowing_the_stack() {
+        // Templates are compiled in today, but packs will bring them from outside (REQ-EXT-002).
+        let nested = format!("{}a{}", "(".repeat(100_000), ")".repeat(100_000));
+        assert!(Matcher::new(&[("x", &[nested.as_str()])]).is_err());
+        let optional = format!("{}a{}", "[".repeat(100_000), "]".repeat(100_000));
+        assert!(Matcher::new(&[("x", &[optional.as_str()])]).is_err());
+        // Ordinary nesting still works.
+        assert!(Matcher::new(&[("x", &["(a (b [c]) | d) e"])]).is_ok());
     }
 
     #[test]
