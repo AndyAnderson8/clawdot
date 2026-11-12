@@ -343,6 +343,7 @@ mod tests {
             expires_at: None,
             received_at: 0,
             state: EventState::New,
+            spoken_seq: 0,
         }
     }
 
