@@ -136,7 +136,7 @@ The timers file and the usage counters use the same writer, so the main loop nev
 
 - **Errors:** typed errors with context; user-facing failures are spoken in plain language.
 - **Observability:** structured logs, a small metrics endpoint (RSS, queue depth, provider latency).
-- **Time:** monotonic clock for durations, wall clock for alarms; clock validity is a first-class state.
+- **Time:** monotonic clock for durations, wall clock for alarms; clock validity is a first-class state. Which is which: [the agent loop, "Time"](agent-loop.md).
 - **Concurrency:** single-threaded async executor for logic, and a dedicated audio thread/callbacks for real-time paths.
 - **Configuration:** one file, schema-validated, with secrets separated.
 
