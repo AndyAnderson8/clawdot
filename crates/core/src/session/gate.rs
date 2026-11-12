@@ -330,8 +330,9 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             "Error: that tool is no longer available.".to_owned()
         };
         self.result.tool_calls += 1;
+        let id = self.conv.host_call_id();
         let call = ToolCall {
-            id: "host_confirmed".to_owned(),
+            id: id.clone(),
             name: held.tool.clone(),
             arguments: held.args.to_string(),
         };
@@ -340,7 +341,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             .push(Message::assistant_calls(String::new(), vec![call]));
         self.conv
             .history
-            .push(Message::tool_result("host_confirmed", clip(&outcome)));
+            .push(Message::tool_result(id, clip(&outcome)));
         if self.ctl.cancel.is_cancelled() {
             let sent = (held.tier >= Tier::Costly).then_some(held.tool.as_str());
             return Some(self.cancelled(&[], sent));

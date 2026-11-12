@@ -384,6 +384,8 @@ pub struct Conversation {
     clarify: Option<Clarify>,
     /// The user was asked whether to forget every note, at this time.
     forget_all_asked: Option<Ts>,
+    /// Counter behind the ids of the calls the host writes into the history itself (see `host_call_id`).
+    next_host_call: u32,
 }
 
 impl Conversation {
@@ -424,6 +426,32 @@ impl Conversation {
             next_result: 0,
             clarify: None,
             forget_all_asked: None,
+            next_host_call: 0,
+        }
+    }
+
+    /// An id for a tool call the host writes into the history itself (a released held action): `host` and five
+    /// base-36 digits, nine ASCII letters and digits in all, which every OpenAI-compatible provider accepts
+    /// (some want unique ids, Mistral wants exactly nine alphanumerics). The ids the model makes are not
+    /// constrained, so one that is already in the history is skipped; the history is short, so this ends.
+    fn host_call_id(&mut self) -> String {
+        const SPACE: u32 = 36 * 36 * 36 * 36 * 36;
+        loop {
+            let mut n = self.next_host_call;
+            self.next_host_call = (n + 1) % SPACE;
+            let mut digits = [b'0'; 5];
+            for d in digits.iter_mut().rev() {
+                *d = b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize];
+                n /= 36;
+            }
+            let id = format!("host{}", String::from_utf8_lossy(&digits));
+            let taken = self.history.iter().any(|m| {
+                m.tool_call_id.as_deref() == Some(id.as_str())
+                    || m.tool_calls.iter().any(|c| c.id == id)
+            });
+            if !taken {
+                return id;
+            }
         }
     }
 
