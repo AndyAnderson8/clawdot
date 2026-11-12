@@ -4,6 +4,7 @@
 //! This module is transport-free: it turns values into JSON and JSON (or SSE lines) back into values, so
 //! it is tested without a network. [`crate::transport`] carries it over HTTP.
 
+use crate::lang::Language;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -543,19 +544,26 @@ impl StreamAccumulator {
 
 /// Cuts streamed text into speakable sentences so TTS can start before the reply is finished
 /// (REQ-VOI-004).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SentenceSplitter {
+    lang: &'static Language,
     buf: String,
 }
 
 /// A sentence is emitted early at a comma or space once it passes this length.
 const LONG_RUN: usize = 160;
-const ABBREVIATIONS: &[&str] = &[
-    "mr", "mrs", "ms", "dr", "st", "vs", "etc", "e.g", "i.e", "approx", "no",
-];
 
 impl SentenceSplitter {
-    fn ends_sentence(s: &str, i: usize) -> bool {
+    /// A splitter for text in `lang`, which says which abbreviations end in a full stop without ending the sentence.
+    #[must_use]
+    pub fn new(lang: &'static Language) -> Self {
+        Self {
+            lang,
+            buf: String::new(),
+        }
+    }
+
+    fn ends_sentence(&self, s: &str, i: usize) -> bool {
         let bytes = s.as_bytes();
         if !matches!(bytes[i], b'.' | b'!' | b'?') {
             return false;
@@ -570,7 +578,7 @@ impl SentenceSplitter {
                 .rfind(|c: char| c.is_whitespace())
                 .map_or(0, |p| p + 1);
             let word = s[word_start..i].to_ascii_lowercase();
-            if ABBREVIATIONS.contains(&word.as_str()) {
+            if self.lang.abbreviations.contains(&word.as_str()) {
                 return false;
             }
         }
@@ -584,7 +592,7 @@ impl SentenceSplitter {
         loop {
             let cut = (0..self.buf.len())
                 .filter(|&i| self.buf.is_char_boundary(i))
-                .find(|&i| Self::ends_sentence(&self.buf, i))
+                .find(|&i| self.ends_sentence(&self.buf, i))
                 .map(|i| i + 1)
                 .or_else(|| {
                     // No terminator for a long time: split at the last comma or space.
@@ -839,7 +847,7 @@ mod tests {
     }
 
     fn split_all(chunks: &[&str]) -> Vec<String> {
-        let mut s = SentenceSplitter::default();
+        let mut s = SentenceSplitter::new(crate::lang::DEFAULT);
         let mut out: Vec<String> = chunks.iter().flat_map(|c| s.push(c)).collect();
         out.extend(s.flush());
         out
@@ -887,7 +895,7 @@ mod tests {
 
     #[test]
     fn a_sentence_split_across_chunks_waits_for_its_end() {
-        let mut s = SentenceSplitter::default();
+        let mut s = SentenceSplitter::new(crate::lang::DEFAULT);
         assert!(s.push("Hello wor").is_empty());
         assert!(
             s.push("ld.").is_empty(),

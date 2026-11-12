@@ -247,7 +247,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         let conv = &mut *self.conv;
         let result = &mut self.result;
         if by_user && let Some(at) = conv.forget_all_asked.take() {
-            if mono - at <= CONFIRM_WINDOW_SECS && is_yes(user_text) {
+            if mono - at <= CONFIRM_WINDOW_SECS && is_yes(self.cfg.lang, user_text) {
                 let speech = match conv.notes.as_ref().map(|n| n.clear()) {
                     Some(Ok(n)) => format!(
                         "Okay, I forgot all {n} note{}.",
@@ -258,7 +258,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 };
                 return Some(finish_with(conv, take(result), &speech));
             }
-            if is_no(user_text) {
+            if is_no(self.cfg.lang, user_text) {
                 return Some(finish_with(conv, take(result), "Okay, I'll keep them."));
             }
         }
@@ -272,7 +272,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             return None;
         }
         let held = self.conv.pending.take()?;
-        if is_yes(user_text) && self.mono - held.proposed_at > CONFIRM_WINDOW_SECS {
+        if is_yes(self.cfg.lang, user_text) && self.mono - held.proposed_at > CONFIRM_WINDOW_SECS {
             let speech = "That took too long, so I dropped it. Please ask again.";
             return Some(self.drop_held(
                 held,
@@ -283,7 +283,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 speech,
             ));
         }
-        if is_no(user_text) {
+        if is_no(self.cfg.lang, user_text) {
             let speech = "Okay, I won't do that.";
             return Some(self.drop_held(
                 held,
@@ -294,7 +294,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 speech,
             ));
         }
-        if is_yes(user_text) {
+        if is_yes(self.cfg.lang, user_text) {
             return self.release_held(held).await;
         }
         // Anything else is an unrelated request: the held action is dropped and the turn goes on.

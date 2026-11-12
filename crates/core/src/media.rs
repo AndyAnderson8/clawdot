@@ -10,6 +10,7 @@
 //! audio. It returns [`Action`]s that the satellite carries out, which keeps it testable and keeps ducking
 //! and pausing for speech, alarms, and announcements (REQ-MUS-004) in one place, the satellite.
 
+use crate::lang::Language;
 use serde::Deserialize;
 
 /// What a backend can do (REQ-MUS-003).
@@ -98,34 +99,21 @@ fn words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Words that mean "some music" rather than a station name.
-const GENERIC: &[&str] = &[
-    "some",
-    "any",
-    "the",
-    "a",
-    "music",
-    "radio",
-    "station",
-    "something",
-    "tunes",
-    "songs",
-    "song",
-];
-
 /// The built-in playback backend: a list of stations.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Player {
+    lang: &'static Language,
     stations: Vec<Station>,
     current: Option<usize>,
     playing: bool,
 }
 
 impl Player {
-    /// A player for these stations.
+    /// A player for these stations, understanding "some music" in `lang`.
     #[must_use]
-    pub fn new(stations: Vec<Station>) -> Self {
+    pub fn new(lang: &'static Language, stations: Vec<Station>) -> Self {
         Self {
+            lang,
             stations,
             current: None,
             playing: false,
@@ -185,7 +173,7 @@ impl Player {
     fn find(&self, query: &str) -> Option<usize> {
         let q: Vec<String> = words(query)
             .into_iter()
-            .filter(|w| !GENERIC.contains(&w.as_str()))
+            .filter(|w| !self.lang.generic_music_words.contains(&w.as_str()))
             .collect();
         if q.is_empty() {
             return (!self.stations.is_empty()).then_some(0);
@@ -293,12 +281,15 @@ mod tests {
     }
 
     fn player() -> Player {
-        Player::new(vec![
-            st("jazz"),
-            st("bbc world service"),
-            st("classic rock"),
-            st("rock classics"),
-        ])
+        Player::new(
+            crate::lang::DEFAULT,
+            vec![
+                st("jazz"),
+                st("bbc world service"),
+                st("classic rock"),
+                st("rock classics"),
+            ],
+        )
     }
 
     fn title(a: &Action) -> &str {
@@ -373,7 +364,7 @@ mod tests {
 
     #[test]
     fn nothing_configured_means_nothing_to_play() {
-        let mut p = Player::new(vec![]);
+        let mut p = Player::new(crate::lang::DEFAULT, vec![]);
         assert!(!p.is_configured());
         assert!(p.play("jazz").unwrap_err().0.contains("set up"));
         assert!(p.next_station().is_err() && p.resume().is_err());

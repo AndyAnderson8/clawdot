@@ -4,6 +4,7 @@
 //!   brain; [`turns`] and [`speaker`] run model turns and speech as tasks beside the loop (ADR-0021).
 //! * [`session`]: one model turn and the gate that decides every tool call. [`speakers`] keeps a conversation each.
 //! * [`fastpath`] and [`assistant`]: local command recognition and the built-in tools, with no model or network.
+//! * [`lang`]: the words the logic listens for, as data; today English.
 //! * [`extensions`], [`httptools`], [`mcp`] and `mcp_server`: tools, connections and skills, and the MCP client and server.
 //! * [`inbox`], [`app`] and [`http`]: events from agents, the shared state behind one lock, and the webhook, announce and bridge routes.
 //! * [`ui`], [`settings`], [`admin`] and [`secrets`]: the portal's API, layered settings, the administrator, stored keys.
@@ -40,6 +41,7 @@ mod hostguard;
 pub mod http;
 pub mod httptools;
 pub mod inbox;
+pub mod lang;
 pub mod limit;
 pub mod llm;
 pub mod mcp;

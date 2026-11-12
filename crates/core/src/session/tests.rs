@@ -2015,10 +2015,10 @@ async fn a_model_request_in_flight_is_abandoned_when_the_user_says_stop() {
 #[test]
 fn the_stop_phrases_are_plain_and_a_sentence_containing_stop_is_not_one() {
     for yes in ["Stop.", "cancel", "never mind", "Stop that", "forget it"] {
-        assert!(is_cancel(yes), "{yes}");
+        assert!(is_cancel(crate::lang::DEFAULT, yes), "{yes}");
     }
     for no in ["stop the music in the kitchen", "don't stop", "yes", ""] {
-        assert!(!is_cancel(no), "{no}");
+        assert!(!is_cancel(crate::lang::DEFAULT, no), "{no}");
     }
 }
 
@@ -2294,7 +2294,7 @@ async fn the_model_sees_the_last_ten_actions_and_they_expire_with_the_conversati
 }
 
 fn with_notes(on: bool) -> (Conversation, Arc<NoteStore>) {
-    let store = Arc::new(NoteStore::in_memory(on));
+    let store = Arc::new(NoteStore::in_memory(crate::lang::DEFAULT, on));
     let mut c = conv();
     c.set_notes(Arc::clone(&store));
     (c, store)

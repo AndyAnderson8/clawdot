@@ -62,6 +62,7 @@ fn start() -> Fixture {
     });
 
     let assistant = Assistant::new(
+        clawdot_core::lang::DEFAULT,
         clock,
         Box::new(FixedOffset(0)),
         Scheduler::new(16),

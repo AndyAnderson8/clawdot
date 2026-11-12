@@ -3,6 +3,8 @@ use crate::app::{Adapters, LOCALHOST_PEER, Limits};
 use crate::sched::{FixedOffset, days_from_civil};
 use std::sync::atomic::{AtomicI64, Ordering};
 
+const L: &Language = crate::lang::DEFAULT;
+
 pub(super) struct TestClock(pub(super) AtomicI64);
 impl Clock for TestClock {
     fn monotonic_secs(&self) -> i64 {
@@ -28,6 +30,7 @@ pub(super) fn setup(with_core: bool) -> (Assistant, Arc<TestClock>, Option<Arc<C
         ))
     });
     let a = Assistant::new(
+        crate::lang::DEFAULT,
         clock.clone(),
         Box::new(FixedOffset(0)),
         Scheduler::new(16),
@@ -209,6 +212,7 @@ fn everything_else_falls_through() {
 fn limits_are_spoken_not_silently_ignored() {
     let clock = Arc::new(TestClock(AtomicI64::new(utc(2026, 11, 7, 14, 42))));
     let mut a = Assistant::new(
+        crate::lang::DEFAULT,
         clock,
         Box::new(FixedOffset(0)),
         Scheduler::new(1),
@@ -322,22 +326,22 @@ fn dismiss_and_snooze_apply_to_the_open_event() {
 
 #[test]
 fn formatting_helpers() {
-    assert_eq!(format_duration(45), "45 seconds");
-    assert_eq!(format_duration(60), "1 minute");
-    assert_eq!(format_duration(3661), "1 hour, 1 minute and 1 second");
-    assert_eq!(format_clock(0, 5), "12:05 AM");
-    assert_eq!(format_clock(12, 0), "12 PM");
-    assert_eq!(format_clock(23, 30), "11:30 PM");
+    assert_eq!(format_duration(L, 45), "45 seconds");
+    assert_eq!(format_duration(L, 60), "1 minute");
+    assert_eq!(format_duration(L, 3661), "1 hour, 1 minute and 1 second");
+    assert_eq!(format_clock(L, 0, 5), "12:05 AM");
+    assert_eq!(format_clock(L, 12, 0), "12 PM");
+    assert_eq!(format_clock(L, 23, 30), "11:30 PM");
     assert_eq!(
         (
-            ordinal(1),
-            ordinal(2),
-            ordinal(3),
-            ordinal(4),
-            ordinal(11),
-            ordinal(12),
-            ordinal(21),
-            ordinal(22)
+            ordinal(L, 1),
+            ordinal(L, 2),
+            ordinal(L, 3),
+            ordinal(L, 4),
+            ordinal(L, 11),
+            ordinal(L, 12),
+            ordinal(L, 21),
+            ordinal(L, 22)
         ),
         (
             "1st".into(),
@@ -359,6 +363,7 @@ fn scheduled_items_persist_through_the_store() {
     let clock = Arc::new(TestClock(AtomicI64::new(utc(2026, 11, 7, 14, 42))));
     {
         let mut a = Assistant::new(
+            crate::lang::DEFAULT,
             clock.clone(),
             Box::new(FixedOffset(0)),
             Scheduler::new(16),
@@ -470,7 +475,14 @@ fn stepping(
         || Scheduler::new(16),
         |s| Scheduler::load(s, 16, &*clock).unwrap(),
     );
-    let a = Assistant::new(clock.clone(), Box::new(FixedOffset(0)), sched, store, None);
+    let a = Assistant::new(
+        crate::lang::DEFAULT,
+        clock.clone(),
+        Box::new(FixedOffset(0)),
+        sched,
+        store,
+        None,
+    );
     (a, clock)
 }
 

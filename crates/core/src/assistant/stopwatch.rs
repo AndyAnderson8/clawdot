@@ -3,6 +3,7 @@
 //! One place makes the words, so the fast path and the model's tool say the same thing.
 
 use super::{Assistant, CLOCK_UNSET, format_duration};
+use crate::lang::Language;
 use crate::stopwatch::{Reading, Refusal};
 
 /// What the user asked of the stopwatch.
@@ -40,21 +41,21 @@ fn laps_word(n: usize) -> String {
 }
 
 /// A refusal in words.
-fn refusal_words(r: Refusal) -> String {
+fn refusal_words(lang: &Language, r: Refusal) -> String {
     match r {
         Refusal::None => "There is no stopwatch running.".to_owned(),
         Refusal::Running(r) => format!(
             "The stopwatch is already running, at {}.",
-            format_duration(r.elapsed)
+            format_duration(lang, r.elapsed)
         ),
         Refusal::Stopped(r) => format!(
             "The stopwatch is stopped at {}.",
-            format_duration(r.elapsed)
+            format_duration(lang, r.elapsed)
         ),
         Refusal::ClockWentBack { last_good } => format!(
             "My clock went backwards while the stopwatch was running, so I can't trust its time. \
              The last time I can vouch for is {}.",
-            format_duration(last_good)
+            format_duration(lang, last_good)
         ),
         Refusal::TooManyLaps => format!(
             "That is {}, the most I can keep. Stop the stopwatch to hear the total.",
@@ -63,8 +64,8 @@ fn refusal_words(r: Refusal) -> String {
     }
 }
 
-fn stopped_words(r: Reading) -> String {
-    let mut s = format!("Stopped at {}", format_duration(r.elapsed));
+fn stopped_words(lang: &Language, r: Reading) -> String {
+    let mut s = format!("Stopped at {}", format_duration(lang, r.elapsed));
     if r.laps > 0 {
         s.push_str(&format!(", {}", laps_word(r.laps)));
     }
@@ -85,29 +86,29 @@ impl Assistant {
         let said = match action {
             Action::Start => match self.sched.stopwatch_start(now) {
                 Ok(()) => "Stopwatch started.".to_owned(),
-                Err(r) => refusal_words(r),
+                Err(r) => refusal_words(self.lang, r),
             },
             Action::Lap => match self.sched.stopwatch_lap(now) {
                 Ok(l) => format!(
                     "Lap {}, {}. Total {}.",
                     l.number,
-                    format_duration(l.split),
-                    format_duration(l.total)
+                    format_duration(self.lang, l.split),
+                    format_duration(self.lang, l.total)
                 ),
-                Err(r) => refusal_words(r),
+                Err(r) => refusal_words(self.lang, r),
             },
             Action::Stop => match self.sched.stopwatch_stop(now) {
-                Ok(r) => stopped_words(r),
-                Err(r) => refusal_words(r),
+                Ok(r) => stopped_words(self.lang, r),
+                Err(r) => refusal_words(self.lang, r),
             },
             Action::Read => match self.sched.stopwatch_read(now) {
                 Ok((r, splits)) if r.running => {
-                    let mut s = format!("{} so far", format_duration(r.elapsed));
+                    let mut s = format!("{} so far", format_duration(self.lang, r.elapsed));
                     if let Some(last) = splits.last() {
                         s.push_str(&format!(
                             ", {}, the last one {}",
                             laps_word(splits.len()),
-                            format_duration(*last)
+                            format_duration(self.lang, *last)
                         ));
                     }
                     s.push('.');
@@ -115,9 +116,9 @@ impl Assistant {
                 }
                 Ok((r, _)) => format!(
                     "The stopwatch is stopped at {}.",
-                    format_duration(r.elapsed)
+                    format_duration(self.lang, r.elapsed)
                 ),
-                Err(r) => refusal_words(r),
+                Err(r) => refusal_words(self.lang, r),
             },
             Action::Reset => {
                 if self.sched.stopwatch_reset() {
@@ -224,6 +225,7 @@ mod tests {
         let clock = Arc::new(TestClock(AtomicI64::new(utc(2026, 11, 7, 14, 42))));
         let build = |clock: &Arc<TestClock>| {
             Assistant::new(
+                crate::lang::DEFAULT,
                 clock.clone(),
                 Box::new(FixedOffset(0)),
                 Scheduler::load(&store, 16, &**clock).unwrap_or_else(|_| Scheduler::new(16)),

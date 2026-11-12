@@ -4,9 +4,10 @@
 
 use crate::app::persist::{Durability, SaveError};
 use crate::app::{Core, ReplyError};
-use crate::fastpath::{Match, Matcher, Time};
+use crate::fastpath::{Intent, Match, Matcher, Time};
 use crate::inbox::reply::ReplyKind;
 use crate::inbox::summary::{details_text, status_sentence};
+use crate::lang::Language;
 use crate::media::{Action as MediaAction, MediaError, Player, Station};
 use crate::sched::{
     Clock, Fired, Kind, Scheduler, Ts, Zone, civil_from_days, days, next_occurrence, weekday,
@@ -88,60 +89,43 @@ impl Outcome {
     }
 }
 
-const WEEKDAYS: [&str; 7] = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-    "Sunday",
-];
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
 /// "1 hour and 30 minutes", "45 seconds".
 #[must_use]
-pub fn format_duration(secs: i64) -> String {
+pub fn format_duration(lang: &Language, secs: i64) -> String {
+    let d = &lang.durations;
     let secs = secs.max(0);
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    let unit = |n: i64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    let unit = |n: i64, noun: &crate::lang::Noun| {
+        format!("{n} {}", if n == 1 { noun.one } else { noun.many })
+    };
     let mut parts = Vec::new();
     if h > 0 {
-        parts.push(unit(h, "hour"));
+        parts.push(unit(h, &d.hour));
     }
     if m > 0 {
-        parts.push(unit(m, "minute"));
+        parts.push(unit(m, &d.minute));
     }
     if s > 0 || parts.is_empty() {
-        parts.push(unit(s, "second"));
+        parts.push(unit(s, &d.second));
     }
     match parts.len() {
         1 => parts.remove(0),
         _ => {
             let last = parts.pop().unwrap_or_default();
-            format!("{} and {last}", parts.join(", "))
+            format!("{} {} {last}", parts.join(", "), d.and)
         }
     }
 }
 
 /// "7 AM", "7:30 PM".
 #[must_use]
-pub fn format_clock(hour: u8, minute: u8) -> String {
+pub fn format_clock(lang: &Language, hour: u8, minute: u8) -> String {
     let h12 = if hour % 12 == 0 { 12 } else { hour % 12 };
-    let ampm = if hour < 12 { "AM" } else { "PM" };
+    let ampm = if hour < 12 {
+        lang.clock.am_label
+    } else {
+        lang.clock.pm_label
+    };
     if minute == 0 {
         format!("{h12} {ampm}")
     } else {
@@ -149,15 +133,8 @@ pub fn format_clock(hour: u8, minute: u8) -> String {
     }
 }
 
-fn ordinal(n: i64) -> String {
-    let suffix = match (n % 10, n % 100) {
-        (_, 11..=13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    };
-    format!("{n}{suffix}")
+fn ordinal(lang: &Language, n: i64) -> String {
+    (lang.calendar.ordinal)(n)
 }
 
 fn capitalize(s: &str) -> String {
@@ -168,17 +145,23 @@ fn capitalize(s: &str) -> String {
 }
 
 /// Speak what was scheduled, for example "Alarm set for 7 AM tomorrow."
-fn day_phrase(zone: &dyn Zone, now: Ts, at: Ts) -> String {
+fn day_phrase(lang: &Language, zone: &dyn Zone, now: Ts, at: Ts) -> String {
+    let c = &lang.calendar;
     match zone.local_day(at) - zone.local_day(now) {
-        0 => "today".to_owned(),
-        1 => "tomorrow".to_owned(),
-        d if d < 7 => format!("on {}", WEEKDAYS[usize::from(weekday(zone.local_day(at)))]),
+        0 => c.today.to_owned(),
+        1 => c.tomorrow.to_owned(),
+        d if d < 7 => format!(
+            "{} {}",
+            c.on,
+            c.weekdays[usize::from(weekday(zone.local_day(at)))]
+        ),
         _ => {
             let (_, m, d) = civil_from_days(zone.local_day(at));
             format!(
-                "on {} {}",
-                MONTHS[usize::try_from(m - 1).unwrap_or(0) % 12],
-                ordinal(d)
+                "{} {} {}",
+                c.on,
+                c.months[usize::try_from(m - 1).unwrap_or(0) % 12],
+                ordinal(lang, d)
             )
         }
     }
@@ -209,6 +192,7 @@ pub fn describe_fired(f: &Fired) -> String {
 
 /// The fast-path dispatcher and the scheduler it drives.
 pub struct Assistant {
+    lang: &'static Language,
     matcher: Matcher,
     sched: Scheduler,
     sched_store: Option<JsonStore>,
@@ -248,25 +232,11 @@ pub fn say_not_saved(say: &str) -> String {
     }
 }
 
-/// Fast-path intents whose answer or effect depends on the wall clock being right. A countdown timer is not
-/// one: it runs on the monotonic clock and works on a device that has never had the time.
-fn needs_valid_clock(intent: &str) -> bool {
-    matches!(
-        intent,
-        "time.query"
-            | "date.query"
-            | "stopwatch.start"
-            | "stopwatch.lap"
-            | "stopwatch.stop"
-            | "stopwatch.read"
-    ) || intent.starts_with("alarm.set")
-        || intent.starts_with("reminder.set")
-}
-
 impl Assistant {
-    /// Build a dispatcher.
+    /// Build a dispatcher that listens and speaks in `lang`.
     #[must_use]
     pub fn new(
+        lang: &'static Language,
         clock: Arc<dyn Clock + Send + Sync>,
         zone: Box<dyn Zone + Send + Sync>,
         sched: Scheduler,
@@ -274,16 +244,23 @@ impl Assistant {
         core: Option<Arc<Core>>,
     ) -> Self {
         Self {
-            matcher: Matcher::builtin(),
+            lang,
+            matcher: Matcher::builtin(lang),
             sched,
             sched_store,
             unreported: Mutex::new(None),
             zone,
             clock,
             core,
-            player: Player::default(),
+            player: Player::new(lang, Vec::new()),
             effects: Vec::new(),
         }
+    }
+
+    /// The language this dispatcher listens and speaks in.
+    #[must_use]
+    pub fn lang(&self) -> &'static Language {
+        self.lang
     }
 
     /// Switch the time zone used for alarms, reminders, and the time (REQ-CFG-039). Items already set keep
@@ -295,7 +272,7 @@ impl Assistant {
     /// Set up the radio stations the music commands use.
     #[must_use]
     pub fn with_stations(mut self, stations: Vec<Station>) -> Self {
-        self.player = Player::new(stations);
+        self.player = Player::new(self.lang, stations);
         self
     }
 
@@ -435,77 +412,78 @@ impl Assistant {
     pub fn handle(&mut self, utterance: &str) -> Option<Outcome> {
         let m = self.matcher.matches(utterance)?;
         let now = self.clock.now();
-        if !self.clock.wall_clock_valid() && needs_valid_clock(&m.intent) {
+        if !self.clock.wall_clock_valid() && m.intent.needs_valid_clock() {
             return Outcome::say(CLOCK_UNSET);
         }
-        match m.intent.as_str() {
-            "stop" => {
+        // Every built-in intent is named here, so a new one must be handled to compile.
+        match m.intent {
+            Intent::Stop => {
                 self.player.stop();
                 Outcome::effect("", Effect::StopPlayback)
             }
-            "media.play" | "media.pause" | "media.resume" | "media.next" | "media.previous" => {
-                self.media_intent(&m)
-            }
-            "volume.up" => Outcome::effect("", Effect::VolumeUp),
-            "volume.down" => Outcome::effect("", Effect::VolumeDown),
-            "volume.set" => {
+            Intent::MediaPlay => self.media_play(&m),
+            Intent::MediaPause => self.media_control(MediaCmd::Pause),
+            Intent::MediaResume => self.media_control(MediaCmd::Resume),
+            Intent::MediaNext => self.media_control(MediaCmd::Next),
+            Intent::MediaPrevious => self.media_control(MediaCmd::Previous),
+            Intent::VolumeUp => Outcome::effect("", Effect::VolumeUp),
+            Intent::VolumeDown => Outcome::effect("", Effect::VolumeDown),
+            Intent::VolumeSet => {
                 let level = m.number("level").filter(|l| (0..=100).contains(l))?;
                 Outcome::effect("", Effect::VolumeSet(u8::try_from(level).ok()?))
             }
-            "stopwatch.start" => self.stopwatch_outcome(stopwatch::Action::Start),
-            "stopwatch.lap" => self.stopwatch_outcome(stopwatch::Action::Lap),
-            "stopwatch.stop" => self.stopwatch_outcome(stopwatch::Action::Stop),
-            "stopwatch.read" => self.stopwatch_outcome(stopwatch::Action::Read),
-            "stopwatch.reset" => self.stopwatch_outcome(stopwatch::Action::Reset),
-            "timer.set" => self.timer_set(&m),
-            "timer.cancel" => self.timer_cancel(&m),
-            "timer.query" => self.timer_query(&m),
-            "alarm.set" => self.alarm_set(&m, now, None, ""),
-            "alarm.set_daily" => self.alarm_set(&m, now, Some(days::ALL), "every day"),
-            "alarm.set_weekdays" => self.alarm_set(&m, now, Some(days::WEEKDAYS), "on weekdays"),
-            "alarm.set_weekend" => self.alarm_set(&m, now, Some(days::WEEKEND), "on weekends"),
-            "alarm.cancel" => self.alarm_cancel(),
-            "reminder.set_in" => self.reminder_set_in(&m),
-            "reminder.set_at" => self.reminder_set_at(&m, now),
-            "time.query" => self.time_query(now),
-            "date.query" => self.date_query(now),
-            other if other.starts_with("inbox.") => self.inbox(&m),
-            _ => None,
+            Intent::StopwatchStart => self.stopwatch_outcome(stopwatch::Action::Start),
+            Intent::StopwatchLap => self.stopwatch_outcome(stopwatch::Action::Lap),
+            Intent::StopwatchStop => self.stopwatch_outcome(stopwatch::Action::Stop),
+            Intent::StopwatchRead => self.stopwatch_outcome(stopwatch::Action::Read),
+            Intent::StopwatchReset => self.stopwatch_outcome(stopwatch::Action::Reset),
+            Intent::TimerSet => self.timer_set(&m),
+            Intent::TimerCancel => self.timer_cancel(&m),
+            Intent::TimerQuery => self.timer_query(&m),
+            Intent::AlarmSet => self.alarm_set(&m, now, None, ""),
+            Intent::AlarmSetDaily => self.alarm_set(&m, now, Some(days::ALL), "every day"),
+            Intent::AlarmSetWeekdays => {
+                self.alarm_set(&m, now, Some(days::WEEKDAYS), "on weekdays")
+            }
+            Intent::AlarmSetWeekend => self.alarm_set(&m, now, Some(days::WEEKEND), "on weekends"),
+            Intent::AlarmCancel => self.alarm_cancel(),
+            Intent::ReminderSetIn => self.reminder_set_in(&m),
+            Intent::ReminderSetAt => self.reminder_set_at(&m, now),
+            Intent::TimeQuery => self.time_query(now),
+            Intent::DateQuery => self.date_query(now),
+            Intent::InboxStatus => self.inbox_status(),
+            Intent::InboxDetails => self.inbox_details(),
+            Intent::InboxDismiss => self.inbox_dismiss(),
+            Intent::InboxSnooze => self.inbox_snooze(&m),
+            Intent::InboxAck => self.inbox_ack(),
+            Intent::InboxInstruct => self.inbox_instruct(&m),
         }
     }
 
-    /// Play, pause, resume, next and previous: through the station player when radio is configured, else as a
-    /// plain command to the satellite (only `media.play` has nothing to say then, and is left to the model).
-    fn media_intent(&mut self, m: &Match) -> Option<Outcome> {
-        let configured = self.player.is_configured();
-        match m.intent.as_str() {
-            "media.play" if configured => {
-                let q = m.text("name").unwrap_or("").to_owned();
-                let r = self.player.play(&q);
-                self.media(r)
-            }
-            "media.pause" if configured => {
-                let r = self.player.pause();
-                self.media(r)
-            }
-            "media.resume" if configured => {
-                let r = self.player.resume();
-                self.media(r)
-            }
-            "media.next" if configured => {
-                let r = self.player.next_station();
-                self.media(r)
-            }
-            "media.previous" if configured => {
-                let r = self.player.previous_station();
-                self.media(r)
-            }
-            "media.pause" => Outcome::effect("", Effect::Media(MediaCmd::Pause)),
-            "media.resume" => Outcome::effect("", Effect::Media(MediaCmd::Resume)),
-            "media.next" => Outcome::effect("", Effect::Media(MediaCmd::Next)),
-            "media.previous" => Outcome::effect("", Effect::Media(MediaCmd::Previous)),
-            _ => None,
+    /// Play something: through the station player when radio is configured; otherwise there is nothing to
+    /// say, and it is left to the model.
+    fn media_play(&mut self, m: &Match) -> Option<Outcome> {
+        if !self.player.is_configured() {
+            return None;
         }
+        let q = m.text("name").unwrap_or("").to_owned();
+        let r = self.player.play(&q);
+        self.media(r)
+    }
+
+    /// Pause, resume, next and previous: through the station player when radio is configured, else as a
+    /// plain command to the satellite.
+    fn media_control(&mut self, cmd: MediaCmd) -> Option<Outcome> {
+        if !self.player.is_configured() {
+            return Outcome::effect("", Effect::Media(cmd));
+        }
+        let r = match cmd {
+            MediaCmd::Pause => self.player.pause(),
+            MediaCmd::Resume => self.player.resume(),
+            MediaCmd::Next => self.player.next_station(),
+            MediaCmd::Previous => self.player.previous_station(),
+        };
+        self.media(r)
     }
 
     fn alarm_cancel(&mut self) -> Option<Outcome> {
@@ -526,7 +504,7 @@ impl Assistant {
                 self.save();
                 Outcome::say(format!(
                     "Okay, I'll remind you to {text} in {}.",
-                    format_duration(secs)
+                    format_duration(self.lang, secs)
                 ))
             }
             Err(e) => Outcome::say(format!("Sorry, {e}.")),
@@ -541,8 +519,8 @@ impl Assistant {
                 self.save();
                 Outcome::say(format!(
                     "Okay, I'll remind you to {text} at {} {}.",
-                    format_clock(h, mi),
-                    day_phrase(&*self.zone, now, at)
+                    format_clock(self.lang, h, mi),
+                    day_phrase(self.lang, &*self.zone, now, at)
                 ))
             }
             Err(e) => Outcome::say(format!("Sorry, {e}.")),
@@ -554,6 +532,7 @@ impl Assistant {
         Outcome::say(format!(
             "It's {}.",
             format_clock(
+                self.lang,
                 u8::try_from(minute / 60).ok()?,
                 u8::try_from(minute % 60).ok()?
             )
@@ -565,9 +544,9 @@ impl Assistant {
         let (_, mo, d) = civil_from_days(day);
         Outcome::say(format!(
             "Today is {}, {} {}.",
-            WEEKDAYS[usize::from(weekday(day))],
-            MONTHS[usize::try_from(mo - 1).ok()? % 12],
-            ordinal(d)
+            self.lang.calendar.weekdays[usize::from(weekday(day))],
+            self.lang.calendar.months[usize::try_from(mo - 1).ok()? % 12],
+            ordinal(self.lang, d)
         ))
     }
 
@@ -582,7 +561,7 @@ impl Assistant {
         match self.sched.set_timer(&*self.clock, secs, &label) {
             Ok(_) => {
                 self.save();
-                let dur = format_duration(secs);
+                let dur = format_duration(self.lang, secs);
                 Outcome::say(if label.is_empty() {
                     format!("Timer set for {dur}.")
                 } else {
@@ -629,9 +608,12 @@ impl Assistant {
             .take(3)
             .map(|(_, label, left)| {
                 if label.is_empty() {
-                    format!("{} left on your timer", format_duration(*left))
+                    format!("{} left on your timer", format_duration(self.lang, *left))
                 } else {
-                    format!("{} left on the {label} timer", format_duration(*left))
+                    format!(
+                        "{} left on the {label} timer",
+                        format_duration(self.lang, *left)
+                    )
                 }
             })
             .collect();
@@ -651,58 +633,72 @@ impl Assistant {
             Ok(_) => {
                 self.save();
                 let when = if repeat_words.is_empty() {
-                    day_phrase(&*self.zone, now, at)
+                    day_phrase(self.lang, &*self.zone, now, at)
                 } else {
                     repeat_words.to_owned()
                 };
-                Outcome::say(format!("Alarm set for {} {when}.", format_clock(h, mi)))
+                Outcome::say(format!(
+                    "Alarm set for {} {when}.",
+                    format_clock(self.lang, h, mi)
+                ))
             }
             Err(e) => Outcome::say(format!("Sorry, {e}.")),
         }
     }
 
-    fn inbox(&mut self, m: &Match) -> Option<Outcome> {
+    fn inbox_status(&self) -> Option<Outcome> {
         let core = self.core.clone()?;
-        match m.intent.as_str() {
-            "inbox.status" => Outcome::say(status_sentence(&core.status())),
-            "inbox.details" => Outcome::say(details_text(&core.current_event()?)),
-            "inbox.dismiss" => {
-                if core.dismiss_current() {
-                    Outcome::say("Dismissed.")
-                } else {
-                    // Nothing open: treat it as "stop" so it still silences a ringing alarm.
-                    Outcome::effect("", Effect::StopPlayback)
-                }
+        Outcome::say(status_sentence(&core.status()))
+    }
+
+    fn inbox_details(&self) -> Option<Outcome> {
+        let core = self.core.clone()?;
+        Outcome::say(details_text(&core.current_event()?))
+    }
+
+    fn inbox_dismiss(&self) -> Option<Outcome> {
+        let core = self.core.clone()?;
+        if core.dismiss_current() {
+            Outcome::say("Dismissed.")
+        } else {
+            // Nothing open: treat it as "stop" so it still silences a ringing alarm.
+            Outcome::effect("", Effect::StopPlayback)
+        }
+    }
+
+    fn inbox_snooze(&self, m: &Match) -> Option<Outcome> {
+        let core = self.core.clone()?;
+        let secs = m.duration("duration").unwrap_or(600);
+        if core.snooze_current(secs) {
+            Outcome::say(format!(
+                "Okay, I'll bring it up again in {}.",
+                format_duration(self.lang, secs)
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn inbox_ack(&self) -> Option<Outcome> {
+        let core = self.core.clone()?;
+        match core.reply(ReplyKind::Ack, "") {
+            Ok(r) => Outcome::say(format!("Okay. I'll let {} know you've got it.", r.origin)),
+            Err(ReplyError::NothingToReplyTo) => None,
+            Err(ReplyError::QueueFull) => {
+                Outcome::say("I couldn't pass that on; too many replies are waiting.")
             }
-            "inbox.snooze" => {
-                let secs = m.duration("duration").unwrap_or(600);
-                if core.snooze_current(secs) {
-                    Outcome::say(format!(
-                        "Okay, I'll bring it up again in {}.",
-                        format_duration(secs)
-                    ))
-                } else {
-                    None
-                }
+        }
+    }
+
+    fn inbox_instruct(&self, m: &Match) -> Option<Outcome> {
+        let core = self.core.clone()?;
+        let text = m.text("text").unwrap_or("continue").to_owned();
+        match core.reply(ReplyKind::Instruct, &text) {
+            Ok(r) => Outcome::say(format!("Okay, sending that to {}.", r.origin)),
+            Err(ReplyError::NothingToReplyTo) => None,
+            Err(ReplyError::QueueFull) => {
+                Outcome::say("I couldn't pass that on; too many replies are waiting.")
             }
-            "inbox.ack" => match core.reply(ReplyKind::Ack, "") {
-                Ok(r) => Outcome::say(format!("Okay. I'll let {} know you've got it.", r.origin)),
-                Err(ReplyError::NothingToReplyTo) => None,
-                Err(ReplyError::QueueFull) => {
-                    Outcome::say("I couldn't pass that on; too many replies are waiting.")
-                }
-            },
-            "inbox.instruct" => {
-                let text = m.text("text").unwrap_or("continue").to_owned();
-                match core.reply(ReplyKind::Instruct, &text) {
-                    Ok(r) => Outcome::say(format!("Okay, sending that to {}.", r.origin)),
-                    Err(ReplyError::NothingToReplyTo) => None,
-                    Err(ReplyError::QueueFull) => {
-                        Outcome::say("I couldn't pass that on; too many replies are waiting.")
-                    }
-                }
-            }
-            _ => None,
         }
     }
 }

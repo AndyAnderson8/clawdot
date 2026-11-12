@@ -15,6 +15,7 @@ use crate::assistant::{Effect, MediaCmd};
 use crate::audio::{decode_pcm16, resample};
 use crate::cancel::CancelToken;
 use crate::inbox::endpoint::verify_token;
+use crate::lang::Language;
 use crate::rtvoice::{Claim, Done, Job, Realtime, Speaker};
 use crate::session::is_cancel;
 use crate::voice::{
@@ -116,6 +117,8 @@ pub struct Settings {
     /// How far ahead of playback a reply is synthesised: the next sentence is asked for when the speaker is
     /// estimated to have this much audio or less left to play. A stop then wastes at most about one sentence.
     pub reply_lead: Duration,
+    /// The language replies are cut into sentences in, and a spoken stop is read in.
+    pub lang: &'static Language,
 }
 
 impl Default for Settings {
@@ -135,6 +138,7 @@ impl Default for Settings {
             rt_idle: Duration::from_secs(10),
             rt_cooldown: Duration::from_secs(60),
             reply_lead: Duration::from_secs(2),
+            lang: crate::lang::DEFAULT,
         }
     }
 }
@@ -1308,9 +1312,10 @@ where
         voice: Option<String>,
     ) -> Pin<Box<dyn Future<Output = Vec<Vec<i16>>> + Send>> {
         let tts = Arc::clone(&self.tts);
+        let lang = self.settings.lang;
         Box::pin(async move {
             let mut problems = Vec::new();
-            speak_text_as(&*tts, &text, voice.as_deref(), &mut problems).await
+            speak_text_as(lang, &*tts, &text, voice.as_deref(), &mut problems).await
         })
     }
 
@@ -1453,8 +1458,11 @@ where
                     send(wr, &Message::SetIndicator(Indicator::Thinking)).await?;
                     if !pcm.is_empty() && st.stop_check.is_none() {
                         let stt = Arc::clone(&self.stt);
+                        let lang = self.settings.lang;
                         st.stop_check = Some(Box::pin(async move {
-                            stt.transcribe(&pcm).await.is_ok_and(|t| is_cancel(&t))
+                            stt.transcribe(&pcm)
+                                .await
+                                .is_ok_and(|t| is_cancel(lang, &t))
                         }));
                     }
                 }
@@ -1472,6 +1480,7 @@ where
     /// sentence at a time (see `reply`).
     fn start_turn(&self, st: &mut SessionState, pcm: Vec<i16>) {
         let (stt, asks) = (Arc::clone(&self.stt), self.asks.clone());
+        let lang = self.settings.lang;
         let speaker = self.speaker_id.clone();
         let cancel = CancelToken::new();
         st.turn_cancel = Some(cancel.clone());
@@ -1511,7 +1520,7 @@ where
             .await;
             let effects =
                 std::mem::take(&mut *effects.lock().unwrap_or_else(PoisonError::into_inner));
-            let speak = sentences(&heard.reply);
+            let speak = sentences(lang, &heard.reply);
             Finished {
                 outcome: VoiceOutcome {
                     transcript: heard.transcript,

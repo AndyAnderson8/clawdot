@@ -641,7 +641,8 @@ where
             self.st.last_user = Some(text.to_owned());
             return Ok(());
         };
-        let answered = is_yes(text) || is_no(text);
+        let lang = self.env.turn_cfg.lang;
+        let answered = is_yes(lang, text) || is_no(lang, text);
         let inputs = self.inputs();
         let res = answer_held_action(inputs, text).await;
         if !answered {

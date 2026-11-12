@@ -72,6 +72,7 @@ pub(super) async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool
     if with_main_loop {
         let mut jobs = core.attach_portal();
         let mut assistant = Assistant::new(
+            crate::lang::DEFAULT,
             Arc::new(Noon),
             Box::new(FixedOffset(-6 * 3600)),
             Scheduler::new(8),
@@ -634,7 +635,7 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     let s = call(&p, "GET", "/api/notes", "", "").await.0;
     assert!(s == 401 || s == 429, "{s}");
     assert_eq!(call(&p, "GET", "/api/notes", &session, "").await.0, 503);
-    let store = Arc::new(NoteStore::in_memory(true));
+    let store = Arc::new(NoteStore::in_memory(crate::lang::DEFAULT, true));
     p.core.set_notes(Arc::clone(&store));
     store.add("my printer is called Pixel", 10).unwrap();
     let second = store.add("the spare key is under the pot", 11).unwrap();
@@ -725,7 +726,7 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
         503
     );
     // off: refused with the reason, nothing written
-    let store = Arc::new(NoteStore::in_memory(false));
+    let store = Arc::new(NoteStore::in_memory(crate::lang::DEFAULT, false));
     p.core.set_notes(Arc::clone(&store));
     let (s, v) = call(
         &p,
