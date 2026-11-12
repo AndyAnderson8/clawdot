@@ -12,6 +12,8 @@
 //! * every connection has a generation, and a result is applied only if it carries the generation now on the
 //!   book. A result that was already queued when its connection was cancelled (and perhaps started again) is
 //!   dropped, so it can neither resurrect a removed source nor overwrite a newer one;
+//! * a task that dies without a result (a panic) is reported as a failed connection, so the name is freed and
+//!   the request that started it is answered;
 //! * dropping the book (shutdown) aborts the tasks and tells each waiting request that ClawDot is stopping.
 
 use crate::app::Fail;
@@ -22,7 +24,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc, oneshot};
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 
 /// The longest a connection may take altogether (a handshake and a listing, each bounded by the server's own
 /// timeout of at most 60 s, would otherwise allow three times that).
@@ -31,6 +33,18 @@ pub const CONNECT_LIMIT: Duration = Duration::from_secs(65);
 /// Where the answer to the portal request that started a connection goes.
 pub type Reply = oneshot::Sender<Result<Value, Fail>>;
 
+/// What the loop is told when a connection task ended without a result (it panicked or was aborted).
+const DIED: &str = "The connection could not be made.";
+
+/// Aborts the task it holds when dropped, so cancelling a connection also stops the work under it.
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// What a connection task reports to the loop.
 #[derive(Debug)]
 pub struct Done {
@@ -38,8 +52,8 @@ pub struct Done {
     generation: u64,
     /// The tools the server listed, or why it cannot be used.
     pub tools: Result<Vec<McpTool>, String>,
-    /// The server, ready to be added.
-    pub pending: PendingServer,
+    /// The server, ready to be added. Shared with the task that loaded it, which may have died.
+    pub pending: Arc<PendingServer>,
 }
 
 /// Who is waiting for a connection.
@@ -67,6 +81,9 @@ pub struct Connects {
     /// How many saved sources connect at the same time; the others wait their turn. Portal requests are
     /// counted against the same limit by the extensions, not here.
     slots: Arc<Semaphore>,
+    /// Test hook: the next connection task panics, as a task that died would.
+    #[cfg(test)]
+    die_next: bool,
 }
 
 impl Default for Connects {
@@ -85,6 +102,8 @@ impl Connects {
             next: 0,
             open: BTreeMap::new(),
             slots: Arc::new(Semaphore::new(MAX_PORTAL_SERVERS)),
+            #[cfg(test)]
+            die_next: false,
         }
     }
 
@@ -113,6 +132,12 @@ impl Connects {
             .values()
             .filter(|f| matches!(f.source, Source::Portal(_)))
             .count()
+    }
+
+    /// Test hook: the connection task started next panics, as a task that died would.
+    #[cfg(test)]
+    pub(crate) fn make_next_task_die(&mut self) {
+        self.die_next = true;
     }
 
     /// Whether this name is being connected now.
@@ -156,17 +181,32 @@ impl Connects {
         let generation = self.next;
         let tx = self.tx.clone();
         let task_name = name.clone();
+        let pending = Arc::new(pending);
+        #[cfg(test)]
+        let die = std::mem::take(&mut self.die_next);
+        // Two tasks: one does the work, and this one waits for it and reports. If the work dies, the report
+        // is still sent (as a failure), so the flight never stays on the book with nobody to settle it.
         let task = tokio::spawn(async move {
-            // Held while connecting, and given back before the result waits for the loop.
-            let slot = match slots {
-                Some(s) => s.acquire_owned().await.ok(),
-                None => None,
-            };
-            let tools = match tokio::time::timeout(CONNECT_LIMIT, pending.load()).await {
-                Ok(r) => r,
-                Err(_) => Err(format!("no answer within {} s", CONNECT_LIMIT.as_secs())),
-            };
-            drop(slot);
+            let load = Arc::clone(&pending);
+            let mut work = AbortOnDrop(tokio::spawn(async move {
+                // Held while connecting, and given back before the result waits for the loop.
+                let slot = match slots {
+                    Some(s) => s.acquire_owned().await.ok(),
+                    None => None,
+                };
+                #[cfg(test)]
+                #[allow(clippy::panic)]
+                if die {
+                    panic!("test: the connection task died");
+                }
+                let tools = match tokio::time::timeout(CONNECT_LIMIT, load.load()).await {
+                    Ok(r) => r,
+                    Err(_) => Err(format!("no answer within {} s", CONNECT_LIMIT.as_secs())),
+                };
+                drop(slot);
+                tools
+            }));
+            let tools = (&mut work.0).await.unwrap_or_else(|_| Err(DIED.to_owned()));
             let _ = tx
                 .send(Done {
                     name: task_name,
@@ -201,28 +241,25 @@ impl Connects {
     /// Stop connecting this name and answer the portal request that started it. False if it was not connecting
     /// for a portal request (a saved source is left to [`Connects::forget_saved`]).
     pub fn cancel(&mut self, name: &str) -> bool {
-        if !matches!(
-            self.open.get(name),
+        match self.open.remove(name) {
             Some(Flight {
-                source: Source::Portal(_),
+                task,
+                source: Source::Portal(reply),
                 ..
-            })
-        ) {
-            return false;
+            }) => {
+                task.abort();
+                let _ = reply.send(Err(Fail::Invalid(format!(
+                    "The connection {name} was removed before it finished connecting."
+                ))));
+                true
+            }
+            // A saved source is left to `forget_saved`.
+            Some(saved) => {
+                self.open.insert(name.to_owned(), saved);
+                false
+            }
+            None => false,
         }
-        let Some(Flight {
-            task,
-            source: Source::Portal(reply),
-            ..
-        }) = self.open.remove(name)
-        else {
-            return false;
-        };
-        task.abort();
-        let _ = reply.send(Err(Fail::Invalid(format!(
-            "The connection {name} was removed before it finished connecting."
-        ))));
-        true
     }
 
     /// The saved source of this name was removed: stop connecting it and drop its result.
@@ -467,6 +504,49 @@ mod tests {
         let warnings = other.settle("up", p[0].load().await, &["up__ping".to_owned()]);
         assert!(warnings[0].contains("clashes"), "{warnings:?}");
         assert!(other.tools().is_empty());
+    }
+
+    // A connection task that dies without a result must not leave its flight on the book: the loop is told
+    // it failed, the name is free again, and a portal request would be answered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_task_that_dies_is_reported_as_a_failed_connection_and_frees_the_name() {
+        let (_open_tx, open) = watch::channel(true);
+        let port = gated_server(open).await;
+        let mut c = Connects::new();
+        let mut rx = c.attach();
+
+        let (r, _answer) = oneshot::channel();
+        c.make_next_task_die();
+        c.start(pending(port, "home").await, r);
+        let done = rx.recv().await.unwrap();
+        assert_eq!(done.tools.as_ref().err().map(String::as_str), Some(DIED));
+        assert!(matches!(c.finish(&done), Some(Source::Portal(_))));
+        assert!(!c.is_connecting("home") && c.is_empty());
+
+        c.make_next_task_die();
+        c.start_saved(pending(port, "saved").await);
+        let done = rx.recv().await.unwrap();
+        assert!(done.tools.is_err());
+        assert!(matches!(c.finish(&done), Some(Source::Saved)));
+        assert!(c.is_empty());
+
+        // The name connects again, and this time the task lives.
+        let (r, _answer) = oneshot::channel();
+        c.start(pending(port, "home").await, r);
+        let done = rx.recv().await.unwrap();
+        assert!(done.tools.is_ok());
+        assert!(c.finish(&done).is_some());
+    }
+
+    // The cancel of a portal connection leaves a saved one alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_leaves_a_saved_connection_on_the_book() {
+        let (_hold, open) = watch::channel(false);
+        let port = gated_server(open).await;
+        let mut c = Connects::new();
+        c.start_saved(pending(port, "saved").await);
+        assert!(!c.cancel("saved"));
+        assert!(c.is_connecting("saved"));
     }
 
     #[tokio::test(flavor = "current_thread")]

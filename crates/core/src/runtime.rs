@@ -1074,6 +1074,29 @@ mod tests {
         assert!(!brain.mcp.has_server("stuck") && brain.mcp.owns("good__ping"));
     }
 
+    // A connection task that dies is answered like any other failed connection, and the name can be tried
+    // again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_connect_task_that_dies_answers_the_request_and_frees_the_name() {
+        let dir = TempDir::new("mcp-died");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let mut done_rx = brain.connects.attach();
+        brain.connects.make_next_task_die();
+        let (job, answer) = ask(add_home(9));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        let done = done_rx.recv().await.unwrap();
+        mcp_connected(&mut brain, &core, done);
+        assert!(matches!(
+            answer.await.unwrap(),
+            Err(Fail::Invalid(m)) if m == "The connection could not be made."
+        ));
+        assert!(!brain.mcp.has_server("home") && brain.connects.is_empty());
+        let (job, _again) = ask(add_home(9));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(brain.connects.is_connecting("home"));
+    }
+
     // A server that cannot be used is reported to the request and leaves nothing behind.
     #[tokio::test(flavor = "current_thread")]
     async fn a_connect_that_fails_answers_the_request_and_adds_nothing() {
