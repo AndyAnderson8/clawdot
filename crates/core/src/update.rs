@@ -531,13 +531,18 @@ impl Updater {
             "latest": s.latest.as_ref().map(release_json),
         });
         drop(s);
-        let tmp = path.with_extension("tmp");
+        let tmp = crate::store::temp_path(&path);
         if std::fs::write(&tmp, doc.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
     }
 
     fn load(&self) {
+        // The temporary file of a save cut short, and the name older versions gave it.
+        if let Some(p) = self.file("update.json") {
+            let _ = std::fs::remove_file(crate::store::temp_path(&p));
+            let _ = std::fs::remove_file(p.with_extension("tmp"));
+        }
         let Some(text) = self
             .file("update.json")
             .and_then(|p| std::fs::read_to_string(p).ok())
