@@ -158,6 +158,13 @@ pub fn is_no(utterance: &str) -> bool {
     )
 }
 
+/// Whether a tool-call id is already used by a message in the history.
+fn id_in_history(history: &[Message], id: &str) -> bool {
+    history
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some(id) || m.tool_calls.iter().any(|c| c.id == id))
+}
+
 fn normalise(utterance: &str) -> String {
     let norm: String = utterance
         .to_lowercase()
@@ -386,7 +393,7 @@ pub struct Conversation {
     clarify: Option<Clarify>,
     /// The user was asked whether to forget every note, at this time.
     forget_all_asked: Option<Ts>,
-    /// Counter behind the ids of the calls the host writes into the history itself (see `host_call_id`).
+    /// Counter behind the ids of the calls the host writes into the history itself and the ids it gives replies that lack usable ones (see `host_call_id`, `unique_call_ids`).
     next_host_call: u32,
 }
 
@@ -437,23 +444,28 @@ impl Conversation {
     /// (some want unique ids, Mistral wants exactly nine alphanumerics). The ids the model makes are not
     /// constrained, so one that is already in the history is skipped; the history is short, so this ends.
     fn host_call_id(&mut self) -> String {
-        const SPACE: u32 = 36 * 36 * 36 * 36 * 36;
-        loop {
-            let mut n = self.next_host_call;
-            self.next_host_call = (n + 1) % SPACE;
-            let mut digits = [b'0'; 5];
-            for d in digits.iter_mut().rev() {
-                *d = b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize];
-                n /= 36;
+        let history = &self.history;
+        crate::llm::fresh_call_id("host", &mut self.next_host_call, |id| {
+            id_in_history(history, id)
+        })
+    }
+
+    /// Make the ids of a reply's calls usable: one that is empty, repeats an earlier one of the same reply, or
+    /// is already in the history gets a fresh `call` id, because strict providers reject duplicates when the
+    /// history is sent back and a result is paired with its call by id. Other ids stay as the model sent them.
+    pub(crate) fn unique_call_ids(&mut self, calls: &mut [ToolCall]) {
+        let mut seen: Vec<String> = Vec::new();
+        for i in 0..calls.len() {
+            let id = calls[i].id.clone();
+            let bad = id.is_empty() || seen.contains(&id) || id_in_history(&self.history, &id);
+            if bad {
+                let ahead: Vec<&str> = calls.iter().map(|c| c.id.as_str()).collect();
+                let history = &self.history;
+                calls[i].id = crate::llm::fresh_call_id("call", &mut self.next_host_call, |n| {
+                    id_in_history(history, n) || seen.iter().any(|s| s == n) || ahead.contains(&n)
+                });
             }
-            let id = format!("host{}", String::from_utf8_lossy(&digits));
-            let taken = self.history.iter().any(|m| {
-                m.tool_call_id.as_deref() == Some(id.as_str())
-                    || m.tool_calls.iter().any(|c| c.id == id)
-            });
-            if !taken {
-                return id;
-            }
+            seen.push(calls[i].id.clone());
         }
     }
 

@@ -43,6 +43,50 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// A call id of nine ASCII letters and digits: `prefix` (four characters) and five base-36 digits of the
+/// counter `n`. Every OpenAI-compatible provider accepts that shape (Mistral wants exactly nine
+/// alphanumerics). The host writes ids with the prefix `host`, parsed replies with `call`.
+#[must_use]
+pub(crate) fn call_id(prefix: &str, mut n: u32) -> String {
+    let mut digits = [b'0'; 5];
+    for d in digits.iter_mut().rev() {
+        *d = b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize];
+        n /= 36;
+    }
+    format!("{prefix}{}", String::from_utf8_lossy(&digits))
+}
+
+/// The next id after `*counter` (which wraps within the five digits) that `taken` does not claim. The
+/// callers hold far fewer ids than there are digits, so this ends.
+pub(crate) fn fresh_call_id(
+    prefix: &str,
+    counter: &mut u32,
+    taken: impl Fn(&str) -> bool,
+) -> String {
+    const SPACE: u32 = 36 * 36 * 36 * 36 * 36;
+    loop {
+        let id = call_id(prefix, *counter);
+        *counter = (*counter + 1) % SPACE;
+        if !taken(&id) {
+            return id;
+        }
+    }
+}
+
+/// Give every call without an id one of its own (`call` and five digits), different from the ids the reply
+/// already has. Ids the provider sent are kept as they are.
+fn name_unnamed_calls(calls: &mut [ToolCall]) {
+    let sent: Vec<String> = calls
+        .iter()
+        .filter(|c| !c.id.is_empty())
+        .map(|c| c.id.clone())
+        .collect();
+    let mut next = 0;
+    for c in calls.iter_mut().filter(|c| c.id.is_empty()) {
+        c.id = fresh_call_id("call", &mut next, |id| sent.iter().any(|s| s == id));
+    }
+}
+
 /// One message in a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -274,7 +318,7 @@ pub fn parse_completion(body: &str) -> Result<Completion, LlmError> {
         .pointer("/choices/0")
         .ok_or_else(|| LlmError::Malformed("no choices".into()))?;
     let msg = choice.get("message").unwrap_or(&Value::Null);
-    let tool_calls = msg
+    let mut tool_calls: Vec<ToolCall> = msg
         .get("tool_calls")
         .and_then(Value::as_array)
         .map(|calls| {
@@ -296,6 +340,7 @@ pub fn parse_completion(body: &str) -> Result<Completion, LlmError> {
                 .collect()
         })
         .unwrap_or_default();
+    name_unnamed_calls(&mut tool_calls);
     Ok(Completion {
         text: msg
             .get("content")
@@ -378,7 +423,11 @@ impl StreamAccumulator {
                         .and_then(|i| usize::try_from(i).ok())
                         .unwrap_or(0);
                     let p = self.calls.entry(index).or_default();
-                    if let Some(id) = c.get("id").and_then(Value::as_str) {
+                    if let Some(id) = c
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|i| !i.is_empty())
+                    {
                         p.id = id.to_owned();
                     }
                     if let Some(name) = c.pointer("/function/name").and_then(Value::as_str) {
@@ -396,22 +445,25 @@ impl StreamAccumulator {
     /// The finished response.
     #[must_use]
     pub fn finish(self) -> Completion {
+        // The id arrives on a call's first chunk only (or never), so a missing one is made here, once per call.
+        let mut tool_calls: Vec<ToolCall> = self
+            .calls
+            .into_values()
+            .filter(|c| !c.name.is_empty())
+            .map(|c| ToolCall {
+                id: c.id,
+                name: c.name,
+                arguments: if c.arguments.trim().is_empty() {
+                    "{}".into()
+                } else {
+                    c.arguments
+                },
+            })
+            .collect();
+        name_unnamed_calls(&mut tool_calls);
         Completion {
             text: self.text,
-            tool_calls: self
-                .calls
-                .into_values()
-                .filter(|c| !c.name.is_empty())
-                .map(|c| ToolCall {
-                    id: c.id,
-                    name: c.name,
-                    arguments: if c.arguments.trim().is_empty() {
-                        "{}".into()
-                    } else {
-                        c.arguments
-                    },
-                })
-                .collect(),
+            tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage,
         }
@@ -654,6 +706,52 @@ mod tests {
             ("b", "{}"),
             "no arguments becomes an empty object"
         );
+    }
+
+    fn well_formed(id: &str) -> bool {
+        id.len() == 9 && id.starts_with("call") && id.bytes().all(|b| b.is_ascii_alphanumeric())
+    }
+
+    #[test]
+    fn a_reply_with_calls_that_have_no_id_gets_distinct_well_formed_ones() {
+        let body = r#"{"choices":[{"message":{"content":null,"tool_calls":[
+            {"function":{"name":"a","arguments":"{}"}},
+            {"id":"","function":{"name":"b","arguments":"{}"}},
+            {"id":"keep_me-1","function":{"name":"c","arguments":"{}"}}]},
+            "finish_reason":"tool_calls"}]}"#;
+        let c = parse_completion(body).unwrap();
+        let ids: Vec<&str> = c.tool_calls.iter().map(|t| t.id.as_str()).collect();
+        assert!(well_formed(ids[0]) && well_formed(ids[1]), "{ids:?}");
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids[2], "keep_me-1", "a provider id is kept verbatim");
+    }
+
+    #[test]
+    fn a_generated_id_never_repeats_one_the_provider_sent() {
+        let body = r#"{"choices":[{"message":{"tool_calls":[
+            {"id":"call00000","function":{"name":"a"}},
+            {"function":{"name":"b"}}]}}]}"#;
+        let c = parse_completion(body).unwrap();
+        assert_eq!(c.tool_calls[0].id, "call00000");
+        assert!(well_formed(&c.tool_calls[1].id));
+        assert_ne!(c.tool_calls[1].id, "call00000");
+    }
+
+    #[test]
+    fn streamed_calls_without_an_id_get_one_each_not_one_per_chunk() {
+        let (_, c) = stream(&[
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"a","arguments":""}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"","function":{"name":"b"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":2,"id":"x9","function":{"name":"c"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{}"}}]}}]}"#,
+        ])
+        .unwrap();
+        let ids: Vec<&str> = c.tool_calls.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(well_formed(ids[0]) && well_formed(ids[1]), "{ids:?}");
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids[2], "x9");
     }
 
     #[test]

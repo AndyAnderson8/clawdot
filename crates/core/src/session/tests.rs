@@ -2439,3 +2439,38 @@ async fn the_full_text_of_a_long_result_is_in_the_audit_record() {
         "the short excerpt stays short"
     );
 }
+
+/// Calls without a usable id (empty, repeated, or already in the history) are given fresh ones before they
+/// enter the history, so each result pairs with exactly one call.
+#[tokio::test(flavor = "current_thread")]
+async fn calls_with_empty_or_repeated_ids_get_unique_ones_in_the_history() {
+    let mut h = Lab::default();
+    let b = Script::new(vec![
+        calls(&[("", "act", "{}"), ("", "act", "{}"), ("dup", "act", "{}")]),
+        calls(&[("dup", "act", "{}"), ("dup", "act", "{}")]),
+        text("ok"),
+    ]);
+    let mut c = conv();
+    lturn(&TurnCtl::default(), &b, &mut h, &mut c, &cfg(), "go").await;
+    let ids: Vec<String> = c
+        .history()
+        .iter()
+        .flat_map(|m| m.tool_calls.iter().map(|t| t.id.clone()))
+        .collect();
+    assert_eq!(ids.len(), 5);
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 5, "every call id is unique: {ids:?}");
+    assert!(ids.iter().all(|i| !i.is_empty()));
+    assert_eq!(ids[2], "dup", "the first use of a model id is kept");
+    let results: Vec<&str> = c
+        .history()
+        .iter()
+        .filter_map(|m| m.tool_call_id.as_deref())
+        .collect();
+    assert_eq!(results.len(), 5);
+    for id in &ids {
+        assert_eq!(results.iter().filter(|r| *r == id).count(), 1, "{id}");
+    }
+}
