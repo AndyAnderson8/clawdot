@@ -32,6 +32,7 @@ If documents disagree, the order is: accepted spec, then ADR, then architecture 
 | [architecture/action-safety.md](architecture/action-safety.md) | Risk tiers, host-held confirmation, untrusted turns, skill allow-lists |
 | [architecture/configuration.md](architecture/configuration.md) | The configuration file, saved settings, the portal's first run |
 | [architecture/voice-pipeline.md](architecture/voice-pipeline.md) | Dialog state machine, end of speech, the spoken turn |
+| [architecture/speech-latency.md](architecture/speech-latency.md) | Time from the end of speech to the first sound: the reply played sentence by sentence as it is made (built), and speaking while the model is still writing (design) |
 | [architecture/satellite-server.md](architecture/satellite-server.md) | How speakers connect to the core |
 | [architecture/esphome-satellite.md](architecture/esphome-satellite.md) | Optional client for ESPHome voice devices |
 | [architecture/extensibility.md](architecture/extensibility.md) | Tools, packs, sidecars, media backends, trust model |
