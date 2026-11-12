@@ -16,6 +16,7 @@ import {
 import { Field } from "../parts.tsx";
 import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { Skill } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 const MAX_FILE_BYTES = 70000;
 const MAX_FILES = 300;
@@ -43,8 +44,8 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
         );
     if (ok) props.onDone();
   };
-  const remove = () => {
-    if (k && confirm("Delete the skill " + k.name + "?"))
+  const remove = async () => {
+    if (k && (await ask("Delete the skill " + k.name + "?", "Delete")))
       void change("POST", "/api/skills/delete", { name: k.name }, "Deleted.").then((ok) => ok && props.onDone());
   };
   return (
@@ -282,8 +283,8 @@ function SkillReview(props: { skill: Skill; onDone: () => void }): JSX.Element {
       fail(x);
     }
   };
-  const remove = () => {
-    if (confirm("Delete the skill " + k.name + "?"))
+  const remove = async () => {
+    if (await ask("Delete the skill " + k.name + "?", "Delete"))
       void change("POST", "/api/skills/delete", { name: k.name }, "Deleted.").then((ok) => ok && props.onDone());
   };
   return (

@@ -8,6 +8,7 @@ import { SettingsPage } from "./tabs/SettingsPage.tsx";
 import { AuthShell, Login, Setup } from "./auth.tsx";
 import { Logo, Wordmark } from "./brand.tsx";
 import { useApp } from "./store.ts";
+import { ConfirmHost } from "./confirm.tsx";
 
 /** What a view is given: the part of the address after the destination (`#/settings/assistant` gives "assistant"). */
 interface ViewProps {
@@ -110,6 +111,7 @@ export function App(): JSX.Element {
   }
   return (
     <div class={"shell" + (inApp ? " in" : "")}>
+      <ConfirmHost />
       {inApp ? <Rail tab={tab} /> : null}
       <div class="stage">
         <div id="top">

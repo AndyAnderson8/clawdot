@@ -2,6 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { fail } from "../store.ts";
+import { ask } from "../confirm.tsx";
 
 /**
  * A key for a service, pasted once and kept on the device. The page only ever shows its first and last few characters.
@@ -53,7 +54,7 @@ export function SavedKey(props: {
     setBusy(false);
   };
   const remove = async () => {
-    if (!confirm("Remove the saved key?")) return;
+    if (!(await ask("Remove the saved key?", "Remove"))) return;
     try {
       await api("DELETE", props.path);
       setLocal("");

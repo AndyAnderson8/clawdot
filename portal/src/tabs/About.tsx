@@ -6,6 +6,7 @@ import { saveFile } from "../parts.tsx";
 import { Updates } from "./Updates.tsx";
 import { fail, get, say, set, useApp } from "../store.ts";
 import type { About as AboutData, Settings } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 function buildText(a: AboutData): string {
   const b = a.build;
@@ -40,14 +41,13 @@ export function About(): JSX.Element {
       say("Nothing to reset: every setting is already at its default.");
       return;
     }
-    if (
-      !confirm(
-        "Put all " +
-          saved.length +
-          " saved settings back to their defaults? Your webhooks, skills, memory and password are kept.",
-      )
-    )
-      return;
+    const sure = await ask(
+      "Put all " +
+        saved.length +
+        " saved settings back to their defaults? Your webhooks, skills, memory and password are kept.",
+      "Reset them",
+    );
+    if (!sure) return;
     try {
       const next = await api<Settings>("PUT", "/api/settings", Object.fromEntries(saved.map(([k]) => [k, null])));
       set({ settings: Object.assign({}, get().settings, next), settingsRev: get().settingsRev + 1 });

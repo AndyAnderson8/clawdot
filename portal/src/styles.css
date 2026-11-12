@@ -1524,6 +1524,14 @@ ul.picklist label.inline {
 .dlgfoot {
   margin-top: var(--spacing-4);
 }
+#confirmdlg .dlgfoot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-2);
+}
+#confirmtext {
+  max-width: 34rem;
+}
 .paramrow {
   flex-wrap: wrap;
 }

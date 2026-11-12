@@ -6,6 +6,7 @@ import { api, ApiError } from "../api.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
 import { whenText } from "../time.ts";
 import type { Note, NotesList } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 /** What the assistant remembers: short facts, listed like tools, each with a pencil to change it and an X to forget it. */
 export function Notes(): JSX.Element {
@@ -74,7 +75,7 @@ export function Notes(): JSX.Element {
     }
   };
   const forget = async (id: number) => {
-    if (!confirm("Forget this memory? The assistant will no longer know it.")) return;
+    if (!(await ask("Forget this memory? The assistant will no longer know it.", "Forget"))) return;
     try {
       await api("DELETE", "/api/notes/" + id);
       say("Forgotten.");
@@ -84,7 +85,11 @@ export function Notes(): JSX.Element {
     }
   };
   const forgetAll = async () => {
-    if (!confirm("Forget every memory? The assistant will no longer know any of them. This cannot be undone.")) return;
+    const sure = await ask(
+      "Forget every memory? The assistant will no longer know any of them. This cannot be undone.",
+      "Forget all",
+    );
+    if (!sure) return;
     try {
       await api("DELETE", "/api/notes");
       say("Everything forgotten.");
