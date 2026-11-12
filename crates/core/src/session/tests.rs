@@ -805,6 +805,52 @@ async fn the_daily_limit_stops_the_turn_before_any_request() {
     assert!(b.requests().is_empty());
 }
 
+// REQ-AST-011: a provider that reports no cost and no tokens still runs into the spend cap, priced from the
+// sizes of what was sent and received, and the turn stops after the request that crossed it.
+#[tokio::test(flavor = "current_thread")]
+async fn the_spend_cap_stops_a_turn_when_the_provider_reports_nothing() {
+    let b = Script::new(vec![
+        calls(&[("a", "set_timer", r#"{"seconds":1}"#)]),
+        calls(&[("b", "set_timer", r#"{"seconds":2}"#)]),
+        text("never reached"),
+    ]);
+    let (mut h, mut c, mut u) = (
+        Host::default(),
+        conv(),
+        UsageTracker::new(UsageLimits {
+            daily_spend_cap_usd: Some(0.0001),
+            ..UsageLimits::default()
+        }),
+    );
+    let r = turn(&b, &mut h, &mut c, &mut u, "set two timers").await;
+    assert_eq!(r.end, TurnEnd::Limit(LimitReached::Spend));
+    assert_eq!(b.requests().len(), 1, "the first request crossed the cap");
+    assert!(u.spend_today() >= 0.0001, "{}", u.spend_today());
+    assert_eq!(u.basis(), Some(crate::usage::Basis::Estimated));
+}
+
+// A server that is free (prices 0) is never stopped by an estimate.
+#[tokio::test(flavor = "current_thread")]
+async fn a_free_server_is_not_stopped_by_the_spend_cap() {
+    let b = Script::new(vec![
+        calls(&[("a", "set_timer", r#"{"seconds":1}"#)]),
+        text("done"),
+    ]);
+    let (mut h, mut c, mut u) = (
+        Host::default(),
+        conv(),
+        UsageTracker::new(UsageLimits {
+            daily_spend_cap_usd: Some(0.0001),
+            llm_usd_per_mtok_in: Some(0.0),
+            llm_usd_per_mtok_out: Some(0.0),
+            ..UsageLimits::default()
+        }),
+    );
+    let r = turn(&b, &mut h, &mut c, &mut u, "set a timer").await;
+    assert_eq!(r.end, TurnEnd::Answered);
+    assert_eq!((u.requests_today(), u.spend_today()), (2, 0.0));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn history_is_bounded_and_never_starts_with_a_dangling_tool_result() {
     let replies: Vec<_> = (0..30)
@@ -1264,13 +1310,14 @@ async fn the_turns_model_cost_is_recorded_when_known() {
     .await;
     let r = rows(&log);
     assert!((r[0].turn_cost_usd.unwrap() - 0.0042).abs() < 1e-9);
-    // and none when it is not known
+    // and an estimate from the sizes when the provider reported nothing (REQ-AST-011): never none, so the
+    // spend cap and the audit log agree
     let again = Script::new(vec![
         calls(&[("a", "set_timer", r#"{"seconds":5}"#)]),
         text("ok"),
     ]);
     turn(&again, &mut h, &mut c, &mut u, "again").await;
-    assert_eq!(rows(&log)[1].turn_cost_usd, None);
+    assert!(rows(&log)[1].turn_cost_usd.unwrap() > 0.0);
 }
 
 // ----- the agent loop (REQ-AST-019 to REQ-AST-025) -----

@@ -33,7 +33,12 @@ pub fn default_scenarios_dir() -> PathBuf {
 /// Run one scenario in replay mode: scripted model, no network, no spend.
 pub async fn replay_one(l: &Loaded) -> RunReport {
     let model = model::Scripted::new();
-    let mut usage = UsageTracker::new(UsageLimits::default());
+    // The scripted model is free: prices of 0, or the spend cap's built-in estimate would count money.
+    let mut usage = UsageTracker::new(UsageLimits {
+        llm_usd_per_mtok_in: Some(0.0),
+        llm_usd_per_mtok_out: Some(0.0),
+        ..UsageLimits::default()
+    });
     run_scenario(&l.scenario, &model, &mut usage).await
 }
 

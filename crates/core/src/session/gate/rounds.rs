@@ -131,15 +131,15 @@ impl<H: ToolHost> Turn<'_, H> {
             };
             match outcome {
                 None => {
-                    self.usage.record(day, None);
+                    self.usage.record_abandoned(day, &req);
                     return Err(self.cancelled(&[], None));
                 }
                 Some(Ok(c)) => {
-                    self.usage.record(day, c.usage.as_ref());
+                    self.usage.record_reply(day, &req, &c);
                     return Ok(c);
                 }
                 Some(Err(e)) => {
-                    self.usage.record(day, None);
+                    self.usage.record_request(day);
                     last_err = Some(e);
                 }
             }
