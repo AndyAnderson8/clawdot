@@ -13,6 +13,7 @@ use hyper::body::Bytes;
 use hyper::header::{AUTHORIZATION, CONTENT_TYPE};
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -129,6 +130,19 @@ pub struct HttpBackend {
     api_key: String,
     deadline: Duration,
     connector: Connector,
+    /// Set once the server has refused `stream_options`; later requests leave the field out, so a server
+    /// that is strict about unknown fields costs one failed request, not one per turn.
+    plain_stream: AtomicBool,
+}
+
+/// Whether a provider's error reads as a refusal of the `stream_options` field: it names the field, or it is
+/// a bare 400 or 422 (servers that reject an unknown field often say nothing more).
+fn refuses_usage_option(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("stream_options")
+        || m.contains("include_usage")
+        || m.starts_with("http 400")
+        || m.starts_with("http 422")
 }
 
 impl std::fmt::Debug for HttpBackend {
@@ -164,6 +178,7 @@ impl HttpBackend {
             endpoint,
             api_key: api_key.to_owned(),
             deadline,
+            plain_stream: AtomicBool::new(false),
         })
     }
 
@@ -176,7 +191,26 @@ impl HttpBackend {
         req: &ChatRequest,
         mut on_text: impl FnMut(&str) + Send,
     ) -> Result<Completion, LlmError> {
-        match timeout(self.deadline, self.exchange(req, &mut on_text)).await {
+        let first = self.attempt(req, &mut on_text).await;
+        // The usage report is asked for with `stream_options`. A server that refuses the field is asked
+        // again without it, once, and remembered; its replies then carry no usage and the spend cap
+        // prices them from sizes instead (REQ-AST-011). A failed request is not billed.
+        if let Err(LlmError::Provider(m)) = &first
+            && !self.plain_stream.load(Ordering::Relaxed)
+            && refuses_usage_option(m)
+        {
+            self.plain_stream.store(true, Ordering::Relaxed);
+            return self.attempt(req, &mut on_text).await;
+        }
+        first
+    }
+
+    async fn attempt(
+        &self,
+        req: &ChatRequest,
+        on_text: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<Completion, LlmError> {
+        match timeout(self.deadline, self.exchange(req, on_text)).await {
             // The provider's words are shown to the person: never with the key in them.
             Ok(Err(LlmError::Provider(m))) => {
                 Err(LlmError::Provider(scrub(&m, &self.api_key, MAX_SHOWN)))
@@ -194,8 +228,13 @@ impl HttpBackend {
         req: &ChatRequest,
         on_text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Completion, LlmError> {
-        let body = serde_json::to_vec(&req.to_json(true))
-            .map_err(|e| LlmError::Malformed(e.to_string()))?;
+        let mut json = req.to_json(true);
+        if self.plain_stream.load(Ordering::Relaxed)
+            && let Some(o) = json.as_object_mut()
+        {
+            o.remove("stream_options");
+        }
+        let body = serde_json::to_vec(&json).map_err(|e| LlmError::Malformed(e.to_string()))?;
         let mut builder = self
             .endpoint
             .request_builder(
@@ -678,6 +717,78 @@ mod tests {
         // A key cut by the length limit must not survive as a prefix.
         let msg = format!("{}sk-abcdef", "x".repeat(295));
         assert!(!scrub(&msg, "sk-abcdef", 300).contains("sk-"));
+    }
+
+    // REQ-AST-011: a server that refuses `stream_options` is asked again without it, once, and remembered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_server_that_refuses_the_usage_option_is_asked_again_without_it_and_remembered() {
+        const REFUSED: &[u8] = b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"Unrecognized request argument supplied: stream_options\"}}";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for n in 0..3 {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut seen = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let k = s.read(&mut chunk).await.unwrap();
+                    seen.extend_from_slice(&chunk[..k]);
+                    let text = String::from_utf8_lossy(&seen).into_owned();
+                    if k == 0 || text.contains("\"max_tokens\"") && text.ends_with('}') {
+                        break;
+                    }
+                }
+                bodies.push(String::from_utf8_lossy(&seen).into_owned());
+                s.write_all(if n == 0 { REFUSED } else { SSE })
+                    .await
+                    .unwrap();
+                let _ = s.shutdown().await;
+            }
+            bodies
+        });
+        let backend = HttpBackend::new(
+            &format!("http://127.0.0.1:{port}"),
+            "",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(backend.complete(&request()).await.unwrap().text, "Hello.");
+        assert_eq!(backend.complete(&request()).await.unwrap().text, "Hello.");
+        let bodies = server.await.unwrap();
+        assert!(
+            bodies[0].contains("stream_options"),
+            "first try asks for usage"
+        );
+        assert!(
+            !bodies[1].contains("stream_options"),
+            "the retry leaves it out"
+        );
+        assert!(
+            !bodies[2].contains("stream_options"),
+            "and so does the next request"
+        );
+    }
+
+    #[test]
+    fn only_a_refusal_that_reads_like_one_about_the_field_is_retried() {
+        for m in [
+            "Unrecognized request argument supplied: stream_options",
+            "HTTP 400",
+            "HTTP 422 Unprocessable",
+            "extra fields not permitted: include_usage",
+        ] {
+            assert!(refuses_usage_option(m), "{m}");
+        }
+        for m in [
+            "HTTP 401",
+            "HTTP 429",
+            "HTTP 500",
+            "Bad key",
+            "model not found",
+        ] {
+            assert!(!refuses_usage_option(m), "{m}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
