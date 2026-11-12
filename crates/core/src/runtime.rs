@@ -293,6 +293,15 @@ impl Brain {
         Ok(self.listing())
     }
 
+    /// How many tools of each kind are on offer, for the status page.
+    pub fn tool_counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "builtin": self.builtin.len(),
+            "http": self.http_tools.specs().len(),
+            "mcp": self.mcp.tools().len(),
+        })
+    }
+
     /// A snapshot for the web UI. Contains no secrets and no agent text.
     pub fn status_json(
         &self,
@@ -316,7 +325,14 @@ impl Brain {
             .assistant
             .scheduled()
             .into_iter()
-            .map(|(kind, label, secs)| serde_json::json!({ "kind": kind, "label": label, "seconds_left": secs }))
+            .map(|(kind, label, secs)| {
+                serde_json::json!({ "kind": kind, "label": label, "seconds_left": secs })
+            })
+            .collect();
+        let (day, history) = self.usage.request_days();
+        let history: Vec<serde_json::Value> = history
+            .iter()
+            .map(|(d, n)| serde_json::json!({ "day": d, "requests": n }))
             .collect();
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
@@ -325,8 +341,8 @@ impl Brain {
                 "model": self.llm.as_ref().map(|l| l.cfg.model.clone()),
             },
             "usage": {
-                "day": self.usage.request_days().0,
-                "history": self.usage.request_days().1.iter().map(|(d, n)| serde_json::json!({ "day": d, "requests": n })).collect::<Vec<_>>(),
+                "day": day,
+                "history": history,
                 "daily_spend_cap_usd": self.usage.limits().daily_spend_cap_usd,
                 "requests_today": self.usage.requests_today(),
                 "spend_today": self.usage.spend_today(),

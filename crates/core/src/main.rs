@@ -298,7 +298,7 @@ async fn main() -> ExitCode {
             }
             _ = tick.tick() => {
                 hub.sweep(brain.clock.now());
-                let tool_counts = serde_json::json!({ "builtin": brain.builtin.len(), "http": brain.http_tools.specs().len(), "mcp": brain.mcp.tools().len() });
+                let tool_counts = brain.tool_counts();
                 let view = SpeakerView {
                     available: announcer.connected() > 0 && voice.available.load(Ordering::Relaxed),
                     console: args.console || args.echo_speech,
