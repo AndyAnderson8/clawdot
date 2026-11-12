@@ -47,11 +47,11 @@ impl<H: ToolHost> Turn<'_, H> {
             .clarify
             .take_if(|c| mono - c.asked_at <= CONFIRM_WINDOW_SECS)
             .is_some();
-        if asked && is_no(user_text) {
+        if asked && is_no(self.cfg.lang, user_text) {
             return Some(self.finish("Okay, never mind."));
         }
         // Notes are the user's to change, by their own words, and never go through the model (REQ-SEC-017).
-        if let Some(cmd) = notes::parse(user_text) {
+        if let Some(cmd) = notes::parse(self.cfg.lang, user_text) {
             let speech = run_note_command(self.conv, cmd, now, mono);
             return Some(self.finish(&speech));
         }

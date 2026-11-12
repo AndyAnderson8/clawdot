@@ -17,6 +17,7 @@
 //! (docs/architecture/speech-latency.md). Speech-to-text and text-to-speech are traits; the providers live
 //! elsewhere.
 
+use crate::lang::Language;
 use crate::llm::SentenceSplitter;
 use crate::vad::{Config as VadConfig, Endpointer, Event};
 use std::future::Future;
@@ -398,7 +399,13 @@ where
 ///
 /// An empty transcript produces no reply (the satellite shows its error cue). A transcription failure speaks a
 /// short apology without calling `respond`. A synthesis failure keeps the text reply and records the problem.
-pub async fn voice_turn<T, S, F, Fut>(stt: &T, tts: &S, pcm: &[i16], respond: F) -> VoiceOutcome
+pub async fn voice_turn<T, S, F, Fut>(
+    lang: &'static Language,
+    stt: &T,
+    tts: &S,
+    pcm: &[i16],
+    respond: F,
+) -> VoiceOutcome
 where
     T: Transcriber,
     S: Synthesizer,
@@ -413,15 +420,15 @@ where
         problems: heard.problems,
     };
     if out.transcript.is_some() || !out.reply.is_empty() {
-        out.audio = speak_text(tts, &out.reply, &mut out.problems).await;
+        out.audio = speak_text(lang, tts, &out.reply, &mut out.problems).await;
     }
     out
 }
 
 /// The sentences of `text`, in the order they are to be spoken. Each is synthesised on its own.
 #[must_use]
-pub fn sentences(text: &str) -> Vec<String> {
-    let mut splitter = SentenceSplitter::default();
+pub fn sentences(lang: &'static Language, text: &str) -> Vec<String> {
+    let mut splitter = SentenceSplitter::new(lang);
     let mut out = splitter.push(text);
     out.extend(splitter.flush());
     out
@@ -430,22 +437,24 @@ pub fn sentences(text: &str) -> Vec<String> {
 /// Synthesise `text` one sentence at a time. Stops at the first failure, keeping what was already made and
 /// recording the problem.
 pub async fn speak_text<S: Synthesizer>(
+    lang: &'static Language,
     tts: &S,
     text: &str,
     problems: &mut Vec<String>,
 ) -> Vec<Vec<i16>> {
-    speak_text_as(tts, text, None, problems).await
+    speak_text_as(lang, tts, text, None, problems).await
 }
 
 /// Like [`speak_text`], in `voice` for these sentences only when one is given.
 pub async fn speak_text_as<S: Synthesizer>(
+    lang: &'static Language,
     tts: &S,
     text: &str,
     voice: Option<&str>,
     problems: &mut Vec<String>,
 ) -> Vec<Vec<i16>> {
     let mut audio = Vec::new();
-    for s in sentences(text) {
+    for s in sentences(lang, text) {
         let made = match voice {
             Some(v) => tts.synthesize_voice(&s, v).await,
             None => tts.synthesize(&s).await,
@@ -766,6 +775,7 @@ mod tests {
     async fn a_turn_transcribes_responds_and_speaks_sentence_by_sentence() {
         let tts = voice(None);
         let out = voice_turn(
+            crate::lang::DEFAULT,
             &Heard(Ok("  what time is it ")),
             &tts,
             &[0; 10],
@@ -788,9 +798,13 @@ mod tests {
     #[tokio::test]
     async fn nothing_heard_means_nothing_said() {
         let tts = voice(None);
-        let out = voice_turn(&Heard(Ok("   ")), &tts, &[], |_| async {
-            panic!("must not respond")
-        })
+        let out = voice_turn(
+            crate::lang::DEFAULT,
+            &Heard(Ok("   ")),
+            &tts,
+            &[],
+            |_| async { panic!("must not respond") },
+        )
         .await;
         assert_eq!(out, VoiceOutcome::default());
     }
@@ -798,9 +812,13 @@ mod tests {
     #[tokio::test]
     async fn a_recognition_failure_apologises_without_asking_the_assistant() {
         let tts = voice(None);
-        let out = voice_turn(&Heard(Err("timeout")), &tts, &[], |_| async {
-            panic!("must not respond")
-        })
+        let out = voice_turn(
+            crate::lang::DEFAULT,
+            &Heard(Err("timeout")),
+            &tts,
+            &[],
+            |_| async { panic!("must not respond") },
+        )
         .await;
         assert_eq!(out.reply, COULD_NOT_UNDERSTAND);
         assert!(out.transcript.is_none());
@@ -811,9 +829,13 @@ mod tests {
     #[tokio::test]
     async fn a_synthesis_failure_keeps_the_text_and_records_the_problem() {
         let tts = voice(Some("Second"));
-        let out = voice_turn(&Heard(Ok("hi")), &tts, &[], |_| async {
-            "First one. Second one. Third one.".to_owned()
-        })
+        let out = voice_turn(
+            crate::lang::DEFAULT,
+            &Heard(Ok("hi")),
+            &tts,
+            &[],
+            |_| async { "First one. Second one. Third one.".to_owned() },
+        )
         .await;
         assert_eq!(out.reply, "First one. Second one. Third one.");
         assert_eq!(

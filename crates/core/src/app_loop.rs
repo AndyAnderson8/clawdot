@@ -213,7 +213,7 @@ impl App {
         if line.is_empty() {
             return Flow::Continue;
         }
-        if crate::commands::is_quit(&line) {
+        if crate::commands::is_quit(self.brain.assistant.lang(), &line) {
             self.save_all();
             return Flow::Exit;
         }

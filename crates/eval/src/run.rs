@@ -179,7 +179,10 @@ pub async fn run_scenario<M: Model>(
     }));
     let mut conv = Conversation::standard(s.setup.system.as_deref().unwrap_or(DEFAULT_PERSONA));
     conv.set_audit(Arc::clone(&log));
-    let notes = Arc::new(NoteStore::in_memory(s.setup.notes));
+    let notes = Arc::new(NoteStore::in_memory(
+        clawdot_core::lang::DEFAULT,
+        s.setup.notes,
+    ));
     if s.setup.notes {
         conv.set_notes(Arc::clone(&notes));
     }

@@ -2,6 +2,7 @@
 //! snippets, the web UI banner and the console's quit words.
 
 use crate::app::Core;
+use crate::lang::Language;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
@@ -47,9 +48,9 @@ pub fn announce_admin(core: &Core, public: &str) {
 }
 
 /// True if a console line asks to leave (REQ-CFG-017).
-pub fn is_quit(line: &str) -> bool {
+pub fn is_quit(lang: &Language, line: &str) -> bool {
     let word = line.trim().trim_end_matches(['.', '!']);
-    word.eq_ignore_ascii_case("quit") || word.eq_ignore_ascii_case("exit")
+    lang.quit_words.iter().any(|q| word.eq_ignore_ascii_case(q))
 }
 
 pub const DEFAULT_PORT: u16 = 3335;
@@ -192,10 +193,10 @@ mod tests {
     #[test]
     fn quit_and_exit_leave_the_console() {
         for l in ["quit", "exit", "Quit", " EXIT ", "quit."] {
-            assert!(is_quit(l), "{l}");
+            assert!(is_quit(crate::lang::DEFAULT, l), "{l}");
         }
         for l in ["quit smoking", "what time is it", "exit the building", ""] {
-            assert!(!is_quit(l), "{l}");
+            assert!(!is_quit(crate::lang::DEFAULT, l), "{l}");
         }
     }
 

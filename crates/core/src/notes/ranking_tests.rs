@@ -3,7 +3,7 @@
 use super::*;
 
 fn filled(texts: &[&str]) -> NoteStore {
-    let s = NoteStore::in_memory(true);
+    let s = NoteStore::in_memory(crate::lang::DEFAULT, true);
     for (i, t) in texts.iter().enumerate() {
         s.add(t, 100 + i as Ts).unwrap();
     }
@@ -12,7 +12,7 @@ fn filled(texts: &[&str]) -> NoteStore {
 
 /// A memory of filler facts with two that matter, well past the point where everything fits.
 fn big() -> NoteStore {
-    let s = NoteStore::in_memory(true);
+    let s = NoteStore::in_memory(crate::lang::DEFAULT, true);
     for i in 0..120 {
         s.add(
             &format!("filler fact number {i} about the weather in town {i}"),
@@ -88,7 +88,7 @@ fn the_turn_before_counts_and_a_vague_request_falls_back_to_the_newest() {
 
 #[test]
 fn long_notes_are_cut_to_the_character_cap() {
-    let s = NoteStore::in_memory(true);
+    let s = NoteStore::in_memory(crate::lang::DEFAULT, true);
     for i in 0..60 {
         let text = format!("hiking boots {i} {}", "z".repeat(MAX_NOTE_CHARS - 20));
         s.add(&text, i).unwrap();
@@ -128,7 +128,7 @@ fn a_rarer_word_beats_a_common_one_and_a_plural_matches() {
 
 #[test]
 fn newer_notes_win_a_tie_and_search_is_bounded_and_off_when_notes_are_off() {
-    let s = NoteStore::in_memory(true);
+    let s = NoteStore::in_memory(crate::lang::DEFAULT, true);
     s.add("tea is in the cupboard", 10).unwrap();
     s.add("tea is on the shelf", 90).unwrap();
     s.add("zebra", 50).unwrap();
@@ -150,7 +150,7 @@ fn newer_notes_win_a_tie_and_search_is_bounded_and_off_when_notes_are_off() {
 // REQ-MEM-001
 #[test]
 fn the_limits_are_raised_but_still_bounded() {
-    let s = NoteStore::in_memory(true);
+    let s = NoteStore::in_memory(crate::lang::DEFAULT, true);
     for i in 0..MAX_NOTES {
         s.add(&format!("note {i}"), 1).unwrap();
     }
@@ -175,7 +175,7 @@ fn the_limits_are_raised_but_still_bounded() {
 // REQ-SEC-017 still holds, and note text cannot close the host's own tag.
 #[test]
 fn a_secret_is_still_refused_and_markup_is_defused_in_the_block() {
-    let s = NoteStore::in_memory(true);
+    let s = NoteStore::in_memory(crate::lang::DEFAULT, true);
     assert_eq!(
         s.add("my token is ghp_0123456789abcdefghij", 1),
         Err(NoteError::Secret)
@@ -198,7 +198,7 @@ fn timestamps_at_the_extremes_rank_without_overflow() {
         ts,
     };
     let notes = [note(1, Ts::MIN), note(2, 0), note(3, Ts::MAX)];
-    let ranked = rank(&notes, "where is the printer", "");
+    let ranked = rank(crate::lang::DEFAULT, &notes, "where is the printer", "");
     assert_eq!(ranked.len(), 3);
     assert!(ranked.iter().all(|(_, s)| s.is_finite() && *s > 0.0));
     assert_eq!(ranked[0].0, 2, "the newest matching note comes first");

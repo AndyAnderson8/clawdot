@@ -9,7 +9,7 @@
 //! model sees, the tier, the trust and the read-back are all derived from that one entry, so a tool cannot
 //! exist in one view and not another. A name that is not in the table is costly and its result untrusted.
 
-use super::{Assistant, Effect, MONTHS, MediaCmd, WEEKDAYS, format_clock, format_duration};
+use super::{Assistant, Effect, MediaCmd, format_clock, format_duration};
 use crate::inbox::reply::ReplyKind;
 use crate::inbox::summary::{details_for_model, status_sentence};
 use crate::llm::ToolSpec;
@@ -552,7 +552,10 @@ impl Assistant {
             .set_timer(&*self.clock, secs, &label)
             .map_err(|e| e.to_string())?;
         self.save();
-        Ok(format!("Timer set for {}.", format_duration(secs)))
+        Ok(format!(
+            "Timer set for {}.",
+            format_duration(self.lang, secs)
+        ))
     }
 
     fn run_list_timers(&mut self, _args: &Value, _now: Ts) -> Result<String, String> {
@@ -568,7 +571,7 @@ impl Assistant {
                 } else {
                     label.as_str()
                 };
-                format!("{who}: {} left", format_duration(*left))
+                format!("{who}: {} left", format_duration(self.lang, *left))
             })
             .collect::<Vec<_>>()
             .join("; "))
@@ -599,7 +602,7 @@ impl Assistant {
         let at = next_occurrence(&*self.zone, now, mask.unwrap_or(days::ALL), h, m).unwrap_or(now);
         Ok(format!(
             "Alarm set for {} {}.",
-            format_clock(h, m),
+            format_clock(self.lang, h, m),
             self.day_words(now, at)
         ))
     }
@@ -640,7 +643,7 @@ impl Assistant {
         self.save();
         Ok(format!(
             "Will remind about \"{what}\" in {}.",
-            format_duration(secs)
+            format_duration(self.lang, secs)
         ))
     }
 
@@ -655,7 +658,7 @@ impl Assistant {
         self.save();
         Ok(format!(
             "Will remind about \"{what}\" at {} {}.",
-            format_clock(h, m),
+            format_clock(self.lang, h, m),
             self.day_words(now, at)
         ))
     }
@@ -667,19 +670,20 @@ impl Assistant {
         Ok(format!(
             "It is {} on {}, {} {}.",
             format_clock(
+                self.lang,
                 u8::try_from(minute / 60).unwrap_or(0),
                 u8::try_from(minute % 60).unwrap_or(0)
             ),
-            WEEKDAYS[usize::from(weekday(day))],
-            MONTHS[usize::try_from(mo - 1).unwrap_or(0) % 12],
+            self.lang.calendar.weekdays[usize::from(weekday(day))],
+            self.lang.calendar.months[usize::try_from(mo - 1).unwrap_or(0) % 12],
             d
         ))
     }
 
     fn day_words(&self, now: i64, at: i64) -> &'static str {
         match self.zone.local_day(at) - self.zone.local_day(now) {
-            0 => "today",
-            1 => "tomorrow",
+            0 => self.lang.calendar.today,
+            1 => self.lang.calendar.tomorrow,
             _ => "on its next occurrence",
         }
     }
@@ -752,7 +756,7 @@ impl Assistant {
             return Err("`seconds` must be between 60 and 86400".into());
         }
         if core.snooze_current(secs) {
-            Ok(format!("Snoozed for {}.", format_duration(secs)))
+            Ok(format!("Snoozed for {}.", format_duration(self.lang, secs)))
         } else {
             Err("no agent event is being discussed".into())
         }

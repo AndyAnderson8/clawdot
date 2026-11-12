@@ -222,6 +222,7 @@ mod tests {
 
     fn assistant(now: Ts) -> Assistant {
         Assistant::new(
+            crate::lang::DEFAULT,
             Arc::new(At(now)),
             Box::new(FixedOffset(-6 * 3600)),
             Scheduler::new(4),

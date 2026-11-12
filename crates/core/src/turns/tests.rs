@@ -97,6 +97,7 @@ impl Lab {
     async fn new(delay_ms: u64) -> Self {
         let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FastClock(Instant::now()));
         let assistant = Assistant::new(
+            crate::lang::DEFAULT,
             clock,
             Box::new(FixedOffset(0)),
             Scheduler::new(16),
@@ -544,6 +545,7 @@ async fn a_timer_tool_result_waits_for_the_disk_without_holding_the_loop() {
     );
     let store = JsonStore::new(dir.0.join("timers.json"), crate::sched::SCHEMA);
     let mut assistant = Assistant::new(
+        crate::lang::DEFAULT,
         clock,
         Box::new(FixedOffset(0)),
         Scheduler::new(8),
@@ -591,6 +593,7 @@ async fn a_timer_tool_result_says_when_the_save_failed() {
     );
     let store = JsonStore::new(dir.0.join("timers.json"), crate::sched::SCHEMA);
     let mut assistant = Assistant::new(
+        crate::lang::DEFAULT,
         clock,
         Box::new(FixedOffset(0)),
         Scheduler::new(8),
@@ -652,6 +655,7 @@ async fn a_turn_task_binds_a_held_reply_to_its_event_through_the_loop() {
         Limits::default(),
     ));
     lab.assistant = Assistant::new(
+        crate::lang::DEFAULT,
         clock,
         Box::new(FixedOffset(0)),
         Scheduler::new(16),

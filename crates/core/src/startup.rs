@@ -430,14 +430,18 @@ fn open_records(args: &Args, core: &Core) -> Result<(Arc<AuditLog>, Arc<NoteStor
     core.set_audit(audit);
     core.set_quiet_hours(args.quiet);
     // Notes the user asks for (REQ-AST-023); off unless the `agent` section turns them on.
-    let notes = NoteStore::open(&args.data_dir, args.agent.notes.unwrap_or(false))
-        .map(Arc::new)
-        .map_err(|e| {
-            fail(
-                1,
-                format!("cannot open the notes in {}: {e}", args.data_dir.display()),
-            )
-        })?;
+    let notes = NoteStore::open(
+        crate::lang::DEFAULT,
+        &args.data_dir,
+        args.agent.notes.unwrap_or(false),
+    )
+    .map(Arc::new)
+    .map_err(|e| {
+        fail(
+            1,
+            format!("cannot open the notes in {}: {e}", args.data_dir.display()),
+        )
+    })?;
     let notes_for_conv = Arc::clone(&notes);
     core.set_notes(notes);
     if args.actions.dry_run {
@@ -457,6 +461,7 @@ fn open_assistant(
     let sched = Scheduler::load(&sched_store, 64, &**clock)
         .map_err(|e| fail(1, format!("cannot load timers: {e}")))?;
     Ok(Assistant::new(
+        crate::lang::DEFAULT,
         clock.clone(),
         zone,
         sched,
@@ -587,6 +592,7 @@ fn satellite_parts(
     let mut settings = satellite::Settings {
         announcer: announcer.clone(),
         realtime: Some(rt.clone()),
+        lang: crate::lang::DEFAULT,
         ..satellite::Settings::default()
     };
     if let Some(s) = args.satellite.follow_up_secs {

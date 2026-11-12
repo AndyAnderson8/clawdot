@@ -9,6 +9,7 @@
 use crate::audit::{Act, AuditLog, Gate, TurnLog, decision};
 use crate::cancel::CancelToken;
 use crate::inbox::summary::{SummaryConfig, clamp_for_speech};
+use crate::lang::Language;
 use crate::llm::{ChatRequest, Completion, LlmError, Message, Role, ToolCall, ToolSpec};
 use crate::notes::{self, NoteStore};
 use crate::sched::{Clock, Ts};
@@ -111,53 +112,18 @@ pub const CONFIRM_WINDOW_SECS: i64 = 120;
 /// Whether the user's whole utterance is a plain yes. Deliberately strict: a confirmation must be the
 /// user's own short answer, not a sentence that merely contains "yes".
 #[must_use]
-pub fn is_yes(utterance: &str) -> bool {
-    matches!(
-        normalise(utterance).as_str(),
-        "yes"
-            | "yeah"
-            | "yep"
-            | "yup"
-            | "sure"
-            | "ok"
-            | "okay"
-            | "correct"
-            | "confirm"
-            | "confirmed"
-            | "affirmative"
-            | "absolutely"
-            | "send it"
-            | "do it"
-            | "go ahead"
-            | "that's right"
-            | "yes send it"
-            | "yes do it"
-            | "yes go ahead"
-            | "yes please send it"
-            | "yes that's right"
-    )
+pub fn is_yes(lang: &Language, utterance: &str) -> bool {
+    lang.answers
+        .yes
+        .contains(&normalise(lang, utterance).as_str())
 }
 
 /// Whether the user's whole utterance is a plain no or cancel.
 #[must_use]
-pub fn is_no(utterance: &str) -> bool {
-    matches!(
-        normalise(utterance).as_str(),
-        "no" | "nope"
-            | "nah"
-            | "cancel"
-            | "stop"
-            | "never mind"
-            | "nevermind"
-            | "don't"
-            | "do not"
-            | "don't do it"
-            | "no thanks"
-            | "no thank you"
-            | "negative"
-            | "forget it"
-            | "cancel that"
-    )
+pub fn is_no(lang: &Language, utterance: &str) -> bool {
+    lang.answers
+        .no
+        .contains(&normalise(lang, utterance).as_str())
 }
 
 /// Whether a tool-call id is already used by a message in the history.
@@ -167,7 +133,7 @@ fn id_in_history(history: &[Message], id: &str) -> bool {
         .any(|m| m.tool_call_id.as_deref() == Some(id) || m.tool_calls.iter().any(|c| c.id == id))
 }
 
-fn normalise(utterance: &str) -> String {
+fn normalise(lang: &Language, utterance: &str) -> String {
     let norm: String = utterance
         .to_lowercase()
         .chars()
@@ -180,7 +146,7 @@ fn normalise(utterance: &str) -> String {
         })
         .collect();
     norm.split_whitespace()
-        .filter(|w| *w != "please")
+        .filter(|w| !lang.answers.ignored.contains(w))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -686,6 +652,8 @@ pub struct TurnConfig {
     pub summary_model: Option<String>,
     /// Whether destructive tools are offered at all (REQ-SEC-010). Off unless the administrator enables it.
     pub allow_destructive: bool,
+    /// The language the user's words are read in: yes, no, note commands (REQ-SEC-011, REQ-SEC-017).
+    pub lang: &'static Language,
 }
 
 impl Default for TurnConfig {
@@ -703,6 +671,7 @@ impl Default for TurnConfig {
             summarize_over: crate::audit::LONG_RESULT_CHARS,
             summary_model: None,
             allow_destructive: false,
+            lang: crate::lang::DEFAULT,
         }
     }
 }
@@ -865,22 +834,10 @@ pub enum Trigger {
 
 /// Whether the user's whole utterance asks to stop what is happening (REQ-AST-022, REQ-VOI-020).
 #[must_use]
-pub fn is_cancel(utterance: &str) -> bool {
-    matches!(
-        normalise(utterance).as_str(),
-        "stop"
-            | "stop it"
-            | "stop that"
-            | "stop now"
-            | "stop talking"
-            | "cancel"
-            | "cancel that"
-            | "cancel it"
-            | "never mind"
-            | "nevermind"
-            | "forget it"
-            | "abort"
-    )
+pub fn is_cancel(lang: &Language, utterance: &str) -> bool {
+    lang.answers
+        .cancel
+        .contains(&normalise(lang, utterance).as_str())
 }
 
 /// What one turn works on, borrowed for its duration: the tools, the conversation, the limits, the counters,

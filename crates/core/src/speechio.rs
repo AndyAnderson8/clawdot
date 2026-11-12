@@ -132,7 +132,7 @@ pub async fn voice_once(
     let pcm = parse_wav(&bytes).map_err(|e| format!("{}: {e}", input.display()))?;
 
     let effects = std::cell::RefCell::new(Vec::new());
-    let out = voice_turn(&stt, &tts, &pcm, |text| {
+    let out = voice_turn(app.brain.assistant.lang(), &stt, &tts, &pcm, |text| {
         let app = &mut *app;
         let effects = &effects;
         async move {

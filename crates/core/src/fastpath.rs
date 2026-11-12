@@ -14,6 +14,7 @@
 //!   and a bare name that is itself a kind uses that kind
 //! * `word[s]`       a word with an optional glued suffix, meaning "word" or "words"
 
+use crate::lang::Language;
 use std::fmt;
 
 /// Search steps allowed per utterance before giving up (and falling through to the LLM).
@@ -71,16 +72,204 @@ pub enum SlotValue {
     Time(Time),
 }
 
-/// A recognised command.
+/// What a built-in command asks for. The grammar of each language maps phrases to these, and the
+/// dispatcher handles each one, so adding an intent without handling it does not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Intent {
+    /// `stop`
+    Stop,
+    /// `inbox.status`
+    InboxStatus,
+    /// `inbox.details`
+    InboxDetails,
+    /// `inbox.snooze`
+    InboxSnooze,
+    /// `inbox.ack`
+    InboxAck,
+    /// `inbox.dismiss`
+    InboxDismiss,
+    /// `inbox.instruct`
+    InboxInstruct,
+    /// `media.pause`
+    MediaPause,
+    /// `media.resume`
+    MediaResume,
+    /// `media.next`
+    MediaNext,
+    /// `media.previous`
+    MediaPrevious,
+    /// `media.play`
+    MediaPlay,
+    /// `volume.set`
+    VolumeSet,
+    /// `volume.up`
+    VolumeUp,
+    /// `volume.down`
+    VolumeDown,
+    /// `timer.cancel`
+    TimerCancel,
+    /// `timer.query`
+    TimerQuery,
+    /// `timer.set`
+    TimerSet,
+    /// `stopwatch.start`
+    StopwatchStart,
+    /// `stopwatch.lap`
+    StopwatchLap,
+    /// `stopwatch.stop`
+    StopwatchStop,
+    /// `stopwatch.read`
+    StopwatchRead,
+    /// `stopwatch.reset`
+    StopwatchReset,
+    /// `alarm.cancel`
+    AlarmCancel,
+    /// `alarm.set_weekdays`
+    AlarmSetWeekdays,
+    /// `alarm.set_weekend`
+    AlarmSetWeekend,
+    /// `alarm.set_daily`
+    AlarmSetDaily,
+    /// `alarm.set`
+    AlarmSet,
+    /// `reminder.set_in`
+    ReminderSetIn,
+    /// `reminder.set_at`
+    ReminderSetAt,
+    /// `time.query`
+    TimeQuery,
+    /// `date.query`
+    DateQuery,
+}
+
+impl Intent {
+    /// Every intent, in grammar order. A test checks that each has a template in every language.
+    pub const ALL: [Self; 32] = [
+        Self::Stop,
+        Self::InboxStatus,
+        Self::InboxDetails,
+        Self::InboxSnooze,
+        Self::InboxAck,
+        Self::InboxDismiss,
+        Self::InboxInstruct,
+        Self::MediaPause,
+        Self::MediaResume,
+        Self::MediaNext,
+        Self::MediaPrevious,
+        Self::MediaPlay,
+        Self::VolumeSet,
+        Self::VolumeUp,
+        Self::VolumeDown,
+        Self::TimerCancel,
+        Self::TimerQuery,
+        Self::TimerSet,
+        Self::StopwatchStart,
+        Self::StopwatchLap,
+        Self::StopwatchStop,
+        Self::StopwatchRead,
+        Self::StopwatchReset,
+        Self::AlarmCancel,
+        Self::AlarmSetWeekdays,
+        Self::AlarmSetWeekend,
+        Self::AlarmSetDaily,
+        Self::AlarmSet,
+        Self::ReminderSetIn,
+        Self::ReminderSetAt,
+        Self::TimeQuery,
+        Self::DateQuery,
+    ];
+
+    /// The dotted name, for logs and tests. It does not change with the language.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::InboxStatus => "inbox.status",
+            Self::InboxDetails => "inbox.details",
+            Self::InboxSnooze => "inbox.snooze",
+            Self::InboxAck => "inbox.ack",
+            Self::InboxDismiss => "inbox.dismiss",
+            Self::InboxInstruct => "inbox.instruct",
+            Self::MediaPause => "media.pause",
+            Self::MediaResume => "media.resume",
+            Self::MediaNext => "media.next",
+            Self::MediaPrevious => "media.previous",
+            Self::MediaPlay => "media.play",
+            Self::VolumeSet => "volume.set",
+            Self::VolumeUp => "volume.up",
+            Self::VolumeDown => "volume.down",
+            Self::TimerCancel => "timer.cancel",
+            Self::TimerQuery => "timer.query",
+            Self::TimerSet => "timer.set",
+            Self::StopwatchStart => "stopwatch.start",
+            Self::StopwatchLap => "stopwatch.lap",
+            Self::StopwatchStop => "stopwatch.stop",
+            Self::StopwatchRead => "stopwatch.read",
+            Self::StopwatchReset => "stopwatch.reset",
+            Self::AlarmCancel => "alarm.cancel",
+            Self::AlarmSetWeekdays => "alarm.set_weekdays",
+            Self::AlarmSetWeekend => "alarm.set_weekend",
+            Self::AlarmSetDaily => "alarm.set_daily",
+            Self::AlarmSet => "alarm.set",
+            Self::ReminderSetIn => "reminder.set_in",
+            Self::ReminderSetAt => "reminder.set_at",
+            Self::TimeQuery => "time.query",
+            Self::DateQuery => "date.query",
+        }
+    }
+
+    /// Whether the answer or effect depends on the wall clock being right. A countdown timer is not
+    /// one: it runs on the monotonic clock and works on a device that has never had the time.
+    #[must_use]
+    pub const fn needs_valid_clock(self) -> bool {
+        match self {
+            Self::TimeQuery
+            | Self::DateQuery
+            | Self::StopwatchStart
+            | Self::StopwatchLap
+            | Self::StopwatchStop
+            | Self::StopwatchRead
+            | Self::AlarmSet
+            | Self::AlarmSetDaily
+            | Self::AlarmSetWeekdays
+            | Self::AlarmSetWeekend
+            | Self::ReminderSetIn
+            | Self::ReminderSetAt => true,
+            Self::Stop
+            | Self::InboxStatus
+            | Self::InboxDetails
+            | Self::InboxSnooze
+            | Self::InboxAck
+            | Self::InboxDismiss
+            | Self::InboxInstruct
+            | Self::MediaPause
+            | Self::MediaResume
+            | Self::MediaNext
+            | Self::MediaPrevious
+            | Self::MediaPlay
+            | Self::VolumeSet
+            | Self::VolumeUp
+            | Self::VolumeDown
+            | Self::TimerCancel
+            | Self::TimerQuery
+            | Self::TimerSet
+            | Self::StopwatchReset
+            | Self::AlarmCancel => false,
+        }
+    }
+}
+
+/// A recognised command. `I` is the intent type: [`Intent`] for the built-in grammar, anything copyable
+/// for a custom one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Match {
-    /// Intent name, for example `timer.set`.
-    pub intent: String,
+pub struct Match<I = Intent> {
+    /// What was asked for.
+    pub intent: I,
     /// Captured slots in template order.
     pub slots: Vec<(String, SlotValue)>,
 }
 
-impl Match {
+impl<I> Match<I> {
     /// A slot by name.
     #[must_use]
     pub fn slot(&self, name: &str) -> Option<&SlotValue> {
@@ -328,25 +517,14 @@ fn compile(template: &str) -> Result<Vec<Vec<Item>>, GrammarError> {
 // Normalisation and value parsing
 // ---------------------------------------------------------------------------------------------
 
-const LEADING_FILLERS: &[&[&str]] = &[
-    &["please"],
-    &["hey"],
-    &["ok"],
-    &["okay"],
-    &["can", "you"],
-    &["could", "you"],
-    &["would", "you"],
-    &["will", "you"],
-    &["go", "ahead", "and"],
-    &["i", "want", "you", "to"],
-    &["i'd", "like", "you", "to"],
-    &["i", "would", "like", "you", "to"],
-];
-const TRAILING_FILLERS: &[&[&str]] = &[&["please"], &["thanks"], &["thank", "you"]];
+/// Whether `toks` starts with exactly these words.
+fn starts_with(toks: &[String], words: &[&str]) -> bool {
+    toks.len() >= words.len() && toks.iter().zip(words).all(|(t, w)| t == w)
+}
 
 /// Lower-case, strip punctuation, and drop polite filler words.
 #[must_use]
-pub fn normalize(utterance: &str) -> Vec<String> {
+pub fn normalize(lang: &Language, utterance: &str) -> Vec<String> {
     let mut s = String::with_capacity(utterance.len());
     for c in utterance.to_lowercase().chars() {
         match c {
@@ -359,18 +537,13 @@ pub fn normalize(utterance: &str) -> Vec<String> {
     let mut toks: Vec<String> = s.split_whitespace().map(str::to_owned).collect();
     loop {
         let before = toks.len();
-        for f in LEADING_FILLERS {
-            if toks.len() > f.len() && toks.iter().zip(f.iter()).all(|(a, b)| a == b) {
+        for f in lang.leading_fillers {
+            if toks.len() > f.len() && starts_with(&toks, f) {
                 toks.drain(..f.len());
             }
         }
-        for f in TRAILING_FILLERS {
-            if toks.len() > f.len()
-                && toks[toks.len() - f.len()..]
-                    .iter()
-                    .zip(f.iter())
-                    .all(|(a, b)| a == b)
-            {
+        for f in lang.trailing_fillers {
+            if toks.len() > f.len() && starts_with(&toks[toks.len() - f.len()..], f) {
                 let new_len = toks.len() - f.len();
                 toks.truncate(new_len);
             }
@@ -381,122 +554,84 @@ pub fn normalize(utterance: &str) -> Vec<String> {
     }
 }
 
-fn small_number(tok: &str) -> Option<u32> {
-    Some(match tok {
-        "zero" | "oh" => 0,
-        "one" => 1,
-        "two" => 2,
-        "three" => 3,
-        "four" => 4,
-        "five" => 5,
-        "six" => 6,
-        "seven" => 7,
-        "eight" => 8,
-        "nine" => 9,
-        "ten" => 10,
-        "eleven" => 11,
-        "twelve" => 12,
-        "thirteen" => 13,
-        "fourteen" => 14,
-        "fifteen" => 15,
-        "sixteen" => 16,
-        "seventeen" => 17,
-        "eighteen" => 18,
-        "nineteen" => 19,
-        _ => return None,
-    })
-}
-
-fn tens(tok: &str) -> Option<u32> {
-    Some(match tok {
-        "twenty" => 20,
-        "thirty" => 30,
-        "forty" => 40,
-        "fifty" => 50,
-        "sixty" => 60,
-        "seventy" => 70,
-        "eighty" => 80,
-        "ninety" => 90,
-        _ => return None,
-    })
+fn word_value(table: &[(&str, u32)], tok: &str) -> Option<u32> {
+    table.iter().find(|(w, _)| *w == tok).map(|(_, v)| *v)
 }
 
 /// A number at the start of `toks`: digits, or words up to "one hundred". Returns `(value, tokens used)`.
-fn parse_number(toks: &[String]) -> Option<(u32, usize)> {
+fn parse_number(lang: &Language, toks: &[String]) -> Option<(u32, usize)> {
+    let n = &lang.numbers;
     let first = toks.first()?;
     if first.len() <= 4 && first.chars().all(|c| c.is_ascii_digit()) {
         return first.parse().ok().map(|n| (n, 1));
     }
-    if first == "a" && toks.get(1).is_some_and(|t| t == "hundred") {
+    if first == n.article_a && toks.get(1).is_some_and(|t| t == n.hundred) {
         return Some((100, 2));
     }
-    if let Some(t) = tens(first) {
+    if let Some(t) = word_value(n.tens, first) {
         if let Some(o) = toks
             .get(1)
-            .and_then(|t| small_number(t))
+            .and_then(|t| word_value(n.small, t))
             .filter(|o| (1..=9).contains(o))
         {
             return Some((t + o, 2));
         }
         return Some((t, 1));
     }
-    let base = small_number(first)?;
-    if base < 10 && toks.get(1).is_some_and(|t| t == "hundred") {
+    let base = word_value(n.small, first)?;
+    if base < 10 && toks.get(1).is_some_and(|t| t == n.hundred) {
         return Some((base * 100, 2));
     }
     Some((base, 1))
 }
 
-fn unit_seconds(tok: &str) -> Option<i64> {
-    Some(match tok {
-        "second" | "seconds" | "sec" | "secs" => 1,
-        "minute" | "minutes" | "min" | "mins" => 60,
-        "hour" | "hours" | "hr" | "hrs" => 3600,
-        "day" | "days" => 86_400,
-        _ => return None,
-    })
+fn unit_seconds(lang: &Language, tok: &str) -> Option<i64> {
+    lang.durations
+        .units
+        .iter()
+        .find(|(words, _)| words.contains(&tok))
+        .map(|(_, secs)| *secs)
 }
 
 /// One "quantity unit" chunk, for example "ten minutes" or "an hour".
-fn duration_chunk(toks: &[String]) -> Option<(usize, i64, i64)> {
+fn duration_chunk(lang: &Language, toks: &[String]) -> Option<(usize, i64, i64)> {
     // (tokens used, seconds, unit seconds)
-    if toks.first().is_some_and(|t| t == "half")
-        && toks.get(1).is_some_and(|t| t == "an")
-        && toks.get(2).is_some_and(|t| t == "hour")
-    {
-        return Some((3, 1800, 3600));
+    let half = lang.durations.half_an_hour;
+    if starts_with(toks, half) {
+        return Some((half.len(), 1800, 3600));
     }
     let (qty, used) = match toks.first().map(String::as_str) {
-        Some("a" | "an") => (1_i64, 1),
+        Some(a) if a == lang.numbers.article_a || a == lang.numbers.article_an => (1_i64, 1),
         _ => {
-            let (n, used) = parse_number(toks)?;
+            let (n, used) = parse_number(lang, toks)?;
             (i64::from(n), used)
         }
     };
-    let unit = unit_seconds(toks.get(used)?)?;
+    let unit = unit_seconds(lang, toks.get(used)?)?;
     Some((used + 1, qty * unit, unit))
 }
 
-fn duration_candidates(toks: &[String]) -> Vec<(usize, i64)> {
+fn duration_candidates(lang: &Language, toks: &[String]) -> Vec<(usize, i64)> {
+    let d = &lang.durations;
     let mut results = Vec::new();
-    let Some((mut used, mut total, mut last_unit)) = duration_chunk(toks) else {
+    let Some((mut used, mut total, mut last_unit)) = duration_chunk(lang, toks) else {
         return results;
     };
     results.push((used, total));
     loop {
         // "... and a half" after hours or minutes
-        if toks.get(used).is_some_and(|t| t == "and")
-            && toks.get(used + 1).is_some_and(|t| t == "a")
-            && toks.get(used + 2).is_some_and(|t| t == "half")
+        if toks
+            .get(used..)
+            .is_some_and(|rest| starts_with(rest, d.and_a_half))
             && last_unit >= 60
         {
-            used += 3;
+            used += d.and_a_half.len();
             total += last_unit / 2;
             results.push((used, total));
             break;
         }
-        let skip = usize::from(toks.get(used).is_some_and(|t| t == "and"));
-        match duration_chunk(toks.get(used + skip..).unwrap_or(&[])) {
+        let skip = usize::from(toks.get(used).is_some_and(|t| t == d.and));
+        match duration_chunk(lang, toks.get(used + skip..).unwrap_or(&[])) {
             Some((n, secs, unit)) if unit < last_unit => {
                 used += skip + n;
                 total += secs;
@@ -510,10 +645,10 @@ fn duration_candidates(toks: &[String]) -> Vec<(usize, i64)> {
     results
 }
 
-fn parse_clock_token(tok: &str) -> Option<(u8, u8, Option<Meridiem>)> {
-    let (body, meridiem) = if let Some(b) = tok.strip_suffix("am") {
+fn parse_clock_token(lang: &Language, tok: &str) -> Option<(u8, u8, Option<Meridiem>)> {
+    let (body, meridiem) = if let Some(b) = tok.strip_suffix(lang.clock.am) {
         (b, Some(Meridiem::Am))
-    } else if let Some(b) = tok.strip_suffix("pm") {
+    } else if let Some(b) = tok.strip_suffix(lang.clock.pm) {
         (b, Some(Meridiem::Pm))
     } else {
         (tok, None)
@@ -531,15 +666,15 @@ fn valid_clock(h: u8, m: u8, meridiem: Option<Meridiem>) -> bool {
     m < 60 && h <= 24 && (meridiem.is_none() || (1..=12).contains(&h))
 }
 
-fn meridiem_at(toks: &[String], i: usize) -> Option<Meridiem> {
+fn meridiem_at(lang: &Language, toks: &[String], i: usize) -> Option<Meridiem> {
     match toks.get(i).map(String::as_str) {
-        Some("am") => Some(Meridiem::Am),
-        Some("pm") => Some(Meridiem::Pm),
+        Some(t) if t == lang.clock.am => Some(Meridiem::Am),
+        Some(t) if t == lang.clock.pm => Some(Meridiem::Pm),
         _ => None,
     }
 }
 
-fn time_candidates(toks: &[String]) -> Vec<(usize, Time)> {
+fn time_candidates(lang: &Language, toks: &[String]) -> Vec<(usize, Time)> {
     let mut out: Vec<(usize, Time)> = Vec::new();
     let Some(first) = toks.first() else {
         return out;
@@ -556,47 +691,51 @@ fn time_candidates(toks: &[String]) -> Vec<(usize, Time)> {
             ));
         }
     };
-    match first.as_str() {
-        "noon" => push(1, 12, 0, Some(Meridiem::Pm)),
-        "midnight" => push(1, 12, 0, Some(Meridiem::Am)),
-        _ => {}
+    if first == lang.clock.noon {
+        push(1, 12, 0, Some(Meridiem::Pm));
+    } else if first == lang.clock.midnight {
+        push(1, 12, 0, Some(Meridiem::Am));
     }
-    if let Some((h, m, mer)) = parse_clock_token(first) {
+    if let Some((h, m, mer)) = parse_clock_token(lang, first) {
         if mer.is_some() {
             push(1, h, m, mer);
         } else {
-            if let Some(mer) = meridiem_at(toks, 1) {
+            if let Some(mer) = meridiem_at(lang, toks, 1) {
                 push(2, h, m, Some(mer));
             }
             push(1, h, m, None);
         }
-    } else if let Some((h, hused)) = parse_number(toks).filter(|(h, _)| *h <= 24) {
+    } else if let Some((h, hused)) = parse_number(lang, toks).filter(|(h, _)| *h <= 24) {
         let h = h as u8;
         // "seven thirty [pm]" / "7 30 [pm]" / "seven oh five"
-        let minute = if toks.get(hused).is_some_and(|t| t == "oh" || t == "o") {
-            parse_number(&toks[hused + 1..])
+        let minute = if toks
+            .get(hused)
+            .is_some_and(|t| lang.clock.oh.contains(&t.as_str()))
+        {
+            parse_number(lang, &toks[hused + 1..])
                 .filter(|(m, n)| *n == 1 && (1..=9).contains(m))
                 .map(|(m, n)| (m, n + 1))
         } else {
-            parse_number(toks.get(hused..).unwrap_or(&[])).filter(|(m, _)| (10..=59).contains(m))
+            parse_number(lang, toks.get(hused..).unwrap_or(&[]))
+                .filter(|(m, _)| (10..=59).contains(m))
         };
         if let Some((m, mused)) = minute {
             let used = hused + mused;
-            if let Some(mer) = meridiem_at(toks, used) {
+            if let Some(mer) = meridiem_at(lang, toks, used) {
                 push(used + 1, h, m as u8, Some(mer));
             }
             push(used, h, m as u8, None);
         }
-        if matches!(
-            toks.get(hused).map(String::as_str),
-            Some("o'clock" | "oclock")
-        ) {
-            if let Some(mer) = meridiem_at(toks, hused + 1) {
+        if toks
+            .get(hused)
+            .is_some_and(|t| lang.clock.oclock.contains(&t.as_str()))
+        {
+            if let Some(mer) = meridiem_at(lang, toks, hused + 1) {
                 push(hused + 2, h, 0, Some(mer));
             }
             push(hused + 1, h, 0, None);
         }
-        if let Some(mer) = meridiem_at(toks, hused) {
+        if let Some(mer) = meridiem_at(lang, toks, hused) {
             push(hused + 1, h, 0, Some(mer));
         }
         // a bare hour only counts for plain digits or words 1..=12 followed by something the template wants
@@ -609,28 +748,22 @@ fn time_candidates(toks: &[String]) -> Vec<(usize, Time)> {
     out
 }
 
-fn candidates(kind: Kind, toks: &[String]) -> Vec<(usize, SlotValue)> {
+fn candidates(lang: &Language, kind: Kind, toks: &[String]) -> Vec<(usize, SlotValue)> {
     match kind {
-        Kind::Number => parse_number(toks)
+        Kind::Number => parse_number(lang, toks)
             .map(|(n, used)| vec![(used, SlotValue::Number(i64::from(n)))])
             .unwrap_or_default(),
-        Kind::Duration => duration_candidates(toks)
+        Kind::Duration => duration_candidates(lang, toks)
             .into_iter()
             .map(|(used, secs)| (used, SlotValue::Duration(secs)))
             .collect(),
-        Kind::Time => time_candidates(toks)
+        Kind::Time => time_candidates(lang, toks)
             .into_iter()
             .map(|(used, t)| (used, SlotValue::Time(t)))
             .collect(),
         // A lone article or pronoun is never a useful label ("set a timer" must not name it "a").
         Kind::Text => (1..=toks.len())
-            .filter(|&n| {
-                !(n == 1
-                    && matches!(
-                        toks[0].as_str(),
-                        "a" | "an" | "the" | "my" | "all" | "of" | "it" | "that" | "this"
-                    ))
-            })
+            .filter(|&n| !(n == 1 && lang.numbers.not_a_label.contains(&toks[0].as_str())))
             .map(|n| (n, SlotValue::Text(toks[..n].join(" "))))
             .collect(),
     }
@@ -641,6 +774,7 @@ fn candidates(kind: Kind, toks: &[String]) -> Vec<(usize, SlotValue)> {
 // ---------------------------------------------------------------------------------------------
 
 fn match_items(
+    lang: &Language,
     items: &[Item],
     toks: &[String],
     pos: usize,
@@ -654,13 +788,14 @@ fn match_items(
     match items.split_first() {
         None => pos == toks.len(),
         Some((Item::Word(w), rest)) => {
-            toks.get(pos).is_some_and(|t| t == w) && match_items(rest, toks, pos + 1, caps, steps)
+            toks.get(pos).is_some_and(|t| t == w)
+                && match_items(lang, rest, toks, pos + 1, caps, steps)
         }
         Some((Item::Slot(name, kind), rest)) => {
             let remaining = toks.get(pos..).unwrap_or(&[]);
-            for (used, value) in candidates(*kind, remaining) {
+            for (used, value) in candidates(lang, *kind, remaining) {
                 caps.push((name.clone(), value));
-                if match_items(rest, toks, pos + used, caps, steps) {
+                if match_items(lang, rest, toks, pos + used, caps, steps) {
                     return true;
                 }
                 caps.pop();
@@ -671,51 +806,43 @@ fn match_items(
 }
 
 #[derive(Debug)]
-struct Compiled {
-    intent: String,
+struct Compiled<I> {
+    intent: I,
     patterns: Vec<Vec<Item>>,
 }
 
-/// A set of compiled intents.
+/// A set of compiled intents, matched in a language's words.
 #[derive(Debug)]
-pub struct Matcher {
-    intents: Vec<Compiled>,
+pub struct Matcher<I = Intent> {
+    lang: &'static Language,
+    intents: Vec<Compiled<I>>,
 }
 
-impl Matcher {
-    /// Compile intents given as `(name, templates)`. Earlier intents win ties, so list the more specific
-    /// ones first.
+impl<I: Copy> Matcher<I> {
+    /// Compile intents given as `(intent, templates)`, to be matched with `lang`'s number, duration and
+    /// clock words. Earlier intents win ties, so list the more specific ones first.
     ///
     /// # Errors
     /// [`GrammarError`] for a malformed template.
-    pub fn new(specs: &[(&str, &[&str])]) -> Result<Self, GrammarError> {
+    pub fn new(lang: &'static Language, specs: &[(I, &[&str])]) -> Result<Self, GrammarError> {
         let mut intents = Vec::with_capacity(specs.len());
-        for (name, templates) in specs {
+        for (intent, templates) in specs {
             let mut patterns = Vec::new();
             for t in *templates {
                 patterns.extend(compile(t)?);
             }
             intents.push(Compiled {
-                intent: (*name).to_owned(),
+                intent: *intent,
                 patterns,
             });
         }
-        Ok(Self { intents })
-    }
-
-    /// The built-in grammar: stop, volume, music controls, timers, alarms, reminders, time and date.
-    #[must_use]
-    pub fn builtin() -> Self {
-        // The built-in templates are tested to compile; an error here is a programming mistake.
-        Self::new(BUILTIN).unwrap_or(Self {
-            intents: Vec::new(),
-        })
+        Ok(Self { lang, intents })
     }
 
     /// Recognise a whole utterance, or `None` to fall through to the LLM.
     #[must_use]
-    pub fn matches(&self, utterance: &str) -> Option<Match> {
-        let toks = normalize(utterance);
+    pub fn matches(&self, utterance: &str) -> Option<Match<I>> {
+        let toks = normalize(self.lang, utterance);
         if toks.is_empty() {
             return None;
         }
@@ -723,9 +850,9 @@ impl Matcher {
         for intent in &self.intents {
             for pattern in &intent.patterns {
                 let mut caps = Vec::new();
-                if match_items(pattern, &toks, 0, &mut caps, &mut steps) {
+                if match_items(self.lang, pattern, &toks, 0, &mut caps, &mut steps) {
                     return Some(Match {
-                        intent: intent.intent.clone(),
+                        intent: intent.intent,
                         slots: caps,
                     });
                 }
@@ -738,332 +865,54 @@ impl Matcher {
     }
 }
 
-/// Built-in intents. Names are the contract with the tool layer.
-pub const BUILTIN: &[(&str, &[&str])] = &[
-    (
-        "stop",
-        &[
-            "stop",
-            "cancel",
-            "never mind",
-            "nevermind",
-            "be quiet",
-            "quiet",
-            "enough",
-            "that's enough",
-            "shut up",
-            "stop (it|that|talking|speaking|ringing)",
-            "silence [it|that|the alarm]",
-        ],
-    ),
-    (
-        "inbox.status",
-        &[
-            "what are my agents (up to|doing)",
-            "(any|are there any) (updates|news|messages|notifications)",
-            "what's new",
-            "anything new",
-            "what did i miss",
-            "check my (agents|inbox)",
-        ],
-    ),
-    (
-        "inbox.details",
-        &[
-            "(give me|tell me|read me) [the|more] (details|info|information)",
-            "more (details|info|information)",
-            "tell me more",
-            "what did (it|they|claude) (say|do)",
-            "read (it|that|the whole thing)",
-            "go on",
-        ],
-    ),
-    (
-        "inbox.snooze",
-        &[
-            "snooze [it|that|this] [for {duration}]",
-            "remind me (later|again) [in {duration}]",
-            "ask me (later|again) [in {duration}]",
-            "not now",
-            "later",
-        ],
-    ),
-    (
-        "inbox.ack",
-        &[
-            "(thanks|thank you) [i'll|i will] (handle|take care of|deal with|take) (it|that|this) [from here]",
-            "i'll (handle|take care of|deal with|take) (it|that|this) [from here]",
-            "i (got|have) (it|this|that)",
-            "i've got (it|this|that)",
-            "(thanks|thank you) [i got it]",
-            "got it [thanks]",
-            "that's all [thanks]",
-        ],
-    ),
-    (
-        "inbox.dismiss",
-        &[
-            "dismiss [it|that|this|the alarm|the notification|the message]",
-            "(clear|ignore|forget) (it|that|this)",
-        ],
-    ),
-    (
-        "inbox.instruct",
-        &[
-            "tell (it|claude|them|the agent) to {text}",
-            "tell (it|claude|them|the agent) {text}",
-            "(keep going|carry on|continue) (and|with|but) {text}",
-            "(keep going|carry on|continue)",
-            "reply {text}",
-        ],
-    ),
-    (
-        "media.pause",
-        &[
-            "pause [the] [music|song|playback|radio]",
-            "stop the (music|song|playback|radio)",
-        ],
-    ),
-    (
-        "media.resume",
-        &["(resume|continue|unpause|play) [the] [music|song|playback|radio]"],
-    ),
-    (
-        "media.next",
-        &[
-            "(next|skip) [the] [song|track|station]",
-            "skip this [song|track]",
-        ],
-    ),
-    (
-        "media.previous",
-        &[
-            "(previous|go back) [song|track]",
-            "play the previous (song|track)",
-        ],
-    ),
-    (
-        "media.play",
-        &[
-            "play [some] {name:text} (radio|station|music)",
-            "play [some|the] {name:text}",
-            "put on [some|the] {name:text}",
-            "(listen to|i want to hear) [some|the] {name:text}",
-        ],
-    ),
-    (
-        "volume.set",
-        &[
-            "(set|turn|put) [the] volume (to|at) {level:number} [percent]",
-            "volume {level:number} [percent]",
-            "(set|turn) it to {level:number} [percent]",
-        ],
-    ),
-    (
-        "volume.up",
-        &[
-            "volume up",
-            "louder",
-            "turn it up",
-            "speak up",
-            "(turn|make|bring) [the] volume up",
-            "(increase|raise) [the] volume",
-            "(turn|make) it louder",
-        ],
-    ),
-    (
-        "volume.down",
-        &[
-            "volume down",
-            "quieter",
-            "softer",
-            "turn it down",
-            "(turn|make|bring) [the] volume down",
-            "(decrease|lower|reduce) [the] volume",
-            "(turn|make) it (quieter|softer)",
-        ],
-    ),
-    (
-        "timer.cancel",
-        &[
-            "(cancel|stop|delete|clear|remove) [the|my|all] [{label:text}] timer[s]",
-            "(cancel|stop|delete|clear|remove) [all] [of] [my] timers",
-        ],
-    ),
-    (
-        "timer.query",
-        &[
-            "how much time (is|do i have) (left|remaining) [on [the] [{label:text}] timer]",
-            "how long (is|until) (left|remaining|the timer) [on [the] [{label:text}] timer]",
-            "(check|show) [the] [{label:text}] timer",
-            "(list|show|read|tell me|give me) [me] [all] [of] [the|my] [running|active] timers",
-            "what [are] [the|my] [running|active] timers [(do i have|are there|are running|are set|are active)]",
-            "what timers (do i have|are (there|running|set|active)) [running|set|right now]",
-            "which timers (do i have|are (there|running|set|active))",
-            "(do i have|are there) any [running|active] timers [running|set|right now]",
-            "how many timers (do i have|are (there|running|set))",
-        ],
-    ),
-    (
-        "timer.set",
-        &[
-            "(set|start|create|make) [a|an|the] timer for {duration} (called|named) {label:text}",
-            "(set|start|create|make) [a|an|the] {label:text} timer for {duration}",
-            "(set|start|create|make) [a|an|the] timer for {duration}",
-            "(set|start|create|make) [a|an|the] {duration} [{label:text}] timer",
-            "(set|start|create|make) [a|an|the] timer {duration}",
-            "timer for {duration}",
-            "{duration} timer",
-            "time me for {duration}",
-        ],
-    ),
-    (
-        "stopwatch.start",
-        &[
-            "(start|begin|run|use) [a|the|my] [new] (stopwatch|stop watch)",
-            "(set up|set) [a|the|my] [new] (stopwatch|stop watch)",
-            "(stopwatch|stop watch) start",
-            "(start|begin) timing [me|it|this]",
-            "time (me|this|it)",
-        ],
-    ),
-    (
-        "stopwatch.lap",
-        &[
-            "lap",
-            "split",
-            "lap time",
-            "(next|new|another) (lap|split)",
-            "(mark|record|take|log|do|add|start) [a|an|another|the|next|new] (lap|split)",
-            "(lap|split) [the|my] (stopwatch|stop watch)",
-            "(stopwatch|stop watch) (lap|split)",
-        ],
-    ),
-    (
-        "stopwatch.stop",
-        &[
-            "(stop|end|finish) [the|my] (stopwatch|stop watch)",
-            "(stopwatch|stop watch) stop",
-            "stop timing [me|it|this]",
-        ],
-    ),
-    (
-        "stopwatch.read",
-        &[
-            "how long (has|is) [the|my] (stopwatch|stop watch) (been running|running|at|on)",
-            "how long (on|is on) [the|my] (stopwatch|stop watch)",
-            "how much time (is on|has passed on|has elapsed on) [the|my] (stopwatch|stop watch)",
-            "(what's|what is) [on|at] [the|my] (stopwatch|stop watch) [at|reading|time|say|says|show|shows]",
-            "(check|read|show|tell me|give me) [me] [the|my] (stopwatch|stop watch) [time|reading]",
-            "(stopwatch|stop watch) (time|reading|check)",
-        ],
-    ),
-    (
-        "stopwatch.reset",
-        &["(reset|clear|cancel|delete|remove|zero) [the|my] (stopwatch|stop watch)"],
-    ),
-    (
-        "alarm.cancel",
-        &["(cancel|stop|delete|clear|remove|turn off) [the|my|all] [of] [my] alarm[s]"],
-    ),
-    (
-        "alarm.set_weekdays",
-        &[
-            "(set|create|make) [a|an] [alarm] (every weekday|on weekdays|for weekdays) (at|for) {time}",
-            "(set|create|make) [a|an] weekday alarm (at|for) {time}",
-        ],
-    ),
-    (
-        "alarm.set_weekend",
-        &["(set|create|make) [a|an] weekend alarm (at|for) {time}"],
-    ),
-    (
-        "alarm.set_daily",
-        &[
-            "(set|create|make) [a|an] (daily|every day|repeating) alarm (at|for) {time}",
-            "(set|create|make) [a|an] alarm (at|for) {time} every day",
-        ],
-    ),
-    (
-        "alarm.set",
-        &[
-            "(set|create|make) [a|an] alarm (at|for) {time} (called|named) {label:text}",
-            "(set|create|make) [a|an] alarm (at|for) {time}",
-            "(wake me|wake me up) (at|up at) {time}",
-            "alarm (at|for) {time}",
-        ],
-    ),
-    (
-        "reminder.set_in",
-        &[
-            "remind me (in|after) {duration} to {text}",
-            "remind me to {text} in {duration}",
-            "remind me to {text} after {duration}",
-        ],
-    ),
-    (
-        "reminder.set_at",
-        &[
-            "remind me (at|by) {time} to {text}",
-            "remind me to {text} (at|by) {time}",
-        ],
-    ),
-    (
-        "time.query",
-        &[
-            "what time is it [now]",
-            "what's the time [now]",
-            "what is the time [now]",
-            "tell me the time",
-            "what time",
-        ],
-    ),
-    (
-        "date.query",
-        &[
-            "what's the date [today]",
-            "what is the date [today]",
-            "what day is it [today]",
-            "what's today's date",
-            "what's today",
-        ],
-    ),
-];
+impl Matcher {
+    /// The language's own grammar: stop, volume, music controls, timers, alarms, reminders, time and date.
+    #[must_use]
+    pub fn builtin(lang: &'static Language) -> Self {
+        // The built-in templates are tested to compile; an error here is a programming mistake.
+        Self::new(lang, lang.grammar).unwrap_or(Self {
+            lang,
+            intents: Vec::new(),
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const L: &Language = crate::lang::DEFAULT;
+
     fn m(utterance: &str) -> Option<Match> {
-        Matcher::builtin().matches(utterance)
+        Matcher::builtin(L).matches(utterance)
     }
 
-    fn intent(utterance: &str) -> Option<String> {
-        m(utterance).map(|x| x.intent)
+    fn intent(utterance: &str) -> Option<&'static str> {
+        m(utterance).map(|x| x.intent.name())
     }
 
     #[test]
     fn the_built_in_grammar_compiles() {
-        assert!(!Matcher::builtin().intents.is_empty());
-        assert!(Matcher::new(BUILTIN).is_ok());
+        assert!(!Matcher::builtin(L).intents.is_empty());
+        assert!(Matcher::new(L, L.grammar).is_ok());
     }
 
     #[test]
     fn normalisation_strips_punctuation_and_politeness() {
-        assert_eq!(normalize("Hey, could you stop, please?"), vec!["stop"]);
+        assert_eq!(normalize(L, "Hey, could you stop, please?"), vec!["stop"]);
         assert_eq!(
-            normalize("Set an alarm for 7 a.m."),
+            normalize(L, "Set an alarm for 7 a.m."),
             vec!["set", "an", "alarm", "for", "7", "am"]
         );
         assert_eq!(
-            normalize("ten-minute timer"),
+            normalize(L, "ten-minute timer"),
             vec!["ten", "minute", "timer"]
         );
     }
 
     #[test]
     fn numbers_parse_from_digits_and_words() {
-        let n = |s: &str| parse_number(&normalize(s)).map(|(v, _)| v);
+        let n = |s: &str| parse_number(L, &normalize(L, s)).map(|(v, _)| v);
         assert_eq!(n("10"), Some(10));
         assert_eq!(n("ten"), Some(10));
         assert_eq!(n("twenty five"), Some(25));
@@ -1090,7 +939,7 @@ mod tests {
             ("please set a timer for one minute", 60),
         ] {
             let got = m(u).unwrap_or_else(|| panic!("no match: {u}"));
-            assert_eq!(got.intent, "timer.set", "{u}");
+            assert_eq!(got.intent.name(), "timer.set", "{u}");
             assert_eq!(got.duration("duration"), Some(secs), "{u}");
         }
     }
@@ -1111,18 +960,15 @@ mod tests {
 
     #[test]
     fn timer_management() {
-        assert_eq!(intent("cancel the timer").as_deref(), Some("timer.cancel"));
-        assert_eq!(intent("cancel all timers").as_deref(), Some("timer.cancel"));
+        assert_eq!(intent("cancel the timer"), Some("timer.cancel"));
+        assert_eq!(intent("cancel all timers"), Some("timer.cancel"));
         assert_eq!(
             m("cancel the pasta timer").unwrap().text("label"),
             Some("pasta")
         );
+        assert_eq!(intent("how much time is left"), Some("timer.query"));
         assert_eq!(
-            intent("how much time is left").as_deref(),
-            Some("timer.query")
-        );
-        assert_eq!(
-            intent("how much time is left on the pasta timer").as_deref(),
+            intent("how much time is left on the pasta timer"),
             Some("timer.query")
         );
     }
@@ -1147,7 +993,7 @@ mod tests {
             "how many timers do I have",
             "please list the timers",
         ] {
-            assert_eq!(intent(u).as_deref(), Some("timer.query"), "{u}");
+            assert_eq!(intent(u), Some("timer.query"), "{u}");
         }
         // Naming a timer still means that timer.
         assert_eq!(
@@ -1228,7 +1074,7 @@ mod tests {
             ),
         ] {
             for u in phrases {
-                assert_eq!(intent(u).as_deref(), Some(intent_name), "{u}");
+                assert_eq!(intent(u), Some(intent_name), "{u}");
             }
         }
     }
@@ -1247,7 +1093,7 @@ mod tests {
             ("what time is it", Some("time.query")),
             ("cancel the alarm", Some("alarm.cancel")),
         ] {
-            assert_eq!(intent(u).as_deref(), want, "{u}");
+            assert_eq!(intent(u), want, "{u}");
         }
         for u in [
             "stop watching television",
@@ -1259,7 +1105,7 @@ mod tests {
         ] {
             let got = intent(u);
             assert!(
-                got.as_deref().is_none_or(|i| !i.starts_with("stopwatch.")),
+                got.is_none_or(|i| !i.starts_with("stopwatch.")),
                 "{u} -> {got:?}"
             );
         }
@@ -1268,7 +1114,7 @@ mod tests {
     #[test]
     fn alarms() {
         let a = m("set an alarm for 7 am").unwrap();
-        assert_eq!(a.intent, "alarm.set");
+        assert_eq!(a.intent.name(), "alarm.set");
         assert_eq!(
             a.time("time"),
             Some(Time {
@@ -1293,18 +1139,18 @@ mod tests {
         let c = m("set an alarm for 6:45 pm").unwrap();
         assert_eq!(c.time("time").unwrap().candidates_24h(), vec![(18, 45)]);
         assert_eq!(
-            intent("set a weekday alarm for 6:30 am").as_deref(),
+            intent("set a weekday alarm for 6:30 am"),
             Some("alarm.set_weekdays")
         );
         assert_eq!(
-            intent("set a daily alarm for seven").as_deref(),
+            intent("set a daily alarm for seven"),
             Some("alarm.set_daily")
         );
         assert_eq!(
-            intent("set a weekend alarm for 9 am").as_deref(),
+            intent("set a weekend alarm for 9 am"),
             Some("alarm.set_weekend")
         );
-        assert_eq!(intent("cancel my alarm").as_deref(), Some("alarm.cancel"));
+        assert_eq!(intent("cancel my alarm"), Some("alarm.cancel"));
         assert_eq!(
             m("set an alarm for noon")
                 .unwrap()
@@ -1334,7 +1180,7 @@ mod tests {
     #[test]
     fn reminders() {
         let a = m("remind me to call mum in ten minutes").unwrap();
-        assert_eq!(a.intent, "reminder.set_in");
+        assert_eq!(a.intent.name(), "reminder.set_in");
         assert_eq!(
             (a.text("text"), a.duration("duration")),
             (Some("call mum"), Some(600))
@@ -1345,76 +1191,61 @@ mod tests {
             (Some("take the bins out"), Some(3600))
         );
         let c = m("remind me at 3 pm to pick up the kids").unwrap();
-        assert_eq!(c.intent, "reminder.set_at");
+        assert_eq!(c.intent.name(), "reminder.set_at");
         assert_eq!(c.text("text"), Some("pick up the kids"));
     }
 
     #[test]
     fn stop_volume_and_media_controls() {
-        assert_eq!(intent("stop").as_deref(), Some("stop"));
-        assert_eq!(intent("Never mind.").as_deref(), Some("stop"));
-        assert_eq!(intent("volume up").as_deref(), Some("volume.up"));
-        assert_eq!(intent("turn it down").as_deref(), Some("volume.down"));
+        assert_eq!(intent("stop"), Some("stop"));
+        assert_eq!(intent("Never mind."), Some("stop"));
+        assert_eq!(intent("volume up"), Some("volume.up"));
+        assert_eq!(intent("turn it down"), Some("volume.down"));
         assert_eq!(
             m("set the volume to 40 percent").unwrap().number("level"),
             Some(40)
         );
         assert_eq!(m("volume sixty").unwrap().number("level"), Some(60));
-        assert_eq!(intent("pause the music").as_deref(), Some("media.pause"));
-        assert_eq!(intent("stop the music").as_deref(), Some("media.pause"));
-        assert_eq!(intent("resume").as_deref(), Some("media.resume"));
-        assert_eq!(intent("skip this song").as_deref(), Some("media.next"));
-        assert_eq!(intent("play some jazz").as_deref(), Some("media.play"));
-        assert_eq!(
-            intent("put on the bbc world service").as_deref(),
-            Some("media.play")
-        );
+        assert_eq!(intent("pause the music"), Some("media.pause"));
+        assert_eq!(intent("stop the music"), Some("media.pause"));
+        assert_eq!(intent("resume"), Some("media.resume"));
+        assert_eq!(intent("skip this song"), Some("media.next"));
+        assert_eq!(intent("play some jazz"), Some("media.play"));
+        assert_eq!(intent("put on the bbc world service"), Some("media.play"));
         // "play the music" is a resume, not a station called "music".
-        assert_eq!(intent("play the music").as_deref(), Some("media.resume"));
+        assert_eq!(intent("play the music"), Some("media.resume"));
     }
 
     #[test]
     fn inbox_commands_are_recognised() {
-        assert_eq!(
-            intent("what are my agents up to").as_deref(),
-            Some("inbox.status")
-        );
-        assert_eq!(intent("any updates").as_deref(), Some("inbox.status"));
-        assert_eq!(
-            intent("give me the details").as_deref(),
-            Some("inbox.details")
-        );
-        assert_eq!(intent("tell me more").as_deref(), Some("inbox.details"));
-        assert_eq!(
-            intent("thanks I'll handle it").as_deref(),
-            Some("inbox.ack")
-        );
-        assert_eq!(intent("I've got it").as_deref(), Some("inbox.ack"));
-        assert_eq!(intent("dismiss it").as_deref(), Some("inbox.dismiss"));
-        assert_eq!(intent("dismiss").as_deref(), Some("inbox.dismiss"));
+        assert_eq!(intent("what are my agents up to"), Some("inbox.status"));
+        assert_eq!(intent("any updates"), Some("inbox.status"));
+        assert_eq!(intent("give me the details"), Some("inbox.details"));
+        assert_eq!(intent("tell me more"), Some("inbox.details"));
+        assert_eq!(intent("thanks I'll handle it"), Some("inbox.ack"));
+        assert_eq!(intent("I've got it"), Some("inbox.ack"));
+        assert_eq!(intent("dismiss it"), Some("inbox.dismiss"));
+        assert_eq!(intent("dismiss"), Some("inbox.dismiss"));
         let s = m("snooze for twenty minutes").unwrap();
         assert_eq!(
-            (s.intent.as_str(), s.duration("duration")),
+            (s.intent.name(), s.duration("duration")),
             ("inbox.snooze", Some(1200))
         );
-        assert_eq!(intent("not now").as_deref(), Some("inbox.snooze"));
+        assert_eq!(intent("not now"), Some("inbox.snooze"));
         let i = m("tell it to also add unit tests").unwrap();
         assert_eq!(
-            (i.intent.as_str(), i.text("text")),
+            (i.intent.name(), i.text("text")),
             ("inbox.instruct", Some("also add unit tests"))
         );
         let j = m("keep going and fix the failing test").unwrap();
         assert_eq!(j.text("text"), Some("fix the failing test"));
-        assert_eq!(intent("keep going").as_deref(), Some("inbox.instruct"));
+        assert_eq!(intent("keep going"), Some("inbox.instruct"));
     }
 
     #[test]
     fn time_and_date_are_answered_locally() {
-        assert_eq!(intent("what time is it").as_deref(), Some("time.query"));
-        assert_eq!(
-            intent("What's the date today?").as_deref(),
-            Some("date.query")
-        );
+        assert_eq!(intent("what time is it"), Some("time.query"));
+        assert_eq!(intent("What's the date today?"), Some("date.query"));
     }
 
     #[test]
@@ -1445,7 +1276,7 @@ mod tests {
             "()",
             "[a|b]",
         ] {
-            assert!(Matcher::new(&[("x", &[bad])]).is_err(), "{bad}");
+            assert!(Matcher::new(L, &[("x", &[bad])]).is_err(), "{bad}");
         }
     }
 
@@ -1453,25 +1284,28 @@ mod tests {
     fn deeply_nested_templates_are_refused_instead_of_overflowing_the_stack() {
         // Templates are compiled in today, but packs will bring them from outside (REQ-EXT-002).
         let nested = format!("{}a{}", "(".repeat(100_000), ")".repeat(100_000));
-        assert!(Matcher::new(&[("x", &[nested.as_str()])]).is_err());
+        assert!(Matcher::new(L, &[("x", &[nested.as_str()])]).is_err());
         let optional = format!("{}a{}", "[".repeat(100_000), "]".repeat(100_000));
-        assert!(Matcher::new(&[("x", &[optional.as_str()])]).is_err());
+        assert!(Matcher::new(L, &[("x", &[optional.as_str()])]).is_err());
         // Ordinary nesting still works.
-        assert!(Matcher::new(&[("x", &["(a (b [c]) | d) e"])]).is_ok());
+        assert!(Matcher::new(L, &[("x", &["(a (b [c]) | d) e"])]).is_ok());
     }
 
     #[test]
     fn explosive_templates_are_refused() {
         let t = "[a] [b] [c] [d] [e] [f] [g] [h] [i] [j] x";
-        assert!(Matcher::new(&[("x", &[t])]).is_err());
+        assert!(Matcher::new(L, &[("x", &[t])]).is_err());
     }
 
     #[test]
     fn pathological_input_cannot_stall_the_matcher() {
-        let matcher = Matcher::new(&[(
-            "greedy",
-            &["{a:text} {b:text} {c:text} {d:text} {e:text} {f:text} end"],
-        )])
+        let matcher = Matcher::new(
+            L,
+            &[(
+                "greedy",
+                &["{a:text} {b:text} {c:text} {d:text} {e:text} {f:text} end"],
+            )],
+        )
         .unwrap();
         let long = "word ".repeat(200);
         let start = std::time::Instant::now();
@@ -1487,7 +1321,7 @@ mod tests {
     fn matching_is_fast_enough_for_the_budget() {
         // REQ-NFR-111: at most 20 ms per utterance on the reference CPU. Check a generous bound in
         // debug builds on a fast host so a regression to something quadratic is caught.
-        let matcher = Matcher::builtin();
+        let matcher = Matcher::builtin(L);
         let start = std::time::Instant::now();
         for _ in 0..200 {
             let _ = matcher.matches("set a timer for ten minutes");

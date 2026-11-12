@@ -11,6 +11,7 @@
 //! BM25-style word score (no embeddings, no dependency) plus a small bonus for newer notes, and the best few are
 //! shown. The model can look others up with the read-only `recall` tool, which uses the same ranking.
 
+use crate::lang::{Language, NoteWords};
 use crate::sched::Ts;
 use crate::store::JsonStore;
 use serde::{Deserialize, Serialize};
@@ -120,6 +121,7 @@ impl NoteError {
 /// The notes, in memory and (when a directory is given) in `memory.json`, which only the service user can read.
 #[derive(Debug)]
 pub struct NoteStore {
+    lang: &'static Language,
     enabled: AtomicBool,
     doc: Mutex<Doc>,
     file: Option<JsonStore>,
@@ -132,8 +134,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl NoteStore {
     /// Notes that live only in memory (tests, and a core without a data directory).
     #[must_use]
-    pub fn in_memory(enabled: bool) -> Self {
+    pub fn in_memory(lang: &'static Language, enabled: bool) -> Self {
         Self {
+            lang,
             enabled: AtomicBool::new(enabled),
             doc: Mutex::new(Doc::default()),
             file: None,
@@ -144,7 +147,7 @@ impl NoteStore {
     ///
     /// # Errors
     /// A message when an existing file is unreadable or from a newer version.
-    pub fn open(dir: &Path, enabled: bool) -> Result<Self, String> {
+    pub fn open(lang: &'static Language, dir: &Path, enabled: bool) -> Result<Self, String> {
         let file = JsonStore::new(dir.join("memory.json"), SCHEMA);
         let mut doc: Doc = file.load().map_err(|e| format!("memory.json: {e}"))?;
         // A file edited by hand must not break the bounds.
@@ -158,6 +161,7 @@ impl NoteStore {
             bytes <= MAX_TOTAL_BYTES
         });
         Ok(Self {
+            lang,
             enabled: AtomicBool::new(enabled),
             doc: Mutex::new(doc),
             file: Some(file),
@@ -381,7 +385,7 @@ impl NoteStore {
         let mut picked: Vec<usize> = if whole {
             (0..notes.len()).collect()
         } else {
-            let mut ranked: Vec<usize> = rank(notes, utterance, context)
+            let mut ranked: Vec<usize> = rank(self.lang, notes, utterance, context)
                 .into_iter()
                 .filter(|(_, s)| *s > 0.0)
                 .map(|(i, _)| i)
@@ -441,7 +445,7 @@ impl NoteStore {
         }
         let query: String = query.chars().take(MAX_QUERY_CHARS).collect();
         let doc = lock(&self.doc);
-        rank(&doc.notes, &query, "")
+        rank(self.lang, &doc.notes, &query, "")
             .into_iter()
             .filter(|(_, s)| *s > 0.0)
             .take(limit)
@@ -452,18 +456,11 @@ impl NoteStore {
 
 // ----- ranking (REQ-MEM-003) -----
 
-const STOP: [&str; 48] = [
-    "a", "an", "the", "and", "or", "of", "to", "in", "on", "at", "for", "is", "are", "was", "were",
-    "be", "it", "its", "my", "me", "i", "you", "your", "do", "does", "did", "what", "whats",
-    "where", "when", "who", "how", "this", "that", "with", "about", "can", "could", "please",
-    "tell", "from", "have", "has", "had", "so", "we", "he", "she",
-];
-
 /// Lower-case words of a text, without stop words, one or two letter words and a plural `s`.
-fn tokens(text: &str) -> Vec<String> {
+fn tokens(lang: &Language, text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .map(str::to_lowercase)
-        .filter(|w| w.chars().count() >= 2 && !STOP.contains(&w.as_str()))
+        .filter(|w| w.chars().count() >= 2 && !lang.notes.stop_words.contains(&w.as_str()))
         .map(|w| match w.strip_suffix('s') {
             Some(base) if base.chars().count() >= 3 && !w.ends_with("ss") => base.to_owned(),
             _ => w,
@@ -480,10 +477,10 @@ fn matches(term: &str, word: &str) -> bool {
 /// documents (k1 1.2, b 0.75); the utterance counts fully and the turn before it half; a note's age adds up to
 /// 0.25 of a typical match score, so recency only breaks ties and never beats a real match by itself. Pure and
 /// allocation-light: 500 notes rank in well under a millisecond on a desktop.
-fn rank(notes: &[Note], utterance: &str, context: &str) -> Vec<(usize, f64)> {
+fn rank(lang: &Language, notes: &[Note], utterance: &str, context: &str) -> Vec<(usize, f64)> {
     let mut terms: Vec<(String, f64)> = Vec::new();
     for (text, w) in [(utterance, 1.0), (context, 0.5)] {
-        for t in tokens(text) {
+        for t in tokens(lang, text) {
             match terms.iter_mut().find(|(x, _)| *x == t) {
                 Some(e) => e.1 = e.1.max(w),
                 None => terms.push((t, w)),
@@ -491,7 +488,7 @@ fn rank(notes: &[Note], utterance: &str, context: &str) -> Vec<(usize, f64)> {
         }
     }
     terms.truncate(32);
-    let docs: Vec<Vec<String>> = notes.iter().map(|n| tokens(&n.text)).collect();
+    let docs: Vec<Vec<String>> = notes.iter().map(|n| tokens(lang, &n.text)).collect();
     let n = docs.len().max(1) as f64;
     let avg = (docs.iter().map(Vec::len).sum::<usize>() as f64 / n).max(1.0);
     let (lo, hi) = notes
@@ -553,66 +550,40 @@ fn word(t: &str) -> String {
         .to_lowercase()
 }
 
-fn number(w: &str) -> Option<usize> {
-    const WORDS: [&str; 10] = [
-        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    ];
+fn number(words: &NoteWords, w: &str) -> Option<usize> {
     w.parse().ok().or_else(|| {
-        WORDS
+        words
+            .numbers
             .iter()
             .position(|x| *x == w)
+            .or_else(|| words.ordinals.iter().position(|x| *x == w))
             .map(|i| i + 1)
-            .or(match w {
-                "first" => Some(1),
-                "second" => Some(2),
-                "third" => Some(3),
-                _ => None,
-            })
     })
 }
 
 /// Match the user's whole utterance against the note commands. Anything else is not a note command and goes
 /// to the model as usual. Deliberately strict: "remember" must start the sentence.
 #[must_use]
-pub fn parse(utterance: &str) -> Option<Cmd> {
+pub fn parse(lang: &Language, utterance: &str) -> Option<Cmd> {
+    let nw = &lang.notes;
     let raw: Vec<&str> = utterance.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|t| word(t)).collect();
     let mut at = 0;
     while words
         .get(at)
-        .is_some_and(|w| matches!(w.as_str(), "please" | "hey" | "ok" | "okay"))
+        .is_some_and(|w| nw.leading.contains(&w.as_str()))
     {
         at += 1;
     }
     let rest: Vec<&str> = words[at..].iter().map(String::as_str).collect();
     let joined = rest.join(" ");
 
-    const LISTS: [&str; 10] = [
-        "what do you remember",
-        "what do you remember about me",
-        "what have you remembered",
-        "what notes do you have",
-        "what are my notes",
-        "list my notes",
-        "list notes",
-        "read my notes",
-        "read my notes back",
-        "show my notes",
-    ];
-    if LISTS.contains(&joined.as_str()) || joined == "what did i ask you to remember" {
+    if nw.list.contains(&joined.as_str()) {
         return Some(Cmd::List);
     }
 
-    const REMEMBER: [&[&str]; 6] = [
-        &["remember", "that"],
-        &["remember"],
-        &["make", "a", "note", "that"],
-        &["make", "a", "note"],
-        &["take", "a", "note", "that"],
-        &["note", "that"],
-    ];
-    for p in REMEMBER {
-        if rest.len() > p.len() && rest[..p.len()] == *p {
+    for p in nw.remember {
+        if rest.len() > p.len() && rest[..p.len()] == **p {
             let text = raw[at + p.len()..]
                 .join(" ")
                 .trim()
@@ -623,49 +594,35 @@ pub fn parse(utterance: &str) -> Option<Cmd> {
         }
     }
 
-    if matches!(rest.first(), Some(&"forget" | &"delete" | &"erase")) {
+    if rest.first().is_some_and(|w| nw.forget.contains(w)) {
         let tail = &rest[1..];
-        let all = [
-            "everything",
-            "all",
-            "all notes",
-            "all my notes",
-            "all of my notes",
-            "my notes",
-            "my notes all",
-            "everything you know",
-            "everything you remember",
-        ];
-        if all.contains(&tail.join(" ").as_str()) {
+        if nw.forget_all.contains(&tail.join(" ").as_str()) {
             return Some(Cmd::ForgetAll);
         }
         if let [first, ..] = tail {
-            if *first == "note" || *first == "number" {
-                let num = tail.iter().skip(1).find_map(|w| number(w));
+            if nw.number_markers.contains(first) {
+                let num = tail.iter().skip(1).find_map(|w| number(nw, w));
                 if let Some(n) = num {
                     return Some(Cmd::ForgetNth(n));
                 }
             }
-            if let ["the", w, "note", ..] = tail {
-                if let Some(n) = number(w) {
-                    return Some(Cmd::ForgetNth(n));
+            if let [the, w, note, ..] = tail {
+                if *the == nw.article && *note == nw.note {
+                    if let Some(n) = number(nw, w) {
+                        return Some(Cmd::ForgetNth(n));
+                    }
                 }
             }
         }
         // "forget that my printer is called Pixel", "forget the note about the printer"
-        let skip = match tail {
-            ["the", "note", "about", ..] => 3,
-            ["the", "note", "that", ..] => 3,
-            ["note", "about", ..] => 2,
-            ["about", ..] | ["that", ..] => 1,
-            _ => 0,
-        };
+        let skip = nw
+            .subject_leads
+            .iter()
+            .find(|lead| tail.starts_with(lead))
+            .map_or(0, |lead| lead.len());
         let subject: Vec<&str> = tail.iter().skip(skip).copied().collect();
         let subject = subject.join(" ");
-        let vague = matches!(
-            subject.as_str(),
-            "" | "it" | "that" | "this" | "them" | "those" | "about it" | "about that"
-        );
+        let vague = nw.vague.contains(&subject.as_str());
         if !vague && subject.chars().count() >= 3 && skip > 0 {
             return Some(Cmd::ForgetText(subject));
         }
@@ -679,12 +636,12 @@ mod tests {
     use crate::store::testutil::TempDir;
 
     fn on() -> NoteStore {
-        NoteStore::in_memory(true)
+        NoteStore::in_memory(crate::lang::DEFAULT, true)
     }
 
     #[test]
     fn notes_are_off_by_default_and_refuse_to_save() {
-        let s = NoteStore::in_memory(false);
+        let s = NoteStore::in_memory(crate::lang::DEFAULT, false);
         assert_eq!(s.add("my printer is called pixel", 1), Err(NoteError::Off));
         assert!(s.list().is_empty());
         assert!(s.prompt_block().is_none());
@@ -762,14 +719,14 @@ mod tests {
     fn the_file_is_private_survives_a_restart_and_a_hand_edit_cannot_break_the_bounds() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new("notes");
-        let s = NoteStore::open(&dir.0, true).unwrap();
+        let s = NoteStore::open(crate::lang::DEFAULT, &dir.0, true).unwrap();
         s.add("my printer is called Pixel", 9).unwrap();
         let path = dir.0.join("memory.json");
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let again = NoteStore::open(&dir.0, true).unwrap();
+        let again = NoteStore::open(crate::lang::DEFAULT, &dir.0, true).unwrap();
         assert_eq!(again.list()[0].text, "my printer is called Pixel");
         let many: Vec<Note> = (0..700)
             .map(|i| Note {
@@ -780,7 +737,7 @@ mod tests {
             .collect();
         let doc = serde_json::json!({"schema": 1, "data": {"next_id": 700, "notes": many}});
         std::fs::write(&path, doc.to_string()).unwrap();
-        let big = NoteStore::open(&dir.0, true).unwrap();
+        let big = NoteStore::open(crate::lang::DEFAULT, &dir.0, true).unwrap();
         assert_eq!(big.list().len(), MAX_NOTES);
         let long: Vec<Note> = (0..400)
             .map(|i| Note {
@@ -791,7 +748,7 @@ mod tests {
             .collect();
         let doc = serde_json::json!({"schema": 1, "data": {"next_id": 400, "notes": long}});
         std::fs::write(&path, doc.to_string()).unwrap();
-        let big = NoteStore::open(&dir.0, true).unwrap();
+        let big = NoteStore::open(crate::lang::DEFAULT, &dir.0, true).unwrap();
         assert!(big.list().len() * MAX_NOTE_CHARS <= MAX_TOTAL_BYTES);
         assert!(
             big.list()
@@ -803,7 +760,7 @@ mod tests {
     #[test]
     fn a_save_that_fails_leaves_the_notes_as_they_were() {
         let dir = TempDir::new("notes-fail");
-        let s = NoteStore::open(&dir.0, true).unwrap();
+        let s = NoteStore::open(crate::lang::DEFAULT, &dir.0, true).unwrap();
         s.add("first", 1).unwrap();
         // A directory where the file should be makes the rename fail.
         std::fs::remove_file(dir.0.join("memory.json")).unwrap();
@@ -814,7 +771,7 @@ mod tests {
 
     #[test]
     fn the_grammar_matches_only_explicit_requests() {
-        let p = parse;
+        let p = |u: &str| parse(crate::lang::DEFAULT, u);
         assert_eq!(
             p("Remember that my printer is called Pixel."),
             Some(Cmd::Remember("my printer is called Pixel".into()))
@@ -862,7 +819,7 @@ mod edit_tests {
 
     #[test]
     fn editing_a_memory_keeps_its_place_and_date_and_is_checked_like_adding() {
-        let s = NoteStore::in_memory(true);
+        let s = NoteStore::in_memory(crate::lang::DEFAULT, true);
         let a = s.add("the spare key is under the pot", 10).unwrap();
         let b = s.add("the router is in the hall", 20).unwrap();
         let edited = s.edit(a.id, "the spare key is under the blue pot").unwrap();
