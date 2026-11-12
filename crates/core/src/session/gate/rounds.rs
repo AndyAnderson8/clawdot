@@ -82,13 +82,14 @@ impl<H: ToolHost> Turn<'_, H> {
     async fn round<B: ChatBackend>(&mut self, backend: &B, round: usize) -> Option<TurnResult> {
         let mut tools = offered(&*self.host, &self.cfg);
         tools.extend(pseudo_tools(self.conv));
-        let completion = match self.ask_model(backend, &tools).await {
+        let mut completion = match self.ask_model(backend, &tools).await {
             Ok(c) => c,
             Err(ended) => return Some(ended),
         };
         if completion.tool_calls.is_empty() {
             return Some(self.finish_on_words(&completion));
         }
+        self.conv.unique_call_ids(&mut completion.tool_calls);
         self.conv.history.push(Message::assistant_calls(
             completion.text.clone(),
             completion.tool_calls.clone(),
