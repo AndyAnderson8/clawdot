@@ -118,6 +118,8 @@ function seed(mode: string): Json {
       listen: { value: "0.0.0.0:3335", source: "flag", live: false, ignored: true },
       public_url: { value: null, source: "default", live: true },
       daily_spend_usd: { value: null, source: "default", live: true },
+      llm_usd_per_mtok_in: { value: null, source: "default", live: true },
+      llm_usd_per_mtok_out: { value: null, source: "default", live: true },
       board: { value: "none", source: "default", live: false },
       agent_max_rounds: { value: 8, source: "default", live: true },
       agent_max_tool_calls: { value: 12, source: "file", live: true },
@@ -430,6 +432,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             usage: {
               requests_today: 3,
               spend_today: 0.0123,
+              spend_basis: st["spendBasis"] ?? "reported",
               day: Math.floor(Date.now() / 86400000),
               history: [{ day: Math.floor(Date.now() / 86400000) - 1, requests: 5 }],
             },
