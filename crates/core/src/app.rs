@@ -172,6 +172,9 @@ pub enum ReplyError {
     NothingToReplyTo,
     /// The bridge queue is full.
     QueueFull,
+    /// The event named is no longer open: it was answered, dismissed, snoozed, pruned or deleted with its
+    /// endpoint since the reply was proposed.
+    NoLongerWaiting,
 }
 
 /// The result of answering an announced event.
@@ -1163,13 +1166,46 @@ impl Core {
     /// # Errors
     /// [`ReplyError::NothingToReplyTo`] or [`ReplyError::QueueFull`].
     pub fn reply(&self, kind: ReplyKind, text: &str) -> Result<Replied, ReplyError> {
-        let now = self.clock.now();
-        let mut g = self.lock();
+        let g = self.lock();
         let ev = g
             .inbox
             .reply_target()
             .cloned()
             .ok_or(ReplyError::NothingToReplyTo)?;
+        self.reply_locked(g, ev, kind, text)
+    }
+
+    /// Answer one named event, as [`Core::reply`] does for the current one. A reply the user approved is sent
+    /// here with the id it was bound to when it was read back, so a later announcement cannot take it
+    /// elsewhere (REQ-SEC-011, REQ-INB-023). The event must still be waiting for an answer.
+    ///
+    /// # Errors
+    /// [`ReplyError::NoLongerWaiting`] when the event is not open any more, or [`ReplyError::QueueFull`].
+    pub fn reply_to(
+        &self,
+        event_id: u64,
+        kind: ReplyKind,
+        text: &str,
+    ) -> Result<Replied, ReplyError> {
+        let g = self.lock();
+        let ev = g
+            .inbox
+            .get(event_id)
+            .filter(|e| e.state == EventState::Announced && !e.no_reply)
+            .cloned()
+            .ok_or(ReplyError::NoLongerWaiting)?;
+        self.reply_locked(g, ev, kind, text)
+    }
+
+    /// Queue the answer to `ev` (already checked to be open) and record it.
+    fn reply_locked(
+        &self,
+        mut g: MutexGuard<'_, Inner>,
+        ev: Event,
+        kind: ReplyKind,
+        text: &str,
+    ) -> Result<Replied, ReplyError> {
+        let now = self.clock.now();
         // A question an agent asked out loud (REQ-EXT-012): the answer goes to the one waiting caller, as
         // data, and to no bridge.
         let end = if kind == ReplyKind::Ack {

@@ -57,12 +57,15 @@ pub fn describe_generic(name: &str, args: &Value) -> String {
     s
 }
 
-/// The read-back of text that is forwarded to an outside agent word for word (`inbox_reply`).
+/// The read-back of text that is forwarded to an outside agent word for word (`inbox_reply`). `origin` is the
+/// spoken name of the endpoint the reply is bound to, written by the host from the administrator's setting and
+/// never taken from the event's own (untrusted) `source`; without one the sentence says "the agent".
 #[must_use]
-pub fn describe_agent_text(text: &str) -> String {
+pub fn describe_agent_text(origin: Option<&str>, text: &str) -> String {
     let mut hidden = false;
     let said = speak_text(text, &mut hidden).replace('"', "'");
-    let mut s = format!("I will send this to the agent, word for word: \"{said}\"");
+    let to = origin.map_or_else(|| "the agent".to_owned(), |o| speak_text(o, &mut hidden));
+    let mut s = format!("I will send this to {to}, word for word: \"{said}\"");
     if hidden {
         s.push_str(". ");
         s.push_str(HIDDEN_NOTE);
@@ -212,6 +215,11 @@ mod tests {
         );
         let s = say("inbox_reply", &json!({"kind": "ack"}));
         assert!(s.contains("handle this yourself"), "{s}");
+        let s = say(
+            "inbox_reply",
+            &json!({"kind": "instruct", "text": "go", "pinned_origin": "Build Server"}),
+        );
+        assert_eq!(s, "I will send this to Build Server, word for word: \"go\"");
     }
 
     #[test]

@@ -20,6 +20,9 @@ pub(super) struct Host {
     /// Set by a test server to make the host stop offering `send_money`. Shared, so it reaches the host the
     /// session owns whatever thread or task sets it.
     withdrawn: Arc<AtomicBool>,
+    /// When set, the host fixes a `destination` into every `send_money` call as it is held, from its own
+    /// state, and strips whatever the model wrote there (the shape of `inbox_reply`).
+    pin_destination: Option<&'static str>,
 }
 
 impl ToolHost for Host {
@@ -43,6 +46,17 @@ impl ToolHost for Host {
     }
     fn returns_untrusted_text(&self, name: &str) -> bool {
         name == "web"
+    }
+    fn clean_args(&self, name: &str, args: &mut Value) {
+        if self.pin_destination.is_some() && name == "send_money" {
+            args.as_object_mut().map(|m| m.remove("destination"));
+        }
+    }
+    async fn pin_args(&mut self, name: &str, mut args: Value) -> Value {
+        if let (Some(to), "send_money") = (self.pin_destination, name) {
+            args["destination"] = json!(to);
+        }
+        args
     }
     async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         self.ran.push((name.to_owned(), args.clone()));
@@ -925,6 +939,55 @@ async fn a_yes_for_a_held_tool_that_has_gone_runs_nothing_and_reports_the_error(
     .await;
     assert_eq!(r.result, Ok(SessionEnd::Closed));
     assert!(r.host.ran.is_empty(), "nothing ran: {:?}", r.host.ran);
+}
+
+// REQ-SEC-011: a realtime session's held call is pinned by the host before it is read back and stored, the
+// model's own value for the pinned field is gone, and the yes releases the pinned arguments.
+#[tokio::test(flavor = "current_thread")]
+async fn a_held_call_is_pinned_before_the_read_back_and_the_model_cannot_set_the_pin() {
+    let host = Host {
+        pin_destination: Some("Build Server"),
+        ..Host::default()
+    };
+    let r = session_with(
+        host,
+        cfg(),
+        UsageLimits::default(),
+        vec![],
+        false,
+        move |mut s| async move {
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(
+                &mut s,
+                calls_done(&[(
+                    "c1",
+                    "send_money",
+                    r#"{"to":"sam","destination":"Mallory"}"#,
+                )]),
+            )
+            .await;
+            next(&mut s).await;
+            let rc = next(&mut s).await;
+            let ask = rc["response"]["instructions"].as_str().unwrap();
+            assert!(ask.contains("destination: Build Server"), "{ask}");
+            assert!(!ask.contains("Mallory"), "{ask}");
+            put(&mut s, said("pay sam")).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, said("yes")).await;
+            next(&mut s).await;
+            s.send_close().await.unwrap();
+        },
+    )
+    .await;
+    assert_eq!(r.result, Ok(SessionEnd::Closed));
+    assert_eq!(
+        r.host.ran,
+        vec![(
+            "send_money".to_owned(),
+            json!({"to": "sam", "destination": "Build Server"})
+        )]
+    );
 }
 
 // REQ-SEC-001

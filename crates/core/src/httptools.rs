@@ -544,6 +544,20 @@ impl<H: crate::session::ToolHost> crate::session::ToolHost for WithHttp<'_, H> {
         self.http.owns(name) || self.inner.expected_slow(name)
     }
 
+    fn clean_args(&self, name: &str, args: &mut Value) {
+        if !self.http.owns(name) {
+            self.inner.clean_args(name, args);
+        }
+    }
+
+    async fn pin_args(&mut self, name: &str, args: Value) -> Value {
+        if self.http.owns(name) {
+            args
+        } else {
+            self.inner.pin_args(name, args).await
+        }
+    }
+
     fn begin_turn(&mut self, user_text: &str) {
         self.inner.begin_turn(user_text);
     }

@@ -519,6 +519,8 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         if call.name == RESULT_DETAILS {
             return self.read_stored_result(&args);
         }
+        // Fields only the host may set are dropped from whatever the model wrote.
+        self.host.clean_args(&call.name, &mut args);
         // `confirmed` means nothing to the host: drop it unless the tool really declares it.
         drop_confirmed(&mut args, spec);
         self.sort_by_tier(batch, call, args, d).await
@@ -576,6 +578,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             format!("Error: there is no tool called `{}`.", call.name)
         } else if !self.by_user && risk.tier != Tier::ReadOnly {
             // Nobody is here to ask: keep it as a proposal for the user's next turn.
+            let args = self.host.pin_args(&call.name, args).await;
             match self.keep_pending(call, &args, risk.tier, &PROPOSE) {
                 Ok(p) => {
                     d.held = Some(p);
@@ -598,6 +601,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 gate,
             )
         } else if risk.needs_hold() {
+            let args = self.host.pin_args(&call.name, args).await;
             match self.keep_pending(call, &args, risk.tier, &HOLD) {
                 Ok(p) => {
                     d.held = Some(p);
