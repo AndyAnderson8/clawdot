@@ -53,6 +53,29 @@ fn wav_files_round_trip_and_wrong_formats_are_explained() {
 }
 
 #[test]
+fn hostile_wav_headers_are_errors_or_short_audio_never_a_panic() {
+    let samples = vec![1i16, 2, 3, 4];
+    let good = wav(&samples);
+    // Every prefix of a good file is handled.
+    for n in 0..good.len() {
+        let _ = parse_wav(&good[..n]);
+    }
+    // A chunk that declares four gigabytes: the format block is too short, a data block is cut to the file.
+    let mut big_fmt = good[..12].to_vec();
+    big_fmt.extend(b"fmt ");
+    big_fmt.extend(u32::MAX.to_le_bytes());
+    assert!(parse_wav(&big_fmt).is_err());
+    let mut big_data = good.clone();
+    big_data[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(parse_wav(&big_data).unwrap(), samples);
+    // A chunk that is skipped may declare any length, and then there is no audio.
+    let mut skipped = good[..36].to_vec();
+    skipped.extend(b"junk");
+    skipped.extend(u32::MAX.to_le_bytes());
+    assert!(parse_wav(&skipped).unwrap_err().contains("no audio"));
+}
+
+#[test]
 fn wav_has_a_valid_header() {
     let w = wav(&[1, -2, 3]);
     assert_eq!(&w[..4], b"RIFF");
@@ -176,6 +199,26 @@ async fn transcription_failures_have_clear_messages_without_secrets() {
     let e = t.transcribe(&[1]).await.unwrap_err();
     assert_eq!(e, "HTTP 401: bad key");
     assert!(!e.contains("k3y"));
+    // A server that echoes the key back in its error does not get it into the message.
+    let (port, _s) = serve_once(
+        "401 Unauthorized",
+        "application/json",
+        br#"{"error":{"message":"rejected k3y-echo-1234 sorry"}}"#.to_vec(),
+    )
+    .await;
+    let t = HttpTranscriber::new(
+        &format!("http://127.0.0.1:{port}"),
+        "k3y-echo-1234",
+        "m",
+        None,
+        T,
+    )
+    .unwrap();
+    let e = t.transcribe(&[1]).await.unwrap_err();
+    assert!(
+        !e.contains("k3y-echo-1234") && e.contains("rejected"),
+        "{e}"
+    );
     let (port, _s) = serve_once("200 OK", "text/plain", b"hello".to_vec()).await;
     let t = HttpTranscriber::new(&format!("http://127.0.0.1:{port}"), "", "m", None, T).unwrap();
     assert!(t.transcribe(&[1]).await.unwrap_err().contains("not JSON"));

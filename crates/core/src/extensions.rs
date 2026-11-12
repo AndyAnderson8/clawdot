@@ -344,10 +344,8 @@ impl Extensions {
         if self.tools.disabled.contains(name) || self.conns.disabled_tools.contains(name) {
             return true;
         }
-        mcp.owns(name)
-            && name
-                .split_once("__")
-                .is_some_and(|(server, _)| self.conns.disabled_servers.contains(server))
+        mcp.server_of(name)
+            .is_some_and(|server| self.conns.disabled_servers.contains(server))
     }
 
     /// The tier the administrator set for a tool in the portal, if any (REQ-SEC-030).
@@ -553,11 +551,10 @@ impl Extensions {
                 let Some(pos) = self.conns.servers.iter().position(|s| s.name == name) else {
                     return Err(Fail::NotFound("There is no such connection.".into()));
                 };
-                let prefix = format!("{name}__");
                 let tool_names: Vec<String> = mcp
                     .tools()
                     .iter()
-                    .filter(|t| t.exposed.starts_with(&prefix))
+                    .filter(|t| mcp.server_of(&t.exposed) == Some(name.as_str()))
                     .map(|t| t.exposed.clone())
                     .collect();
                 self.conns.servers.remove(pos);

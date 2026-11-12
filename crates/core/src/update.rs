@@ -207,6 +207,14 @@ pub fn verify_signature(key: &[u8; 32], message: &[u8], sig_hex: &str) -> bool {
         .is_ok()
 }
 
+/// Whether the output of `--version` names exactly `version`. Matching a whole word matters: a substring test
+/// would accept an older `10.2.0` when `0.2.0` was asked for, which is the one check that ties a signed (but
+/// possibly replayed) program to the version the feed announced.
+fn reports_version(said: &str, version: &str) -> bool {
+    said.split_whitespace()
+        .any(|w| w.trim_start_matches(['v', 'V']) == version)
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     use std::fmt::Write;
     Sha256::digest(data).iter().fold(String::new(), |mut s, b| {
@@ -402,12 +410,7 @@ impl Updater {
             if !ep.tls && !is_loopback(&ep.host) {
                 return Err("updates are only fetched over https".into());
             }
-            let default_port = if ep.tls { 443 } else { 80 };
-            let host = if ep.port == default_port {
-                ep.host.clone()
-            } else {
-                format!("{}:{}", ep.host, ep.port)
-            };
+            let host = ep.host_header();
             let path = if ep.base.is_empty() {
                 "/"
             } else {
@@ -693,8 +696,18 @@ impl Updater {
             .to_owned();
         let new = self.exe.with_file_name(format!("{name}.new"));
         let prev = self.exe.with_file_name(format!("{name}.prev"));
-        std::fs::write(&new, data)
-            .map_err(|e| format!("cannot write the new program next to this one: {e}"))?;
+        // Flush it to the disk before the rename below makes it the program: after a power cut a renamed but
+        // unflushed file can come back empty, and the speaker would then have no program at all.
+        let written = std::fs::File::create(&new).and_then(|mut f| {
+            std::io::Write::write_all(&mut f, data)?;
+            f.sync_all()
+        });
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&new);
+            return Err(format!(
+                "cannot write the new program next to this one: {e}"
+            ));
+        }
         let cleanup = |e: String| {
             let _ = std::fs::remove_file(&new);
             e
@@ -715,7 +728,7 @@ impl Updater {
                     ))
                 })?;
             let said = String::from_utf8_lossy(&out.stdout);
-            if !out.status.success() || !said.contains(version) {
+            if !out.status.success() || !reports_version(&said, version) {
                 return Err(cleanup(
                     "the new program did not report the expected version".into(),
                 ));

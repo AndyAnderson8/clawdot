@@ -424,7 +424,7 @@ impl HttpTools {
         let mut req = Request::builder()
             .method(method)
             .uri(path)
-            .header("host", &endpoint.host)
+            .header("host", endpoint.host_header())
             .header("connection", "close")
             .header("user-agent", "clawdot")
             .header("accept", "application/json, text/plain");
@@ -486,7 +486,13 @@ fn build(def: &ToolDef, args: &Map<String, Value>) -> Result<(String, Option<Val
         let v = rest
             .remove(&ph)
             .ok_or_else(|| format!("`{ph}` is required"))?;
-        url = url.replace(&format!("{{{ph}}}"), &encode(&scalar(&v)));
+        let value = scalar(&v);
+        // `.` and `..` survive percent-encoding and a server resolves them, so the model could climb out of the
+        // path the administrator declared (`/items/{id}` with `..` becomes `/`).
+        if matches!(value.as_str(), "." | "..") {
+            return Err(format!("`{ph}` is not a value this tool accepts"));
+        }
+        url = url.replace(&format!("{{{ph}}}"), &encode(&value));
     }
     if matches!(def.method.as_str(), "POST" | "PUT") {
         let body = if rest.is_empty() && def.params.is_empty() {
@@ -744,6 +750,21 @@ mod tests {
         let (url, body) = build(&p, &args).unwrap();
         assert_eq!(url, "http://h/x");
         assert_eq!(body.unwrap(), json!({"room":"den","level":4}));
+    }
+
+    // REQ-AST-014
+    #[test]
+    fn a_dot_segment_cannot_climb_out_of_the_declared_path() {
+        let d = def(
+            r#"{"name":"a","description":"d","url":"http://h/v1/items/{id}","method":"DELETE",
+            "params":{"id":{"type":"string","required":true}}}"#,
+        );
+        for bad in [".", ".."] {
+            let args = check_args(&d, &json!({ "id": bad })).unwrap();
+            assert!(build(&d, &args).is_err(), "`{bad}` reached the URL");
+        }
+        let args = check_args(&d, &json!({ "id": "..a" })).unwrap();
+        assert_eq!(build(&d, &args).unwrap().0, "http://h/v1/items/..a");
     }
 
     /// One canned response; returns the raw request.

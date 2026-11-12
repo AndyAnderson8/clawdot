@@ -191,7 +191,14 @@ pub async fn serve(
     tokio::pin!(shutdown);
     loop {
         let (stream, _) = tokio::select! {
-            r = listener.accept() => match r { Ok(x) => x, Err(_) => continue },
+            r = listener.accept() => match r {
+                Ok(x) => x,
+                Err(_) => {
+                    // Out of file descriptors, for example: do not spin while it lasts.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            },
             () = &mut shutdown => return,
         };
         let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
@@ -216,6 +223,36 @@ mod tests {
         let mut out = Vec::new();
         s.read_to_end(&mut out).await.unwrap();
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    // REQ-ESP-010
+    #[test]
+    fn only_a_get_or_head_for_a_32_digit_token_is_understood() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let ok = format!("GET /esphome/{token}.wav HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert_eq!(parse_request(&ok), Some((token, false)));
+        let head = format!("HEAD /esphome/{token}.wav HTTP/1.0\r\n\r\n");
+        assert_eq!(parse_request(&head), Some((token, true)));
+        for bad in [
+            String::new(),
+            "GET".into(),
+            "GET /".into(),
+            "GET / HTTP/1.1".into(),
+            format!("POST /esphome/{token}.wav HTTP/1.1"),
+            format!("get /esphome/{token}.wav HTTP/1.1"),
+            format!("GET /esphome/{token}.wav HTTP/2"),
+            format!("GET /esphome/{token}.wav HTTP/1.1 extra"),
+            format!("GET /esphome/{token}.wav  HTTP/1.1"),
+            format!("GET /esphome/{}.wav HTTP/1.1", &token[..31]),
+            format!("GET /esphome/{token}0.wav HTTP/1.1"),
+            format!("GET /esphome/../{token}.wav HTTP/1.1"),
+            format!("GET /esphome/{token}.wav?x=1 HTTP/1.1"),
+            format!("GET /esphome/{}.wav HTTP/1.1", "g".repeat(32)),
+            format!("GET /esphome/{}.wav HTTP/1.1", "é".repeat(16)),
+            format!("GET /{} HTTP/1.1", "a".repeat(10_000)),
+        ] {
+            assert_eq!(parse_request(&bad), None, "{bad:?}");
+        }
     }
 
     // REQ-ESP-010

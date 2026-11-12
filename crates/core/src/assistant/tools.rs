@@ -369,7 +369,7 @@ impl Assistant {
                 let secs = int(args, "seconds")?;
                 let what = text(args, "text")?.to_owned();
                 self.sched
-                    .set_reminder(now, now + secs, &what)
+                    .set_reminder(now, now.saturating_add(secs), &what)
                     .map_err(|e| e.to_string())?;
                 self.save();
                 Ok(format!(
@@ -623,6 +623,18 @@ mod tests {
             "Will remind about \"call mum\" in 10 minutes."
         );
         assert!(call(&mut a, "set_reminder", json!({"text": "  ", "seconds": 60})).is_err());
+        // A delay the model makes up cannot overflow the clock arithmetic.
+        for secs in [i64::MAX, i64::MAX - 5, i64::MIN] {
+            assert!(
+                call(
+                    &mut a,
+                    "set_reminder",
+                    json!({"text": "x", "seconds": secs})
+                )
+                .is_err(),
+                "{secs}"
+            );
+        }
         assert_eq!(
             call(
                 &mut a,
