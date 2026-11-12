@@ -11,6 +11,18 @@ pub const MAX_DEVICES: usize = 4;
 /// ESPHome's native API port.
 pub const DEFAULT_PORT: u16 = 6053;
 
+/// How a spoken reply to a person reaches the device.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplyMode {
+    /// The reply is collected and delivered once it is complete (the behaviour before sentence-by-sentence
+    /// replies existed).
+    #[default]
+    Whole,
+    /// The reply is delivered while it is still being made, starting with its first sentence.
+    Streamed,
+}
+
 /// One ESPHome voice satellite to dial.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +33,10 @@ pub struct EsphomeDevice {
     pub address: String,
     /// Name of the environment variable holding the base64 Noise key. Plaintext when unset.
     pub psk_env: Option<String>,
+    /// `"whole"` (the default) or `"streamed"`: whether a spoken reply starts on the device with its first
+    /// sentence. See `docs/architecture/esphome-satellite.md`.
+    #[serde(default)]
+    pub reply: ReplyMode,
 }
 
 impl EsphomeDevice {
@@ -185,12 +201,26 @@ mod tests {
         let d = |a: &str| EsphomeDevice {
             name: "d".into(),
             address: a.into(),
-            psk_env: None,
+            ..EsphomeDevice::default()
         };
         assert_eq!(d("dot.local").host_port(), "dot.local:6053");
         assert_eq!(d("10.0.0.2:7000").host_port(), "10.0.0.2:7000");
         assert_eq!(d("fe80::1").host_port(), "[fe80::1]:6053");
         assert_eq!(d("[fe80::1]:99").host_port(), "[fe80::1]:99");
+    }
+
+    #[test]
+    fn the_reply_mode_defaults_to_whole_and_accepts_streamed() {
+        let c = parse(
+            r#"{"devices":[{"name":"a","address":"h"},{"name":"b","address":"h","reply":"streamed"},
+                           {"name":"c","address":"h","reply":"whole"}]}"#,
+        )
+        .unwrap();
+        let modes: Vec<_> = c.devices.iter().map(|d| d.reply).collect();
+        assert_eq!(
+            modes,
+            [ReplyMode::Whole, ReplyMode::Streamed, ReplyMode::Whole]
+        );
     }
 
     #[test]
@@ -231,6 +261,14 @@ mod tests {
             (
                 r#"{"devices":[{"name":"a","address":"h","typo":1}]}"#,
                 "typo",
+            ),
+            (
+                r#"{"devices":[{"name":"a","address":"h","reply":"fast"}]}"#,
+                "fast",
+            ),
+            (
+                r#"{"devices":[{"name":"a","address":"h","reply":true}]}"#,
+                "expected value",
             ),
         ] {
             let e = parse(text).unwrap_err();

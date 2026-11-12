@@ -23,7 +23,7 @@ use crate::voice::{Synthesizer, Transcriber};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub use client::{Device, Pipeline, Timing, run_device};
+pub use client::{Device, Pipeline, Timing, run_device, run_device_with};
 
 #[cfg(feature = "esphome-noise")]
 fn read_psk(env: &crate::env::Env, var: &str) -> Result<Option<[u8; 32]>, String> {
@@ -85,7 +85,7 @@ where
             psk,
         };
         println!("clawdot: dialling ESPHome device {}", d.name);
-        tokio::spawn(run_device(
+        tokio::spawn(run_device_with(
             device,
             media_store.clone(),
             Pipeline {
@@ -95,6 +95,7 @@ where
                 settings: settings.clone(),
             },
             Timing::default(),
+            d.reply,
             std::future::pending(),
         ));
     }
