@@ -6,7 +6,7 @@
 //! is bound (REQ-CFG-015).
 
 use crate::app::{Adapters, Core, Limits, Stores};
-use crate::app_loop::{App, Inbox, Speaker};
+use crate::app_loop::{App, Sources, SpeakerHandle};
 use crate::assistant::Assistant;
 use crate::audit::{AuditConfig, AuditLog};
 use crate::cli::Args;
@@ -133,7 +133,7 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
         spawn_console(line_tx);
         println!("clawdot: console ready. Type what you would say; \"quit\" or Ctrl-D to leave.");
     }
-    let inbox = Inbox {
+    let sources = Sources {
         portal: running.core.attach_portal(),
         mcp: running.mcp_rx,
         realtime: running.realtime_rx,
@@ -141,7 +141,7 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
         lines,
         console: args.console,
     };
-    let speaker = spawn_speaker(
+    let speaker_task = spawn_speaker(
         &running.brain,
         &running.core,
         announcer,
@@ -152,8 +152,8 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
         running.hub,
         running.core,
         running.applied,
-        inbox,
-        speaker,
+        sources,
+        speaker_task,
     )
     .with_stations(stations);
     Ok(Started::Run(Box::new(app)))
@@ -256,14 +256,20 @@ async fn build_running(
     })
 }
 
-/// Answer one recorded utterance and leave. There is no loop to serve meanwhile, so wait for the MCP inbox
+/// Answer one recorded utterance and leave. There is no loop to serve meanwhile, so wait for the MCP sources
 /// to answer first, as the single turn should have their tools.
 async fn one_utterance(
     r: Running,
     args: &Args,
     input: &std::path::Path,
 ) -> Result<ExitCode, Failure> {
-    let mut app = App::one_shot(r.brain, r.hub, r.core, r.applied, Inbox::mcp_only(r.mcp_rx));
+    let mut app = App::one_shot(
+        r.brain,
+        r.hub,
+        r.core,
+        r.applied,
+        Sources::mcp_only(r.mcp_rx),
+    );
     app.wait_for_connections().await;
     voice_once(&mut app, &args.speech, input, args.voice_out.as_deref())
         .await
@@ -294,7 +300,7 @@ fn spawn_speaker(
     core: &Arc<Core>,
     announcer: satellite::Announcer,
     console: bool,
-) -> Speaker {
+) -> SpeakerHandle {
     let (usage, usage_store) = brain.usage_handles();
     let voice = Arc::new(Voice {
         announcer: announcer.clone(),
@@ -307,7 +313,7 @@ fn spawn_speaker(
     });
     let (tx, rx) = mpsc::unbounded_channel::<Say>();
     tokio::spawn(speak(Arc::clone(&voice), rx));
-    Speaker {
+    SpeakerHandle {
         tx,
         voice,
         announcer,
@@ -456,7 +462,7 @@ struct Tools {
     connects: Connects,
 }
 
-/// Load the portal's saved tools and skills, define the HTTP tools, and declare the MCP inbox. Takes the
+/// Load the portal's saved tools and skills, define the HTTP tools, and declare the MCP sources. Takes the
 /// tool and server definitions out of `args`.
 fn declare_tools(args: &mut Args, core: &Core, assistant: &Assistant) -> Result<Tools, Failure> {
     let builtin: Vec<String> = ToolHost::tool_specs(assistant)
@@ -483,7 +489,7 @@ fn declare_tools(args: &mut Args, core: &Core, assistant: &Assistant) -> Result<
     let http_tools =
         HttpTools::new(tool_defs, &builtin, |v| core.env().get(v)).map_err(|e| fail(1, e))?;
 
-    // Saved and configured MCP inbox are declared here and connected in tasks once the loop runs
+    // Saved and configured MCP sources are declared here and connected in tasks once the loop runs
     // (ADR-0021): a dead server delays only itself, never the start of the speaker. Bad definitions still
     // stop start-up.
     let (mcp, pending) =

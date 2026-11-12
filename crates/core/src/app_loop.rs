@@ -1,13 +1,18 @@
 //! The running application: the one loop that owns the [`Brain`] and the conversation [`Hub`] (ADR-0021).
 //!
-//! [`App`] holds what the loop owns (the brain, the hub, the settings in effect, the [`Inbox`] it listens on,
+//! [`App`] holds what the loop owns (the brain, the hub, the settings in effect, the [`Sources`] it listens on,
 //! the tick and the handle on the speaker task) and has one method per kind of event; all of the loop's
 //! behaviour is on it, split by concern: `turns` (a request becomes a turn, a turn ends, a reply is delivered),
 //! `portal` (changes asked for in the web UI) and `connections` (MCP connections made beside the loop).
 //! [`App::run`] only chooses which event is next. Turns, realtime sessions, speech and MCP connections are
-//! tasks beside the loop; they report back through the inbox, and nothing here waits for them. The start-up
+//! tasks beside the loop; they report back through the sources, and nothing here waits for them. The start-up
 //! sequence that builds an `App` is in `startup`; `--voice-in` builds one with [`App::one_shot`] and drives the
 //! same methods without running the loop.
+//!
+//! Names. "Speaker" means three things in this crate and each has its own words: `speakers` is the set of
+//! per-speaker conversations (the [`Hub`]'s keys), `speaker` is the task that says things in order, and
+//! [`SpeakerHandle`] here is this loop's end of that task. "Inbox" always means the agent inbox (`crate::inbox`);
+//! the channels this loop listens on are [`Sources`].
 
 use crate::app::{Core, Job};
 use crate::assistant::describe_fired;
@@ -39,7 +44,7 @@ pub enum Flow {
 
 /// The channels the loop listens on. Each is the receiving end of a task or front end that reports back.
 #[derive(Debug)]
-pub struct Inbox {
+pub struct Sources {
     /// Changes asked for in the web UI.
     pub portal: mpsc::Receiver<Job>,
     /// Finished MCP connections.
@@ -53,7 +58,7 @@ pub struct Inbox {
     pub console: bool,
 }
 
-impl Inbox {
+impl Sources {
     /// Only the finished connections, for the one-shot command: every other source is closed.
     #[must_use]
     pub fn mcp_only(mcp: mpsc::Receiver<Done>) -> Self {
@@ -78,7 +83,7 @@ impl Inbox {
 /// The loop's end of the speaker task: everything that speaks is handed over and said in order, so the wait
 /// for a voice or a summary never holds the loop.
 #[derive(Debug)]
-pub struct Speaker {
+pub struct SpeakerHandle {
     pub tx: mpsc::UnboundedSender<Say>,
     pub voice: Arc<Voice>,
     pub announcer: Announcer,
@@ -88,7 +93,7 @@ pub struct Speaker {
     pub lost: bool,
 }
 
-impl Speaker {
+impl SpeakerHandle {
     fn say(&mut self, item: Say) {
         if self.tx.send(item).is_err() && !self.lost {
             self.lost = true;
@@ -107,9 +112,9 @@ pub struct App {
     pub(crate) core: Arc<Core>,
     /// The settings in effect, so a change does work only where something differs.
     pub(crate) applied: serde_json::Map<String, serde_json::Value>,
-    pub(crate) inbox: Inbox,
+    pub(crate) sources: Sources,
     /// The speaker task, or `None` for the one-shot command, which has nothing to speak and no tick.
-    pub(crate) speaker: Option<Speaker>,
+    pub(crate) speaker_task: Option<SpeakerHandle>,
     /// Names of the music stations, for the status page.
     pub(crate) stations: Vec<String>,
     tick: Interval,
@@ -123,11 +128,11 @@ impl App {
         hub: Hub,
         core: Arc<Core>,
         applied: serde_json::Map<String, serde_json::Value>,
-        inbox: Inbox,
-        speaker: Speaker,
+        sources: Sources,
+        speaker_task: SpeakerHandle,
     ) -> Self {
-        let mut app = Self::one_shot(brain, hub, core, applied, inbox);
-        app.speaker = Some(speaker);
+        let mut app = Self::one_shot(brain, hub, core, applied, sources);
+        app.speaker_task = Some(speaker_task);
         app
     }
 
@@ -138,15 +143,15 @@ impl App {
         hub: Hub,
         core: Arc<Core>,
         applied: serde_json::Map<String, serde_json::Value>,
-        inbox: Inbox,
+        sources: Sources,
     ) -> Self {
         Self {
             brain,
             hub,
             core,
             applied,
-            inbox,
-            speaker: None,
+            sources,
+            speaker_task: None,
             stations: Vec::new(),
             tick: tokio::time::interval(Duration::from_secs(1)),
         }
@@ -163,22 +168,22 @@ impl App {
     pub async fn run(mut self) -> ExitCode {
         loop {
             let flow = tokio::select! {
-                Some(job) = self.inbox.portal.recv() => {
+                Some(job) = self.sources.portal.recv() => {
                     self.on_portal_job(job).await;
                     Flow::Continue
                 }
-                Some(done) = self.inbox.mcp.recv() => {
+                Some(done) = self.sources.mcp.recv() => {
                     self.on_mcp_connected(done);
                     Flow::Continue
                 }
-                line = self.inbox.lines.recv(), if self.inbox.console => {
+                line = self.sources.lines.recv(), if self.sources.console => {
                     self.on_console_line(line).await
                 }
-                Some(job) = self.inbox.realtime.recv() => {
+                Some(job) = self.sources.realtime.recv() => {
                     self.on_realtime_job(job);
                     Flow::Continue
                 }
-                Some(ask) = self.inbox.asks.recv() => {
+                Some(ask) = self.sources.asks.recv() => {
                     self.on_ask(ask);
                     Flow::Continue
                 }
@@ -244,7 +249,7 @@ impl App {
     /// Once a second: sweep stale conversations, publish the status, hand what is due to the speaker task.
     /// Without a speaker task (the one-shot command) there is no tick, and this does nothing.
     pub fn on_tick(&mut self) {
-        let Some(speaker) = self.speaker.as_mut() else {
+        let Some(speaker) = self.speaker_task.as_mut() else {
             return;
         };
         self.hub.sweep(self.brain.mono());
@@ -273,7 +278,7 @@ impl App {
     }
 }
 
-fn publish_status(core: &Core, brain: &Brain, speaker: &Speaker, stations: &[String]) {
+fn publish_status(core: &Core, brain: &Brain, speaker: &SpeakerHandle, stations: &[String]) {
     let connected = speaker.announcer.connected();
     let view = SpeakerView {
         available: connected > 0 && speaker.voice.available.load(Ordering::Relaxed),

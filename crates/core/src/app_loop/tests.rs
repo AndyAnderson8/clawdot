@@ -69,7 +69,7 @@ async fn rig_with(dir: &TempDir, extra: &[&str], clock: Arc<dyn Clock + Send + S
     let (_r, realtime) = mpsc::channel(1);
     let (_a, asks) = mpsc::channel(1);
     let (_l, lines) = mpsc::channel(1);
-    let inbox = Inbox {
+    let sources = Sources {
         portal,
         mcp,
         realtime,
@@ -77,14 +77,14 @@ async fn rig_with(dir: &TempDir, extra: &[&str], clock: Arc<dyn Clock + Send + S
         lines,
         console: true,
     };
-    let speaker = Speaker {
+    let speaker_task = SpeakerHandle {
         tx,
         voice,
         announcer,
         console: true,
         lost: false,
     };
-    let app = App::new(brain, hub, core, live, inbox, speaker);
+    let app = App::new(brain, hub, core, live, sources, speaker_task);
     Rig { app, said }
 }
 
@@ -214,7 +214,7 @@ async fn a_lost_speaker_task_does_not_stop_the_tick() {
     drop(said);
     assert!(app.core.queue_speech("anyone there"));
     app.on_tick();
-    assert!(app.speaker.as_ref().is_some_and(|s| s.lost));
+    assert!(app.speaker_task.as_ref().is_some_and(|s| s.lost));
     app.on_tick();
     assert!(!app.core.ui_status().is_null());
 }
@@ -337,7 +337,7 @@ fn one_shot(app: App) -> App {
         app.hub,
         app.core,
         app.applied,
-        Inbox::mcp_only(mpsc::channel(1).1),
+        Sources::mcp_only(mpsc::channel(1).1),
     )
 }
 
@@ -351,7 +351,7 @@ async fn a_one_shot_app_answers_through_the_loops_methods_without_a_loop() {
     let url = format!("http://127.0.0.1:{port}/v1");
     let Rig { app, .. } = rig(&dir, &["--llm-url", &url, "--llm-model", "m"]).await;
     let mut app = one_shot(app);
-    assert!(app.speaker.is_none());
+    assert!(app.speaker_task.is_none());
 
     let timer = app.respond_inline("set a timer for 5 minutes").await;
     assert!(timer.say.starts_with("Timer set"), "{}", timer.say);

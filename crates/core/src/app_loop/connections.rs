@@ -80,10 +80,10 @@ impl App {
     }
 
     /// Serve the connection results until none is outstanding. For the one-shot command: with no loop to serve
-    /// meanwhile, wait for the connections to answer first, as the single turn should have their tools.
+    /// meanwhile, wait for the sources to answer first, as the single turn should have their tools.
     pub async fn wait_for_connections(&mut self) {
         while self.brain.is_connecting() {
-            let Some(done) = self.inbox.mcp.recv().await else {
+            let Some(done) = self.sources.mcp.recv().await else {
                 break;
             };
             self.on_mcp_connected(done);
