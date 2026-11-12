@@ -118,7 +118,9 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const note =
     unavailable ||
     (data
-      ? (data.clock_valid ? "" : "The device clock is not set yet, so nothing will ring until it is. ") +
+      ? (data.clock_valid
+          ? ""
+          : "The device clock is not set yet. Timers still count down and ring; alarms and reminders wait until it is. ") +
         "Times are in " +
         zoneName(zone()) +
         ", the device's time zone."
