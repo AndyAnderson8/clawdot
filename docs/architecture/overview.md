@@ -121,12 +121,14 @@ The device never calls out to agent hosts; the bridge pulls. Reply types are `ac
 |---|---|---|
 | Config | `config.toml` | n/a |
 | Timers, alarms, reminders | JSON file, atomic write | max items configurable |
-| Inbox events | Append log with compaction | max N events / bytes |
+| Inbox events | Append log with compaction | max N events / bytes; when full, the endpoint holding more than half the queue gives up events first, so one token holder cannot evict another endpoint's events |
 | Endpoint tokens | Config (hashed) | n/a |
 | Conversation history | Memory only | token and byte capped |
 | Logs | Ring buffer + optional file | bytes capped |
 
 No raw audio is ever stored.
+
+The endpoint, inbox and reply files are compact JSON, and a change rewrites only the file it changed (an acknowledgement from a bridge touches `replies.json` alone). The core serialises under its lock and a small writer thread does the writes, coalescing several changes to one file into one write, so neither the lock nor the async runtime waits for flash. The HTTP layer awaits that thread before it answers, so a webhook, announcement or acknowledgement that was reported as accepted is on disk (REQ-INB-004).
 
 ## 8. Cross-cutting concerns
 

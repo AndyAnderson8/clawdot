@@ -49,15 +49,14 @@ impl<I> Row<I> {
 }
 
 /// The first two `{parameter}` segments of a match, empty when the pattern has fewer.
+///
+/// A parameter is the raw path segment and is never percent-decoded, because none needs an escape: every one is an
+/// endpoint, tool or connection name (lowercase letters, digits, `-` and `_`; an MCP tool's remote name is
+/// sanitised to those), one of the fixed skill actions, or a number. A segment that carries an escape names nothing
+/// and gets the handler's "no such ..." answer. A new row whose parameter can hold other characters must decode it.
 pub(crate) type Params<'a> = [&'a str; 2];
 
-/// An endpoint name: lowercase letters, digits, `-` and `_`, 1 to 32 bytes.
-pub(crate) fn valid_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 32
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-}
+use crate::inbox::endpoint::valid_name;
 
 /// Whether `segs` (the path split on `/`, without the outer slashes) fits `pattern`, and the parameters if so.
 pub(crate) fn fit<'a>(pattern: &str, segs: &[&'a str]) -> Option<Params<'a>> {
@@ -168,6 +167,11 @@ mod tests {
         assert_eq!(fit("/tools/{name}", &["tools", "x", "tier"]), None);
         assert_eq!(fit("/tools", &["tools"]), Some(["", ""]));
         assert_eq!(fit("/tools/{name}", &["tools", ""]), Some(["", ""]));
+        assert_eq!(
+            fit("/tools/{name}", &["tools", "%61"]),
+            Some(["%61", ""]),
+            "a parameter is never decoded"
+        );
         assert_eq!(fit("/tools", &[]), None);
         assert_eq!(fit("/", &[""]), Some(["", ""]));
     }
@@ -179,6 +183,11 @@ mod tests {
         assert_eq!(fit(p, &ok), Some(["claude-code", "7"]));
         // An invalid name is not this route at all (the caller sees 404, not 401).
         assert_eq!(fit(p, &["bridge", "UPPER", "replies", "7", "ack"]), None);
+        // The first character is a letter or digit, the same rule that creating an endpoint applies.
+        assert_eq!(fit(p, &["bridge", "_x", "replies", "7", "ack"]), None);
+        assert_eq!(fit(p, &["bridge", "-x", "replies", "7", "ack"]), None);
+        assert!(fit(p, &["bridge", "x_-", "replies", "7", "ack"]).is_some());
+        assert_eq!(fit(p, &["bridge", "%61", "replies", "7", "ack"]), None);
         assert_eq!(fit(p, &["bridge", "", "replies", "7", "ack"]), None);
         let long = "a".repeat(33);
         assert_eq!(fit(p, &["bridge", &long, "replies", "7", "ack"]), None);

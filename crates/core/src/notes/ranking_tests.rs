@@ -188,3 +188,19 @@ fn a_secret_is_still_refused_and_markup_is_defused_in_the_block() {
         "only the host's own closing tag"
     );
 }
+
+// A hand-edited memory file can hold any timestamps; ranking them must not overflow (a debug build would panic).
+#[test]
+fn timestamps_at_the_extremes_rank_without_overflow() {
+    let note = |id: u64, ts: Ts| Note {
+        id,
+        text: "my printer is called Pixel".into(),
+        ts,
+    };
+    let notes = [note(1, Ts::MIN), note(2, 0), note(3, Ts::MAX)];
+    let ranked = rank(&notes, "where is the printer", "");
+    assert_eq!(ranked.len(), 3);
+    assert!(ranked.iter().all(|(_, s)| s.is_finite() && *s > 0.0));
+    assert_eq!(ranked[0].0, 2, "the newest matching note comes first");
+    assert_eq!(ranked[2].0, 0, "the oldest comes last");
+}

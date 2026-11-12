@@ -882,7 +882,7 @@ pub struct TurnInputs<'a, H> {
     /// The turn's limits and models.
     pub cfg: &'a TurnConfig,
     /// The daily request and spend counters.
-    pub usage: &'a mut UsageTracker,
+    pub usage: &'a UsageTracker,
     /// The day number the counters are kept by.
     pub day: i64,
     /// The time the turn runs at, in seconds.
@@ -1234,7 +1234,7 @@ fn clean_question(args: &Value) -> Option<String> {
 async fn summarise_result<B: ChatBackend>(
     backend: &B,
     cfg: &TurnConfig,
-    usage: &mut UsageTracker,
+    usage: &UsageTracker,
     day: i64,
     model_requests: &mut u32,
     tool: &str,

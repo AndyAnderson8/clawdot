@@ -290,7 +290,7 @@ fn post_hook(port: u16, token: &str, body: &str) -> u16 {
     let mut s = connect(port);
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let req = format!(
-        "POST /hook/claude-code HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /hook/claude-code HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     s.write_all(req.as_bytes()).unwrap();
@@ -1023,7 +1023,7 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
         .unwrap();
     write!(
         stream,
-        "GET /bridge/claude-code/replies HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\n\r\n"
+        "GET /bridge/claude-code/replies HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\n\r\n"
     )
     .unwrap();
     let mut got = String::new();
@@ -1185,7 +1185,7 @@ fn http(port: u16, method: &str, path: &str, token: &str, body: &str) -> (u16, S
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     write!(
         s,
-        "{method} {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
