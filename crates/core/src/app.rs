@@ -42,15 +42,16 @@ pub struct SaveMark {
 pub struct Adapters(BTreeMap<String, Adapter>);
 
 impl Adapters {
-    /// The built-in adapters (`claude-code`, `generic`).
+    /// The adapters embedded in the binary. One that fails to parse is reported and left out; a test requires
+    /// that none does.
     #[must_use]
     pub fn builtin() -> Self {
         let mut a = Self::default();
-        for adapter in [Adapter::claude_code(), Adapter::generic()]
-            .into_iter()
-            .flatten()
-        {
-            a.insert(adapter);
+        for adapter in Adapter::builtins() {
+            match adapter {
+                Ok(adapter) => a.insert(adapter),
+                Err(e) => crate::diag::error(&format!("built-in {e}")),
+            }
         }
         a
     }
