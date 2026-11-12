@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ClawDot</title>
-<script>try{var t=localStorage.getItem("clawdot-theme"),ok=["light","dark","system","graphite","contrast","ocean","custom"];if(t==="custom"){var c=localStorage.getItem("clawdot-theme-css");if(c){var st=document.createElement("style");st.id="customtheme";st.textContent=c;document.head.appendChild(st)}}document.documentElement.dataset.theme=ok.indexOf(t)>=0?t:"light"}catch(e){document.documentElement.dataset.theme="light"}</script>
+<script>try{var t=localStorage.getItem("clawdot-theme"),ok=["light","dark","system","graphite","contrast","ocean","custom"];if(t==="custom"){var c=localStorage.getItem("clawdot-theme-css");if(c&&document.adoptedStyleSheets){var st=new CSSStyleSheet();st.replaceSync(c);st.customTheme=1;document.adoptedStyleSheets=[st]}}document.documentElement.dataset.theme=ok.indexOf(t)>=0?t:"light"}catch(e){document.documentElement.dataset.theme="light"}</script>
 <style>/*@css*/</style>
 </head>
 <body>
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="mk" viewBox="0 0 128 128">
+<svg class="sprite" width="0" height="0" aria-hidden="true"><symbol id="mk" viewBox="0 0 128 128">
 <path d="M18 90v12c0 8 20.600 14 46 14s46-6 46-14V90Z" fill="#1f4d5b"/>
 <ellipse cx="64" cy="90" rx="46" ry="14" fill="#0e2a33"/>
 <ellipse cx="64" cy="90" rx="41" ry="10.500" fill="none" stroke="#2ee6c5" stroke-opacity=".28" stroke-width="7"/>

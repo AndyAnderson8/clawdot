@@ -47,6 +47,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 #[cfg(test)]
+mod csp_tests;
+#[cfg(test)]
 mod tests;
 
 type Resp = Response<BoxBody<Bytes, Infallible>>;
@@ -58,11 +60,12 @@ const PAGE: &str = include_str!(concat!(env!("OUT_DIR"), "/ui-page.html"));
 const PAGE_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui-page.html.gz"));
 /// The release notes, shown on the About card (REQ-CFG-013, 025).
 const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
-/// Only the page's own inline script and style, and only calls back to this origin. Pictures are the one thing it may
-/// load from elsewhere, and only when a person gives an image address for the picture of their device (or has one saved
-/// in the page as data); nothing else on the page asks another site for anything.
-const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data: https: http:; \
-                   base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+/// Only the page's own inline script and style, allowed by their SHA-256 (computed from the page by `build.rs`, so
+/// there is no `'unsafe-inline'` and an injected inline script or style is refused), and only calls back to this
+/// origin. Pictures are the one thing it may load from elsewhere, and only when a person gives an image address for
+/// the picture of their device (or has one saved in the page as data); nothing else on the page asks another site
+/// for anything.
+const CSP: &str = include_str!(concat!(env!("OUT_DIR"), "/ui-csp.txt"));
 /// API bodies are tiny; refuse anything larger.
 const MAX_BODY: usize = 4096;
 /// A tool description with its parameters, and a skills file.

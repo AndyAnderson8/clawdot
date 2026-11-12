@@ -13,10 +13,12 @@ export const HELPERS = `(() => {
     submit: async (s) => { const f = document.querySelector(s); f.requestSubmit(); await settle(); },
     wide: () => {
       // A wide stack with extra spacing, so a layout that only fits narrow system fonts (Linux CI) shows itself here.
-      const st = document.createElement('style');
-      st.id = 'widefont';
-      st.textContent = 'html *:not(svg):not(svg *) { font-family: Verdana, "DejaVu Sans", "Arial Black", sans-serif !important; letter-spacing: 0.05em !important; } code, pre, .token { font-family: "Courier New", monospace !important; }';
-      if (!document.getElementById('widefont')) document.head.append(st);
+      // A constructed stylesheet, not a <style> element: the page's policy refuses inline styles that are not its own.
+      if (window.__wide) return;
+      const st = new CSSStyleSheet();
+      st.replaceSync('html *:not(svg):not(svg *) { font-family: Verdana, "DejaVu Sans", "Arial Black", sans-serif !important; letter-spacing: 0.05em !important; } code, pre, .token { font-family: "Courier New", monospace !important; }');
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, st];
+      window.__wide = true;
     },
     // Things a fixed bar or a clipping box would hide: the focus ring's room, and the last row above the bottom bar.
     hidden: () => {
