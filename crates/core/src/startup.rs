@@ -6,7 +6,7 @@
 //! is bound (REQ-CFG-015).
 
 use crate::app::{Adapters, Core, Limits, Stores};
-use crate::app_loop::{App, Inbox, Speaker};
+use crate::app_loop::{App, Sources, SpeakerHandle};
 use crate::assistant::Assistant;
 use crate::audit::{AuditConfig, AuditLog};
 use crate::cli::Args;
@@ -19,7 +19,7 @@ use crate::httptools::HttpTools;
 use crate::mcp::McpClient;
 use crate::notes::NoteStore;
 use crate::rtvoice::{Realtime, RtSettings};
-use crate::runtime::{Brain, build_llm, mcp_connected, settings_extra, zone_for};
+use crate::runtime::{Brain, build_llm, settings_extra, zone_for};
 use crate::satellite::{self, Ask};
 use crate::sched::{Clock, Scheduler, SystemClock, Zone};
 use crate::session::{Conversation, ToolHost};
@@ -133,7 +133,7 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
         spawn_console(line_tx);
         println!("clawdot: console ready. Type what you would say; \"quit\" or Ctrl-D to leave.");
     }
-    let inbox = Inbox {
+    let sources = Sources {
         portal: running.core.attach_portal(),
         mcp: running.mcp_rx,
         realtime: running.realtime_rx,
@@ -141,7 +141,7 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
         lines,
         console: args.console,
     };
-    let speaker = spawn_speaker(
+    let speaker_task = spawn_speaker(
         &running.brain,
         &running.core,
         announcer,
@@ -152,8 +152,8 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
         running.hub,
         running.core,
         running.applied,
-        inbox,
-        speaker,
+        sources,
+        speaker_task,
     )
     .with_stations(stations);
     Ok(Started::Run(Box::new(app)))
@@ -260,27 +260,22 @@ async fn build_running(
 /// Answer one recorded utterance and leave. There is no loop to serve meanwhile, so wait for the MCP sources
 /// to answer first, as the single turn should have their tools.
 async fn one_utterance(
-    mut r: Running,
+    r: Running,
     args: &Args,
     input: &std::path::Path,
 ) -> Result<ExitCode, Failure> {
-    while r.brain.is_connecting() {
-        let Some(done) = r.mcp_rx.recv().await else {
-            break;
-        };
-        mcp_connected(&mut r.brain, &r.core, done);
-    }
-    voice_once(
-        &mut r.brain,
-        &mut r.hub,
-        &args.speech,
-        &r.core,
-        input,
-        args.voice_out.as_deref(),
-    )
-    .await
-    .map(|()| ExitCode::SUCCESS)
-    .map_err(|e| fail(1, e))
+    let mut app = App::one_shot(
+        r.brain,
+        r.hub,
+        r.core,
+        r.applied,
+        Sources::mcp_only(r.mcp_rx),
+    );
+    app.wait_for_connections().await;
+    voice_once(&mut app, &args.speech, input, args.voice_out.as_deref())
+        .await
+        .map(|()| ExitCode::SUCCESS)
+        .map_err(|e| fail(1, e))
 }
 
 /// Serve the web UI and the webhooks on `listener` in a task.
@@ -306,7 +301,7 @@ fn spawn_speaker(
     core: &Arc<Core>,
     announcer: satellite::Announcer,
     console: bool,
-) -> Speaker {
+) -> SpeakerHandle {
     let (usage, usage_store) = brain.usage_handles();
     let voice = Arc::new(Voice {
         announcer: announcer.clone(),
@@ -319,7 +314,7 @@ fn spawn_speaker(
     });
     let (tx, rx) = mpsc::unbounded_channel::<Say>();
     tokio::spawn(speak(Arc::clone(&voice), rx));
-    Speaker {
+    SpeakerHandle {
         tx,
         voice,
         announcer,

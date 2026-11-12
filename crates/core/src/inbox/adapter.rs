@@ -17,10 +17,13 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// Built-in adapters, embedded in the binary.
-pub const BUILTIN_CLAUDE_CODE: &str = include_str!("../../adapters/claude-code.json");
-/// The generic adapter for scripts, CI, and automations.
-pub const BUILTIN_GENERIC: &str = include_str!("../../adapters/generic.json");
+/// The adapter definitions embedded in the binary (the files in `crates/core/adapters/`). Each is loaded the
+/// same way and known by the `name` inside it, which endpoints saved on disk refer to; to ship another, add its
+/// file here.
+const BUILTIN: &[&str] = &[
+    include_str!("../../adapters/claude-code.json"),
+    include_str!("../../adapters/generic.json"),
+];
 
 /// An adapter definition that cannot be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,16 +307,10 @@ impl Adapter {
         })
     }
 
-    /// The built-in Claude Code adapter.
-    #[must_use]
-    pub fn claude_code() -> Option<Self> {
-        Self::from_json(BUILTIN_CLAUDE_CODE).ok()
-    }
-
-    /// The built-in generic adapter.
-    #[must_use]
-    pub fn generic() -> Option<Self> {
-        Self::from_json(BUILTIN_GENERIC).ok()
+    /// The built-in adapters, one result per embedded definition. A definition that does not parse is a defect
+    /// of the build, which the tests catch; the caller decides what to do with the error at run time.
+    pub fn builtins() -> impl Iterator<Item = Result<Self, AdapterError>> {
+        BUILTIN.iter().map(|json| Self::from_json(json))
     }
 
     /// Map a payload to an event, or `None` if no rule matches. Fields are clamped to their limits.
@@ -349,14 +346,31 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn claude() -> Adapter {
-        Adapter::claude_code().unwrap()
+    /// The embedded adapter called `name`.
+    fn builtin(name: &str) -> Adapter {
+        Adapter::builtins()
+            .map(Result::unwrap)
+            .find(|a| a.name == name)
+            .unwrap_or_else(|| panic!("no built-in adapter `{name}`"))
     }
 
+    fn claude() -> Adapter {
+        builtin("claude-code")
+    }
+
+    // A definition that does not parse would otherwise be left out at run time; it must fail here instead.
     #[test]
-    fn built_in_adapters_compile() {
-        assert!(Adapter::claude_code().is_some());
-        assert!(Adapter::generic().is_some());
+    fn every_built_in_adapter_parses_and_has_its_own_name() {
+        let all: Vec<Adapter> = Adapter::builtins()
+            .map(|a| a.unwrap_or_else(|e| panic!("{e}")))
+            .collect();
+        assert_eq!(all.len(), BUILTIN.len());
+        let mut names: Vec<&str> = all.iter().map(|a| a.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), all.len(), "two built-ins share a name");
+        // Endpoints saved on disk refer to these names, so they must not change.
+        assert_eq!(names, ["claude-code", "generic"]);
     }
 
     #[test]
@@ -410,7 +424,7 @@ mod tests {
 
     #[test]
     fn the_generic_adapter_takes_simple_fields() {
-        let g = Adapter::generic().unwrap();
+        let g = builtin("generic");
         let m = g
             .map(&json!({"title": "Backup finished", "summary": "12 GB copied", "kind": "done", "priority": "low", "source": "nightly"}))
             .unwrap();
