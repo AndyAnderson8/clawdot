@@ -44,10 +44,25 @@ pub struct Voice {
     /// Spoken text is echoed only to an interactive console: in server mode stdout goes to a journal or
     /// container log that is never size-capped (REQ-SEC-009, PRIVACY.md).
     pub echo: bool,
+    /// Agent events are for a satellite to speak: one is configured and nobody is reading a terminal. While
+    /// none is connected (a speaker that is off, or its network link down) an event waits in the queue; it is
+    /// not summarised and marked as announced with nobody to hear it.
+    pub waits_for_satellite: bool,
     /// Some satellite could speak right now, as of the last poll (read by the loop for the portal).
     pub available: AtomicBool,
     /// A poll is queued or running; the loop sends another only when this is false.
     pub polling: AtomicBool,
+}
+
+/// Whether an agent event may be announced now. A connected satellite must be free (not busy or muted). With
+/// none connected, the event is shown at the terminal or in the portal only when no satellite is meant to
+/// speak it.
+fn may_announce(connected: bool, free: bool, waits_for_satellite: bool) -> bool {
+    if connected {
+        free
+    } else {
+        !waits_for_satellite
+    }
 }
 
 /// Say what the loop hands over, one thing at a time. A satellite that is busy or muted simply does not
@@ -79,8 +94,9 @@ pub async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
                 let connected = v.announcer.connected() > 0;
                 let free = connected && v.announcer.is_available().await;
                 v.available.store(free, Ordering::Relaxed);
-                // A satellite that is connected but busy or muted: keep the event queued and try again.
-                if (!connected || free)
+                // A satellite that is busy, muted or (when one is meant to speak) not connected: keep the event
+                // queued and try again.
+                if may_announce(connected, free, v.waits_for_satellite)
                     && let Some(next) = v.core.next_announcement(true, minute)
                 {
                     let spoken = match &llm {
@@ -149,5 +165,23 @@ impl std::fmt::Debug for Voice {
             .field("available", &self.available)
             .field("polling", &self.polling)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_announce;
+
+    // REQ-INB-006: an event is announced when someone can hear it.
+    #[test]
+    fn an_event_waits_for_a_satellite_that_is_meant_to_speak_it() {
+        // A satellite is connected: it must be free.
+        assert!(may_announce(true, true, true));
+        assert!(!may_announce(true, false, true));
+        assert!(!may_announce(true, false, false));
+        // None is connected. With one configured, the event waits for it to come back.
+        assert!(!may_announce(false, false, true));
+        // With none configured (the terminal or the portal is the only place to see it), it goes ahead.
+        assert!(may_announce(false, false, false));
     }
 }

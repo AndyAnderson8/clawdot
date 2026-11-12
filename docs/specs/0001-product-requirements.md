@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.53 |
+| **Version** | 0.54 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -116,7 +116,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-INB-003 | An event MUST support fields: `source`, `kind` (`done`, `needs_input`, `question`, `info`), `title`, `summary`, `status`, `priority`, `session_ref` (optional). Each endpoint MUST have a `format` adapter (`claude-code`, `codex`, `gemini`, `generic`) that maps the agent's native hook payload to this model, so agents can post their native hook payload unmodified. | Must | M2 | T |
 | REQ-INB-004 | The system MUST persist events so none are lost across restarts, with a bounded queue and eviction policy. A request that changes the inbox, the replies or the endpoints (a webhook, an announcement, a bridge acknowledgement, an MCP `announce` or `ask_user`, an endpoint made, rotated or removed in the portal) MUST be answered as a success only once the change is on disk; when it could not be written the answer MUST be an error (`500`, or `507` when the storage is full; an MCP tool reports it as a tool error) with a plain message, never a `2xx`. The change stays in memory so the event is still announced, and a sender that retries is coalesced. | Must | M2 | T |
 | REQ-INB-005 | On a new event, the system MUST play a notification tone and announce it when the device is idle. | Must | M2 | D |
-| REQ-INB-006 | If the device is mid-conversation, the system MUST defer announcement until idle (except `urgent` priority policy as configured). | Must | M2 | T |
+| REQ-INB-006 | If the device is mid-conversation, the system MUST defer announcement until idle (except `urgent` priority policy as configured). When a satellite is configured and none is connected, an event MUST wait in the queue: it is not summarised and not marked as announced with nobody to hear it. | Must | M2 | T |
 | REQ-INB-007 | The user MUST be able to: hear the summary, ask for details, dismiss, snooze, and reply to continue the agent's work. | Must | M2 | D |
 | REQ-INB-008 | Replies and acknowledgements MUST be delivered to agents through an authenticated, per-endpoint **reply stream** (SSE) that the agent bridge opens to the device. The device MUST NOT initiate connections to agent hosts. Each reply carries an id, the event's `session_ref`, a reply type, and text; delivery is at-least-once with bridge acknowledgement, a bounded queue, and expiry. | Must | M2 | T |
 | REQ-INB-009 | The system MUST also support device-initiated sources (outbound subscribe via SSE, or periodic poll with a configurable interval), for agents unreachable from the device. | Should | M2 | T |
@@ -470,3 +470,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.51 | 2026-11-11 | REQ-INB-041: a message is spoken as its endpoint, by the name the user chose, never by the sender's label. REQ-EXT-019, REQ-EXT-020: MCP tools are approved as shown, a change needs approval again, and schema text is reduced. |
 | 0.52 | 2026-11-11 | REQ-CFG-083: the device is named by its own model string or a configured preset, never guessed in code; the unused board setting is retired (REQ-CFG-037, REQ-CFG-039). |
 | 0.53 | 2026-11-11 | Durations are monotonic and calendar points are wall time (REQ-TMR-002, 003, 006, 009; REQ-AST-007, 021; REQ-SEC-004, 011; REQ-CFG-019, 069). A countdown timer works before the clock is set (REQ-TMR-009). |
+| 0.54 | 2026-11-11 | REQ-INB-006: an event waits while a configured satellite is not connected, instead of being summarised and marked as announced unheard |

@@ -32,7 +32,7 @@ OPTIONS:
     --listen ADDR              Address for the HTTP server (default: 127.0.0.1:3335)
     --public-url URL           How agents reach this device, used in printed snippets (default: from --listen)
     --zone NAME                IANA time zone, for example America/New_York (default: UTC)
-    --name NAME                Device name shown in the web UI header (default: the host name)
+    --name NAME                Device name shown in the web UI header (default: ClawDot)
     --create-endpoint SPEC     NAME or NAME:ADAPTER (adapters: claude-code, generic); prints the token once and exits
     --rotate-endpoint NAME     Issue a new token for an endpoint, print it once, and exit
     --reset-admin              Clear the web UI administrator setting and exit, so first-run setup shows again
