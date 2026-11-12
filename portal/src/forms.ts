@@ -135,6 +135,8 @@ export const LABEL: Record<string, string> = {
   listen: "Portal address",
   public_url: "Address other programs use",
   daily_spend_usd: "Most to spend per day",
+  llm_usd_per_mtok_in: "Price of a million tokens sent",
+  llm_usd_per_mtok_out: "Price of a million tokens received",
   board: "Board",
   agent_max_rounds: "Rounds per request",
   agent_max_tool_calls: "Tool calls per request",

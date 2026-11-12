@@ -300,8 +300,23 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
       <Group
         title="Spending limit"
         settings={s}
-        intro="Stops the assistant from using the language model once it has cost this much in a day. It starts again the next day."
-        specs={[{ key: "daily_spend_usd", kind: "money", hint: "In US dollars. Leave it empty for no limit." }]}
+        intro="Stops the assistant from using the language model once it has cost this much in a day. It starts again the next day. Some providers say what each request cost. For the others the cost is worked out from the prices below."
+        specs={[
+          { key: "daily_spend_usd", kind: "money", hint: "In US dollars. Leave it empty for no limit." },
+          {
+            key: "llm_usd_per_mtok_in",
+            kind: "money",
+            placeholder: "10.00",
+            hint: "What your provider charges for a million tokens of what is sent to the model. Leave it empty and a high price is assumed, so the limit stops early, never late. Enter 0 for a model that is free.",
+          },
+          {
+            key: "llm_usd_per_mtok_out",
+            kind: "money",
+            placeholder: "40.00",
+            hint: "What it charges for a million tokens of the model's reply.",
+          },
+        ]}
+        below={() => <SpendBasis />}
       />
       <Group
         title="Quiet hours"
@@ -321,6 +336,24 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
 }
 
 /** Speech: the provider (shown, not yet changeable here), the voice and language, and a way to hear it. */
+/** One line saying how sure today's spending figure is. */
+function SpendBasis(): JSX.Element | null {
+  const basis = useApp().status?.usage?.spend_basis;
+  const text =
+    basis === "estimated"
+      ? "Today's spending is an estimate: the provider does not say what a request cost, and at least one price above is empty. Enter your provider's prices to make it accurate."
+      : basis === "priced"
+        ? "Today's spending is worked out from the prices above."
+        : basis === "reported"
+          ? "Today's spending is the cost your provider reported."
+          : "";
+  return text ? (
+    <p class="mut" id="spendbasis" role="status">
+      {text}
+    </p>
+  ) : null;
+}
+
 const SPEECH_SERVICES: [string, string][] = [
   ["openai", "An OpenAI-style speech server"],
   ["elevenlabs", "ElevenLabs"],
