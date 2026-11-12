@@ -4,7 +4,7 @@ import { api, ApiError } from "../api.ts";
 import { currentText, FROM, labelOf, settingsPatch, type SettingSpec, cents } from "../forms.ts";
 import { providerFor } from "../providers.ts";
 import { TimeField } from "../timefield.tsx";
-import { fail, get, say, set } from "../store.ts";
+import { fail, get, say, set, useApp } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
 import type { Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
@@ -28,6 +28,148 @@ function zoneList(): string[] | null {
   return null;
 }
 
+/** The input for one setting, by its kind. It only shows a value and reports a new one; the form keeps the values. */
+function Control(props: {
+  sp: SettingSpec;
+  id: string;
+  value: string;
+  /** A value is saved on the device, so a switch can offer to go back to the default. */
+  saved: boolean;
+  put: (value: string) => void;
+  /** The provider address in the form (saved or not), for the list of models. */
+  url: string;
+  hasKey: boolean;
+  keyRev: number;
+  /** The time zones to offer, or null where the browser cannot list them. */
+  zones: string[] | null;
+  browserZone: string;
+}): JSX.Element {
+  const { sp, id, saved, put, url, hasKey, keyRev, zones, browserZone } = props;
+  const v = props.value;
+  const input = (e: Event) => put((e.currentTarget as HTMLInputElement).value);
+  if (sp.kind === "zone") {
+    return zones ? (
+      <select id={id} value={v} onChange={input}>
+        {zoneOptions(zones).map((z) => (
+          <option key={z.id} value={z.id}>
+            {z.label}
+          </option>
+        ))}
+      </select>
+    ) : (
+      <input id={id} type="text" value={v} placeholder={browserZone || "Europe/Berlin"} onInput={input} />
+    );
+  }
+  if (sp.kind === "language") {
+    return (
+      <select id={id} value={v} disabled={sp.off} onChange={input}>
+        <option value="">Detect it automatically</option>
+        {languageOptions(v).map((l) => (
+          <option key={l.code} value={l.code}>
+            {l.label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (sp.kind === "model") {
+    // A provider that needs a key is asked for its models only once a key is in place.
+    const prov = providerFor(url);
+    return (
+      <ModelSelect
+        id={id}
+        value={v}
+        url={url}
+        rev={String(keyRev)}
+        blocked={prov && prov.id !== "custom" && !hasKey ? "Add your API key to see the models" : ""}
+        onInput={put}
+      />
+    );
+  }
+  if (sp.kind === "voice") {
+    return <VoiceControl id={id} value={v} off={sp.off} onInput={put} />;
+  }
+  if (sp.kind === "area") {
+    return <textarea id={id} rows={7} maxLength={4000} value={v} onInput={input} />;
+  }
+  if (sp.kind === "board") {
+    return (
+      <select id={id} value={v} onChange={input}>
+        <option value="none">None</option>
+        <option value="auto">Detect automatically</option>
+      </select>
+    );
+  }
+  if (sp.kind === "choice") {
+    return (
+      <select id={id} value={v} disabled={sp.off} onChange={input}>
+        {(sp.options ?? []).map(([val, text]) => (
+          <option key={val} value={val}>
+            {text}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (sp.kind === "bool") {
+    return (
+      <select id={id} value={v} disabled={sp.off} onChange={input}>
+        <option value="true">On</option>
+        <option value="false">Off</option>
+        {saved ? <option value="">Go back to the default</option> : null}
+      </select>
+    );
+  }
+  if (sp.kind === "time") {
+    return <TimeField id={id} value={v} disabled={sp.off} clearable onChange={put} />;
+  }
+  if (sp.kind === "money") {
+    return (
+      <div class="moneybox">
+        <span aria-hidden="true">$</span>
+        <input
+          id={id}
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          placeholder={sp.placeholder ?? "No limit"}
+          disabled={sp.off}
+          value={v}
+          onInput={(e) => put(cents(e.currentTarget.value))}
+          onBlur={() => v && put(Number(v || 0).toFixed(2))}
+        />
+      </div>
+    );
+  }
+  if (sp.kind === "number") {
+    const whole = sp.min !== undefined;
+    return (
+      <input
+        id={id}
+        type="number"
+        value={v}
+        autoComplete="off"
+        step={whole ? "1" : "any"}
+        min={whole ? String(sp.min) : "0"}
+        max={sp.max === undefined ? undefined : String(sp.max)}
+        disabled={sp.off}
+        onInput={input}
+      />
+    );
+  }
+  return (
+    <input
+      id={id}
+      type="text"
+      value={v}
+      autoComplete="off"
+      disabled={sp.off}
+      placeholder={sp.off ? "Not available yet" : undefined}
+      onInput={input}
+    />
+  );
+}
+
 /** One group of settings with its own Save button. Only the values you changed are sent. */
 export function Group(props: {
   title: string;
@@ -40,6 +182,7 @@ export function Group(props: {
   below?: () => JSX.Element | null;
 }): JSX.Element {
   const { title, intro, specs, settings } = props;
+  const keyRev = useApp().keyRev;
   const current: Record<string, string> = {};
   const start0: Record<string, string> = {};
   const hints: Record<string, string> = {};
@@ -131,130 +274,6 @@ export function Group(props: {
         if (!f || sp.hideWhen?.(vals)) return null;
         if (sp.optional && !shown[sp.key]) return null;
         const id = "f-" + sp.key;
-        const v = vals[sp.key] ?? "";
-        const input = (e: Event) => setVals({ ...vals, [sp.key]: (e.currentTarget as HTMLInputElement).value });
-        let ctl;
-        if (sp.kind === "zone") {
-          ctl = zs ? (
-            <select id={id} value={v} onChange={input}>
-              {zoneOptions(zones).map((z) => (
-                <option key={z.id} value={z.id}>
-                  {z.label}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input id={id} type="text" value={v} placeholder={bz || "Europe/Berlin"} onInput={input} />
-          );
-        } else if (sp.kind === "language") {
-          ctl = (
-            <select id={id} value={v} disabled={sp.off} onChange={input}>
-              <option value="">Detect it automatically</option>
-              {languageOptions(v).map((l) => (
-                <option key={l.code} value={l.code}>
-                  {l.label}
-                </option>
-              ))}
-            </select>
-          );
-        } else if (sp.kind === "model") {
-          // A provider that needs a key is asked for its models only once a key is in place.
-          const prov = providerFor(vals["llm_url"] ?? "");
-          const hasKey = vals["_keyok"] === "1" || (settings.llm?.key_present === true && vals["_keyok"] !== "0");
-          ctl = (
-            <ModelSelect
-              id={id}
-              value={v}
-              url={vals["llm_url"] ?? ""}
-              rev={vals["_keyrev"] ?? ""}
-              blocked={prov && prov.id !== "custom" && !hasKey ? "Add your API key to see the models" : ""}
-              onInput={(x) => setVals({ ...vals, [sp.key]: x })}
-            />
-          );
-        } else if (sp.kind === "voice") {
-          ctl = <VoiceControl id={id} value={v} off={sp.off} onInput={(x) => setVals({ ...vals, [sp.key]: x })} />;
-        } else if (sp.kind === "area") {
-          ctl = <textarea id={id} rows={7} maxLength={4000} value={v} onInput={input} />;
-        } else if (sp.kind === "board") {
-          ctl = (
-            <select id={id} value={v} onChange={input}>
-              <option value="none">None</option>
-              <option value="auto">Detect automatically</option>
-            </select>
-          );
-        } else if (sp.kind === "choice") {
-          ctl = (
-            <select id={id} value={v} disabled={sp.off} onChange={input}>
-              {(sp.options ?? []).map(([val, text]) => (
-                <option key={val} value={val}>
-                  {text}
-                </option>
-              ))}
-            </select>
-          );
-        } else if (sp.kind === "bool") {
-          ctl = (
-            <select id={id} value={v} disabled={sp.off} onChange={input}>
-              <option value="true">On</option>
-              <option value="false">Off</option>
-              {f.saved ? <option value="">Go back to the default</option> : null}
-            </select>
-          );
-        } else if (sp.kind === "time") {
-          ctl = (
-            <TimeField
-              id={id}
-              value={v}
-              disabled={sp.off}
-              clearable
-              onChange={(x) => setVals({ ...vals, [sp.key]: x })}
-            />
-          );
-        } else if (sp.kind === "money") {
-          ctl = (
-            <div class="moneybox">
-              <span aria-hidden="true">$</span>
-              <input
-                id={id}
-                type="text"
-                inputMode="decimal"
-                autoComplete="off"
-                placeholder={sp.placeholder ?? "No limit"}
-                disabled={sp.off}
-                value={v}
-                onInput={(e) => setVals({ ...vals, [sp.key]: cents(e.currentTarget.value) })}
-                onBlur={() => v && setVals({ ...vals, [sp.key]: Number(v || 0).toFixed(2) })}
-              />
-            </div>
-          );
-        } else if (sp.kind === "number") {
-          const whole = sp.min !== undefined;
-          ctl = (
-            <input
-              id={id}
-              type="number"
-              value={v}
-              autoComplete="off"
-              step={whole ? "1" : "any"}
-              min={whole ? String(sp.min) : "0"}
-              max={sp.max === undefined ? undefined : String(sp.max)}
-              disabled={sp.off}
-              onInput={input}
-            />
-          );
-        } else {
-          ctl = (
-            <input
-              id={id}
-              type="text"
-              value={v}
-              autoComplete="off"
-              disabled={sp.off}
-              placeholder={sp.off ? "Not available yet" : undefined}
-              onInput={input}
-            />
-          );
-        }
         return (
           <div class="srow" key={sp.key}>
             <div class="slabel">
@@ -276,7 +295,18 @@ export function Group(props: {
               ) : null}
             </div>
             <div class="sctl">
-              {ctl}
+              <Control
+                sp={sp}
+                id={id}
+                value={vals[sp.key] ?? ""}
+                saved={f.saved === true}
+                put={(x) => setVals({ ...vals, [sp.key]: x })}
+                url={vals["llm_url"] ?? ""}
+                hasKey={settings.llm?.key_present === true}
+                keyRev={keyRev}
+                zones={zs ? zones : null}
+                browserZone={bz}
+              />
               {sp.optional ? (
                 <button
                   class="plain small"
