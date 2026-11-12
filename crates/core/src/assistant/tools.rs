@@ -229,14 +229,20 @@ pub fn builtin_returns_untrusted_text(name: &str) -> bool {
     )
 }
 
-/// What the host says when it holds a built-in call.
+/// What the host says when it holds or proposes a built-in call (and in dry-run): every argument that changes
+/// what happens. `inbox_reply` reads its text word for word; every other built-in, including the reversible
+/// ones an event turn can only propose, uses the generic read-back that names each argument.
 #[must_use]
 pub fn builtin_describe_action(name: &str, args: &Value) -> String {
     if name == "inbox_reply" {
-        let text = opt_text(args, "text").replace('"', "'");
-        return format!("I will send this to the agent, word for word: \"{text}\"");
+        if opt_text(args, "kind") == "instruct" {
+            return crate::session::describe_agent_text(opt_text(args, "text"));
+        }
+        if opt_text(args, "kind") == "ack" {
+            return "I will tell the agent that you will handle this yourself".to_owned();
+        }
     }
-    format!("I will run {name}")
+    crate::session::describe_generic(name, args)
 }
 
 impl Assistant {

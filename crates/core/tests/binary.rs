@@ -555,7 +555,7 @@ fn a_configured_http_tool_runs_only_after_the_user_confirms() {
     server.type_line("make the den bright please");
     let asked = server.next_speech().expect("the host should ask");
     assert!(
-        asked.contains("set_light") && asked.contains("Yes or no?"),
+        asked.contains("set light") && asked.contains("room: den") && asked.contains("Yes or no?"),
         "got: {asked}"
     );
     server.type_line("yes");
@@ -1152,7 +1152,9 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
     server.type_line("light up the den for me");
     let asked = server.next_speech().expect("the host should ask");
     assert!(
-        asked.contains("home__turn_on") && asked.contains("Yes or no?"),
+        asked.contains("home turn on")
+            && asked.contains("room: den")
+            && asked.contains("Yes or no?"),
         "got: {asked}"
     );
     server.type_line("yes");
