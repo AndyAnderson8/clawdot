@@ -4,6 +4,7 @@
 //! count and an optional spend cap derived from the cost the provider reports. When a limit is reached
 //! the assistant says so and local features (timers, alarms, the fast path) keep working.
 
+use crate::app::persist::Writer;
 use crate::llm::Usage;
 use crate::store::{JsonStore, StoreError};
 use serde::{Deserialize, Serialize};
@@ -151,6 +152,19 @@ impl UsageTracker {
     /// Storage errors.
     pub fn save(&self, store: &JsonStore) -> Result<(), StoreError> {
         store.save(&self.cell().state)
+    }
+
+    /// Hand the counters to the background writer instead of writing them here, so the caller does not wait for
+    /// flash. The bytes are made under the writer's lock, so a save queued later never carries older counters
+    /// than one queued earlier. Without a writer (tests, no storage) this saves inline.
+    pub fn save_queued(&self, store: &JsonStore, writer: Option<&Writer>) {
+        let Some(w) = writer else {
+            if let Err(e) = self.save(store) {
+                crate::diag::error(&format!("could not save usage counters: {e}"));
+            }
+            return;
+        };
+        w.submit_with(store, || store.encode(&self.cell().state));
     }
 
     /// Replace the limits; the counters for today are kept.

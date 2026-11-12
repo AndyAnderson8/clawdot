@@ -76,6 +76,7 @@ pub async fn build_brain(
         llm,
         usage,
         usage_store,
+        writer: core.writer(),
         http_tools: Arc::new(tools.http_tools),
         mcp: Arc::new(tools.mcp),
         clock: clock.clone(),

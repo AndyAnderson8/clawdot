@@ -1668,3 +1668,58 @@ fn quit_leaves_the_console() {
     };
     assert!(status.expect("`quit` should end the program").success());
 }
+
+/// Wait for the program to end by itself and return whether it succeeded.
+fn exits_by_itself(server: &mut Server) -> bool {
+    let deadline = Instant::now() + REPLY;
+    while Instant::now() < deadline {
+        if let Some(s) = server.child.try_wait().unwrap() {
+            return s.success();
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+/// REQ-TMR-003: a timer the speaker confirmed is on disk once the confirmation is out, and the program, ended
+/// at once by `quit`, leaves the usage counters of the turn it just answered on disk too (they are written
+/// beside the loop and flushed on the way out).
+#[test]
+fn a_confirmed_timer_and_the_last_turns_counters_are_on_disk_after_quit() {
+    let answer =
+        sse(&[r#"{"choices":[{"delta":{"content":"Owls are lovely."},"finish_reason":"stop"}]}"#]);
+    let (llm_port, llm) = fake_llm(vec![answer]);
+    let dir = TempDir::new("flush-on-quit");
+    let (mut server, _) = Server::start_free(
+        &[
+            "--listen",
+            "127.0.0.1:{port}",
+            "--data-dir",
+            dir.to_str().unwrap(),
+            "--llm-url",
+            &format!("http://127.0.0.1:{llm_port}"),
+            "--llm-model",
+            "test-model",
+        ],
+        true,
+    );
+    server.wait_for(&["console ready"], START);
+    server.type_line("set a timer for 10 minutes");
+    let said = server.next_speech().expect("the timer is confirmed");
+    assert!(said.contains("Timer set"), "{said}");
+    let timers =
+        std::fs::read_to_string(dir.join("timers.json")).expect("saved before it was said");
+    assert!(timers.contains("\"fire_at\""), "{timers}");
+
+    server.type_line("tell me about owls");
+    let said = server.next_speech().expect("the model answers");
+    assert!(said.contains("Owls are lovely."), "{said}");
+    server.type_line("quit");
+    assert!(
+        exits_by_itself(&mut server),
+        "`quit` should end the program"
+    );
+    let usage = std::fs::read_to_string(dir.join("usage.json")).expect("flushed on the way out");
+    assert!(usage.contains("\"requests\":1"), "{usage}");
+    drop(llm);
+}

@@ -87,9 +87,7 @@ pub async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
                         Some(l) => {
                             let mut usage = v.usage.clone();
                             let s = summarise(l, &mut usage, day, &next.event).await;
-                            if let Err(e) = usage.save(&v.usage_store) {
-                                crate::diag::error(&format!("could not save usage counters: {e}"));
-                            }
+                            usage.save_queued(&v.usage_store, v.core.writer().as_deref());
                             s
                         }
                         // No model: say only the headline and outcome, never raw agent text.

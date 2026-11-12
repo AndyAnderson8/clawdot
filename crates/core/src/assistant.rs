@@ -2,6 +2,7 @@
 //! no network (REQ-AST-010, REQ-NFR-009). Anything it does not handle returns `None` and falls through to
 //! the LLM.
 
+use crate::app::persist::Durability;
 use crate::app::{Core, ReplyError};
 use crate::fastpath::{Match, Matcher, Time};
 use crate::inbox::reply::ReplyKind;
@@ -211,6 +212,8 @@ pub struct Assistant {
     matcher: Matcher,
     sched: Scheduler,
     sched_store: Option<JsonStore>,
+    /// The last save handed to the background writer.
+    latest_save: Option<Durability>,
     zone: Box<dyn Zone + Send + Sync>,
     clock: Arc<dyn Clock + Send + Sync>,
     core: Option<Arc<Core>>,
@@ -258,6 +261,7 @@ impl Assistant {
             matcher: Matcher::builtin(),
             sched,
             sched_store,
+            latest_save: None,
             zone,
             clock,
             core,
@@ -305,12 +309,36 @@ impl Assistant {
         })
     }
 
-    fn save(&self) {
-        if let Some(store) = &self.sched_store {
-            if let Err(e) = self.sched.save(store) {
-                crate::diag::error(&format!("could not save timers and alarms: {e}"));
+    /// Save the timers and alarms. With a background writer the bytes are made here and written beside the
+    /// loop, so the caller does not wait for flash; [`Assistant::unconfirmed`] says whether the latest change
+    /// has reached the disk. Without one (tests, no storage) the write is inline.
+    fn save(&mut self) {
+        let Some(store) = &self.sched_store else {
+            return;
+        };
+        let writer = self.core.as_ref().and_then(|c| c.writer());
+        match writer {
+            Some(w) => {
+                // The state is read under the writer's lock, so this save is queued after, and carries at least
+                // everything in, any save queued before it.
+                if let Some(ticket) = w.submit_with(store, || self.sched.encode(store)) {
+                    self.latest_save = Some(Durability::new(w, ticket));
+                }
+            }
+            None => {
+                if let Err(e) = self.sched.save(store) {
+                    crate::diag::error(&format!("could not save timers and alarms: {e}"));
+                }
             }
         }
+    }
+
+    /// The last change to the timers and alarms, if it may not be on disk yet. A reply that tells the user a
+    /// timer or alarm is set waits for this before it is spoken, so a crash right after the confirmation cannot
+    /// lose what they were told is set.
+    #[must_use]
+    pub fn unconfirmed(&self) -> Option<Durability> {
+        self.latest_save.clone().filter(|d| !d.is_done())
     }
 
     /// Collect everything due now; persists if anything fired.
@@ -351,12 +379,6 @@ impl Assistant {
     #[must_use]
     pub fn local_day(&self) -> i64 {
         self.zone.local_day(self.clock.now())
-    }
-
-    /// Seconds until the next timer, alarm, or reminder, for sleeping the event loop.
-    #[must_use]
-    pub fn next_wakeup_in(&self) -> Option<i64> {
-        self.sched.next_due_in(self.clock.now())
     }
 
     /// Ring again later.

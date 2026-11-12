@@ -17,7 +17,7 @@ use tokio::sync::Notify;
 
 mod announce;
 mod ask;
-mod persist;
+pub mod persist;
 mod portal;
 pub(crate) use announce::AuditAs;
 pub use announce::{AnnounceError, Announcement, Caller, outcome_json};
@@ -212,7 +212,7 @@ pub struct Core {
     stores: Option<Stores>,
     /// Writes the stores in the background; `None` without storage, or when no thread could be started (then
     /// writes happen inline).
-    writer: Option<persist::Writer>,
+    writer: Option<Arc<persist::Writer>>,
     inner: Mutex<Inner>,
     notify: Notify,
     admin: Mutex<crate::admin::Admin>,
@@ -302,7 +302,9 @@ impl Core {
         replies: ReplyQueue,
     ) -> Self {
         let now = clock.now();
-        let writer = stores.as_ref().and_then(|_| persist::Writer::start());
+        let writer = stores
+            .as_ref()
+            .and_then(|_| persist::Writer::start().map(Arc::new));
         let secrets = stores
             .as_ref()
             .map_or_else(crate::secrets::Secrets::none, |s| {
@@ -464,7 +466,9 @@ impl Core {
             }
         };
         match &self.writer {
-            Some(w) => w.submit(store, bytes),
+            Some(w) => {
+                w.submit(store, bytes);
+            }
             None => {
                 if let Err(e) = store.write(&bytes) {
                     crate::diag::error(&format!("could not save {}: {e}", store.path().display()));
@@ -480,6 +484,13 @@ impl Core {
         if let Some(w) = &self.writer {
             w.flushed().await;
         }
+    }
+
+    /// The background writer, for stores outside the core's three (timers, usage counters) that hand it bytes.
+    /// `None` without storage, or when no thread could be started: those callers then write inline.
+    #[must_use]
+    pub fn writer(&self) -> Option<Arc<persist::Writer>> {
+        self.writer.clone()
     }
 
     /// Block until every change made so far is on disk. For tests and shutdown paths, not for the runtime.
@@ -518,8 +529,8 @@ impl Core {
         Ok(t)
     }
 
-    /// Delete an endpoint, the replies waiting for its bridge and its events that are still open. Both are
-    /// keyed by the endpoint's name, so an endpoint made later under the same name would otherwise inherit
+    /// Delete an endpoint, the replies waiting for its bridge and its events that are still open. Those, and
+    /// its rate-limit bucket, are keyed by the endpoint's name, so an endpoint made later under the same name would otherwise inherit
     /// the old agent's instructions and have its queued events announced and answered.
     ///
     /// # Errors
@@ -527,6 +538,8 @@ impl Core {
     pub fn revoke_endpoint(&self, name: &str) -> Result<(), endpoint::EndpointError> {
         let mut g = self.lock();
         g.endpoints.revoke(name)?;
+        // The rate-limit bucket is keyed by name too; a new endpoint starts with a full burst.
+        g.buckets.remove(name);
         let replies = g.replies.drop_for(name);
         let events = g.inbox.drop_open_for(name);
         self.persist(
@@ -1287,6 +1300,33 @@ mod tests {
             c.bridge_pending("a", &b, 0),
             Err(HookError::Unauthorized),
             "b's token is not a's"
+        );
+    }
+
+    // REQ-CFG-028: the rate-limit state of an endpoint is not inherited either: a new endpoint under a deleted
+    // endpoint's name starts with a full burst, not with whatever the old agent had used up.
+    #[test]
+    fn a_recreated_endpoint_does_not_inherit_the_old_ones_rate_limit() {
+        let (c, _) = core();
+        let (_, old) = c.create_endpoint("agent", "generic").unwrap();
+        let mut n = 0;
+        while c
+            .ingest_hook(
+                "agent",
+                &old,
+                format!(r#"{{"title":"t{n}","session_ref":"s{n}"}}"#).as_bytes(),
+            )
+            .is_ok()
+        {
+            n += 1;
+            assert!(n < 1000, "never throttled");
+        }
+        c.revoke_endpoint("agent").unwrap();
+        let (_, new) = c.create_endpoint("agent", "generic").unwrap();
+        assert!(
+            c.ingest_hook("agent", &new, br#"{"title":"fresh"}"#)
+                .is_ok(),
+            "the new endpoint was throttled by the old one's use"
         );
     }
 

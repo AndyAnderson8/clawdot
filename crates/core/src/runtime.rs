@@ -219,6 +219,8 @@ pub struct Brain {
     /// The daily counters. Turns hold handles on the same ones; only this loop saves them.
     pub(crate) usage: UsageTracker,
     pub(crate) usage_store: JsonStore,
+    /// Where the counters are written without the loop waiting; `None` saves inline.
+    pub(crate) writer: Option<Arc<crate::app::persist::Writer>>,
     /// The HTTP and MCP clients. A turn takes a clone of the `Arc` when it starts and calls the tools itself.
     pub(crate) http_tools: Arc<HttpTools>,
     pub(crate) mcp: Arc<McpClient>,
@@ -515,10 +517,12 @@ impl Brain {
     }
 
     /// Save the usage counters. The loop is their only writer to disk.
+    ///
+    /// The write goes to the background writer, so the loop does not wait for flash. Saves coalesce: the
+    /// counters on disk lag by at most the write in flight.
     pub fn save_usage(&self) {
-        if let Err(e) = self.usage.save(&self.usage_store) {
-            crate::diag::error(&format!("could not save usage counters: {e}"));
-        }
+        self.usage
+            .save_queued(&self.usage_store, self.writer.as_deref());
     }
 }
 
@@ -537,6 +541,21 @@ pub fn deliver(origin: Origin, reply: Reply) {
         for e in &reply.effects {
             println!("satellite> {e:?}");
         }
+    }
+}
+
+/// Show a reply once any timer or alarm change it may announce is on disk. A crash right after "Timer set"
+/// is spoken must not lose the timer, so the reply is held back for the write (a few milliseconds on a
+/// laptop, tens to hundreds on slow flash). The wait happens in its own task, so the loop keeps running.
+pub fn deliver_confirmed(brain: &Brain, origin: Origin, reply: Reply) {
+    match brain.assistant.unconfirmed() {
+        Some(saved) => {
+            tokio::spawn(async move {
+                saved.wait().await;
+                deliver(origin, reply);
+            });
+        }
+        None => deliver(origin, reply),
     }
 }
 
@@ -582,7 +601,7 @@ pub fn finish_turn(brain: &mut Brain, hub: &mut Hub, f: turns::Finished) -> (Ori
     if let Some(next) = next
         && let Some((o, r)) = dispatch(brain, hub, next)
     {
-        deliver(o, r);
+        deliver_confirmed(brain, o, r);
     }
     (origin, reply)
 }
@@ -593,7 +612,7 @@ pub async fn on_hub_event(brain: &mut Brain, hub: &mut Hub, core: &Core, ev: Hub
         HubEvent::Tool(req) => req.serve(&mut brain.assistant).await,
         HubEvent::Turn(f) => {
             let (origin, reply) = finish_turn(brain, hub, *f);
-            deliver(origin, reply);
+            deliver_confirmed(brain, origin, reply);
         }
         HubEvent::Other(_) => {
             // A realtime session ended: its audio cost is in the counters; show how it went.
@@ -607,7 +626,7 @@ pub async fn on_hub_event(brain: &mut Brain, hub: &mut Hub, core: &Core, ev: Hub
             if let Some(next) = hub.lost(&speaker, now)
                 && let Some((origin, reply)) = dispatch(brain, hub, next)
             {
-                deliver(origin, reply);
+                deliver_confirmed(brain, origin, reply);
             }
         }
     }
@@ -619,6 +638,11 @@ pub async fn drain(brain: &mut Brain, hub: &mut Hub, core: &Core) {
         let ev = hub.next().await;
         on_hub_event(brain, hub, core, ev).await;
     }
+    // Replies held back for a write are delivered by their own tasks; let them run before the caller leaves.
+    if let Some(saved) = brain.assistant.unconfirmed() {
+        saved.wait().await;
+    }
+    tokio::task::yield_now().await;
 }
 
 /// Answer one thing and wait for it, serving the turn's tool calls meanwhile. For one-shot use before the
@@ -631,12 +655,21 @@ pub async fn respond_inline(brain: &mut Brain, hub: &mut Hub, line: &str) -> Rep
         origin: Origin::Console,
     };
     if let Some((_, reply)) = dispatch(brain, hub, req) {
+        if let Some(saved) = brain.assistant.unconfirmed() {
+            saved.wait().await;
+        }
         return reply;
     }
     loop {
         match hub.next().await {
             HubEvent::Tool(req) => req.serve(&mut brain.assistant).await,
-            HubEvent::Turn(f) => return finish_turn(brain, hub, *f).1,
+            HubEvent::Turn(f) => {
+                let reply = finish_turn(brain, hub, *f).1;
+                if let Some(saved) = brain.assistant.unconfirmed() {
+                    saved.wait().await;
+                }
+                return reply;
+            }
             HubEvent::Lost(_) => {
                 return Reply {
                     say: "Sorry, I can't answer right now.".into(),
@@ -1247,5 +1280,120 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reply.say, NO_LLM);
+    }
+
+    fn fast_request(line: &str, origin: Origin) -> Request {
+        Request {
+            speaker: "console".into(),
+            line: line.to_owned(),
+            ctl: TurnCtl::default(),
+            origin,
+        }
+    }
+
+    fn timers_on_disk(dir: &TempDir) -> usize {
+        let store = JsonStore::new(dir.0.join("timers.json"), crate::sched::SCHEMA);
+        crate::sched::Scheduler::load(&store, 64)
+            .unwrap()
+            .list()
+            .len()
+    }
+
+    // REQ-TMR-003: a timer the user was told is set survives a crash right after the confirmation. The reply is
+    // held back until the write lands, and the loop is not held with it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_confirmation_of_a_timer_is_not_delivered_before_it_is_on_disk() {
+        let dir = TempDir::new("timer-durable");
+        let (mut brain, core, _live) = started(&dir, &[]).await;
+        let mut hub = Hub::new(|| Conversation::standard(String::new()));
+        let writer = core.writer().unwrap();
+        writer.pause();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let (origin, reply) = dispatch(
+            &mut brain,
+            &mut hub,
+            fast_request("set a timer for 5 minutes", Origin::Ask(tx)),
+        )
+        .unwrap();
+        assert!(reply.say.starts_with("Timer set"), "{}", reply.say);
+        deliver_confirmed(&brain, origin, reply);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(rx.try_recv().is_err(), "spoken before it was saved");
+        assert_eq!(timers_on_disk(&dir), 0);
+        writer.resume();
+        let said = rx.await.unwrap();
+        assert!(said.say.starts_with("Timer set"));
+        // The confirmation is out and nothing has been flushed by hand: it is already on disk.
+        assert_eq!(timers_on_disk(&dir), 1);
+    }
+
+    // A reply that announces nothing new is not held back by a write that is still queued.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reply_with_no_pending_timer_change_is_delivered_at_once() {
+        let dir = TempDir::new("timer-no-wait");
+        let (mut brain, core, _live) = started(&dir, &[]).await;
+        let mut hub = Hub::new(|| Conversation::standard(String::new()));
+        let writer = core.writer().unwrap();
+        writer.pause();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let (origin, reply) = dispatch(
+            &mut brain,
+            &mut hub,
+            fast_request("what time is it", Origin::Ask(tx)),
+        )
+        .unwrap();
+        deliver_confirmed(&brain, origin, reply);
+        assert!(rx.try_recv().is_ok());
+        writer.resume();
+    }
+
+    // Rapid changes coalesce, and the file never goes back to an older state.
+    #[tokio::test(flavor = "current_thread")]
+    async fn rapid_timer_changes_leave_the_newest_state_on_disk() {
+        let dir = TempDir::new("timer-rapid");
+        let (mut brain, core, _live) = started(&dir, &[]).await;
+        let mut hub = Hub::new(|| Conversation::standard(String::new()));
+        for n in 1..=5 {
+            let line = format!("set a timer for {n} minutes");
+            dispatch(&mut brain, &mut hub, fast_request(&line, Origin::Console)).unwrap();
+        }
+        dispatch(
+            &mut brain,
+            &mut hub,
+            fast_request("cancel the timer", Origin::Console),
+        )
+        .unwrap();
+        for n in 6..=7 {
+            let line = format!("set a timer for {n} minutes");
+            dispatch(&mut brain, &mut hub, fast_request(&line, Origin::Console)).unwrap();
+        }
+        let expected = brain.assistant.scheduled().len();
+        core.flush_blocking();
+        assert_eq!(timers_on_disk(&dir), expected);
+        assert_eq!(
+            expected, 2,
+            "the cancel emptied the list before the last two"
+        );
+    }
+
+    // The counters are handed to the writer, not written by the loop, and a burst of saves leaves the newest.
+    #[tokio::test(flavor = "current_thread")]
+    async fn usage_saves_go_to_the_writer_and_the_last_one_wins() {
+        let dir = TempDir::new("usage-queued");
+        let (brain, core, _live) = started(&dir, &[]).await;
+        let writer = core.writer().unwrap();
+        let path = dir.0.join("usage.json");
+        writer.pause();
+        for _ in 0..5 {
+            brain.usage.record(7, None);
+            brain.save_usage();
+        }
+        assert!(!path.exists(), "the loop must not write the file itself");
+        writer.resume();
+        core.flush_blocking();
+        let back = UsageTracker::load(&brain.usage_store, brain.usage.limits()).unwrap();
+        assert_eq!(back.requests_today(), 5);
     }
 }
