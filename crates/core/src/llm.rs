@@ -519,9 +519,12 @@ impl SentenceSplitter {
                     // No terminator for a long time: split at the last comma or space.
                     (self.buf.len() > LONG_RUN)
                         .then(|| {
-                            self.buf[..LONG_RUN.min(self.buf.len())]
-                                .rfind([',', ';', ' '])
-                                .map(|p| p + 1)
+                            // LONG_RUN is a byte count: back up to a character boundary before slicing.
+                            let mut end = LONG_RUN;
+                            while !self.buf.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            self.buf[..end].rfind([',', ';', ' ']).map(|p| p + 1)
                         })
                         .flatten()
                 });
@@ -831,5 +834,14 @@ mod tests {
             parts.len() >= 2 && parts.iter().all(|p| p.len() <= 170),
             "{parts:?}"
         );
+    }
+
+    #[test]
+    fn a_long_run_of_multibyte_text_does_not_panic_the_splitter() {
+        // 3-byte characters put byte 160 inside a character; the cut must land on a boundary.
+        let long = "\u{4e16}\u{754c}\u{4e16}\u{754c} ".repeat(30);
+        let parts = split_all(&[&long]);
+        assert!(parts.len() >= 2, "{parts:?}");
+        assert_eq!(parts.join("").replace(' ', ""), long.replace(' ', ""));
     }
 }
