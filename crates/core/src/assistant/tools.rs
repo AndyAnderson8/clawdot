@@ -229,14 +229,20 @@ pub fn builtin_returns_untrusted_text(name: &str) -> bool {
     )
 }
 
-/// What the host says when it holds a built-in call.
+/// What the host says when it holds or proposes a built-in call (and in dry-run): every argument that changes
+/// what happens. `inbox_reply` reads its text word for word; every other built-in, including the reversible
+/// ones an event turn can only propose, uses the generic read-back that names each argument.
 #[must_use]
 pub fn builtin_describe_action(name: &str, args: &Value) -> String {
     if name == "inbox_reply" {
-        let text = opt_text(args, "text").replace('"', "'");
-        return format!("I will send this to the agent, word for word: \"{text}\"");
+        if opt_text(args, "kind") == "instruct" {
+            return crate::session::describe_agent_text(opt_text(args, "text"));
+        }
+        if opt_text(args, "kind") == "ack" {
+            return "I will tell the agent that you will handle this yourself".to_owned();
+        }
     }
-    format!("I will run {name}")
+    crate::session::describe_generic(name, args)
 }
 
 impl Assistant {
@@ -490,6 +496,7 @@ impl Assistant {
 mod tests {
     use super::super::tests::{setup, utc};
     use super::*;
+    use crate::app::LOCALHOST_PEER;
 
     fn call(a: &mut Assistant, name: &str, args: Value) -> Result<String, String> {
         a.run_tool(name, &args)
@@ -680,7 +687,7 @@ mod tests {
             .contains("no agent event")
         );
 
-        core.ingest_hook("claude-code", &token, br#"{"session_id":"s1","cwd":"/a/p","hook_event_name":"Stop","last_assistant_message":"Fixed it."}"#).unwrap();
+        core.ingest_hook("claude-code", &token, LOCALHOST_PEER, br#"{"session_id":"s1","cwd":"/a/p","hook_event_name":"Stop","last_assistant_message":"Fixed it."}"#).unwrap();
         let id = core.next_announcement(true, 0).unwrap().event.id;
         core.mark_announced(&[id]);
         let details = call(&mut a, "inbox_details", json!({})).unwrap();
@@ -704,8 +711,13 @@ mod tests {
     ) -> String {
         let (_, token) = core.create_endpoint("claude-code", "claude-code").unwrap();
         let hook = json!({"session_id":"s1","cwd":"/a/p","hook_event_name":"Stop","last_assistant_message":text});
-        core.ingest_hook("claude-code", &token, hook.to_string().as_bytes())
-            .unwrap();
+        core.ingest_hook(
+            "claude-code",
+            &token,
+            LOCALHOST_PEER,
+            hook.to_string().as_bytes(),
+        )
+        .unwrap();
         let id = core.next_announcement(true, 0).unwrap().event.id;
         core.mark_announced(&[id]);
         let _ = a;
@@ -796,12 +808,14 @@ mod tests {
         let r = said(&model, &mut a, &mut conv, "tell it to add tests").await;
         assert!(r.speech.contains("add tests") && r.speech.ends_with("Yes or no?"));
         assert!(
-            core.bridge_pending("claude-code", &token, 0)
+            core.bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
                 .unwrap()
                 .is_empty()
         );
         said(&model, &mut a, &mut conv, "Yes, please.").await;
-        let sent = core.bridge_pending("claude-code", &token, 0).unwrap();
+        let sent = core
+            .bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
+            .unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].text, "add tests");
     }
@@ -833,7 +847,7 @@ mod tests {
             r.speech
         );
         assert!(
-            core.bridge_pending("claude-code", &token, 0)
+            core.bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
                 .unwrap()
                 .is_empty()
         );
@@ -841,7 +855,7 @@ mod tests {
         said(&model, &mut a, &mut conv, "what is the weather").await;
         said(&model, &mut a, &mut conv, "yes").await;
         assert!(
-            core.bridge_pending("claude-code", &token, 0)
+            core.bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
                 .unwrap()
                 .is_empty()
         );

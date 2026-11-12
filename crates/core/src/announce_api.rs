@@ -108,7 +108,7 @@ pub(crate) async fn handle(
         Ok(a) => a,
         Err(m) => return fail(StatusCode::BAD_REQUEST, &m),
     };
-    let caller = endpoint_token.map_or(Caller::Admin, Caller::Token);
+    let caller = endpoint_token.map_or(Caller::Admin, |t| Caller::Token(t, peer));
     match core.announce(caller, &announcement) {
         Ok(outcome) => reply(StatusCode::ACCEPTED, &outcome_json(outcome)),
         Err(AnnounceError::Hook(e)) => hook_error(&e),

@@ -126,6 +126,15 @@ pub fn build_llm(
     }))
 }
 
+/// The prices of a million model tokens, in and out, from the live settings. A missing key is `None` (unset,
+/// priced by the built-in price); 0 stays `Some(0.0)` (free).
+pub fn model_prices(
+    live: &serde_json::Map<String, serde_json::Value>,
+) -> (Option<f64>, Option<f64>) {
+    let price = |k: &str| live.get(k).and_then(serde_json::Value::as_f64);
+    (price("llm_usd_per_mtok_in"), price("llm_usd_per_mtok_out"))
+}
+
 /// Switch to the new values of the settings that apply without a restart (REQ-CFG-039). `applied` holds
 /// what is already in effect, so only real changes do any work.
 pub fn apply_live(
@@ -153,6 +162,11 @@ pub fn apply_live(
         l.daily_spend_cap_usd = live
             .get("daily_spend_usd")
             .and_then(serde_json::Value::as_f64);
+        brain.usage.set_limits(l);
+    }
+    if changed("llm_usd_per_mtok_in") || changed("llm_usd_per_mtok_out") {
+        let mut l = brain.usage.limits();
+        (l.llm_usd_per_mtok_in, l.llm_usd_per_mtok_out) = model_prices(live);
         brain.usage.set_limits(l);
     }
     if settings::group_changed(Group::Agent, live, applied) {
@@ -397,6 +411,7 @@ impl Brain {
                 serde_json::json!({ "kind": kind, "label": label, "seconds_left": secs })
             })
             .collect();
+        let limits = self.usage.limits();
         let (day, history) = self.usage.request_days();
         let history: Vec<serde_json::Value> = history
             .iter()
@@ -411,9 +426,15 @@ impl Brain {
             "usage": {
                 "day": day,
                 "history": history,
-                "daily_spend_cap_usd": self.usage.limits().daily_spend_cap_usd,
+                "daily_spend_cap_usd": limits.daily_spend_cap_usd,
                 "requests_today": self.usage.requests_today(),
                 "spend_today": self.usage.spend_today(),
+                // What spend_today rests on: "reported" (the provider's own costs), "priced" (its token
+                // counts times the person's prices), "estimated" (built-in prices and/or sizes), or "none"
+                // while nothing today has cost anything.
+                "spend_basis": self.usage.basis().map_or("none", crate::usage::Basis::as_str),
+                "llm_usd_per_mtok_in": limits.llm_usd_per_mtok_in,
+                "llm_usd_per_mtok_out": limits.llm_usd_per_mtok_out,
             },
             "hardware": crate::hardware::detected(),
             "clock_valid": self.clock.wall_clock_valid(),
@@ -547,16 +568,40 @@ pub fn deliver(origin: Origin, reply: Reply) {
 /// Show a reply once any timer or alarm change it may announce is on disk. A crash right after "Timer set"
 /// is spoken must not lose the timer, so the reply is held back for the write (a few milliseconds on a
 /// laptop, tens to hundreds on slow flash). The wait happens in its own task, so the loop keeps running.
-pub fn deliver_confirmed(brain: &Brain, origin: Origin, reply: Reply) {
-    match brain.assistant.unconfirmed() {
-        Some(saved) => {
-            tokio::spawn(async move {
-                saved.wait().await;
-                deliver(origin, reply);
-            });
-        }
+pub fn deliver_confirmed(brain: &Brain, origin: Origin, mut reply: Reply) {
+    match brain.assistant.take_save() {
         None => deliver(origin, reply),
+        Some(saved) => match saved.outcome_now() {
+            Some(outcome) => {
+                tell_if_unsaved(&mut reply, outcome);
+                deliver(origin, reply);
+            }
+            None => {
+                tokio::spawn(async move {
+                    let outcome = saved.wait().await;
+                    tell_if_unsaved(&mut reply, outcome);
+                    deliver(origin, reply);
+                });
+            }
+        },
     }
+}
+
+/// If the timer, alarm or reminder the reply is about could not be saved, say so in the reply itself: it is set
+/// and will ring, but a restart would lose it, and the person should know before they rely on it.
+fn tell_if_unsaved(reply: &mut Reply, outcome: Result<(), crate::app::persist::SaveError>) {
+    if outcome.is_err() {
+        reply.say = crate::assistant::say_not_saved(&reply.say);
+    }
+}
+
+/// A reply held back for the write of the change it announces (see [`deliver_confirmed`]), for the caller that
+/// returns the reply instead of delivering it.
+async fn confirmed(brain: &Brain, mut reply: Reply) -> Reply {
+    if let Some(saved) = brain.assistant.take_save() {
+        tell_if_unsaved(&mut reply, saved.wait().await);
+    }
+    reply
 }
 
 /// Handle something a speaker said: the fast path answers at once; anything else becomes a turn beside the
@@ -639,8 +684,8 @@ pub async fn drain(brain: &mut Brain, hub: &mut Hub, core: &Core) {
         on_hub_event(brain, hub, core, ev).await;
     }
     // Replies held back for a write are delivered by their own tasks; let them run before the caller leaves.
-    if let Some(saved) = brain.assistant.unconfirmed() {
-        saved.wait().await;
+    if let Some(w) = core.writer() {
+        let _ = w.flushed_since(0, &|_| true).await;
     }
     tokio::task::yield_now().await;
 }
@@ -655,20 +700,14 @@ pub async fn respond_inline(brain: &mut Brain, hub: &mut Hub, line: &str) -> Rep
         origin: Origin::Console,
     };
     if let Some((_, reply)) = dispatch(brain, hub, req) {
-        if let Some(saved) = brain.assistant.unconfirmed() {
-            saved.wait().await;
-        }
-        return reply;
+        return confirmed(brain, reply).await;
     }
     loop {
         match hub.next().await {
             HubEvent::Tool(req) => req.serve(&mut brain.assistant).await,
             HubEvent::Turn(f) => {
                 let reply = finish_turn(brain, hub, *f).1;
-                if let Some(saved) = brain.assistant.unconfirmed() {
-                    saved.wait().await;
-                }
-                return reply;
+                return confirmed(brain, reply).await;
             }
             HubEvent::Lost(_) => {
                 return Reply {
@@ -720,6 +759,26 @@ pub async fn portal_op(
                 brain.connects.forget_saved(&name);
             }
             removed
+        }
+        // A change to the timers is answered once it is on disk, and answered as a failure if it could not be
+        // written: it is made and will ring, but the page must not say it is saved when it is not.
+        op @ Op::Sched(_) => {
+            let answer = sync_op(brain, core, applied, op).await;
+            match brain.assistant.take_save() {
+                Some(saved) if answer.is_ok() => {
+                    tokio::spawn(async move {
+                        let _ = reply.send(match saved.wait().await {
+                            Ok(()) => answer,
+                            Err(e) => Err(crate::app::Fail::NotSaved(
+                                "The change was made, but it could not be saved, so it will be lost if the assistant restarts.".into(),
+                                e.disk_full,
+                            )),
+                        });
+                    });
+                    return;
+                }
+                _ => answer,
+            }
         }
         op => sync_op(brain, core, applied, op).await,
     };
@@ -1274,6 +1333,52 @@ mod tests {
         assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
     }
 
+    // REQ-AST-011: the model prices follow the settings (unset stays unset, 0 stays 0) and the status says
+    // what the day's spend rests on.
+    #[tokio::test]
+    async fn model_prices_follow_the_settings_and_the_status_names_the_basis_of_the_spend() {
+        let dir = TempDir::new("apply-live-prices");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let view = SpeakerView {
+            available: false,
+            console: true,
+            quiet: None,
+        };
+        let status =
+            |b: &Brain| b.status_json(0, &view, &[], &serde_json::json!({}))["usage"].clone();
+        let u = status(&brain);
+        assert_eq!(u["spend_basis"], "none");
+        assert!(u["llm_usd_per_mtok_in"].is_null() && u["llm_usd_per_mtok_out"].is_null());
+
+        // Nothing is known about the provider: the day's spend is an estimate.
+        brain.usage.record_sized(7, None, 3000, 300);
+        assert_eq!(status(&brain)["spend_basis"], "estimated");
+
+        let next = with(
+            &live,
+            &[
+                ("llm_usd_per_mtok_in", 0.into()),
+                ("llm_usd_per_mtok_out", 2.5.into()),
+            ],
+        );
+        apply_live(&mut brain, &core, &next, &mut applied);
+        let l = brain.usage.limits();
+        assert_eq!(
+            (l.llm_usd_per_mtok_in, l.llm_usd_per_mtok_out),
+            (Some(0.0), Some(2.5))
+        );
+        let u = status(&brain);
+        assert_eq!(u["llm_usd_per_mtok_in"], 0.0);
+        assert_eq!(u["llm_usd_per_mtok_out"], 2.5);
+
+        // Clearing a price puts it back to unset, not to 0.
+        let mut cleared = next.clone();
+        cleared.remove("llm_usd_per_mtok_in");
+        apply_live(&mut brain, &core, &cleared, &mut applied);
+        assert_eq!(brain.usage.limits().llm_usd_per_mtok_in, None);
+    }
+
     #[tokio::test]
     async fn the_fast_path_answers_without_a_model_and_other_requests_say_one_is_needed() {
         let dir = TempDir::new("dispatch");
@@ -1347,6 +1452,70 @@ mod tests {
         assert_eq!(timers_on_disk(&dir), 1);
     }
 
+    // REQ-TMR-003: a timer whose save failed is still set (it will ring), and the confirmation says so in one short
+    // sentence instead of claiming it is safe. The next change that does save is confirmed plainly again, and a reply
+    // that changed nothing never repeats the bad news.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_timer_that_could_not_be_saved_is_confirmed_honestly() {
+        let dir = TempDir::new("timer-unsaved");
+        let (mut brain, _core, _live) = started(&dir, &[]).await;
+        let mut hub = Hub::new(|| Conversation::standard(String::new()));
+        // A directory where the temporary file would be written makes every save fail.
+        let blocker = crate::store::temp_path(&dir.0.join("timers.json"));
+        std::fs::create_dir_all(&blocker).unwrap();
+        async fn said(brain: &mut Brain, hub: &mut Hub, line: &str) -> String {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let (origin, reply) =
+                dispatch(brain, hub, fast_request(line, Origin::Ask(tx))).unwrap();
+            deliver_confirmed(brain, origin, reply);
+            rx.await.unwrap().say
+        }
+        let first = said(&mut brain, &mut hub, "set a timer for 10 minutes").await;
+        assert_eq!(
+            first,
+            "Timer set for 10 minutes, but I could not save it, so it will be lost if I restart.",
+            "{first}"
+        );
+        let unrelated = said(&mut brain, &mut hub, "what time is it").await;
+        assert!(!unrelated.contains("save"), "{unrelated}");
+        assert_eq!(brain.assistant.scheduled().len(), 1, "it is still set");
+        std::fs::remove_dir(&blocker).unwrap();
+        let later = said(&mut brain, &mut hub, "set a timer for 5 minutes").await;
+        assert!(
+            later.starts_with("Timer set") && !later.contains("save"),
+            "{later}"
+        );
+        assert_eq!(timers_on_disk(&dir), 2, "the later save carried both");
+    }
+
+    // The page is not told a timer it added is saved when the save failed: the answer is an error (500), though the
+    // timer is set. Once saving works again the same request succeeds.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_portal_timer_that_could_not_be_saved_is_an_error_to_the_page() {
+        let dir = TempDir::new("portal-unsaved");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let blocker = crate::store::temp_path(&dir.0.join("timers.json"));
+        std::fs::create_dir_all(&blocker).unwrap();
+        let body = serde_json::json!({"kind": "timer", "seconds": 60, "label": "tea"});
+        let (job, answer) = ask(Op::Sched(crate::app::SchedOp::Add(body.clone())));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(
+            matches!(answer.await.unwrap(), Err(Fail::NotSaved(_, false))),
+            "the page was told it was saved"
+        );
+        assert_eq!(
+            brain.assistant.scheduled().len(),
+            1,
+            "it is set all the same"
+        );
+        std::fs::remove_dir(&blocker).unwrap();
+        let (job, answer) = ask(Op::Sched(crate::app::SchedOp::Add(body)));
+        portal_op(&mut brain, &core, &mut applied, job).await;
+        assert!(answer.await.unwrap().is_ok());
+        assert_eq!(timers_on_disk(&dir), 2);
+    }
+
     // A reply that announces nothing new is not held back by a write that is still queued.
     #[tokio::test(flavor = "current_thread")]
     async fn a_reply_with_no_pending_timer_change_is_delivered_at_once() {
@@ -1405,7 +1574,7 @@ mod tests {
         let path = dir.0.join("usage.json");
         writer.pause();
         for _ in 0..5 {
-            brain.usage.record(7, None);
+            brain.usage.record_request(7);
             brain.save_usage();
         }
         assert!(!path.exists(), "the loop must not write the file itself");

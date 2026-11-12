@@ -352,7 +352,11 @@ async fn a_costly_call_is_held_asked_out_loud_and_released_only_by_the_users_yes
             let rc = next(&mut s).await;
             let ask = rc["response"]["instructions"].as_str().unwrap();
             assert!(ask.starts_with("Say this to the user, word for word"));
-            assert!(ask.contains("Yes or no?") && ask.contains("send_money"));
+            assert!(ask.contains("Yes or no?") && ask.contains("send money"));
+            assert!(
+                ask.contains("amount: 5") && ask.contains("to: sam"),
+                "{ask}"
+            );
 
             // The late transcript of the request itself is not an answer.
             put(&mut s, said("send sam five dollars")).await;
@@ -383,6 +387,54 @@ async fn a_costly_call_is_held_asked_out_loud_and_released_only_by_the_users_yes
         json!({"to": "sam", "amount": 5}),
         "the stored arguments, without the model's forged flag"
     );
+}
+
+/// REQ-SEC-011, REQ-RTV-003: the question the realtime voice speaks is the same full text, a long body is
+/// read in full, and one too long to read back is neither held nor run: the model gets the error and the
+/// user is told plainly that nothing was done.
+#[tokio::test(flavor = "current_thread")]
+async fn the_spoken_confirmation_is_the_full_text_and_a_too_long_one_is_refused() {
+    let body = "word ".repeat(80);
+    let ok = json!({"body": body.trim(), "to": "bob"}).to_string();
+    let long = json!({"body": "word ".repeat(200), "to": "bob"}).to_string();
+    let spoken = body.trim().to_owned();
+    let r = session(
+        cfg(),
+        UsageLimits::default(),
+        vec![],
+        false,
+        move |mut s| async move {
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, calls_done(&[("c1", "send_money", &ok)])).await;
+            next(&mut s).await;
+            let rc = next(&mut s).await;
+            let ask = rc["response"]["instructions"].as_str().unwrap();
+            assert!(ask.contains(&spoken) && ask.contains("Yes or no?"), "{ask}");
+            // Declined; then a call that is too long.
+            put(&mut s, said("tell bob something")).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, said("no")).await;
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, calls_done(&[("c2", "send_money", &long)])).await;
+            let out = next(&mut s).await;
+            let out = out["item"]["output"].as_str().unwrap();
+            assert!(
+                out.contains("nothing was held") && out.contains("over"),
+                "{out}"
+            );
+            let rc = next(&mut s).await;
+            let tell = rc["response"]["instructions"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no instructions in {rc}"));
+            assert!(tell.contains("too long for me to read back"), "{tell}");
+            s.send_close().await.unwrap();
+        },
+    )
+    .await;
+    assert_eq!(r.result, Ok(SessionEnd::Closed));
+    assert!(r.host.ran.is_empty(), "nothing ran: {:?}", r.host.ran);
 }
 
 #[tokio::test(flavor = "current_thread")]

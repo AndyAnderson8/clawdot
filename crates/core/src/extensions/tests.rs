@@ -626,6 +626,20 @@ async fn the_administrator_sets_a_tier_for_web_tools_and_can_only_raise_a_built_
     )
     .await
     .unwrap();
+    // Read-only keeps the declared baseline (costly for a real HTTP or MCP tool), so a turn with outside text
+    // judges it at that baseline again (REQ-SEC-012).
+    let host = WithPolicy {
+        inner: &mut base,
+        ext: &ext,
+        mcp: &mcp,
+        scope: None,
+    };
+    let r = host.risk("set_light", &json!({}));
+    assert_eq!(
+        (r.tier, r.baseline),
+        (Tier::ReadOnly, Tier::Reversible),
+        "this test's inner host declares reversible"
+    );
     ext.apply(
         ExtOp::ToolDelete("set_light".into()),
         &mut http,

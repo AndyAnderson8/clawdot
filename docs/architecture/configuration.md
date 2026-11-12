@@ -35,7 +35,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `llm.url`, `llm.model` | Language model; set together or not at all. `https://` is required unless the host is localhost, `.local` or a private-network address (REQ-SEC-001) | none (fast path only) |
 | `llm.fallback_model`, `llm.summary_model` | Optional; need `llm.url` and `llm.model` | none |
 | `llm.key_env` | Name of the environment variable holding the key | `OPENROUTER_API_KEY` |
-| `limits.daily_spend_usd` | Stop calling the model after this much spend | none |
+| `limits.daily_spend_usd` | Stop calling the model after this much spend. Counted from the cost the provider reports, else from its token counts times the portal settings `llm_usd_per_mtok_in` and `llm_usd_per_mtok_out`, else estimated from sizes at built-in prices of $10 and $40 per million tokens, so enter your prices (REQ-AST-011) | none |
 | `limits.max_actions_per_day` | Calls that are not read-only allowed per local day; 0 stops all actions (REQ-SEC-015) | 100 |
 | `limits.max_costly_per_day` | Costly and destructive calls allowed per local day (REQ-SEC-015) | 20 |
 | `limits.dry_run` | Describe actions instead of running them; also `--dry-run` (REQ-SEC-016) | off |
@@ -70,6 +70,7 @@ warning so a headless device still starts.
 | Device name, time zone, personality (the text itself) | `device_name`, `zone`, `persona` | right away |
 | Language model address, model, backup model, summary model, key variable name | `llm_url`, `llm_model`, `llm_fallback_model`, `summary_model`, `llm_key_env` | right away (the model client is rebuilt) |
 | Daily spend | `daily_spend_usd` | right away |
+| Model prices, in dollars per million tokens in and out (0 means free; empty means unknown) | `llm_usd_per_mtok_in`, `llm_usd_per_mtok_out` | right away |
 | Voice | `voice` | after a restart (needs the `speech` section of the configuration file) |
 | Listen address, public address | `listen`, `public_url` | after a restart |
 | Board | `board` (`auto` or `none`) | after a restart; nothing reads it yet |
@@ -134,7 +135,7 @@ phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, 
   the server; run them with the server stopped, then start it. Snippets use `--public-url`, or a URL derived from
   `listen` (REQ-CFG-016).
 - **Console.** Type `quit` or `exit`, or press Ctrl-D, to stop (REQ-CFG-017).
-- **Throttling.** Wrong sessions, sign-in attempts, and setup tries share the authentication rate limit.
+- **Throttling.** Wrong sessions, wrong tokens, sign-in attempts, setup tries and wrong "current password" guesses are counted per client address (20 at once, then 1 a second, for at most 64 addresses at a time), under a larger ceiling for all addresses together (100, then 5 a second). A right password gives its attempt back. A change that could not be written to storage is answered with an error (500, or 507 when the storage is full), never as a success.
 - **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
 - **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), and the clock state. It contains no secrets and no agent text. Radio and music are not shown in the portal.
 - **Test speak** makes the speaker say a short phrase (up to 200 characters, a few at a time) on the console and on any free satellite, a quick way to check the speaker end to end.

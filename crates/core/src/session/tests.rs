@@ -40,6 +40,8 @@ struct Host {
     tiers: Vec<(&'static str, Tier)>,
     extra: Vec<&'static str>,
     lowered: Vec<&'static str>,
+    /// Costly by nature; the administrator marked it read-only.
+    lowered_ro: Vec<&'static str>,
 }
 
 impl ToolHost for Host {
@@ -60,6 +62,9 @@ impl ToolHost for Host {
     fn risk(&self, name: &str, _: &Value) -> Risk {
         if self.confirm.contains(&name) {
             return Risk::fixed(Tier::Costly);
+        }
+        if self.lowered_ro.contains(&name) {
+            return Risk::set(Tier::ReadOnly, Tier::Costly);
         }
         if self.lowered.contains(&name) {
             // Costly by nature; the administrator marked it reversible.
@@ -255,7 +260,12 @@ async fn a_risky_call_is_held_and_the_host_asks_then_runs_it_after_a_later_yes()
     let (mut h, mut c, mut u) = fresh();
     let r1 = turn(&b, &mut h, &mut c, &mut u, "send five dollars to sam").await;
     assert!(h.ran.is_empty(), "nothing ran before the user answered");
-    assert!(r1.speech.ends_with("Yes or no?") && r1.speech.contains("send_money"));
+    assert!(r1.speech.ends_with("Yes or no?") && r1.speech.contains("send money"));
+    assert!(
+        r1.speech.contains("amount: 5") && r1.speech.contains("to: sam"),
+        "{}",
+        r1.speech
+    );
     assert_eq!(r1.model_requests, 1, "the host asked; the model did not");
     assert!(r1.pending, "the turn says a held action awaits an answer");
     assert_eq!(r1.held, None, "nothing was answered yet");
@@ -369,17 +379,115 @@ async fn the_read_back_hides_secrets_but_the_stored_action_is_exact() {
     ]);
     let (mut h, mut c, mut u) = fresh();
     let r1 = turn(&b, &mut h, &mut c, &mut u, "send sam some money").await;
-    for leak in ["abcdefghijklmnop1234", "ghp_0123", "goes on and on"] {
+    for leak in ["abcdefghijklmnop1234", "ghp_0123"] {
         assert!(!r1.speech.contains(leak), "{leak} spoken: {}", r1.speech);
     }
+    // A secret is said to be hidden and the call is still held; a long value is read in full.
     assert!(
-        r1.speech.contains("a long value") && r1.speech.contains("sam"),
+        r1.speech.contains("token: a hidden key")
+            && r1.speech.contains("hidden key that I will not read out")
+            && r1.speech.contains("to: sam")
+            && r1
+                .speech
+                .contains("memo: a very long memo that goes on and on and on and on and on and on"),
         "{}",
         r1.speech
     );
+    assert!(!r1.speech.contains("a long value"));
     assert!(!c.pending().unwrap().description().contains("abcdefghij"));
     turn(&b, &mut h, &mut c, &mut u, "yes").await;
     assert_eq!(h.ran, vec![("send_money".to_owned(), args)]);
+}
+
+/// REQ-SEC-011: a long body within the budget is read in full, and the user hears every argument.
+#[tokio::test(flavor = "current_thread")]
+async fn a_long_body_within_the_budget_is_read_in_full() {
+    let body =
+        "Please move the meeting to Thursday at three and bring the signed budget. ".repeat(5);
+    let body = body.trim();
+    let args = json!({"to": "bob@example.com", "body": body});
+    let b = Script::new(vec![
+        calls(&[("c1", "send_money", &args.to_string())]),
+        text("Sent."),
+    ]);
+    let (mut h, mut c, mut u) = fresh();
+    let r = turn(&b, &mut h, &mut c, &mut u, "tell bob").await;
+    assert!(r.speech.contains(body), "{}", r.speech);
+    assert!(
+        r.speech.contains("to: bob at example dot com"),
+        "{}",
+        r.speech
+    );
+    assert!(r.speech.chars().count() < 700 + 40);
+    assert!(h.ran.is_empty() && r.pending);
+}
+
+/// REQ-SEC-011: a call that cannot be read back within the budget is not held and not run. The model gets an
+/// error that says how far over it is, and if the turn ends there the user is told nothing was done, whatever
+/// the model says. The same for a proposal from an event turn.
+#[tokio::test(flavor = "current_thread")]
+async fn a_call_too_long_to_read_back_is_neither_held_nor_run() {
+    let long = json!({"to": "bob", "body": "x ".repeat(500)}).to_string();
+    let (log, mut c) = audited(ActionPolicy::default());
+    let b = Script::new(vec![
+        calls(&[("c1", "send_money", &long)]),
+        text("Sent it!"),
+    ]);
+    let (mut h, mut u) = (money_host(), UsageTracker::new(UsageLimits::default()));
+    let r = turn(&b, &mut h, &mut c, &mut u, "tell bob everything").await;
+    assert!(h.ran.is_empty() && c.pending().is_none() && !r.pending);
+    assert!(
+        r.speech.starts_with("I did not do that") && !r.speech.contains("Sent it"),
+        "{}",
+        r.speech
+    );
+    let seen = b.requests();
+    let told = &seen[1].messages.last().unwrap().content;
+    assert!(
+        told.contains("700") && told.contains("over") && told.contains("nothing was held"),
+        "{told}"
+    );
+    let blocked = rows(&log)
+        .into_iter()
+        .find(|x| x.tool == "send_money")
+        .unwrap();
+    assert_eq!(
+        (blocked.decision.as_str(), blocked.tier.as_str()),
+        ("blocked:invalid", "costly")
+    );
+
+    // Shortened on the next try, it is held and asked about, and the speech is the question.
+    let b = Script::new(vec![
+        calls(&[("c1", "send_money", &long)]),
+        calls(&[("c2", "send_money", r#"{"to":"bob","body":"short"}"#)]),
+    ]);
+    let r = turn(&b, &mut h, &mut c, &mut u, "tell bob").await;
+    assert!(
+        r.pending && r.speech.ends_with("Yes or no?"),
+        "{}",
+        r.speech
+    );
+
+    // An event turn's proposal is held to the same limit.
+    let b = Script::new(vec![calls(&[("e1", "send_money", &long)]), text("ok")]);
+    let (mut h, mut c) = (money_host(), conv());
+    let r = event_turn("alerts", &b, inputs(&mut h, &mut c, &mut u, 2000), "do it").await;
+    assert!(
+        c.pending().is_none() && !r.pending && h.ran.is_empty(),
+        "{r:?}"
+    );
+}
+
+/// REQ-SEC-011: two calls that differ only inside a long value are read back differently.
+#[tokio::test(flavor = "current_thread")]
+async fn calls_that_differ_only_inside_a_long_value_sound_different() {
+    let say = |tail: &str| {
+        let args = json!({"body": format!("{} {tail}", "the same long beginning ".repeat(6))});
+        describe_generic("send_message", &args)
+    };
+    let (a, z) = (say("to Alice"), say("to Zed"));
+    assert_ne!(a, z);
+    assert!(a.contains("to Alice") && z.contains("to Zed"));
 }
 
 /// Adversarial: the model sets `confirmed: true` itself, in the same turn.
@@ -490,7 +598,7 @@ async fn read_only_and_reversible_calls_run_and_costly_ones_are_held() {
         ["web", "set_timer"],
         "stopped at the held call: {ran:?}"
     );
-    assert!(r.speech.contains("send_money"));
+    assert!(r.speech.contains("send money"));
     let tool_msgs: Vec<String> = c
         .history()
         .iter()
@@ -560,7 +668,7 @@ async fn an_event_turn_can_read_but_only_propose_anything_else() {
     let r = event_turn("event", &b, inputs(&mut h, &mut c, &mut u, 1000), evil).await;
     let ran: Vec<&str> = h.ran.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(ran, ["web"], "the timer and the payment did not run");
-    assert!(r.speech.starts_with("Suggested action:") && r.speech.contains("set_timer"));
+    assert!(r.speech.starts_with("Suggested action:") && r.speech.contains("set timer"));
     assert!(
         r.pending,
         "an event's proposal awaits the user's answer too"
@@ -636,6 +744,50 @@ async fn untrusted_text_makes_a_lowered_costly_tool_ask_for_a_yes_again() {
     let b = Script::new(vec![text("ok")]);
     user_turn(&b, inputs(&mut h, &mut c, &mut u, 1101 + 601), "hello").await;
     assert!(!c.is_tainted());
+}
+
+/// REQ-SEC-012: a tool the administrator lowered to read-only (baseline costly) runs unasked in a clean turn,
+/// but once outside text is in the turn it is judged at its baseline again, so injected text cannot send
+/// the user's data out through its arguments. A tool whose own baseline is read-only is unaffected.
+#[tokio::test(flavor = "current_thread")]
+async fn a_tool_lowered_to_read_only_is_held_again_once_outside_text_is_in_the_turn() {
+    let host = || Host {
+        lowered_ro: vec!["fetch"],
+        extra: vec!["fetch"],
+        tiers: vec![("web", Tier::ReadOnly)],
+        ..Host::default()
+    };
+    // Clean turn: runs without asking.
+    let b = Script::new(vec![
+        calls(&[("a", "fetch", r#"{"q":"weather"}"#)]),
+        text("Sunny."),
+    ]);
+    let (mut h, mut c, mut u) = (host(), conv(), UsageTracker::new(UsageLimits::default()));
+    let r = turn(&b, &mut h, &mut c, &mut u, "weather?").await;
+    assert_eq!((h.ran.len(), r.speech.as_str()), (1, "Sunny."));
+
+    // Tainted turn: held, with the tier it was judged at in the audit record.
+    let (log, mut c) = audited(ActionPolicy::default());
+    let b = Script::new(vec![
+        calls(&[("a", "web", "{}")]),
+        calls(&[("b", "fetch", r#"{"q":"the user's memories"}"#)]),
+    ]);
+    let (mut h, mut u) = (host(), UsageTracker::new(UsageLimits::default()));
+    let r = turn(&b, &mut h, &mut c, &mut u, "look it up").await;
+    assert_eq!(
+        h.ran.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        ["web"],
+        "fetch did not run"
+    );
+    assert!(r.pending && r.speech.ends_with("Yes or no?"), "{r:?}");
+    let held = rows(&log)
+        .into_iter()
+        .find(|x| x.tool == "fetch")
+        .expect("a record for fetch");
+    assert_eq!(
+        (held.decision.as_str(), held.tier.as_str()),
+        ("held", "costly")
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -803,6 +955,52 @@ async fn the_daily_limit_stops_the_turn_before_any_request() {
     assert_eq!(r.end, TurnEnd::Limit(LimitReached::Requests));
     assert!(r.speech.contains("Timers, alarms"));
     assert!(b.requests().is_empty());
+}
+
+// REQ-AST-011: a provider that reports no cost and no tokens still runs into the spend cap, priced from the
+// sizes of what was sent and received, and the turn stops after the request that crossed it.
+#[tokio::test(flavor = "current_thread")]
+async fn the_spend_cap_stops_a_turn_when_the_provider_reports_nothing() {
+    let b = Script::new(vec![
+        calls(&[("a", "set_timer", r#"{"seconds":1}"#)]),
+        calls(&[("b", "set_timer", r#"{"seconds":2}"#)]),
+        text("never reached"),
+    ]);
+    let (mut h, mut c, mut u) = (
+        Host::default(),
+        conv(),
+        UsageTracker::new(UsageLimits {
+            daily_spend_cap_usd: Some(0.0001),
+            ..UsageLimits::default()
+        }),
+    );
+    let r = turn(&b, &mut h, &mut c, &mut u, "set two timers").await;
+    assert_eq!(r.end, TurnEnd::Limit(LimitReached::Spend));
+    assert_eq!(b.requests().len(), 1, "the first request crossed the cap");
+    assert!(u.spend_today() >= 0.0001, "{}", u.spend_today());
+    assert_eq!(u.basis(), Some(crate::usage::Basis::Estimated));
+}
+
+// A server that is free (prices 0) is never stopped by an estimate.
+#[tokio::test(flavor = "current_thread")]
+async fn a_free_server_is_not_stopped_by_the_spend_cap() {
+    let b = Script::new(vec![
+        calls(&[("a", "set_timer", r#"{"seconds":1}"#)]),
+        text("done"),
+    ]);
+    let (mut h, mut c, mut u) = (
+        Host::default(),
+        conv(),
+        UsageTracker::new(UsageLimits {
+            daily_spend_cap_usd: Some(0.0001),
+            llm_usd_per_mtok_in: Some(0.0),
+            llm_usd_per_mtok_out: Some(0.0),
+            ..UsageLimits::default()
+        }),
+    );
+    let r = turn(&b, &mut h, &mut c, &mut u, "set a timer").await;
+    assert_eq!(r.end, TurnEnd::Answered);
+    assert_eq!((u.requests_today(), u.spend_today()), (2, 0.0));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1132,7 +1330,7 @@ async fn dry_run_describes_actions_runs_reads_and_marks_the_log() {
         .collect();
     assert!(
         tool_msgs[1].starts_with("Dry run: nothing was done")
-            && tool_msgs[2].contains("send_money")
+            && tool_msgs[2].contains("send money")
     );
 }
 
@@ -1264,13 +1462,14 @@ async fn the_turns_model_cost_is_recorded_when_known() {
     .await;
     let r = rows(&log);
     assert!((r[0].turn_cost_usd.unwrap() - 0.0042).abs() < 1e-9);
-    // and none when it is not known
+    // and an estimate from the sizes when the provider reported nothing (REQ-AST-011): never none, so the
+    // spend cap and the audit log agree
     let again = Script::new(vec![
         calls(&[("a", "set_timer", r#"{"seconds":5}"#)]),
         text("ok"),
     ]);
     turn(&again, &mut h, &mut c, &mut u, "again").await;
-    assert_eq!(rows(&log)[1].turn_cost_usd, None);
+    assert!(rows(&log)[1].turn_cost_usd.unwrap() > 0.0);
 }
 
 // ----- the agent loop (REQ-AST-019 to REQ-AST-025) -----

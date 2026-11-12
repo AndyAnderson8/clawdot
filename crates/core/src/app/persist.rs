@@ -10,10 +10,14 @@
 //! Writes coalesce: a file that changes again before the writer reaches it is written once, with the latest
 //! bytes. A burst of acknowledgements costs one write per file, which is what saves flash wear.
 //!
-//! Durability (REQ-INB-004): the HTTP layer awaits [`Writer::flushed`] before it answers, so an event that was
-//! acknowledged to a caller is on disk. Dropping the writer writes everything still queued.
+//! Durability (REQ-INB-004): the HTTP layer awaits [`Writer::flushed_since`] before it answers, so an event that
+//! was acknowledged to a caller is on disk, and a caller whose change could not be written is told so. A ticket
+//! resolves to success or failure ([`SaveError`]); a failed write is never reported as done. Dropping the writer
+//! writes everything still queued.
 
-use crate::store::JsonStore;
+use crate::store::{JsonStore, StoreError};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use tokio::sync::watch;
@@ -49,14 +53,72 @@ impl Dirty {
     };
 }
 
+/// A change that could not be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveError {
+    /// The disk (or the quota) is full, so retrying will not help until space is freed.
+    pub disk_full: bool,
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.disk_full {
+            "the change could not be saved because the storage is full"
+        } else {
+            "the change could not be saved to storage"
+        })
+    }
+}
+
+impl std::error::Error for SaveError {}
+
+impl SaveError {
+    /// What a failed write says about the cause.
+    pub(crate) fn from_store(e: &StoreError) -> Self {
+        Self {
+            disk_full: matches!(e, StoreError::Io(io) if io.kind() == std::io::ErrorKind::StorageFull),
+        }
+    }
+}
+
+/// One file waiting to be written.
+#[derive(Debug)]
+struct Pending {
+    store: JsonStore,
+    bytes: Vec<u8>,
+    /// The first ticket this entry carries (later ones replaced its bytes), and the newest.
+    first: u64,
+    newest: u64,
+}
+
+/// A write that failed: the file and the tickets (`first..=newest`) whose bytes it carried.
+#[derive(Debug)]
+struct Failure {
+    path: PathBuf,
+    first: u64,
+    newest: u64,
+    error: SaveError,
+}
+
+/// Names the files a caller cares about.
+pub type Ours<'a> = &'a (dyn Fn(&Path) -> bool + Sync);
+
+/// Failures remembered; an older one is forgotten (see `State::forgotten`).
+const KEEP_FAILURES: usize = 16;
+
 #[derive(Debug, Default)]
 struct State {
     /// At most one entry per file: a newer write replaces an older one that has not started.
-    pending: Vec<(JsonStore, Vec<u8>)>,
+    pending: Vec<Pending>,
     /// Writes handed in so far.
     submitted: u64,
-    /// Writes handed in before the last batch started that have now finished.
+    /// Writes handed in before the last batch started that have now finished (well or badly).
     written: u64,
+    /// The most recent writes that failed.
+    failures: VecDeque<Failure>,
+    /// Every ticket up to this one may have failed without a record: a failure was dropped to make room. Asked
+    /// about, such a ticket is reported as failed, so a failure is never lost, only reported too eagerly.
+    forgotten: u64,
     closing: bool,
     /// Tests hold the writer to look at the state before a write lands.
     #[cfg(test)]
@@ -144,16 +206,23 @@ impl Writer {
 
     fn enqueue(st: &mut State, store: &JsonStore, bytes: Vec<u8>) -> u64 {
         st.submitted += 1;
+        let ticket = st.submitted;
         if let Some(slot) = st
             .pending
             .iter_mut()
-            .find(|(s, _)| s.path() == store.path())
+            .find(|p| p.store.path() == store.path())
         {
-            slot.1 = bytes;
+            slot.bytes = bytes;
+            slot.newest = ticket;
         } else {
-            st.pending.push((store.clone(), bytes));
+            st.pending.push(Pending {
+                store: store.clone(),
+                bytes,
+                first: ticket,
+                newest: ticket,
+            });
         }
-        st.submitted
+        ticket
     }
 
     /// Whether the write behind `ticket` (and everything before it) has finished.
@@ -161,20 +230,59 @@ impl Writer {
         self.shared.lock().written >= ticket
     }
 
-    /// Resolves once the write behind `ticket` (and everything before it) has finished, or failed and been
-    /// logged.
-    pub async fn wait(&self, ticket: u64) {
+    /// The tickets handed out so far. Take it before a change; [`Writer::flushed_since`] then answers for every
+    /// write queued after it.
+    pub fn mark(&self) -> u64 {
+        self.shared.lock().submitted
+    }
+
+    /// Whether any write of a file `ours` accepts, carrying a ticket in `(after, upto]`, failed.
+    fn outcome(&self, after: u64, upto: u64, ours: Ours<'_>) -> Result<(), SaveError> {
+        let st = self.shared.lock();
+        if st.forgotten > after {
+            return Err(SaveError { disk_full: false });
+        }
+        match st
+            .failures
+            .iter()
+            .find(|f| f.newest > after && f.first <= upto && ours(&f.path))
+        {
+            Some(f) => Err(f.error),
+            None => Ok(()),
+        }
+    }
+
+    /// Resolves once the write behind `ticket` (and everything before it) has finished: `Ok` if it was written,
+    /// `Err` if it failed. `ours` names the files the caller cares about.
+    ///
+    /// # Errors
+    /// [`SaveError`] when the write failed.
+    pub async fn wait(&self, ticket: u64, ours: Ours<'_>) -> Result<(), SaveError> {
         let mut rx = self.shared.progress.subscribe();
         // The sender lives as long as `self`, so this cannot fail while we hold it.
         let _ = rx.wait_for(|written| *written >= ticket).await;
+        self.outcome(ticket.saturating_sub(1), ticket, ours)
     }
 
-    /// Resolves once everything submitted before the call is on disk (or has failed and been logged).
-    pub async fn flushed(&self) {
+    /// Resolves once everything submitted before the call has been written or has failed. `Ok` when none of the
+    /// writes queued since `mark` (see [`Writer::mark`]) to a file `ours` accepts failed.
+    ///
+    /// # Errors
+    /// [`SaveError`] when one of them failed.
+    pub async fn flushed_since(&self, mark: u64, ours: Ours<'_>) -> Result<(), SaveError> {
         let target = self.shared.lock().submitted;
         let mut rx = self.shared.progress.subscribe();
         // The sender lives as long as `self`, so this cannot fail while we hold it.
         let _ = rx.wait_for(|written| *written >= target).await;
+        self.outcome(mark, target, ours)
+    }
+
+    /// Whether any write queued since `mark` to a file `ours` accepts has failed. For tests: call it after
+    /// [`Writer::flush_blocking`].
+    #[cfg(test)]
+    pub(crate) fn failed_since(&self, mark: u64, ours: Ours<'_>) -> bool {
+        let target = self.shared.lock().submitted;
+        self.outcome(mark, target, ours).is_err()
     }
 
     /// Stop writing until [`Writer::resume`], so a test can look at the state before a write lands.
@@ -244,41 +352,97 @@ fn run(shared: &Shared) {
             }
             (std::mem::take(&mut st.pending), st.submitted)
         };
-        for (store, bytes) in batch {
-            // A failed write must not lose the in-memory event, but it must not be silent either.
-            if let Err(e) = store.write(&bytes) {
-                crate::diag::error(&format!("could not save {}: {e}", store.path().display()));
+        let mut failed = Vec::new();
+        for p in batch {
+            // A failed write must not lose the in-memory event, and it must not be silent: it is logged and
+            // remembered, so whoever waits for this write is told that it did not happen.
+            if let Err(e) = p.store.write(&p.bytes) {
+                crate::diag::error(&format!("could not save {}: {e}", p.store.path().display()));
+                failed.push(Failure {
+                    path: p.store.path().to_path_buf(),
+                    first: p.first,
+                    newest: p.newest,
+                    error: SaveError::from_store(&e),
+                });
             }
         }
-        shared.lock().written = upto;
+        {
+            // The failures are recorded in the same step that moves `written` on, so a waiter that wakes sees them.
+            let mut st = shared.lock();
+            for f in failed {
+                if st.failures.len() == KEEP_FAILURES
+                    && let Some(old) = st.failures.pop_front()
+                {
+                    st.forgotten = st.forgotten.max(old.newest);
+                }
+                st.failures.push_back(f);
+            }
+            st.written = upto;
+        }
         shared.progress.send_replace(upto);
         shared.done.notify_all();
     }
 }
 
-/// A write that was queued and may not be on disk yet.
+/// A write that was queued and may not be on disk yet, or one whose outcome is already known.
 #[derive(Debug, Clone)]
-pub struct Durability {
-    writer: Arc<Writer>,
-    ticket: u64,
+pub struct Durability(Kind);
+
+#[derive(Debug, Clone)]
+enum Kind {
+    Queued {
+        writer: Arc<Writer>,
+        ticket: u64,
+        path: PathBuf,
+    },
+    Settled(Result<(), SaveError>),
 }
 
 impl Durability {
-    /// Name the write behind `ticket`.
+    /// Name the write behind `ticket`, which carried the file at `path`.
     #[must_use]
-    pub fn new(writer: Arc<Writer>, ticket: u64) -> Self {
-        Self { writer, ticket }
+    pub fn new(writer: Arc<Writer>, ticket: u64, path: &Path) -> Self {
+        Self(Kind::Queued {
+            writer,
+            ticket,
+            path: path.to_path_buf(),
+        })
     }
 
-    /// The write has finished (or failed and been logged).
+    /// A write whose outcome is known already (made inline, or never made).
     #[must_use]
-    pub fn is_done(&self) -> bool {
-        self.writer.is_durable(self.ticket)
+    pub fn settled(outcome: Result<(), SaveError>) -> Self {
+        Self(Kind::Settled(outcome))
     }
 
-    /// Resolves once the write has finished.
-    pub async fn wait(self) {
-        self.writer.wait(self.ticket).await;
+    /// The outcome, if the write has finished.
+    #[must_use]
+    pub fn outcome_now(&self) -> Option<Result<(), SaveError>> {
+        match &self.0 {
+            Kind::Queued {
+                writer,
+                ticket,
+                path,
+            } => writer
+                .is_durable(*ticket)
+                .then(|| writer.outcome(ticket.saturating_sub(1), *ticket, &|p| p == path)),
+            Kind::Settled(r) => Some(*r),
+        }
+    }
+
+    /// Resolves once the write has finished: `Ok` when it is on disk, `Err` when it failed.
+    ///
+    /// # Errors
+    /// [`SaveError`] when the write failed.
+    pub async fn wait(self) -> Result<(), SaveError> {
+        match self.0 {
+            Kind::Queued {
+                writer,
+                ticket,
+                path,
+            } => writer.wait(ticket, &|p| p == path).await,
+            Kind::Settled(r) => r,
+        }
     }
 }
 
@@ -347,6 +511,71 @@ mod tests {
         w.flush_blocking();
         assert!(w.is_durable(first) && w.is_durable(second));
         assert_eq!(a.load::<u32>().unwrap(), 2, "coalesced to the newer");
+    }
+
+    fn block(path: &Path) -> PathBuf {
+        let blocker = crate::store::temp_path(path);
+        std::fs::create_dir(&blocker).unwrap();
+        blocker
+    }
+
+    // REQ-INB-004: a ticket resolves to success or failure, per file, and a later write that works reports success.
+    #[test]
+    fn a_failed_write_is_reported_to_its_own_waiter_only_and_a_later_one_succeeds() {
+        let dir = TempDir::new("writer-fail");
+        let (bad, good) = (
+            JsonStore::new(dir.0.join("bad.json"), 1),
+            JsonStore::new(dir.0.join("good.json"), 1),
+        );
+        let blocker = block(bad.path());
+        let w = Writer::start().unwrap();
+        let mark = w.mark();
+        w.pause();
+        let t_bad = w.submit(&bad, bad.encode(&1).unwrap());
+        let t_good = w.submit(&good, good.encode(&2).unwrap());
+        w.resume();
+        w.flush_blocking();
+        let is = |p: &Path, name: &str| p.ends_with(name);
+        assert!(w.outcome(t_bad - 1, t_bad, &|p| is(p, "bad.json")).is_err());
+        assert!(
+            w.outcome(t_good - 1, t_good, &|p| is(p, "good.json"))
+                .is_ok(),
+            "the file that was written is not blamed for the one that was not, though they shared a batch"
+        );
+        assert!(w.failed_since(mark, &|_| true));
+        assert!(!w.failed_since(mark, &|p| is(p, "good.json")));
+        assert_eq!(good.load::<u32>().unwrap(), 2);
+        // Space comes back: the same file now saves, and a waiter after the mark sees success.
+        std::fs::remove_dir(&blocker).unwrap();
+        let mark = w.mark();
+        w.submit(&bad, bad.encode(&3).unwrap());
+        w.flush_blocking();
+        assert!(!w.failed_since(mark, &|_| true));
+        assert_eq!(bad.load::<u32>().unwrap(), 3);
+    }
+
+    #[test]
+    fn a_failure_is_never_lost_when_the_record_of_it_is_dropped() {
+        let dir = TempDir::new("writer-forget");
+        let bad = JsonStore::new(dir.0.join("bad.json"), 1);
+        block(bad.path());
+        let w = Writer::start().unwrap();
+        let first = w.mark();
+        for n in 0..(KEEP_FAILURES + 5) {
+            w.submit(&bad, bad.encode(&n).unwrap());
+            w.flush_blocking();
+        }
+        // The oldest records were dropped; asking about them is answered "failed", not "fine".
+        assert!(w.failed_since(first, &|_| true));
+        assert!(w.outcome(0, 1, &|_| false).is_err());
+    }
+
+    #[test]
+    fn a_full_disk_is_told_apart() {
+        let full = StoreError::Io(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        assert!(SaveError::from_store(&full).disk_full);
+        let other = StoreError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(!SaveError::from_store(&other).disk_full);
     }
 
     #[test]

@@ -351,19 +351,24 @@ async fn route(
             r#"{"error":"this name does not belong to the device: open the portal by its IP address, localhost, its .local name, or set the public address in the settings"}"#,
         ));
     }
+    // Where the saves stand before this request changes anything, so that afterwards we can tell whether what
+    // it changed reached the disk.
+    let mark = core.save_mark();
     // First decide whether the path names a real resource (invalid endpoint names are simply 404),
     // then whether the method is allowed on it (405).
-    let resp = match find(ROUTES, parts.method.as_str(), &segs) {
+    let mut resp = match find(ROUTES, parts.method.as_str(), &segs) {
         Some((row, [name, id])) => match row.id {
             Id::Page => crate::ui::serve_page(headers),
             Id::Health => json(StatusCode::OK, r#"{"status":"ok"}"#),
-            Id::Hook => hook(&core, headers, name, body, opts.body_timeout).await,
+            Id::Hook => hook(&core, headers, peer, name, body, opts.body_timeout).await,
             Id::Announce => {
                 crate::announce_api::handle(&core, headers, peer, body, opts.body_timeout).await
             }
-            Id::Mcp => crate::mcp_server::handle(&core, headers, body, opts.body_timeout).await,
-            Id::Replies => replies_stream(Arc::clone(&core), streams, opts, headers, name),
-            Id::Ack => ack(&core, headers, name, id),
+            Id::Mcp => {
+                crate::mcp_server::handle(&core, headers, peer, body, opts.body_timeout).await
+            }
+            Id::Replies => replies_stream(Arc::clone(&core), streams, opts, headers, peer, name),
+            Id::Ack => ack(&core, headers, peer, name, id),
         },
         None => match path_row(ROUTES, &segs) {
             Some(row) if row.auth == Page => crate::ui::method_not_allowed(),
@@ -381,15 +386,43 @@ async fn route(
             .unwrap_or_else(|| json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#)),
         },
     };
-    // A webhook, announcement or acknowledgement is reported as accepted only once it is on disk (REQ-INB-004).
-    // Nothing is waiting for most requests, so this returns at once.
-    core.durable().await;
+    // A webhook, announcement or acknowledgement is reported as accepted only once it is on disk (REQ-INB-004),
+    // and one that could not be saved is not reported as accepted. The event is kept in memory (it is still
+    // announced, answered or delivered), so a sender that retries is coalesced; the answer says it will not
+    // survive a restart. The portal's endpoint changes check for themselves (see `ui`); the MCP tools check per
+    // call (see `mcp_server`), since one call can wait minutes for an answer.
+    let writes_inbox = matches!(
+        find(ROUTES, parts.method.as_str(), &segs),
+        Some((row, _)) if matches!(row.id, Id::Hook | Id::Announce | Id::Ack)
+    );
+    if writes_inbox && resp.status().is_success() {
+        if let Err(e) = core.saved_since(mark).await {
+            resp = not_saved(e);
+        }
+    }
     Ok(resp)
+}
+
+/// The answer for a change that was made in memory but could not be written: 507 when the cause is a full
+/// disk, 500 otherwise, with a plain sentence either way.
+pub(crate) fn not_saved(e: crate::app::persist::SaveError) -> Resp {
+    if e.disk_full {
+        json(
+            StatusCode::INSUFFICIENT_STORAGE,
+            r#"{"error":"the storage is full, so this could not be saved; it will be lost if the device restarts"}"#,
+        )
+    } else {
+        json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"this could not be saved to storage; it will be lost if the device restarts"}"#,
+        )
+    }
 }
 
 async fn hook(
     core: &Core,
     headers: &HeaderMap,
+    peer: IpAddr,
     name: &str,
     body: Incoming,
     body_timeout: Duration,
@@ -410,7 +443,7 @@ async fn hook(
         return error_response(&HookError::Unauthorized);
     };
     // Authenticate and throttle before spending effort on the body.
-    if let Err(e) = core.bridge_check(name, &token) {
+    if let Err(e) = core.bridge_check(name, &token, peer) {
         return error_response(&e);
     }
     let Some(bytes) = read_body(body, max, body_timeout).await else {
@@ -419,7 +452,7 @@ async fn hook(
             r#"{"error":"body too large, too slow or unreadable"}"#,
         );
     };
-    match core.ingest_hook(name, &token, &bytes) {
+    match core.ingest_hook(name, &token, peer, &bytes) {
         Ok(outcome) => {
             let (label, id) = match outcome {
                 HookOutcome::Accepted(id) => ("accepted", id),
@@ -436,14 +469,14 @@ async fn hook(
     }
 }
 
-fn ack(core: &Core, headers: &HeaderMap, name: &str, id: &str) -> Resp {
+fn ack(core: &Core, headers: &HeaderMap, peer: IpAddr, name: &str, id: &str) -> Resp {
     let Some(token) = token_from(headers) else {
         return error_response(&HookError::Unauthorized);
     };
     let Ok(id) = id.parse::<u64>() else {
         return json(StatusCode::BAD_REQUEST, r#"{"error":"bad reply id"}"#);
     };
-    match core.bridge_ack(name, &token, id) {
+    match core.bridge_ack(name, &token, peer, id) {
         Ok(true) => Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(Full::new(Bytes::new()).boxed())
@@ -486,12 +519,13 @@ fn replies_stream(
     streams: Arc<AtomicUsize>,
     opts: ServeOptions,
     headers: &HeaderMap,
+    peer: IpAddr,
     name: &str,
 ) -> Resp {
     let Some(token) = token_from(headers) else {
         return error_response(&HookError::Unauthorized);
     };
-    if let Err(e) = core.bridge_check(name, &token) {
+    if let Err(e) = core.bridge_check(name, &token, peer) {
         return error_response(&e);
     }
     if streams.fetch_add(1, Ordering::SeqCst) >= opts.max_streams {
@@ -523,7 +557,7 @@ fn replies_stream(
 
             // Re-checking credentials each round ends the stream as soon as a token is rotated or
             // revoked (REQ-INB-002).
-            let Ok(replies) = core.bridge_pending(&name, &token, last_sent) else {
+            let Ok(replies) = core.bridge_pending(&name, &token, peer, last_sent) else {
                 return;
             };
             for r in replies {

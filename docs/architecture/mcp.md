@@ -77,8 +77,8 @@ harness (MCP client) --POST /mcp, endpoint token--> mcp_server --announce_as--> 
   stateless (no `Mcp-Session-Id`), one JSON-RPC message per `POST`, answered with `application/json`, a
   notification answered `202`. `GET` and `DELETE` are `405`, so a client falls back to plain request and
   response. Only `initialize`, `ping`, `tools/list` and `tools/call` exist.
-- **Authentication.** An endpoint token only, checked before the body is read, spending the shared
-  failed-authentication budget on a miss. The endpoint it names is the identity of the caller for the filter,
+- **Authentication.** An endpoint token only, checked before the body is read, spending the calling address's
+  failed-authentication budget on a miss. An `announce` or `ask_user` whose message could not be saved is a tool error. The endpoint it names is the identity of the caller for the filter,
   the burst limit, the audit trigger `mcp:<endpoint>` and the "one question at a time" rule.
 - **`announce`** is `Core::announce_as`: the same path as `/api/announce`, with the text cleaned (control
   characters, markup, links, secrets), the source forced to the endpoint's name and a one hour time to live.

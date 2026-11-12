@@ -250,6 +250,13 @@ const PRICE: Check = Check::Number {
     err: PRICE_ERR,
 };
 
+/// The price of a million tokens of the language model, for the spend cap (REQ-AST-011).
+const TOKEN_PRICE: Check = Check::Number {
+    lo: 0.0,
+    hi: 1000.0,
+    err: "The price per million tokens must be a number of dollars from 0 to 1000. Leave it empty if you do not know it, and 0 if the model is free.",
+};
+
 /// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039), in the order the API lists them.
 pub const FIELDS: &[Field] = &[
     Field::live(
@@ -299,6 +306,10 @@ pub const FIELDS: &[Field] = &[
         },
         Initial::None,
     ),
+    // Dollars per million tokens, so the spend cap works with a provider that reports no cost. Unset is not
+    // 0: unset means "price it with the built-in prices", 0 means "free" (usage.rs).
+    Field::live("llm_usd_per_mtok_in", TOKEN_PRICE, Initial::None),
+    Field::live("llm_usd_per_mtok_out", TOKEN_PRICE, Initial::None),
     Field::restart(
         "board",
         Check::Choice {
@@ -1155,7 +1166,7 @@ mod tests {
             restart,
             ["speech_provider", "listen", "public_url", "board"]
         );
-        assert_eq!(FIELDS.len(), 35);
+        assert_eq!(FIELDS.len(), 37);
         let mut defaults: Vec<_> = built_in_defaults().into_keys().collect();
         defaults.sort();
         let mut want = vec![
@@ -1354,6 +1365,34 @@ mod tests {
         assert_eq!(st.get("zone"), "UTC");
         assert_eq!(st.get("device_name"), "Den");
         assert!(warnings[0].contains("zone"), "{warnings:?}");
+    }
+
+    // REQ-CFG-040
+    // REQ-AST-011: the prices are live, empty by default, and an explicit 0 is kept (free), not dropped.
+    #[test]
+    fn model_prices_are_unset_by_default_zero_is_kept_and_the_range_is_enforced() {
+        let dir = TempDir::new("model-prices");
+        let mut st = open_in(&dir.0, Layer::new(), Layer::new());
+        for k in ["llm_usd_per_mtok_in", "llm_usd_per_mtok_out"] {
+            assert_eq!(is_live(k), Some(true), "{k} applies without a restart");
+            assert!(st.live_values()[k].is_null(), "{k} starts unset");
+            assert!(!built_in_defaults().contains_key(k));
+        }
+        st.change(&json!({"llm_usd_per_mtok_in": 0, "llm_usd_per_mtok_out": 2.5}))
+            .unwrap();
+        let live = st.live_values();
+        assert_eq!(live["llm_usd_per_mtok_in"].as_f64(), Some(0.0));
+        assert_eq!(live["llm_usd_per_mtok_out"].as_f64(), Some(2.5));
+        for (patch, needle) in [
+            (json!({"llm_usd_per_mtok_in": -1}), "0 to 1000"),
+            (json!({"llm_usd_per_mtok_out": 1000.5}), "0 to 1000"),
+            (json!({"llm_usd_per_mtok_out": "free"}), "0 to 1000"),
+        ] {
+            let e = st.change(&patch).unwrap_err();
+            assert!(e.contains(needle), "{patch}: {e}");
+        }
+        st.change(&json!({"llm_usd_per_mtok_in": null})).unwrap();
+        assert!(st.live_values()["llm_usd_per_mtok_in"].is_null());
     }
 
     // REQ-CFG-040

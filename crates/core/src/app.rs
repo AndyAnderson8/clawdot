@@ -8,10 +8,12 @@ use crate::inbox::endpoint::{self, Endpoint, Endpoints, QuietHours};
 use crate::inbox::event::{Event, EventState};
 use crate::inbox::queue::{FilterReason, Inbox, InboxLimits, Ingest, SourceStatus};
 use crate::inbox::reply::{self, Reply, ReplyKind, ReplyQueue};
+use crate::limit::{FailureBudget, FailureLimiter};
 use crate::sched::{Clock, Ts};
 use crate::store::{JsonStore, StoreError};
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Notify;
 
@@ -24,6 +26,16 @@ pub use announce::{AnnounceError, Announcement, Caller, outcome_json};
 pub use ask::{AskEnd, AskError, AskTicket, MAX_PENDING_ASKS};
 use persist::Dirty;
 pub use portal::{Fail, Job, Op, SchedOp};
+
+/// The address of a request from this machine, for tests and local callers that have no peer to name.
+pub const LOCALHOST_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+/// Where the saves stood when a change began (see [`Core::save_mark`]).
+#[derive(Debug, Clone, Copy)]
+pub struct SaveMark {
+    submitted: u64,
+    errors: u64,
+}
 
 /// Adapters available to endpoints, by name.
 #[derive(Debug, Clone, Default)]
@@ -64,10 +76,16 @@ pub struct Limits {
     pub hook_burst: f64,
     /// Sustained requests per second per endpoint.
     pub hook_per_sec: f64,
-    /// Failed authentications that may burst before further attempts are refused.
+    /// Failed authentications one source address may make at once before its further attempts are refused.
     pub auth_fail_burst: f64,
-    /// Sustained failed authentications per second.
+    /// Sustained failed authentications per second, per source address.
     pub auth_fail_per_sec: f64,
+    /// The backstop over all sources together: failures that may burst. Larger than one source can spend.
+    pub auth_fail_overall_burst: f64,
+    /// The backstop's sustained rate per second.
+    pub auth_fail_overall_per_sec: f64,
+    /// Source addresses remembered at once; the table never grows past this.
+    pub auth_fail_sources: usize,
     /// Replies held for bridges.
     pub max_pending_replies: usize,
     /// Seconds a reply waits for a bridge before expiring.
@@ -82,6 +100,9 @@ impl Default for Limits {
             hook_per_sec: 5.0,
             auth_fail_burst: 20.0,
             auth_fail_per_sec: 1.0,
+            auth_fail_overall_burst: 100.0,
+            auth_fail_overall_per_sec: 5.0,
+            auth_fail_sources: 64,
             max_pending_replies: 64,
             reply_ttl_secs: 24 * 3600,
         }
@@ -196,7 +217,8 @@ struct Inner {
     inbox: Inbox,
     replies: ReplyQueue,
     buckets: HashMap<String, Bucket>,
-    auth_failures: Bucket,
+    /// Failed attempts, counted per source address (REQ-SEC-004).
+    auth_failures: FailureLimiter,
 }
 
 /// Test phrases that may wait to be spoken.
@@ -228,6 +250,8 @@ pub struct Core {
     env: crate::env::Env,
     speech_handles: crate::speechio::SpeechHandles,
     speech_origin: std::sync::OnceLock<crate::speech::SpeechOrigin>,
+    /// Saves of the core's own three files that could not be made inline or encoded.
+    save_errors: AtomicU64,
     #[cfg(feature = "hive")]
     hive: std::sync::OnceLock<crate::hive::Hive>,
     #[cfg(feature = "tls")]
@@ -321,10 +345,18 @@ impl Core {
                 inbox,
                 replies,
                 buckets: HashMap::new(),
-                auth_failures: Bucket {
-                    tokens: limits.auth_fail_burst,
-                    last: now,
-                },
+                auth_failures: FailureLimiter::new(
+                    FailureBudget {
+                        burst: limits.auth_fail_burst,
+                        per_sec: limits.auth_fail_per_sec,
+                    },
+                    FailureBudget {
+                        burst: limits.auth_fail_overall_burst,
+                        per_sec: limits.auth_fail_overall_per_sec,
+                    },
+                    limits.auth_fail_sources,
+                    now,
+                ),
             }),
             notify: Notify::new(),
             admin: Mutex::new(crate::admin::Admin::new()),
@@ -340,6 +372,7 @@ impl Core {
             env: crate::env::Env::empty(),
             speech_handles: crate::speechio::SpeechHandles::default(),
             speech_origin: std::sync::OnceLock::new(),
+            save_errors: AtomicU64::new(0),
             #[cfg(feature = "hive")]
             hive: std::sync::OnceLock::new(),
             #[cfg(feature = "tls")]
@@ -457,11 +490,13 @@ impl Core {
     }
 
     fn queue_write(&self, store: &JsonStore, bytes: Result<Vec<u8>, StoreError>) {
-        // A failed write must not lose the in-memory event, but it must not be silent either.
+        // A failed write must not lose the in-memory event, but it must not be silent either, and the caller
+        // that waits for it must hear that it failed.
         let bytes = match bytes {
             Ok(b) => b,
             Err(e) => {
                 crate::diag::error(&format!("could not save {}: {e}", store.path().display()));
+                self.save_errors.fetch_add(1, Ordering::SeqCst);
                 return;
             }
         };
@@ -472,18 +507,46 @@ impl Core {
             None => {
                 if let Err(e) = store.write(&bytes) {
                     crate::diag::error(&format!("could not save {}: {e}", store.path().display()));
+                    self.save_errors.fetch_add(1, Ordering::SeqCst);
                 }
             }
         }
     }
 
-    /// Resolves once every change made so far is on disk. The HTTP layer awaits this before it answers, so a
-    /// webhook, announcement or acknowledgement that was reported as accepted survives a power cut (REQ-INB-004).
-    /// Returns at once when nothing is waiting or the core has no storage.
-    pub async fn durable(&self) {
-        if let Some(w) = &self.writer {
-            w.flushed().await;
+    /// Note where the saves stand, before a change that will be saved. Hand it to [`Core::saved_since`] after
+    /// the change.
+    #[must_use]
+    pub fn save_mark(&self) -> SaveMark {
+        SaveMark {
+            submitted: self.writer.as_ref().map_or(0, |w| w.mark()),
+            errors: self.save_errors.load(Ordering::SeqCst),
         }
+    }
+
+    /// Resolves once every change made to the endpoints, inbox and replies since `mark` is on disk. The HTTP layer
+    /// awaits this before it answers a webhook, announcement, acknowledgement or endpoint change, so one reported
+    /// as accepted survives a power cut (REQ-INB-004) and one that could not be saved is not reported as a success.
+    /// Returns at once when nothing is waiting or the core has no storage.
+    ///
+    /// # Errors
+    /// [`persist::SaveError`] when a write failed. The change stays in memory (it is still announced, answered or
+    /// delivered), but it will not survive a restart.
+    pub async fn saved_since(&self, mark: SaveMark) -> Result<(), persist::SaveError> {
+        if self.save_errors.load(Ordering::SeqCst) != mark.errors {
+            return Err(persist::SaveError { disk_full: false });
+        }
+        let (Some(w), Some(s)) = (&self.writer, &self.stores) else {
+            return Ok(());
+        };
+        let ours = |p: &std::path::Path| {
+            p == s.endpoints.path() || p == s.inbox.path() || p == s.replies.path()
+        };
+        w.flushed_since(mark.submitted, &ours).await?;
+        // An encoding or inline failure that happened while the writer was busy.
+        if self.save_errors.load(Ordering::SeqCst) != mark.errors {
+            return Err(persist::SaveError { disk_full: false });
+        }
+        Ok(())
     }
 
     /// The background writer, for stores outside the core's three (timers, usage counters) that hand it bytes.
@@ -580,17 +643,13 @@ impl Core {
         g: &mut Inner,
         name: &str,
         token: &str,
+        peer: IpAddr,
         now: Ts,
     ) -> Result<Endpoint, HookError> {
         if let Some(ep) = g.endpoints.authenticate(name, token) {
             return Ok(ep.clone());
         }
-        let ok = take(
-            &mut g.auth_failures,
-            now,
-            self.limits.auth_fail_burst,
-            self.limits.auth_fail_per_sec,
-        );
+        let ok = g.auth_failures.spend(peer, now);
         Err(if ok {
             HookError::Unauthorized
         } else {
@@ -598,7 +657,8 @@ impl Core {
         })
     }
 
-    /// Handle a posted event: authenticate, rate-limit, parse, map, filter, queue, persist.
+    /// Handle a posted event: authenticate, rate-limit, parse, map, filter, queue, persist. `peer` is the
+    /// address the request came from; a wrong token is counted against it alone.
     ///
     /// # Errors
     /// See [`HookError`].
@@ -606,11 +666,12 @@ impl Core {
         &self,
         name: &str,
         token: &str,
+        peer: IpAddr,
         body: &[u8],
     ) -> Result<HookOutcome, HookError> {
         let now = self.clock.now();
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, now)?;
+        let ep = self.authenticate(&mut g, name, token, peer, now)?;
         let bucket = g.buckets.entry(ep.name.clone()).or_insert(Bucket {
             tokens: self.limits.hook_burst,
             last: now,
@@ -649,11 +710,12 @@ impl Core {
         &self,
         name: &str,
         token: &str,
+        peer: IpAddr,
         after: u64,
     ) -> Result<Vec<Reply>, HookError> {
         let now = self.clock.now();
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, now)?;
+        let ep = self.authenticate(&mut g, name, token, peer, now)?;
         g.replies.expire(now);
         Ok(g.replies
             .pending_for(&ep.name, after)
@@ -666,10 +728,16 @@ impl Core {
     ///
     /// # Errors
     /// [`HookError::Unauthorized`] or [`HookError::RateLimited`].
-    pub fn bridge_ack(&self, name: &str, token: &str, reply_id: u64) -> Result<bool, HookError> {
+    pub fn bridge_ack(
+        &self,
+        name: &str,
+        token: &str,
+        peer: IpAddr,
+        reply_id: u64,
+    ) -> Result<bool, HookError> {
         let now = self.clock.now();
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, now)?;
+        let ep = self.authenticate(&mut g, name, token, peer, now)?;
         let acked = g.replies.ack(&ep.name, reply_id);
         if acked {
             self.persist(&g, Dirty::REPLIES);
@@ -681,10 +749,11 @@ impl Core {
     ///
     /// # Errors
     /// [`HookError::Unauthorized`] or [`HookError::RateLimited`].
-    pub fn bridge_check(&self, name: &str, token: &str) -> Result<(), HookError> {
+    pub fn bridge_check(&self, name: &str, token: &str, peer: IpAddr) -> Result<(), HookError> {
         let now = self.clock.now();
         let mut g = self.lock();
-        self.authenticate(&mut g, name, token, now).map(|_| ())
+        self.authenticate(&mut g, name, token, peer, now)
+            .map(|_| ())
     }
 
     // ----- web UI administration (REQ-CFG-018..024) -----
@@ -693,16 +762,16 @@ impl Core {
         self.admin.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Spend one attempt from the shared authentication rate limit. False when the budget is used up.
-    fn spend_attempt(&self) -> bool {
+    /// Spend one attempt from `peer`'s authentication budget (and the backstop over everyone). False when either
+    /// is used up.
+    fn spend_attempt(&self, peer: IpAddr) -> bool {
         let now = self.clock.now();
-        let mut g = self.lock();
-        take(
-            &mut g.auth_failures,
-            now,
-            self.limits.auth_fail_burst,
-            self.limits.auth_fail_per_sec,
-        )
+        self.lock().auth_failures.spend(peer, now)
+    }
+
+    /// Give back an attempt that turned out to be a success, so signing in with the right password costs nothing.
+    fn refund_attempt(&self, peer: IpAddr) {
+        self.lock().auth_failures.refund(peer);
     }
 
     /// Tell the administrator logic where the core listens (decides whether open mode is allowed).
@@ -729,7 +798,7 @@ impl Core {
         self.admin_lock().mode()
     }
 
-    /// Whether a request may use the administrator API. Wrong sessions share the authentication rate limit.
+    /// Whether a request may use the administrator API. A wrong session counts against the caller's address.
     ///
     /// # Errors
     /// [`AdminError::SetupRequired`], [`AdminError::NotPrivate`], [`AdminError::Unauthorized`], or
@@ -738,18 +807,20 @@ impl Core {
         let now = self.clock.now();
         let r = self.admin_lock().authorize(bearer, peer, now);
         match r {
-            Err(AdminError::Unauthorized) if !self.spend_attempt() => Err(AdminError::RateLimited),
+            Err(AdminError::Unauthorized) if !self.spend_attempt(peer) => {
+                Err(AdminError::RateLimited)
+            }
             r => r,
         }
     }
 
-    /// Whether setup may proceed from `peer`. Every call spends an attempt, so setup attempts share the
-    /// authentication rate limit (call this before doing any expensive hashing).
+    /// Whether setup may proceed from `peer`. Every call spends an attempt from the peer's budget (call this
+    /// before doing any expensive hashing).
     ///
     /// # Errors
     /// See [`AdminError`].
     pub fn admin_check_setup(&self, peer: IpAddr) -> Result<(), AdminError> {
-        if !self.spend_attempt() {
+        if !self.spend_attempt(peer) {
             return Err(AdminError::RateLimited);
         }
         self.admin_lock().check_setup(peer)
@@ -772,29 +843,39 @@ impl Core {
         self.admin_lock().setup_password(peer, hash, now)
     }
 
-    /// Start a sign-in: spends an attempt and returns the stored hash to verify (do that off the async
-    /// thread, it is deliberately slow).
+    /// Start a sign-in from `peer`: spends an attempt from its budget and returns the stored hash to verify
+    /// (do that off the async thread, it is deliberately slow). The attempt is spent before the check so that
+    /// many sign-ins at once cannot all pass a budget that has one attempt left; [`Core::admin_login_finish`]
+    /// gives it back when the password was right.
     ///
     /// # Errors
     /// [`AdminError::RateLimited`]; [`AdminError::SetupRequired`] or [`AdminError::Unauthorized`] when there
     /// is no password to check.
-    pub fn admin_login_begin(&self) -> Result<String, AdminError> {
-        if !self.spend_attempt() {
+    pub fn admin_login_begin(&self, peer: IpAddr) -> Result<String, AdminError> {
+        if !self.spend_attempt(peer) {
             return Err(AdminError::RateLimited);
         }
         let a = self.admin_lock();
-        match a.mode() {
+        let stored = match a.mode() {
             AdminMode::Setup => Err(AdminError::SetupRequired),
             _ => a.password_hash().ok_or(AdminError::Unauthorized),
+        };
+        drop(a);
+        if stored.is_err() {
+            // Nothing was guessed: there was no password to check.
+            self.refund_attempt(peer);
         }
+        stored
     }
 
-    /// Open a session after the password checked out.
+    /// Open a session after the password checked out, and give back the attempt [`Core::admin_login_begin`]
+    /// spent for `peer`.
     ///
     /// # Errors
     /// If the OS cannot supply random bytes.
-    pub fn admin_login_finish(&self) -> Result<String, AdminError> {
+    pub fn admin_login_finish(&self, peer: IpAddr) -> Result<String, AdminError> {
         let now = self.clock.now();
+        self.refund_attempt(peer);
         self.admin_lock().new_session(now)
     }
 
@@ -803,14 +884,74 @@ impl Core {
         self.admin_lock().end_session(bearer);
     }
 
-    /// Replace the administrator password (the caller has already passed [`Core::check_admin`] and hashed the
-    /// new password). Ends every session and returns a new one.
+    /// Start a password change from `peer` (REQ-CFG-024): spends an attempt from its budget and returns the
+    /// credential the caller must prove it knows, to verify off the async thread (deliberately slow). `None` in
+    /// open mode, where there is no password to prove and the private address is the credential. The caller has
+    /// already passed [`Core::check_admin`].
     ///
     /// # Errors
-    /// Storage and randomness failures.
-    pub fn admin_set_password(&self, hash: String) -> Result<String, AdminError> {
+    /// [`AdminError::RateLimited`]; [`AdminError::SetupRequired`] while no setting exists.
+    pub fn admin_password_begin(&self, peer: IpAddr) -> Result<Option<String>, AdminError> {
+        if !self.spend_attempt(peer) {
+            return Err(AdminError::RateLimited);
+        }
+        let a = self.admin_lock();
+        let stored = match a.mode() {
+            AdminMode::Setup => Err(AdminError::SetupRequired),
+            _ => Ok(a.password_hash()),
+        };
+        drop(a);
+        if !matches!(stored, Ok(Some(_))) {
+            // Open mode (or no setting): nothing was guessed.
+            self.refund_attempt(peer);
+        }
+        stored
+    }
+
+    /// Replace the administrator password (the caller has passed [`Core::check_admin`], proved the current
+    /// password against what [`Core::admin_password_begin`] returned, and hashed the new one). Ends every session
+    /// and returns a new one. `proved` is that credential: if the stored one changed meanwhile (another change
+    /// got in first), nothing is replaced. The attempt `begin` spent is given back. Setting a password in open
+    /// mode, and changing one, are written to the audit log and the problem log.
+    ///
+    /// # Errors
+    /// [`AdminError::WrongCurrent`] when the stored credential is no longer the one that was checked; storage and
+    /// randomness failures.
+    pub fn admin_set_password(
+        &self,
+        peer: IpAddr,
+        proved: Option<&str>,
+        hash: String,
+    ) -> Result<String, AdminError> {
         let now = self.clock.now();
-        self.admin_lock().set_password(hash, now)
+        let mut a = self.admin_lock();
+        if a.password_hash().as_deref() != proved {
+            return Err(AdminError::WrongCurrent);
+        }
+        let r = a.set_password(hash, now);
+        drop(a);
+        self.refund_attempt(peer);
+        match (&r, proved) {
+            (Ok(_), None) => self.audit_admin_event(
+                "admin_password",
+                "administrator password set while the portal was open",
+                "password set in open mode",
+                true,
+            ),
+            (Ok(_), Some(_)) => self.audit_admin_event(
+                "admin_password",
+                "administrator password changed",
+                "password changed",
+                true,
+            ),
+            (Err(_), _) => self.audit_admin_event(
+                "admin_password",
+                "administrator password change failed",
+                "password change failed",
+                false,
+            ),
+        }
+        r
     }
 
     /// Open the local reset window on a device's request (REQ-CFG-069). Returns the seconds it is open.
@@ -833,7 +974,7 @@ impl Core {
     /// [`AdminError::RateLimited`], [`AdminError::NotPrivate`], [`AdminError::WindowClosed`],
     /// [`AdminError::NoPassword`].
     pub fn admin_window_begin(&self, peer: IpAddr) -> Result<(), AdminError> {
-        if !self.spend_attempt() {
+        if !self.spend_attempt(peer) {
             return Err(AdminError::RateLimited);
         }
         let now = self.clock.now();
@@ -855,7 +996,18 @@ impl Core {
 
     /// One line in the problem log and one audit record for an administrator password-reset event. Never a secret.
     fn audit_admin(&self, what: &str, ok: bool) {
-        crate::diag::warn(&format!("administrator reset: {what}"));
+        self.audit_admin_event(
+            "admin_reset",
+            &format!("administrator reset: {what}"),
+            what,
+            ok,
+        );
+    }
+
+    /// One line (`line`) in the problem log and one audit record under `tool`, with the short `what` as its note,
+    /// for an administrator event. Never a secret.
+    fn audit_admin_event(&self, tool: &'static str, line: &str, what: &str, ok: bool) {
+        crate::diag::warn(line);
         if let Some(log) = self.audit.get() {
             let now = self.clock.now();
             log.record(
@@ -865,7 +1017,7 @@ impl Core {
                 "admin",
                 None,
                 &crate::audit::Act {
-                    tool: "admin_reset",
+                    tool,
                     tier: None,
                     args: &serde_json::Value::Null,
                     decision: if ok {
@@ -1131,7 +1283,7 @@ mod tests {
         let (c, _) = core();
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
         let out = c
-            .ingest_hook("claude-code", &token, STOP.as_bytes())
+            .ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
         assert_eq!(out, HookOutcome::Accepted(1));
         let ev = &c.events()[0];
@@ -1146,11 +1298,11 @@ mod tests {
         let (c, _) = core();
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
         assert_eq!(
-            c.ingest_hook("claude-code", "cdt_wrong", b"{}"),
+            c.ingest_hook("claude-code", "cdt_wrong", LOCALHOST_PEER, b"{}"),
             Err(HookError::Unauthorized)
         );
         assert_eq!(
-            c.ingest_hook("no-such", &token, b"{}"),
+            c.ingest_hook("no-such", &token, LOCALHOST_PEER, b"{}"),
             Err(HookError::Unauthorized)
         );
         assert!(c.events().is_empty());
@@ -1162,7 +1314,8 @@ mod tests {
         c.create_endpoint("x", "generic").unwrap();
         let mut limited = false;
         for _ in 0..100 {
-            if c.ingest_hook("x", "cdt_guess", b"{}") == Err(HookError::RateLimited) {
+            if c.ingest_hook("x", "cdt_guess", LOCALHOST_PEER, b"{}") == Err(HookError::RateLimited)
+            {
                 limited = true;
                 break;
             }
@@ -1180,6 +1333,7 @@ mod tests {
             match c.ingest_hook(
                 "x",
                 &token,
+                LOCALHOST_PEER,
                 format!(r#"{{"title":"t{i}","session_ref":"s{i}"}}"#).as_bytes(),
             ) {
                 Ok(_) => accepted += 1,
@@ -1193,7 +1347,8 @@ mod tests {
         );
         clock.0.fetch_add(10, Ordering::Relaxed);
         assert!(
-            c.ingest_hook("x", &token, br#"{"title":"later"}"#).is_ok(),
+            c.ingest_hook("x", &token, LOCALHOST_PEER, br#"{"title":"later"}"#)
+                .is_ok(),
             "tokens refill"
         );
     }
@@ -1203,11 +1358,14 @@ mod tests {
         let (c, _) = core();
         let (_, token) = c.create_endpoint("x", "generic").unwrap();
         assert_eq!(
-            c.ingest_hook("x", &token, b"not json"),
+            c.ingest_hook("x", &token, LOCALHOST_PEER, b"not json"),
             Err(HookError::BadJson)
         );
         let (_, t2) = c.create_endpoint("y", "no-such-adapter").unwrap();
-        assert_eq!(c.ingest_hook("y", &t2, b"{}"), Err(HookError::NoAdapter));
+        assert_eq!(
+            c.ingest_hook("y", &t2, LOCALHOST_PEER, b"{}"),
+            Err(HookError::NoAdapter)
+        );
     }
 
     #[test]
@@ -1215,7 +1373,9 @@ mod tests {
         let (c, _) = core();
         let (_, token) = c.create_endpoint("x", "generic").unwrap();
         c.update_filter("x", |f| f.muted = true);
-        let out = c.ingest_hook("x", &token, br#"{"title":"hi"}"#).unwrap();
+        let out = c
+            .ingest_hook("x", &token, LOCALHOST_PEER, br#"{"title":"hi"}"#)
+            .unwrap();
         assert!(matches!(out, HookOutcome::Filtered(FilterReason::Muted)));
         assert!(c.events().is_empty());
     }
@@ -1224,7 +1384,7 @@ mod tests {
     fn announce_reply_and_the_bridge_round_trip() {
         let (c, _) = core();
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
 
         let next = c.next_announcement(true, 600).unwrap();
@@ -1242,13 +1402,18 @@ mod tests {
         assert_eq!(replied.event_id, next.event.id);
 
         // The bridge pulls it with its own credentials, and only its own.
-        let pending = c.bridge_pending("claude-code", &token, 0).unwrap();
+        let pending = c
+            .bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].session_ref.as_deref(), Some("s1"));
         assert_eq!(pending[0].text, "keep going and add tests");
-        assert!(c.bridge_ack("claude-code", &token, pending[0].id).unwrap());
         assert!(
-            c.bridge_pending("claude-code", &token, 0)
+            c.bridge_ack("claude-code", &token, LOCALHOST_PEER, pending[0].id)
+                .unwrap()
+        );
+        assert!(
+            c.bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
                 .unwrap()
                 .is_empty()
         );
@@ -1258,14 +1423,16 @@ mod tests {
     fn saying_thanks_ill_handle_it_acknowledges_locally_and_tells_the_agent() {
         let (c, _) = core();
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
         let id = c.next_announcement(true, 0).unwrap().event.id;
         c.mark_announced(&[id]);
         c.reply(ReplyKind::Ack, "").unwrap();
         assert_eq!(c.events()[0].state, EventState::Acknowledged);
         assert_eq!(
-            c.bridge_pending("claude-code", &token, 0).unwrap()[0].kind,
+            c.bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
+                .unwrap()[0]
+                .kind,
             ReplyKind::Ack
         );
         assert_eq!(
@@ -1289,15 +1456,27 @@ mod tests {
         let (c, _) = core();
         let (_, a) = c.create_endpoint("a", "generic").unwrap();
         let (_, b) = c.create_endpoint("b", "generic").unwrap();
-        c.ingest_hook("a", &a, br#"{"title":"for a","session_ref":"sa"}"#)
-            .unwrap();
+        c.ingest_hook(
+            "a",
+            &a,
+            LOCALHOST_PEER,
+            br#"{"title":"for a","session_ref":"sa"}"#,
+        )
+        .unwrap();
         let id = c.next_announcement(true, 0).unwrap().event.id;
         c.mark_announced(&[id]);
         c.reply(ReplyKind::Instruct, "x").unwrap();
-        assert!(c.bridge_pending("b", &b, 0).unwrap().is_empty());
-        assert_eq!(c.bridge_pending("a", &a, 0).unwrap().len(), 1);
+        assert!(
+            c.bridge_pending("b", &b, LOCALHOST_PEER, 0)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            c.bridge_pending("a", &b, 0),
+            c.bridge_pending("a", &a, LOCALHOST_PEER, 0).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            c.bridge_pending("a", &b, LOCALHOST_PEER, 0),
             Err(HookError::Unauthorized),
             "b's token is not a's"
         );
@@ -1314,6 +1493,7 @@ mod tests {
             .ingest_hook(
                 "agent",
                 &old,
+                LOCALHOST_PEER,
                 format!(r#"{{"title":"t{n}","session_ref":"s{n}"}}"#).as_bytes(),
             )
             .is_ok()
@@ -1324,7 +1504,7 @@ mod tests {
         c.revoke_endpoint("agent").unwrap();
         let (_, new) = c.create_endpoint("agent", "generic").unwrap();
         assert!(
-            c.ingest_hook("agent", &new, br#"{"title":"fresh"}"#)
+            c.ingest_hook("agent", &new, LOCALHOST_PEER, br#"{"title":"fresh"}"#)
                 .is_ok(),
             "the new endpoint was throttled by the old one's use"
         );
@@ -1336,21 +1516,38 @@ mod tests {
     fn a_recreated_endpoint_inherits_no_replies_and_no_events() {
         let (c, _) = core();
         let (_, old) = c.create_endpoint("agent", "generic").unwrap();
-        c.ingest_hook("agent", &old, br#"{"title":"first","session_ref":"s1"}"#)
-            .unwrap();
+        c.ingest_hook(
+            "agent",
+            &old,
+            LOCALHOST_PEER,
+            br#"{"title":"first","session_ref":"s1"}"#,
+        )
+        .unwrap();
         let first = c.next_announcement(true, 0).unwrap().event.id;
         c.mark_announced(&[first]);
         c.reply(ReplyKind::Instruct, "private to the old agent")
             .unwrap();
-        c.ingest_hook("agent", &old, br#"{"title":"second","session_ref":"s2"}"#)
-            .unwrap();
-        assert_eq!(c.bridge_pending("agent", &old, 0).unwrap().len(), 1);
+        c.ingest_hook(
+            "agent",
+            &old,
+            LOCALHOST_PEER,
+            br#"{"title":"second","session_ref":"s2"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            c.bridge_pending("agent", &old, LOCALHOST_PEER, 0)
+                .unwrap()
+                .len(),
+            1
+        );
 
         c.revoke_endpoint("agent").unwrap();
         let (_, new) = c.create_endpoint("agent", "generic").unwrap();
 
         assert!(
-            c.bridge_pending("agent", &new, 0).unwrap().is_empty(),
+            c.bridge_pending("agent", &new, LOCALHOST_PEER, 0)
+                .unwrap()
+                .is_empty(),
             "the new endpoint got the old one's replies"
         );
         assert!(c.events().is_empty(), "queued events outlived the endpoint");
@@ -1368,8 +1565,13 @@ mod tests {
     fn dismissing_and_snoozing_the_current_event() {
         let (c, clock) = core();
         let (_, token) = c.create_endpoint("x", "generic").unwrap();
-        c.ingest_hook("x", &token, br#"{"title":"one","session_ref":"1"}"#)
-            .unwrap();
+        c.ingest_hook(
+            "x",
+            &token,
+            LOCALHOST_PEER,
+            br#"{"title":"one","session_ref":"1"}"#,
+        )
+        .unwrap();
         let id = c.next_announcement(true, 0).unwrap().event.id;
         c.mark_announced(&[id]);
         assert!(c.snooze_current(600));
@@ -1386,8 +1588,13 @@ mod tests {
     fn a_huge_snooze_postpones_for_good_instead_of_overflowing() {
         let (c, _) = core();
         let (_, token) = c.create_endpoint("x", "generic").unwrap();
-        c.ingest_hook("x", &token, br#"{"title":"one","session_ref":"1"}"#)
-            .unwrap();
+        c.ingest_hook(
+            "x",
+            &token,
+            LOCALHOST_PEER,
+            br#"{"title":"one","session_ref":"1"}"#,
+        )
+        .unwrap();
         let id = c.next_announcement(true, 0).unwrap().event.id;
         c.mark_announced(&[id]);
         assert!(c.snooze_current(i64::MAX));
@@ -1424,7 +1631,7 @@ mod tests {
         let c = open_in(&dir);
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
         assert_eq!(written(&c, &dir), ["endpoints.json"], "a new endpoint");
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
         assert_eq!(written(&c, &dir), ["inbox.json"], "a posted event");
         let id = c.next_announcement(true, 0).unwrap().event.id;
@@ -1432,8 +1639,14 @@ mod tests {
         assert_eq!(written(&c, &dir), ["inbox.json"], "an announcement");
         c.reply(ReplyKind::Instruct, "go on").unwrap();
         assert_eq!(written(&c, &dir), ["replies.json"], "an instruction");
-        let reply = c.bridge_pending("claude-code", &token, 0).unwrap()[0].id;
-        assert!(c.bridge_ack("claude-code", &token, reply).unwrap());
+        let reply = c
+            .bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
+            .unwrap()[0]
+            .id;
+        assert!(
+            c.bridge_ack("claude-code", &token, LOCALHOST_PEER, reply)
+                .unwrap()
+        );
         assert_eq!(written(&c, &dir), ["replies.json"], "a bridge ack");
         c.reply(ReplyKind::Ack, "").unwrap();
         assert_eq!(
@@ -1456,7 +1669,7 @@ mod tests {
         )
         .unwrap();
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
         let id = c.next_announcement(true, 0).unwrap().event.id;
         c.mark_announced(&[id]);
@@ -1473,7 +1686,7 @@ mod tests {
         let dir = TempDir::new("compact");
         let c = open_in(&dir);
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
         c.flush_blocking();
         for f in ["endpoints.json", "inbox.json"] {
@@ -1489,9 +1702,10 @@ mod tests {
         let dir = TempDir::new("durable");
         let c = open_in(&dir);
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+        let mark = c.save_mark();
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
-        c.durable().await;
+        c.saved_since(mark).await.unwrap();
         // No flush_blocking: awaiting durable() alone is what the HTTP layer does before it answers.
         let text = std::fs::read_to_string(dir.0.join("inbox.json")).unwrap();
         assert!(text.contains("clawdot finished"));
@@ -1511,7 +1725,7 @@ mod tests {
             )
             .unwrap();
             token = c.create_endpoint("claude-code", "claude-code").unwrap().1;
-            c.ingest_hook("claude-code", &token, STOP.as_bytes())
+            c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
                 .unwrap();
             let id = c.next_announcement(true, 0).unwrap().event.id;
             c.mark_announced(&[id]);
@@ -1526,21 +1740,172 @@ mod tests {
         .unwrap();
         assert_eq!(c.events().len(), 1);
         assert_eq!(
-            c.bridge_pending("claude-code", &token, 0).unwrap()[0].text,
+            c.bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
+                .unwrap()[0]
+                .text,
             "carry on"
         );
         assert!(
-            c.ingest_hook("claude-code", &token, STOP.as_bytes())
+            c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
                 .is_ok(),
             "the old token still works"
         );
+    }
+
+    fn peer(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    // REQ-SEC-004: failed attempts are counted per source address. One host that guesses until it is refused does
+    // not stop another host presenting the right token, nor the administrator signing in with the right password.
+    #[test]
+    fn one_hosts_bad_guesses_do_not_lock_out_another_host() {
+        let (c, _) = core();
+        let (_, token) = c.create_endpoint("x", "generic").unwrap();
+        let hash = crate::admin::hash_password("correct horse").unwrap();
+        c.admin_setup_password(peer("192.168.1.2"), hash.clone())
+            .unwrap();
+        let (a, b) = (peer("192.168.1.10"), peer("192.168.1.11"));
+        let mut n = 0;
+        while c.ingest_hook("x", "cdt_guess", a, b"{}") != Err(HookError::RateLimited) {
+            n += 1;
+            assert!(n <= 20, "never throttled");
+        }
+        assert_eq!(n, 20, "the per-address burst");
+        // A is throttled everywhere: hooks, bridges, announcements, sessions, sign-in.
+        assert_eq!(
+            c.bridge_check("x", "cdt_guess", a),
+            Err(HookError::RateLimited)
+        );
+        assert_eq!(
+            c.announce_check("cdt_guess", a),
+            Err(HookError::RateLimited)
+        );
+        assert_eq!(
+            c.check_admin(Some("wrong"), a),
+            Err(AdminError::RateLimited)
+        );
+        assert_eq!(c.admin_login_begin(a), Err(AdminError::RateLimited));
+        // B is not touched.
+        assert_eq!(
+            c.ingest_hook("x", "cdt_guess", b, b"{}"),
+            Err(HookError::Unauthorized)
+        );
+        assert!(c.ingest_hook("x", &token, b, br#"{"title":"hi"}"#).is_ok());
+        assert_eq!(c.admin_login_begin(b).unwrap(), hash);
+        assert!(c.admin_login_finish(b).is_ok());
+    }
+
+    // A good sign-in is not charged, and one's own earlier failures cost only the usual throttle.
+    #[test]
+    fn a_successful_sign_in_gives_its_attempt_back() {
+        let (c, _) = core();
+        let hash = crate::admin::hash_password("correct horse").unwrap();
+        c.admin_setup_password(peer("192.168.1.2"), hash).unwrap();
+        let a = peer("192.168.1.10");
+        for _ in 0..19 {
+            assert_eq!(
+                c.ingest_hook("x", "cdt_guess", a, b"{}"),
+                Err(HookError::Unauthorized)
+            );
+        }
+        // One attempt left: the right password signs in, and gets it back, many times over.
+        for _ in 0..5 {
+            c.admin_login_begin(a).unwrap();
+            c.admin_login_finish(a).unwrap();
+        }
+        // Spent for real: the 20th bad guess, then refused, right password or not.
+        assert_eq!(
+            c.ingest_hook("x", "cdt_guess", a, b"{}"),
+            Err(HookError::Unauthorized)
+        );
+        assert_eq!(c.admin_login_begin(a), Err(AdminError::RateLimited));
+    }
+
+    // Many addresses together hit the backstop; one address never reaches it.
+    #[test]
+    fn the_overall_backstop_exists_and_one_address_cannot_reach_it() {
+        let (c, _) = core();
+        let a = peer("203.0.113.1");
+        for _ in 0..1000 {
+            let _ = c.ingest_hook("x", "cdt_guess", a, b"{}");
+        }
+        assert_eq!(
+            c.ingest_hook("x", "cdt_guess", peer("203.0.113.2"), b"{}"),
+            Err(HookError::Unauthorized),
+            "one noisy address left the others their share"
+        );
+        // Enough different addresses use up the shared ceiling (100); then even a new address is refused.
+        let mut refused = false;
+        for i in 0..64u8 {
+            let p = IpAddr::from([198, 51, 100, i]);
+            for _ in 0..20 {
+                if c.ingest_hook("x", "cdt_guess", p, b"{}") == Err(HookError::RateLimited) {
+                    refused = true;
+                }
+            }
+        }
+        assert!(refused, "the shared ceiling never applied");
+        assert_eq!(
+            c.ingest_hook("x", "cdt_guess", peer("198.51.100.200"), b"{}"),
+            Err(HookError::RateLimited)
+        );
+    }
+
+    #[test]
+    fn the_table_of_sources_stays_bounded_under_ten_thousand_addresses() {
+        let (c, clock) = core();
+        for i in 0..10_000u32 {
+            let p = IpAddr::from([10, (i >> 16) as u8, (i >> 8) as u8, i as u8]);
+            let _ = c.ingest_hook("x", "cdt_guess", p, b"{}");
+            if i % 50 == 0 {
+                clock.0.fetch_add(10, Ordering::Relaxed);
+            }
+            assert!(c.lock().auth_failures.tracked() <= c.limits().auth_fail_sources);
+        }
+    }
+
+    #[test]
+    fn saved_since_reports_a_write_that_failed_and_then_one_that_did_not() {
+        let dir = TempDir::new("save-outcome");
+        let c = open_in(&dir);
+        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
+        c.flush_blocking();
+        let blocker = crate::store::temp_path(&dir.0.join("inbox.json"));
+        std::fs::create_dir(&blocker).unwrap();
+        let mark = c.save_mark();
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
+            .unwrap();
+        let r = futures_lite_block(c.saved_since(mark));
+        assert_eq!(r, Err(persist::SaveError { disk_full: false }));
+        assert_eq!(c.events().len(), 1, "the event is still held in memory");
+        // An unrelated file's failure is not ours, and once saving works the next change reports success.
+        std::fs::remove_dir(&blocker).unwrap();
+        let mark = c.save_mark();
+        c.ingest_hook(
+            "claude-code",
+            &token,
+            LOCALHOST_PEER,
+            STOP.replace("s1", "s2").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(futures_lite_block(c.saved_since(mark)), Ok(()));
+    }
+
+    /// Run a future to its end on a throwaway runtime (these tests have none of their own).
+    fn futures_lite_block<T>(f: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
     }
 
     #[test]
     fn status_reports_what_is_open() {
         let (c, _) = core();
         let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
         let st = c.status();
         // The roll-up names the endpoint, not the label the payload or adapter carries.
@@ -1561,7 +1926,7 @@ mod tests {
         // Every field a payload could carry that looks like an origin.
         let payload = r#"{"hook_event_name":"Stop","session_id":"s1","cwd":"/ClawDot",
             "source":"ClawDot","from":"Mum","name":"the bank","title":"ClawDot"}"#;
-        c.ingest_hook("claude-code", &token, payload.as_bytes())
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, payload.as_bytes())
             .unwrap();
         let ev = c.next_announcement(true, 0).unwrap().event;
         let line = crate::inbox::summary::announcement(&ev, "", 0);

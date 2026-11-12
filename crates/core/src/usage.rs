@@ -1,18 +1,68 @@
 //! Usage limits for the language model (REQ-AST-011).
 //!
 //! An always-on device calling a paid API needs a guardrail. Limits are per local day: a request
-//! count and an optional spend cap derived from the cost the provider reports. When a limit is reached
-//! the assistant says so and local features (timers, alarms, the fast path) keep working.
+//! count and an optional spend cap. When a limit is reached the assistant says so and local features
+//! (timers, alarms, the fast path) keep working.
+//!
+//! The spend cap has to work with every provider, and most do not say what a request cost. So each model
+//! request is priced by the first rule that applies:
+//!
+//! 1. the cost the provider reported, when it is there and above zero (`reported`);
+//! 2. otherwise the tokens the provider reported times the prices the person set (`priced`);
+//! 3. otherwise an estimate, `estimated`: tokens counted from the bytes sent and received, rounded up
+//!    ([`BYTES_PER_TOKEN`]), and/or the built-in prices below for a side whose price is not set.
+//!
+//! A price set to 0 is a price ("this server is free"): it gives zero cost, labelled `priced`.
 
 use crate::app::persist::Writer;
-use crate::llm::Usage;
+use crate::llm::{ChatRequest, Completion, Usage};
 use crate::store::{JsonStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// Schema version of the persisted usage counters.
+/// Schema version of the persisted usage counters. The counters only ever gained optional fields, which an
+/// older file lacks and reads as empty, so the version has not changed.
 pub const SCHEMA: u32 = 1;
+
+/// Price per million prompt tokens used while none is set, in US dollars. Deliberately high: the dearest
+/// mainstream chat models are priced at or under this (a flagship at about $5 to $15 in, a mid-range one
+/// about $1 to $3), so a person who has set nothing meets the cap early rather than late. Enter the real
+/// price and the cap follows the real spend.
+pub const DEFAULT_USD_PER_MTOK_IN: f64 = 10.0;
+/// Price per million generated tokens used while none is set, in US dollars. Output costs four to five times
+/// the input on the mainstream models (a flagship $15 to $75, a mid-range one $10 to $15); see
+/// [`DEFAULT_USD_PER_MTOK_IN`] for why this is set at the top.
+pub const DEFAULT_USD_PER_MTOK_OUT: f64 = 40.0;
+
+/// Bytes counted as one token when the provider reported no token counts. English prose runs near four bytes
+/// a token, JSON (the tool specifications go out with each round) and code near three, and Chinese or
+/// Japanese text about three bytes for one or two tokens. Three is therefore never low for a mix of these.
+pub const BYTES_PER_TOKEN: usize = 3;
+
+/// What today's spend rests on, weakest last. The portal says "an estimate" for [`Basis::Estimated`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Basis {
+    /// Every cost was reported by the provider.
+    Reported,
+    /// Some cost is the provider's token counts times the person's own prices.
+    Priced,
+    /// Some cost rests on the built-in prices or on tokens counted from sizes.
+    Estimated,
+}
+
+impl Basis {
+    /// The word used in the status snapshot.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reported => "reported",
+            Self::Priced => "priced",
+            Self::Estimated => "estimated",
+        }
+    }
+}
 
 /// Configured limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,6 +74,10 @@ pub struct UsageLimits {
     pub max_requests_per_day: u32,
     /// Spend allowed per local day, in US dollars, if set.
     pub daily_spend_cap_usd: Option<f64>,
+    /// What the person pays per million prompt tokens; `None` is unset (the built-in price applies), 0 is free.
+    pub llm_usd_per_mtok_in: Option<f64>,
+    /// What the person pays per million generated tokens; `None` is unset, 0 is free.
+    pub llm_usd_per_mtok_out: Option<f64>,
 }
 
 impl Default for UsageLimits {
@@ -32,8 +86,71 @@ impl Default for UsageLimits {
             max_output_tokens_per_turn: 300,
             max_requests_per_day: u32::MAX,
             daily_spend_cap_usd: None,
+            llm_usd_per_mtok_in: None,
+            llm_usd_per_mtok_out: None,
         }
     }
+}
+
+/// Tokens in `bytes` when only the size is known, rounded up.
+fn estimated_tokens(bytes: usize) -> f64 {
+    bytes.div_ceil(BYTES_PER_TOKEN) as f64
+}
+
+/// One side (prompt or reply) of a request: its cost in millionths of a dollar and what that rests on.
+/// `reported` is the provider's token count (0 when it gave none), `bytes` the size, `price` the person's.
+fn side_cost(reported: u32, bytes: usize, price: Option<f64>, default: f64) -> (f64, Basis) {
+    let counted = reported > 0;
+    let tokens = if counted {
+        f64::from(reported)
+    } else {
+        estimated_tokens(bytes)
+    };
+    if tokens == 0.0 {
+        return (0.0, Basis::Reported); // nothing was sent or said: nothing to rest on
+    }
+    let set = price.filter(|p| p.is_finite() && *p >= 0.0);
+    let per_mtok = set.unwrap_or(default);
+    // dollars per million tokens times tokens is millionths of a dollar
+    let micro = tokens * per_mtok;
+    let basis = match set {
+        None => Basis::Estimated,
+        Some(p) if counted || p == 0.0 => Basis::Priced,
+        Some(_) => Basis::Estimated,
+    };
+    (micro, basis)
+}
+
+/// The cost of one model request in millionths of a dollar, and its basis, by the rules in the module docs.
+/// `sent` and `got` are the request's and the reply's sizes in bytes.
+#[must_use]
+pub fn price_request(
+    limits: &UsageLimits,
+    usage: Option<&Usage>,
+    sent: usize,
+    got: usize,
+) -> (u64, Basis) {
+    if let Some(cost) = usage
+        .and_then(|u| u.cost_usd)
+        .filter(|c| c.is_finite() && *c > 0.0)
+    {
+        return ((cost * 1_000_000.0).round() as u64, Basis::Reported);
+    }
+    let (in_tokens, out_tokens) = usage.map_or((0, 0), |u| (u.prompt_tokens, u.completion_tokens));
+    let (a, ab) = side_cost(
+        in_tokens,
+        sent,
+        limits.llm_usd_per_mtok_in,
+        DEFAULT_USD_PER_MTOK_IN,
+    );
+    let (b, bb) = side_cost(
+        out_tokens,
+        got,
+        limits.llm_usd_per_mtok_out,
+        DEFAULT_USD_PER_MTOK_OUT,
+    );
+    // Rounded up: a request is never free for being small.
+    ((a + b).ceil() as u64, ab.max(bb))
 }
 
 /// Which limit stopped a request.
@@ -80,6 +197,10 @@ struct State {
     /// The days before today that made requests, oldest first.
     #[serde(default)]
     history: Vec<PastDay>,
+    /// The weakest basis any of today's cost rests on; `None` before today has cost anything. A file from
+    /// before this field existed has none, which reads as unknown until the next cost is added.
+    #[serde(default)]
+    basis: Option<Basis>,
 }
 
 /// The limits and the counters they are held against.
@@ -107,8 +228,15 @@ impl Cell {
                 requests: 0,
                 micro_usd: 0,
                 history,
+                basis: None,
             };
         }
+    }
+
+    /// Add `micro` millionths of a dollar that rest on `basis`.
+    fn charge(&mut self, micro: u64, basis: Basis) {
+        self.state.micro_usd = self.state.micro_usd.saturating_add(micro);
+        self.state.basis = self.state.basis.max(Some(basis));
     }
 }
 
@@ -196,33 +324,55 @@ impl UsageTracker {
         Ok(())
     }
 
-    /// Record one request and its reported cost.
-    pub fn record(&self, day: i64, usage: Option<&Usage>) {
+    /// Count one request that cost nothing we can know: it failed (a request the provider refused is not
+    /// billed), or it is a realtime session, whose audio is added by [`Self::add_cost`].
+    pub fn record_request(&self, day: i64) {
         let mut c = self.cell();
         c.roll(day);
         c.state.requests = c.state.requests.saturating_add(1);
-        if let Some(cost) = usage
-            .and_then(|u| u.cost_usd)
-            .filter(|cost| cost.is_finite() && *cost > 0.0)
-        {
-            c.state.micro_usd = c
-                .state
-                .micro_usd
-                .saturating_add((cost * 1_000_000.0).round() as u64);
-        }
+    }
+
+    /// Count one finished request and price it (see [`price_request`]). `sent` and `got` are the sizes in
+    /// bytes of the request and of the reply.
+    pub fn record_sized(&self, day: i64, usage: Option<&Usage>, sent: usize, got: usize) {
+        let mut c = self.cell();
+        c.roll(day);
+        c.state.requests = c.state.requests.saturating_add(1);
+        let (micro, basis) = price_request(&c.limits, usage, sent, got);
+        c.charge(micro, basis);
+    }
+
+    /// Count a request that was answered, and price it from what the provider reported and the sizes.
+    pub fn record_reply(&self, day: i64, req: &ChatRequest, reply: &Completion) {
+        self.record_sized(
+            day,
+            reply.usage.as_ref(),
+            req.sent_bytes(),
+            reply.received_bytes(),
+        );
+    }
+
+    /// Count a request that was abandoned while in flight. The provider has the prompt and may bill all
+    /// of it, so the prompt is priced from its size and nothing is assumed of the reply.
+    pub fn record_abandoned(&self, day: i64, req: &ChatRequest) {
+        self.record_sized(day, None, req.sent_bytes(), 0);
     }
 
     /// Add spend that is not a model request, such as the audio time of a realtime voice session
-    /// (REQ-RTV-004). The request count is not changed; the daily spend cap sees the cost.
+    /// (REQ-RTV-004). The request count is not changed; the daily spend cap sees the cost. It is the
+    /// measured time at the configured rates, so it counts as priced.
     pub fn add_cost(&self, day: i64, usd: f64) {
         let mut c = self.cell();
         c.roll(day);
         if usd.is_finite() && usd > 0.0 {
-            c.state.micro_usd = c
-                .state
-                .micro_usd
-                .saturating_add((usd * 1_000_000.0).round() as u64);
+            c.charge((usd * 1_000_000.0).round() as u64, Basis::Priced);
         }
+    }
+
+    /// What today's spend rests on, or `None` before anything today has cost money.
+    #[must_use]
+    pub fn basis(&self) -> Option<Basis> {
+        self.cell().state.basis
     }
 
     /// The local day the counters are for, and the requests each recent day made, today last.
@@ -255,131 +405,4 @@ impl UsageTracker {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::testutil::TempDir;
-
-    #[test]
-    fn added_cost_counts_toward_the_spend_cap_without_counting_a_request() {
-        let t = UsageTracker::new(UsageLimits {
-            daily_spend_cap_usd: Some(0.10),
-            ..UsageLimits::default()
-        });
-        t.add_cost(1, 0.04);
-        t.add_cost(1, f64::NAN);
-        t.add_cost(1, -5.0);
-        assert_eq!(t.requests_today(), 0);
-        assert!(t.check(1).is_ok());
-        t.add_cost(1, 0.07);
-        assert_eq!(t.check(1), Err(LimitReached::Spend));
-        assert_eq!(t.check(2), Ok(()), "a new day starts at zero");
-    }
-
-    fn usage(cost: Option<f64>) -> Usage {
-        Usage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            cost_usd: cost,
-        }
-    }
-
-    #[test]
-    fn past_days_are_kept_for_the_chart() {
-        let t = UsageTracker::new(UsageLimits::default());
-        t.record(100, None);
-        t.record(100, None);
-        t.record(102, None);
-        let (today, days) = t.request_days();
-        assert_eq!(today, 102);
-        assert_eq!(
-            days,
-            vec![(100, 2), (102, 1)],
-            "a day with no requests is not listed"
-        );
-        for d in 103..160 {
-            t.record(d, None);
-        }
-        assert!(
-            t.request_days().1.len() <= KEEP_DAYS + 1,
-            "only recent days are kept"
-        );
-    }
-
-    #[test]
-    fn the_request_cap_stops_requests_and_resets_the_next_day() {
-        let t = UsageTracker::new(UsageLimits {
-            max_requests_per_day: 2,
-            ..UsageLimits::default()
-        });
-        for _ in 0..2 {
-            t.check(100).unwrap();
-            t.record(100, None);
-        }
-        assert_eq!(t.check(100), Err(LimitReached::Requests));
-        assert!(t.check(101).is_ok(), "a new local day starts fresh");
-        assert_eq!(t.requests_today(), 0);
-    }
-
-    #[test]
-    fn the_spend_cap_uses_the_cost_the_provider_reports() {
-        let t = UsageTracker::new(UsageLimits {
-            daily_spend_cap_usd: Some(0.01),
-            ..UsageLimits::default()
-        });
-        t.record(1, Some(&usage(Some(0.004))));
-        assert!(t.check(1).is_ok());
-        t.record(1, Some(&usage(Some(0.007))));
-        assert_eq!(t.check(1), Err(LimitReached::Spend));
-        assert!((t.spend_today() - 0.011).abs() < 1e-9);
-    }
-
-    #[test]
-    fn bad_cost_values_are_ignored() {
-        let t = UsageTracker::new(UsageLimits::default());
-        for c in [f64::NAN, f64::INFINITY, -1.0] {
-            t.record(1, Some(&usage(Some(c))));
-        }
-        assert_eq!(t.spend_today(), 0.0);
-        assert_eq!(t.requests_today(), 3);
-    }
-
-    // REQ-AST-011: turns that run side by side count into the same counters, so the cap sees all of them.
-    #[test]
-    fn clones_count_into_the_same_counters_and_see_the_same_cap() {
-        let a = UsageTracker::new(UsageLimits {
-            daily_spend_cap_usd: Some(0.10),
-            ..UsageLimits::default()
-        });
-        let b = a.clone();
-        a.record(5, Some(&usage(Some(0.06))));
-        b.record(5, Some(&usage(Some(0.05))));
-        assert_eq!(a.requests_today(), 2);
-        assert_eq!(a.check(5), Err(LimitReached::Spend));
-        assert_eq!(b.check(5), Err(LimitReached::Spend));
-        b.set_limits(UsageLimits::default());
-        assert!(
-            a.check(5).is_ok(),
-            "a change of limits reaches every handle"
-        );
-    }
-
-    #[test]
-    fn the_message_says_what_still_works() {
-        assert!(
-            LimitReached::Requests
-                .to_string()
-                .contains("Timers, alarms")
-        );
-    }
-
-    #[test]
-    fn counters_survive_a_restart() {
-        let dir = TempDir::new("usage");
-        let store = JsonStore::new(dir.0.join("usage.json"), SCHEMA);
-        let t = UsageTracker::new(UsageLimits::default());
-        t.record(7, Some(&usage(Some(0.5))));
-        t.save(&store).unwrap();
-        let back = UsageTracker::load(&store, UsageLimits::default()).unwrap();
-        assert_eq!((back.requests_today(), back.spend_today()), (1, 0.5));
-    }
-}
+mod tests;

@@ -173,6 +173,8 @@ pub enum AdminError {
     NoPassword,
     /// The local reset window is not open.
     WindowClosed,
+    /// A password change did not prove the current password: it was missing or wrong.
+    WrongCurrent,
 }
 
 impl std::fmt::Display for AdminError {
@@ -189,6 +191,7 @@ impl std::fmt::Display for AdminError {
             Self::NoRandomness => "no randomness available",
             Self::NoPassword => "no password is set",
             Self::WindowClosed => "the reset window is not open",
+            Self::WrongCurrent => "the current password is missing or wrong",
         })
     }
 }
