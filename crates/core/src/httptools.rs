@@ -14,8 +14,8 @@ use crate::llm::ToolSpec;
 use crate::session::{Risk, Tier};
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::{Method, Request};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -415,12 +415,8 @@ impl HttpTools {
             .and_then(|(_, r)| r.find(['/', '?']).map(|i| r[i..].to_owned()))
             .unwrap_or_else(|| "/".into());
         let method = Method::from_bytes(def.method.as_bytes()).map_err(|e| e.to_string())?;
-        let mut req = Request::builder()
-            .method(method)
-            .uri(path)
-            .header("host", endpoint.host_header())
-            .header("connection", "close")
-            .header("user-agent", "clawdot")
+        let mut req = endpoint
+            .request_builder(method, &path, "clawdot")
             .header("accept", "application/json, text/plain");
         for (k, v) in &def.headers {
             req = req.header(k, v);

@@ -20,8 +20,8 @@ use crate::llm::ToolSpec;
 use crate::session::{Risk, Tier, ToolHost};
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::{Method, Request};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -456,18 +456,16 @@ impl McpClient {
         if let Some(id) = id {
             msg["id"] = json!(id);
         }
-        let mut req = Request::builder()
-            .method(Method::POST)
-            .uri(if s.endpoint.base.is_empty() {
-                "/".to_owned()
-            } else {
-                s.endpoint.base.clone()
-            })
-            .header("host", s.endpoint.host_header())
+        let path = if s.endpoint.base.is_empty() {
+            "/"
+        } else {
+            s.endpoint.base.as_str()
+        };
+        let mut req = s
+            .endpoint
+            .request_builder(Method::POST, path, "clawdot")
             .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .header("connection", "close")
-            .header("user-agent", "clawdot");
+            .header("accept", "application/json, text/event-stream");
         if method != "initialize" {
             req = req.header("mcp-protocol-version", PROTOCOL_REVISION);
         }

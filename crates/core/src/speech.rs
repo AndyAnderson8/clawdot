@@ -15,8 +15,8 @@ use crate::secrets::Secrets;
 use crate::transport::{Connector, Endpoint};
 use crate::voice::{Synthesizer, Transcriber};
 use http_body_util::{BodyExt, Full};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::{Method, Request};
 use serde_json::{Value, json};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -494,13 +494,10 @@ impl Client {
         } else {
             base.strip_suffix("/v1").unwrap_or(base)
         };
-        let mut req = Request::builder()
-            .method(method)
-            .uri(format!("{base}{path}"))
-            .header("host", self.endpoint.host_header())
-            .header("content-type", content_type)
-            .header("connection", "close")
-            .header("user-agent", "clawdot");
+        let mut req = self
+            .endpoint
+            .request_builder(method, &format!("{base}{path}"), "clawdot")
+            .header("content-type", content_type);
         let key = self.current_key();
         if key.is_empty() && self.dialect.needs_key() {
             return Err(ProviderError::NoKey(format!(

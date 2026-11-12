@@ -9,9 +9,9 @@
 
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full, Limited};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::header::{ACCEPT, HOST, LOCATION, USER_AGENT};
-use hyper::{Method, Request};
+use hyper::header::{ACCEPT, LOCATION};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -442,17 +442,13 @@ impl Updater {
             if !ep.tls && !is_loopback(&ep.host) {
                 return Err("updates are only fetched over https".into());
             }
-            let host = ep.host_header();
             let path = if ep.base.is_empty() {
                 "/"
             } else {
                 ep.base.as_str()
             };
-            let req = Request::builder()
-                .method(Method::GET)
-                .uri(path)
-                .header(HOST, host)
-                .header(USER_AGENT, format!("clawdot/{CURRENT}"))
+            let req = ep
+                .request_builder(Method::GET, path, &format!("clawdot/{CURRENT}"))
                 .header(ACCEPT, accept)
                 .body(Full::new(Bytes::new()))
                 .map_err(|e| format!("bad request: {e}"))?;
