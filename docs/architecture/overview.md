@@ -121,7 +121,7 @@ The device never calls out to agent hosts; the bridge pulls. Reply types are `ac
 |---|---|---|
 | Config | `config.toml` | n/a |
 | Timers, alarms, reminders | JSON file, atomic write | max items configurable |
-| Inbox events | Append log with compaction | max N events / bytes |
+| Inbox events | Append log with compaction | max N events / bytes; when full, the endpoint holding more than half the queue gives up events first, so one token holder cannot evict another endpoint's events |
 | Endpoint tokens | Config (hashed) | n/a |
 | Conversation history | Memory only | token and byte capped |
 | Logs | Ring buffer + optional file | bytes capped |
