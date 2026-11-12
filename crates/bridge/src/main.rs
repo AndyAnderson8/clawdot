@@ -152,7 +152,7 @@ fn main() -> ExitCode {
         endpoint: args.endpoint,
         token,
         read_timeout: Duration::from_secs(45),
-        claude: args.claude,
+        harness: Box::new(args.claude),
     };
     let mut runner: Box<dyn Runner> = if args.dry_run {
         Box::new(DryRunner)

@@ -56,6 +56,9 @@ pub enum Ingest {
 pub struct InboxState {
     next_id: u64,
     events: Vec<Event>,
+    /// The last value given to an event's `spoken_seq`.
+    #[serde(default)]
+    spoken_seq: u64,
 }
 
 /// What to announce next: the most important event, and how many others are waiting.
@@ -210,6 +213,7 @@ impl Inbox {
             expires_at: mapped.ttl_secs.map(|t| now.saturating_add(t)),
             received_at: now,
             state: EventState::New,
+            spoken_seq: 0,
         });
         self.enforce_limits(id);
         Ingest::Accepted(id)
@@ -372,13 +376,20 @@ impl Inbox {
         })
     }
 
-    /// Mark events as spoken to the user.
+    /// Mark events as spoken to the user, in the order given. An event spoken again (a repeat, its details)
+    /// becomes the most recently spoken one.
     pub fn mark_announced(&mut self, ids: &[u64]) {
         for id in ids {
-            if let Some(e) = self.get_mut(*id) {
-                if matches!(e.state, EventState::New | EventState::Snoozed { .. }) {
-                    e.state = EventState::Announced;
-                }
+            let seq = self.state.spoken_seq + 1;
+            let Some(e) = self.state.events.iter_mut().find(|e| e.id == *id) else {
+                continue;
+            };
+            if matches!(e.state, EventState::New | EventState::Snoozed { .. }) {
+                e.state = EventState::Announced;
+            }
+            if e.state == EventState::Announced {
+                e.spoken_seq = seq;
+                self.state.spoken_seq = seq;
             }
         }
     }
@@ -408,16 +419,20 @@ impl Inbox {
         }
     }
 
-    /// The event a spoken reply should go to: the most recently announced one still open. A one-way
-    /// announcement is never a target, and it does not hand the reply to an older event either, so an
-    /// answer meant for a doorbell message cannot land on a coding agent (REQ-INB-023).
+    /// The event a spoken reply should go to: the one spoken most recently that is still open, which is not
+    /// always the one that arrived last (an urgent event is spoken before an older one; a snoozed one comes
+    /// back later). A one-way announcement is never a target, and it does not hand the reply to an older
+    /// event either, so an answer meant for a doorbell message cannot land on a coding agent (REQ-INB-023).
     #[must_use]
     pub fn reply_target(&self) -> Option<&Event> {
         self.state
             .events
             .iter()
-            .rev()
-            .find(|e| e.state == EventState::Announced)
+            .enumerate()
+            .filter(|(_, e)| e.state == EventState::Announced)
+            // Events saved before the order was recorded all have zero, and fall back to arrival order.
+            .max_by_key(|(i, e)| (e.spoken_seq, *i))
+            .map(|(_, e)| e)
             .filter(|e| !e.no_reply)
     }
 
@@ -879,6 +894,75 @@ mod tests {
             inbox.plan(10, true, night, &eps).unwrap().rest.len(),
             1,
             "cleared at once"
+        );
+    }
+
+    #[test]
+    fn a_reply_goes_to_the_event_spoken_last_not_the_one_that_arrived_last() {
+        // REQ-INB-008: an older event spoken after a newer urgent one is what the person is answering.
+        let (mut inbox, eps) = setup();
+        let e = ep(&eps);
+        let Ingest::Accepted(old) = inbox.ingest(
+            1,
+            &e,
+            mapped(EventKind::Done, Priority::Normal, "old", Some("a")),
+        ) else {
+            panic!("accepted")
+        };
+        let Ingest::Accepted(urgent) = inbox.ingest(
+            2,
+            &e,
+            mapped(EventKind::Question, Priority::Urgent, "urgent", Some("b")),
+        ) else {
+            panic!("accepted")
+        };
+        assert_eq!(inbox.plan(3, true, 0, &eps).unwrap().lead, urgent);
+        inbox.mark_announced(&[urgent]);
+        assert_eq!(inbox.reply_target().unwrap().id, urgent);
+        inbox.mark_announced(&[old]);
+        assert_eq!(
+            inbox.reply_target().unwrap().id,
+            old,
+            "the older event was spoken last"
+        );
+        // Speaking the urgent one again (its details, a repeat) makes it the target again.
+        inbox.mark_announced(&[urgent]);
+        assert_eq!(inbox.reply_target().unwrap().id, urgent);
+        // Once it is answered, the reply target is the one spoken before it.
+        inbox.acknowledge(urgent);
+        assert_eq!(inbox.reply_target().unwrap().id, old);
+        // A snoozed event that comes back is the target when it is spoken again.
+        let Ingest::Accepted(newer) = inbox.ingest(
+            4,
+            &e,
+            mapped(EventKind::Done, Priority::Normal, "newer", Some("c")),
+        ) else {
+            panic!("accepted")
+        };
+        inbox.snooze(old, 10);
+        inbox.mark_announced(&[newer]);
+        inbox.mark_announced(&[old]);
+        assert_eq!(inbox.reply_target().unwrap().id, old);
+    }
+
+    #[test]
+    fn an_inbox_saved_before_the_spoken_order_falls_back_to_arrival_order() {
+        let old = r#"{"next_id":2,"events":[
+            {"id":1,"endpoint":"cc","source":"s","kind":"done","title":"a","text":"x","priority":"normal",
+             "received_at":1,"state":{"state":"announced"}},
+            {"id":2,"endpoint":"cc","source":"s","kind":"done","title":"b","text":"x","priority":"normal",
+             "received_at":2,"state":{"state":"announced"}}]}"#;
+        let state: InboxState = serde_json::from_str(old).unwrap();
+        let inbox = Inbox {
+            state,
+            limits: InboxLimits::default(),
+            quiet: None,
+        };
+        assert_eq!(inbox.reply_target().unwrap().id, 2);
+        assert!(
+            !serde_json::to_string(&inbox.state.events[0])
+                .unwrap()
+                .contains("spoken_seq")
         );
     }
 

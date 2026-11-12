@@ -124,6 +124,15 @@ pub struct Event {
     pub received_at: Ts,
     /// Where it is in its life.
     pub state: EventState,
+    /// The order it was last spoken in: higher is more recent, zero is never (or before this was recorded). A
+    /// spoken reply goes to the event spoken last, which is not always the one that arrived last.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spoken_seq: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes a reference
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Event {

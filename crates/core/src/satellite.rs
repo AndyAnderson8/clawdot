@@ -12,11 +12,11 @@
 
 use self::reply::{Reply, poll_reply, stop_reply};
 use crate::assistant::{Effect, MediaCmd};
+use crate::audio::{decode_pcm16, resample};
 use crate::cancel::CancelToken;
 use crate::inbox::endpoint::verify_token;
-use crate::rtvoice::{Claim, Done, Job, Realtime, Speaker, resample};
+use crate::rtvoice::{Claim, Done, Job, Realtime, Speaker};
 use crate::session::is_cancel;
-use crate::speech::decode_pcm16;
 use crate::voice::{
     Config as DialogConfig, Cue, Dialog, Phase, Step, Synthesizer, Transcriber, VoiceOutcome, hear,
     sentences, speak_text_as,
