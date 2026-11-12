@@ -248,6 +248,38 @@ pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Val
     }
 }
 
+/// What every kind of satellite shares: the speech to text and text to speech clients (registered for the
+/// portal's status), and the settings that carry the announcer, the realtime voice and the follow-up window.
+fn satellite_parts(
+    args: &Args,
+    core: &Core,
+    rt: &Realtime,
+    announcer: &satellite::Announcer,
+) -> Result<
+    (
+        Arc<crate::speech::HttpTranscriber>,
+        Arc<crate::speech::HttpSynthesizer>,
+        satellite::Settings,
+    ),
+    String,
+> {
+    let (stt, tts) = build_registered_speech(
+        &args.speech,
+        core.secrets(),
+        core.env(),
+        core.speech_handles(),
+    )?;
+    let mut settings = satellite::Settings {
+        announcer: announcer.clone(),
+        realtime: Some(rt.clone()),
+        ..satellite::Settings::default()
+    };
+    if let Some(s) = args.satellite.follow_up_secs {
+        settings.dialog.follow_up_secs = s;
+    }
+    Ok((Arc::new(stt), Arc::new(tts), settings))
+}
+
 /// Start the satellite listener (`satellite.listen`) and the ESPHome satellites, when configured. Their
 /// questions come back through `ask_tx`. The error is the message to print.
 pub async fn start_satellites(
@@ -261,17 +293,7 @@ pub async fn start_satellites(
         let addr: SocketAddr = listen
             .parse()
             .map_err(|e| format!("satellite.listen: {e}"))?;
-        let (stt, tts) = build_registered_speech(
-            &args.speech,
-            core.secrets(),
-            core.env(),
-            core.speech_handles(),
-        )?;
-        let mut settings = satellite::Settings {
-            announcer: announcer.clone(),
-            realtime: Some(rt.clone()),
-            ..satellite::Settings::default()
-        };
+        let (stt, tts, mut settings) = satellite_parts(args, core, rt, announcer)?;
         if let Some(var) = &args.satellite.token_env {
             let token = core.env().get(var).unwrap_or_default();
             if token.is_empty() {
@@ -280,9 +302,6 @@ pub async fn start_satellites(
                 ));
             }
             settings.token_hashes = vec![crate::inbox::endpoint::hash_token(&token)];
-        }
-        if let Some(s) = args.satellite.follow_up_secs {
-            settings.dialog.follow_up_secs = s;
         }
         settings.admin_reset = Some(satellite::AdminResetHook::new({
             let core = Arc::clone(core);
@@ -305,15 +324,8 @@ pub async fn start_satellites(
         println!("clawdot: satellites connect to {addr}");
         let tx = ask_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = satellite::serve(
-                l,
-                Arc::new(stt),
-                Arc::new(tts),
-                tx,
-                settings,
-                std::future::pending(),
-            )
-            .await
+            if let Err(e) =
+                satellite::serve(l, stt, tts, tx, settings, std::future::pending()).await
             {
                 eprintln!("clawdot: satellite server stopped: {e}");
             }
@@ -323,25 +335,12 @@ pub async fn start_satellites(
     // ESPHome voice satellites (optional feature; spec 0004) share the satellite pipeline and announcer.
     #[cfg(feature = "esphome-satellite")]
     if !args.esphome.is_empty() {
-        let (stt, tts) = build_registered_speech(
-            &args.speech,
-            core.secrets(),
-            core.env(),
-            core.speech_handles(),
-        )?;
-        let mut settings = satellite::Settings {
-            announcer: announcer.clone(),
-            realtime: Some(rt.clone()),
-            ..satellite::Settings::default()
-        };
-        if let Some(s) = args.satellite.follow_up_secs {
-            settings.dialog.follow_up_secs = s;
-        }
+        let (stt, tts, settings) = satellite_parts(args, core, rt, announcer)?;
         crate::esphome::start(
             &args.esphome,
             core.env(),
-            Arc::new(stt),
-            Arc::new(tts),
+            stt,
+            tts,
             ask_tx.clone(),
             settings,
         )

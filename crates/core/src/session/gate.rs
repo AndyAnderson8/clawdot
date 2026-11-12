@@ -9,17 +9,19 @@
 
 use super::*;
 
-/// One turn in progress: the pieces the gate needs, with the host's bookkeeping. The fields only the gate
-/// reads are private; the rest are the state the model loop in `run_turn_from` works on between rounds.
+mod rounds;
+
+/// One turn in progress: the pieces the gate needs, with the host's bookkeeping. Its state is private to this
+/// module and the model loop in `rounds`; `run_turn_from` only opens a turn and runs it.
 pub(super) struct Turn<'a, H> {
     ctl: &'a TurnCtl,
-    pub(super) host: &'a mut H,
-    pub(super) conv: &'a mut Conversation,
-    pub(super) usage: &'a mut UsageTracker,
-    pub(super) cfg: TurnConfig,
+    host: &'a mut H,
+    conv: &'a mut Conversation,
+    usage: &'a mut UsageTracker,
+    cfg: TurnConfig,
     turn: Option<TurnLog>,
-    pub(super) st: TurnState,
-    pub(super) result: TurnResult,
+    st: TurnState,
+    result: TurnResult,
     by_user: bool,
     day: i64,
     now: Ts,
@@ -41,7 +43,7 @@ fn invalid<'a>(tool: &'a str, why: &'static str) -> Act<'a> {
 
 /// What dispatching one reply's calls left for the turn to settle.
 #[derive(Default)]
-pub(super) struct Dispatched {
+struct Dispatched {
     held: Option<PendingAction>,
     ask: Option<String>,
     limit_hit: Option<Stop>,
@@ -160,14 +162,9 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         }
     }
 
-    /// Whether the user's own voice started this turn (an event did not).
-    pub(super) fn by_user(&self) -> bool {
-        self.by_user
-    }
-
     /// End the turn because the user cancelled it: discard what was held, record it, and say what was and was
     /// not done (REQ-AST-022).
-    pub(super) fn cancelled(&mut self, not_run: &[String], sent: Option<&str>) -> TurnResult {
+    fn cancelled(&mut self, not_run: &[String], sent: Option<&str>) -> TurnResult {
         let mut discarded = false;
         if let Some(p) = self.conv.pending.take() {
             self.resolved(&p, decision::CANCELLED, "the user cancelled");
@@ -195,7 +192,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// End the turn at a limit.
-    pub(super) fn stopped(&mut self, why: Stop) -> TurnResult {
+    fn stopped(&mut self, why: Stop) -> TurnResult {
         stopped_turn(
             self.conv,
             take(&mut self.result),
@@ -207,22 +204,26 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// End the turn with words the host chose.
-    pub(super) fn finish(&mut self, speech: &str) -> TurnResult {
+    fn finish(&mut self, speech: &str) -> TurnResult {
         finish_with(self.conv, take(&mut self.result), speech)
     }
 
     /// End the turn because calls keep failing (REQ-AST-025).
-    pub(super) fn failed(&mut self) -> TurnResult {
+    fn failed(&mut self) -> TurnResult {
         failed_turn(self.conv, take(&mut self.result), &self.st)
     }
 
-    /// Take the result out as the turn ends.
-    pub(super) fn into_result(mut self) -> TurnResult {
-        take(&mut self.result)
+    /// The answers the host reads from the user's own words before anything else: to "forget all my notes?"
+    /// and to a held action. `Some` ends the turn.
+    async fn answer_first(&mut self, user_text: &str) -> Option<TurnResult> {
+        if let Some(r) = self.answer_forget_all(user_text) {
+            return Some(r);
+        }
+        self.answer_held(user_text).await
     }
 
     /// The user's answer to "forget all my notes?" is read here, by the host. `Some` ends the turn.
-    pub(super) fn answer_forget_all(&mut self, user_text: &str) -> Option<TurnResult> {
+    fn answer_forget_all(&mut self, user_text: &str) -> Option<TurnResult> {
         let (by_user, now) = (self.by_user, self.now);
         let conv = &mut *self.conv;
         let result = &mut self.result;
@@ -247,7 +248,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// The user's answer to a held action is read here, by the host, from the user's own words. It is the
     /// only way a held action runs (REQ-SEC-011). An event is never an answer. `Some` ends the turn.
-    pub(super) async fn answer_held(&mut self, user_text: &str) -> Option<TurnResult> {
+    async fn answer_held(&mut self, user_text: &str) -> Option<TurnResult> {
         if !self.by_user {
             return None;
         }
@@ -359,7 +360,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Put each of the calls through the gate, in order, and say what is left to settle. `backend` is used
     /// only to summarise long results (REQ-AST-024); a caller with `None` gets them whole.
-    pub(super) async fn dispatch<B: ChatBackend>(
+    async fn dispatch<B: ChatBackend>(
         &mut self,
         backend: Option<&B>,
         calls: &[ToolCall],
@@ -700,7 +701,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// What follows a batch of calls: cancel, a question for the user, a held action to ask about, a limit,
     /// or calls that keep failing. `Some` ends the turn; `None` means the turn may go on.
-    pub(super) fn settle(&mut self, d: Dispatched) -> Option<TurnResult> {
+    fn settle(&mut self, d: Dispatched) -> Option<TurnResult> {
         let Dispatched {
             mut held,
             ask,
@@ -937,10 +938,7 @@ async fn voice_turn<H: ToolHost>(
         ..inputs
     };
     let mut t = Turn::begin(&ctl, Trigger::User, "voice", inputs, user_text);
-    if let Some(r) = t.answer_forget_all(user_text) {
-        return r;
-    }
-    if let Some(r) = t.answer_held(user_text).await {
+    if let Some(r) = t.answer_first(user_text).await {
         return r;
     }
     if let Some(calls) = calls {
