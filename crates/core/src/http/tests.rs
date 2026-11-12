@@ -1337,3 +1337,53 @@ async fn the_known_differences_between_routes_are_pinned() {
         401
     );
 }
+
+// REQ-CFG-005, threat T5: in open mode the only credential is the caller's address, which a web page in a browser on
+// the same network borrows. A "simple" cross-site POST needs no preflight and the body is parsed whatever its type, so
+// a state-changing request that names a different origin than the one it was sent to must be refused.
+#[tokio::test]
+async fn a_web_page_on_another_site_cannot_drive_the_portal_in_open_mode() {
+    let h = start(Limits::default(), ServeOptions::default()).await;
+    let evil = [("Origin", "http://evil.example")];
+    // Before setup: a page must not be able to choose the mode for the owner.
+    let (s, _, _) = call(h.addr, "POST", "/api/setup", &evil, r#"{"mode":"open"}"#).await;
+    assert_eq!(s, 403);
+    let (_, _, body) = call(h.addr, "GET", "/api/auth", &[], "").await;
+    assert_eq!(json_of(&body)["mode"], "setup", "nothing was set up");
+    assert_eq!(
+        post(&h, "/api/setup", "", r#"{"mode":"open"}"#).await.0,
+        200
+    );
+
+    let make = r#"{"name":"csrf","adapter":"generic"}"#;
+    for origin in [
+        "http://evil.example",
+        "null",
+        "http://t.evil.example",
+        "http://t:1",
+    ] {
+        let hdrs = [("Origin", origin)];
+        let (s, _, _) = call(h.addr, "POST", "/api/endpoints", &hdrs, make).await;
+        assert_eq!(s, 403, "{origin}");
+    }
+    assert!(
+        h.core.endpoints().iter().all(|e| e.name != "csrf"),
+        "no cross-site request changed anything"
+    );
+    // The announce route takes the administrator path in open mode, so it is covered too.
+    let say = r#"{"text":"hello","endpoint":"claude-code"}"#;
+    assert_eq!(
+        call(h.addr, "POST", "/api/announce", &evil, say).await.0,
+        403
+    );
+    // Reading is left to the browser's same-origin rule, and the portal itself (origin = host) works, as does a
+    // script that sends no Origin at all.
+    assert_eq!(call(h.addr, "GET", "/api/overview", &evil, "").await.0, 200);
+    let same = [("Origin", "http://T")];
+    assert_eq!(
+        call(h.addr, "POST", "/api/endpoints", &same, make).await.0,
+        201
+    );
+    let (s, _, _) = call(h.addr, "POST", "/api/announce", &[], say).await;
+    assert_eq!(s, 202);
+}

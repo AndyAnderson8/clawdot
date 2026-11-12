@@ -22,7 +22,7 @@ use crate::routes::{Auth, Row, find, path_row};
 use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
 use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::header::{
-    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER,
+    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderValue, ORIGIN, RETRY_AFTER,
     WWW_AUTHENTICATE,
 };
 use hyper::server::conn::http1;
@@ -249,6 +249,36 @@ pub fn documented_routes() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+/// Whether this is a request that changes something under `/api`, sent by a web page from another site.
+///
+/// In open mode (REQ-CFG-005) the only credential is the caller's address, and a browser on the private network
+/// lends its address to any page it shows. Such a page can send a "simple" cross-site POST with no preflight, and
+/// the body is parsed whatever its content type. A browser always names the page's origin on a request that
+/// changes something, so a request whose `Origin` is not the authority it was sent to is refused. A script sends no
+/// `Origin` and is not affected; reads are left to the browser's same-origin rule.
+fn cross_site_write(method: &hyper::Method, segs: &[&str], headers: &HeaderMap) -> bool {
+    if matches!(
+        *method,
+        hyper::Method::GET | hyper::Method::HEAD | hyper::Method::OPTIONS
+    ) || segs.first() != Some(&"api")
+    {
+        return false;
+    }
+    let Some(origin) = headers.get(ORIGIN) else {
+        return false;
+    };
+    let origin_authority = origin
+        .to_str()
+        .ok()
+        .and_then(|o| o.split_once("://"))
+        .map(|(_, rest)| rest);
+    let host = headers.get(HOST).and_then(|h| h.to_str().ok());
+    match (origin_authority, host) {
+        (Some(o), Some(h)) => !o.eq_ignore_ascii_case(h),
+        _ => true,
+    }
+}
+
 async fn route(
     core: Arc<Core>,
     streams: Arc<AtomicUsize>,
@@ -260,6 +290,12 @@ async fn route(
     let path = parts.uri.path().to_owned();
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
     let headers = &parts.headers;
+    if cross_site_write(&parts.method, &segs, headers) {
+        return Ok(json(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"cross-site request refused"}"#,
+        ));
+    }
     // First decide whether the path names a real resource (invalid endpoint names are simply 404),
     // then whether the method is allowed on it (405).
     let resp = match find(ROUTES, parts.method.as_str(), &segs) {
