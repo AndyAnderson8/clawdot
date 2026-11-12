@@ -25,8 +25,8 @@ pub mod ws;
 use crate::llm::{Role, ToolCall, ToolSpec};
 use crate::sched::Ts;
 use crate::session::{
-    Conversation, ToolHost, TurnConfig, TurnEnd, TurnInputs, answer_held_action, is_no, is_yes,
-    run_proposed_calls, tools_for,
+    Conversation, HeldOutcome, ToolHost, TurnConfig, TurnEnd, TurnInputs, answer_held_action,
+    is_no, is_yes, run_proposed_calls, tools_for,
 };
 use crate::usage::{LimitReached, UsageTracker};
 use serde_json::{Value, json};
@@ -706,18 +706,19 @@ where
         st.last_user = Some(text.to_owned());
         return Ok(());
     }
-    // A confirmed action whose tool had gone ran nothing (no call counted) but has an error to report.
-    let gone = is_yes(text)
-        && res.speech == "Done."
-        && last_tool_text(env.conv, None).is_some_and(|t| t == crate::session::GONE);
-    let outcome = if res.tool_calls > 0 || gone {
+    // A confirmed action ran, failed, or found its tool gone: the tool result in the history says which.
+    let released = matches!(
+        res.held,
+        Some(HeldOutcome::Ran | HeldOutcome::Failed | HeldOutcome::Gone)
+    );
+    let outcome = if released {
         let last = last_tool_text(env.conv, None).unwrap_or_default();
         if env.host.returns_untrusted_text(&tool) {
             // Outside text never goes into an instruction.
-            if last.starts_with("Error") {
-                "The action was tried but it failed.".to_owned()
-            } else {
+            if res.held == Some(HeldOutcome::Ran) {
                 "The action was carried out.".to_owned()
+            } else {
+                "The action was tried but it failed.".to_owned()
             }
         } else {
             one_line(&last, "")

@@ -22,8 +22,6 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 mod gate;
-#[cfg(feature = "realtime")]
-pub(crate) use gate::GONE;
 use gate::Turn;
 pub use gate::{answer_held_action, run_proposed_calls};
 
@@ -750,6 +748,24 @@ pub struct TurnResult {
     /// The turn ended with a question for the user (a clarifying question or a held action), so the follow-up
     /// window should be longer (REQ-AST-021).
     pub expects_reply: bool,
+    /// What became of the action held for the user's yes, when this turn answered one (REQ-SEC-011). `None` when
+    /// none was held.
+    pub held: Option<HeldOutcome>,
+}
+
+/// What became of a held action when the user answered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldOutcome {
+    /// The user said yes in time and the tool ran and succeeded.
+    Ran,
+    /// The user said yes in time and the tool failed, timed out or was not run (dry run, a cap).
+    Failed,
+    /// The user said yes in time but the tool is no longer offered, so nothing ran.
+    Gone,
+    /// The user said no, or asked for something unrelated; the action was dropped.
+    Declined,
+    /// The user said yes after the confirmation window; the action was dropped.
+    Expired,
 }
 
 impl Default for TurnResult {
@@ -762,6 +778,7 @@ impl Default for TurnResult {
             model_requests: 0,
             early: Vec::new(),
             expects_reply: false,
+            held: None,
         }
     }
 }
