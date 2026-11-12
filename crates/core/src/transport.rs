@@ -82,7 +82,14 @@ impl Endpoint {
             Some((h, p)) => (h, p.parse::<u16>().map_err(|_| format!("bad port `{p}`"))?),
             None => (hostport, if tls { 443 } else { 80 }),
         };
-        if host.is_empty() || host.contains(char::is_whitespace) {
+        // Letters, digits, dots, dashes and underscores only: no user name (`user@host`), query, fragment or
+        // bracket. Such a text is not a name that resolves, but it can end in `.local` or `localhost` and so pass
+        // the plain-http rule for the home network (REQ-SEC-001) while naming something else.
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        {
             return Err("the URL has no valid host".into());
         }
         let base = path.trim_matches('/');
@@ -445,9 +452,23 @@ mod tests {
         ] {
             assert_eq!(Endpoint::parse(url).unwrap().host_header(), host, "{url}");
         }
-        for bad in ["ftp://h", "h", "http://", "http://h:x", "http://a b"] {
+        for bad in [
+            "ftp://h",
+            "h",
+            "http://",
+            "http://h:x",
+            "http://a b",
+            "http://x@evil.example.local",
+            "http://evil.example#.local/",
+            "http://evil.example?.local",
+            "http://[::1]:8080",
+            "http://h\u{e9}/",
+        ] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
+        // The plain-http rule cannot be passed with such a host.
+        let d = Duration::from_secs(1);
+        assert!(HttpBackend::new("http://evil.example#.local/v1", "", d).is_err());
     }
 
     #[test]
