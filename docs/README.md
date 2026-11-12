@@ -18,6 +18,7 @@
 | Architecture | [architecture/action-safety.md](architecture/action-safety.md) | How actions are held, tiered and scoped: host-held confirmation, risk tiers, untrusted turns, skill allow-lists |
 | Architecture | [architecture/agent-loop.md](architecture/agent-loop.md) | One multi-step turn: limits, plan and progress speech, questions, cancel, memory and notes, long-result summaries, error recovery |
 | Architecture | [architecture/evals.md](architecture/evals.md) | The scenario eval harness: format, replay gate, live mode with a spend cap, the shipped scenario set |
+| Architecture | [architecture/speech-latency.md](architecture/speech-latency.md) | Time from end of speech to first sound: the reply played sentence by sentence as it is made (built), and speaking while the model is still writing (design) |
 | Architecture | [architecture/media.md](architecture/media.md) | Music and radio: backend shapes, built-in stations, control recipes |
 | Architecture | [architecture/voice-pipeline.md](architecture/voice-pipeline.md) | Dialog state machine, endpointing, and the speech turn |
 | Architecture | [architecture/satellite-server.md](architecture/satellite-server.md) | How speakers connect: handshake, a spoken turn, mute, limits |
