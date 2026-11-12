@@ -282,7 +282,7 @@ impl Core {
             Ingest::Filtered(r) => HookOutcome::Filtered(r),
         };
         if !matches!(outcome, HookOutcome::Filtered(_)) {
-            self.persist(&g);
+            self.persist(&g, super::persist::Dirty::INBOX);
             self.notify.notify_waiters();
         }
         drop(g);

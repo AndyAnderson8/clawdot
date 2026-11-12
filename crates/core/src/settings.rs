@@ -1304,7 +1304,7 @@ mod tests {
         assert_eq!(st2.get("zone"), "Europe/Berlin");
         assert_eq!(st2.get("persona"), "Be brief.\nBe kind.");
         assert!(dir.0.join("settings.json").exists());
-        assert!(!dir.0.join("settings.tmp").exists());
+        assert!(!dir.0.join("settings.json.tmp").exists());
     }
 
     // REQ-CFG-038, REQ-SEC-009

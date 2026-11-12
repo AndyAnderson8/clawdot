@@ -118,7 +118,9 @@ pub struct Endpoints {
 /// Schema version of the persisted endpoint list.
 pub const SCHEMA: u32 = 1;
 
-fn valid_name(name: &str) -> bool {
+/// An endpoint name: lowercase letters and digits to start, then also `-` and `_`, 1 to [`MAX_NAME`] bytes. The one
+/// definition: the route matcher uses it for `{endpoint}` segments too.
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME
         && name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())

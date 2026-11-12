@@ -75,6 +75,14 @@ impl ReplyQueue {
         store.save(&self.state)
     }
 
+    /// The bytes [`ReplyQueue::save`] would write, so the caller can serialise under a lock and write later.
+    ///
+    /// # Errors
+    /// A state that cannot be serialised.
+    pub fn encode(&self, store: &JsonStore) -> Result<Vec<u8>, StoreError> {
+        store.encode(&self.state)
+    }
+
     /// Queue a reply for the endpoint's bridge.
     ///
     /// # Errors

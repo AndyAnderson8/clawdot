@@ -519,7 +519,8 @@ fn rank(notes: &[Note], utterance: &str, context: &str) -> Vec<(usize, f64)> {
             score += w * idf * norm;
         }
         if score > 0.0 && hi > lo {
-            score += 0.25 * ((notes[i].ts - lo) as f64 / (hi - lo) as f64);
+            // abs_diff cannot overflow, whatever a hand-edited file holds.
+            score += 0.25 * (notes[i].ts.abs_diff(lo) as f64 / hi.abs_diff(lo) as f64);
         }
         out.push((i, score));
     }

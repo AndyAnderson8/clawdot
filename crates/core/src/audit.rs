@@ -333,12 +333,16 @@ impl AuditLog {
         let mut max_turn = 0;
         let mut corrupt = 0;
         for p in [&old, &path] {
-            let (records, bad, _) = read_lines(p);
-            corrupt += bad;
-            for r in &records {
-                max_id = max_id.max(r.id);
-                max_turn = max_turn.max(r.turn);
-            }
+            let Ok(file) = fs::File::open(p) else {
+                continue;
+            };
+            each_file_line(file, |line| match parse_line(line) {
+                Some(r) => {
+                    max_id = max_id.max(r.id);
+                    max_turn = max_turn.max(r.turn);
+                }
+                None => corrupt += 1,
+            });
         }
         let size = fs::metadata(&path).map_or(0, |m| m.len());
         let needs_newline = size > 0 && !ends_with_newline(&path);
@@ -510,25 +514,40 @@ impl AuditLog {
     /// last few calls that failed (tool and time only; no arguments or result text). REQ-CFG-063.
     #[must_use]
     pub fn summary(&self) -> Value {
-        let s = lock(&self.state);
-        let (mut all, _) = s.read_all();
-        drop(s);
-        all.sort_by_key(|r| std::cmp::Reverse(r.id));
+        let source = lock(&self.state).source();
+        let mut records = 0_usize;
         let mut by_decision = std::collections::BTreeMap::<String, u64>::new();
         let mut by_tier = std::collections::BTreeMap::<String, u64>::new();
-        for r in &all {
+        // The record with the highest id is the newest and the one with the lowest the oldest; among equal ids
+        // the first in the file is the newest and the last the oldest, as a stable sort by id would give.
+        let mut newest: Option<(u64, Ts)> = None;
+        let mut oldest: Option<(u64, Ts)> = None;
+        // (id, ts, tool, decision) of every failed call; the ten with the highest ids are kept at the end.
+        let mut failures: Vec<(u64, Ts, String, String)> = Vec::new();
+        source.each_line(|line| {
+            let Some(r) = parse_line(line) else { return };
+            records += 1;
             *by_decision.entry(r.decision.clone()).or_default() += 1;
             *by_tier.entry(r.tier.clone()).or_default() += 1;
-        }
-        let failed: Vec<Value> = all
-            .iter()
-            .filter(|r| r.status.as_deref() == Some("error"))
+            if newest.is_none_or(|(id, _)| r.id > id) {
+                newest = Some((r.id, r.ts));
+            }
+            if oldest.is_none_or(|(id, _)| r.id <= id) {
+                oldest = Some((r.id, r.ts));
+            }
+            if r.status.as_deref() == Some("error") {
+                failures.push((r.id, r.ts, r.tool, r.decision));
+            }
+        });
+        failures.sort_by_key(|f| std::cmp::Reverse(f.0));
+        let failed: Vec<Value> = failures
+            .into_iter()
             .take(10)
-            .map(|r| serde_json::json!({ "ts": r.ts, "tool": r.tool, "decision": r.decision }))
+            .map(|(_, ts, tool, decision)| json!({ "ts": ts, "tool": tool, "decision": decision }))
             .collect();
-        serde_json::json!({
-            "records": all.len(), "by_decision": by_decision, "by_tier": by_tier,
-            "newest": all.first().map(|r| r.ts), "oldest": all.last().map(|r| r.ts),
+        json!({
+            "records": records, "by_decision": by_decision, "by_tier": by_tier,
+            "newest": newest.map(|n| n.1), "oldest": oldest.map(|o| o.1),
             "recent_failures": failed,
         })
     }
@@ -536,13 +555,68 @@ impl AuditLog {
     /// Records matching `q`, newest first.
     #[must_use]
     pub fn query(&self, q: &Query) -> Page {
-        let mut s = lock(&self.state);
-        let (mut all, bad) = s.read_all();
-        s.corrupt_lines = bad;
-        drop(s);
+        let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+        // Records are appended in id order, so the newest are at the end of the newest file: read from there
+        // and stop as soon as the page is full and one more match proves there is a next page. If an id is
+        // ever not lower than the one before it (a hand-edited file), fall back to reading everything.
+        let source = lock(&self.state).source();
+        let mut records: Vec<Record> = Vec::new();
+        let mut more = false;
+        let mut ordered = true;
+        let mut bad = 0_u64;
+        let mut stopped = false;
+        let mut last_id = u64::MAX;
+        source.each_line_rev(|line| {
+            let Some(r) = parse_line(line) else {
+                bad += 1;
+                return true;
+            };
+            if r.id >= last_id {
+                ordered = false;
+                return false;
+            }
+            last_id = r.id;
+            if !q.matches(&r) {
+                return true;
+            }
+            if records.len() >= limit {
+                more = true;
+                stopped = true;
+                return false;
+            }
+            records.push(r);
+            true
+        });
+        if !ordered {
+            return self.query_sorted(q, limit);
+        }
+        if !stopped {
+            // The whole log was read, so the damaged-line figure is current.
+            lock(&self.state).corrupt_lines = bad;
+        }
+        let next_before = if more {
+            records.last().map(|r| r.id)
+        } else {
+            None
+        };
+        Page {
+            records,
+            next_before,
+        }
+    }
+
+    /// [`AuditLog::query`] for a log whose ids are not in order: read everything, sort, drop repeated ids.
+    fn query_sorted(&self, q: &Query, limit: usize) -> Page {
+        let source = lock(&self.state).source();
+        let mut all: Vec<Record> = Vec::new();
+        let mut bad = 0_u64;
+        source.each_line(|line| match parse_line(line) {
+            Some(r) => all.push(r),
+            None => bad += 1,
+        });
+        lock(&self.state).corrupt_lines = bad;
         all.sort_by_key(|r| std::cmp::Reverse(r.id));
         all.dedup_by_key(|r| r.id);
-        let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
         let mut matched = all.into_iter().filter(|r| q.matches(r));
         let records: Vec<Record> = matched.by_ref().take(limit).collect();
         let next_before = if matched.next().is_some() {
@@ -619,41 +693,35 @@ impl State {
         }
     }
 
-    fn read_all(&self) -> (Vec<Record>, u64) {
+    /// What a read of the log works from. Taken under the lock; the reading itself needs no lock, because open
+    /// file handles keep pointing at the file they were opened on even if it is rotated meanwhile.
+    fn source(&self) -> Source {
         match &self.sink {
-            Sink::Memory { lines, .. } => {
-                let mut out = Vec::new();
-                let mut bad = 0;
-                for l in lines {
-                    match parse_line(l) {
-                        Some(r) => out.push(r),
-                        None => bad += 1,
-                    }
-                }
-                (out, bad)
-            }
-            Sink::Disk { path, old, .. } => {
-                let (mut a, bad_a, _) = read_lines(old);
-                let (b, bad_b, _) = read_lines(path);
-                a.extend(b);
-                (a, bad_a + bad_b)
-            }
+            Sink::Memory { lines, .. } => Source::Memory(lines.iter().cloned().collect()),
+            Sink::Disk { path, old, .. } => Source::Files {
+                old: fs::File::open(old).ok(),
+                current: fs::File::open(path).ok(),
+            },
         }
     }
 
     /// Make the day's counters match the log (it is the record of what ran), the first time a day is seen.
+    /// After that [`AuditLog::record`] keeps them up to date, so this does not run again for the same day.
     fn load_counts(&mut self, day: i64) {
         if self.counts.known && self.counts.day == day {
             return;
         }
-        let (records, _) = self.read_all();
         let mut c = Counts {
             day,
             known: true,
             actions: 0,
             costly: 0,
         };
-        for r in records.iter().filter(|r| r.day == day) {
+        self.source().each_line(|line| {
+            let Some(r) = parse_line(line) else { return };
+            if r.day != day {
+                return;
+            }
             if r.decision == decision::RAN || r.decision == decision::APPROVED {
                 if r.tier != Tier::ReadOnly.label() && r.tier != "unknown" {
                     c.actions = c.actions.saturating_add(1);
@@ -662,8 +730,137 @@ impl State {
                     c.costly = c.costly.saturating_add(1);
                 }
             }
-        }
+        });
         self.counts = c;
+    }
+}
+
+/// The log as lines, ready to read without the lock.
+enum Source {
+    /// The in-memory log, oldest line first.
+    Memory(Vec<String>),
+    /// The rotated file and the current one (either may be missing).
+    Files {
+        old: Option<fs::File>,
+        current: Option<fs::File>,
+    },
+}
+
+impl Source {
+    /// Every non-blank line, oldest first.
+    fn each_line(self, mut f: impl FnMut(&str)) {
+        match self {
+            Self::Memory(lines) => {
+                for l in lines.iter().filter(|l| !l.trim().is_empty()) {
+                    f(l);
+                }
+            }
+            Self::Files { old, current } => {
+                for file in [old, current].into_iter().flatten() {
+                    each_file_line(file, &mut f);
+                }
+            }
+        }
+    }
+
+    /// Non-blank lines, newest first, until `f` returns false.
+    fn each_line_rev(self, mut f: impl FnMut(&str) -> bool) {
+        match self {
+            Self::Memory(lines) => {
+                for l in lines.iter().rev().filter(|l| !l.trim().is_empty()) {
+                    if !f(l) {
+                        return;
+                    }
+                }
+            }
+            Self::Files { old, current } => {
+                for file in [current, old].into_iter().flatten() {
+                    let mut lines = RevLines::new(file, REV_CHUNK);
+                    while let Some(l) = lines.next_line() {
+                        let text = String::from_utf8_lossy(&l);
+                        if !text.trim().is_empty() && !f(&text) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Call `f` with each non-blank line of a file, oldest first, without holding the whole file.
+fn each_file_line(file: fs::File, mut f: impl FnMut(&str)) {
+    use std::io::BufRead;
+    let mut reader = io::BufReader::new(file);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&buf);
+                if !text.trim().is_empty() {
+                    f(&text);
+                }
+            }
+        }
+    }
+}
+
+/// How much of the end of a file is read at a time when reading newest first.
+const REV_CHUNK: usize = 4096;
+
+/// The lines of a file from the last to the first, reading it backwards in chunks.
+struct RevLines {
+    file: fs::File,
+    chunk: usize,
+    /// Bytes before this offset have not been read yet.
+    pos: u64,
+    /// The start of a line whose beginning is in an earlier chunk.
+    carry: Vec<u8>,
+    /// Complete lines read but not yet handed out, in file order.
+    ready: Vec<Vec<u8>>,
+}
+
+impl RevLines {
+    fn new(mut file: fs::File, chunk: usize) -> Self {
+        use std::io::{Seek, SeekFrom};
+        let pos = file.seek(SeekFrom::End(0)).unwrap_or(0);
+        Self {
+            file,
+            chunk: chunk.max(1),
+            pos,
+            carry: Vec::new(),
+            ready: Vec::new(),
+        }
+    }
+
+    /// The next line towards the start of the file, without its newline.
+    fn next_line(&mut self) -> Option<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        loop {
+            if let Some(line) = self.ready.pop() {
+                return Some(line);
+            }
+            if self.pos == 0 {
+                return (!self.carry.is_empty()).then(|| std::mem::take(&mut self.carry));
+            }
+            let n = u64::try_from(self.chunk).map_or(self.pos, |c| c.min(self.pos));
+            self.pos -= n;
+            let mut data = vec![0_u8; usize::try_from(n).unwrap_or(self.chunk)];
+            if self.file.seek(SeekFrom::Start(self.pos)).is_err()
+                || self.file.read_exact(&mut data).is_err()
+            {
+                self.pos = 0;
+                self.carry.clear();
+                return None;
+            }
+            data.extend_from_slice(&self.carry);
+            let mut parts = data.split(|b| *b == b'\n').map(<[u8]>::to_vec);
+            // The first part may continue into the chunk before; every later one is a whole line.
+            self.carry = parts.next().unwrap_or_default();
+            self.ready = parts.collect();
+        }
     }
 }
 
@@ -674,25 +871,6 @@ fn parse_line(line: &str) -> Option<Record> {
     serde_json::from_str::<Record>(line)
         .ok()
         .filter(|r| r.v >= 1 && r.v <= FORMAT)
-}
-
-/// Read a log file, skipping what cannot be understood. Returns the records, the number of damaged
-/// non-empty lines, and whether the file ended without a newline.
-fn read_lines(path: &Path) -> (Vec<Record>, u64, bool) {
-    let Ok(bytes) = fs::read(path) else {
-        return (Vec::new(), 0, false);
-    };
-    let ends = bytes.last().is_none_or(|b| *b == b'\n');
-    let text = String::from_utf8_lossy(&bytes);
-    let mut out = Vec::new();
-    let mut bad = 0;
-    for l in text.lines().filter(|l| !l.trim().is_empty()) {
-        match parse_line(l) {
-            Some(r) => out.push(r),
-            None => bad += 1,
-        }
-    }
-    (out, bad, ends)
 }
 
 fn ends_with_newline(path: &Path) -> bool {
@@ -1423,6 +1601,201 @@ mod tests {
         assert_eq!(page.records[0].id, id);
         assert!(page.records[0].dry_run);
         assert_eq!(log.today(1), (0, 0));
+    }
+
+    fn ids(p: &Page) -> Vec<u64> {
+        p.records.iter().map(|r| r.id).collect()
+    }
+
+    fn put(log: &AuditLog, n: u64) {
+        let args = json!({"n": "x".repeat(150)});
+        for i in 0..n {
+            log.record(
+                i64::try_from(i).unwrap(),
+                1,
+                1,
+                "voice",
+                None,
+                &act("set_timer", Tier::Reversible, &args, decision::RAN),
+            );
+        }
+    }
+
+    // REQ-SEC-014
+    #[test]
+    fn a_page_that_ends_exactly_at_the_oldest_record_has_no_next_page() {
+        let log = AuditLog::in_memory(AuditConfig::default());
+        put(&log, 10);
+        let page = |limit, before| {
+            log.query(&Query {
+                limit: Some(limit),
+                before,
+                ..Query::default()
+            })
+        };
+        let p = page(10, None);
+        assert_eq!((p.records.len(), p.next_before), (10, None), "all of it");
+        let p = page(9, None);
+        assert_eq!((ids(&p).last().copied(), p.next_before), (Some(2), Some(2)));
+        let p = page(5, Some(6));
+        assert_eq!((ids(&p), p.next_before), (vec![5, 4, 3, 2, 1], None));
+        let p = page(4, Some(6));
+        assert_eq!((ids(&p), p.next_before), (vec![5, 4, 3, 2], Some(2)));
+        let p = page(5, Some(1));
+        assert_eq!((p.records.len(), p.next_before), (0, None), "nothing older");
+        let p = page(5, Some(100));
+        assert_eq!(ids(&p), [10, 9, 8, 7, 6], "a cursor past the newest");
+    }
+
+    // REQ-SEC-014
+    #[test]
+    fn paging_walks_a_rotated_log_on_disk_without_a_gap_or_a_repeat() {
+        let dir = TempDir::new("audit-pages");
+        // Files several chunks long, so lines straddle the chunk boundaries of the backwards read.
+        let log = AuditLog::open(&dir.0, cfg(20_000)).unwrap();
+        put(&log, 300);
+        assert!(fs::metadata(dir.0.join("audit.1.jsonl")).is_ok(), "rotated");
+        assert!(fs::metadata(dir.0.join("audit.1.jsonl")).unwrap().len() > 2 * REV_CHUNK as u64);
+        let mut seen = Vec::new();
+        let mut before = None;
+        loop {
+            let p = log.query(&Query {
+                limit: Some(37),
+                before,
+                ..Query::default()
+            });
+            seen.extend(ids(&p));
+            match p.next_before {
+                Some(b) => before = Some(b),
+                None => break,
+            }
+        }
+        assert_eq!(seen[0], 300);
+        assert!(seen.windows(2).all(|w| w[0] == w[1] + 1), "{seen:?}");
+        let all = log.query(&Query {
+            limit: Some(MAX_PAGE),
+            ..Query::default()
+        });
+        assert_eq!(ids(&all), seen, "one big page and many small ones agree");
+    }
+
+    // REQ-SEC-014
+    #[test]
+    fn a_log_out_of_order_or_with_repeated_ids_is_still_sorted_and_deduplicated() {
+        let dir = TempDir::new("audit-order");
+        {
+            let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+            put(&log, 5);
+        }
+        let path = dir.0.join("audit.jsonl");
+        let lines: Vec<String> = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        // 3, 1, 5, 2, 4, then 2 again
+        let order = [2, 0, 4, 1, 3, 1];
+        let text: String = order.iter().map(|i| format!("{}\n", lines[*i])).collect();
+        fs::write(&path, text).unwrap();
+        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+        let p = log.query(&Query {
+            limit: Some(3),
+            ..Query::default()
+        });
+        assert_eq!((ids(&p), p.next_before), (vec![5, 4, 3], Some(3)));
+        let p = log.query(&Query::default());
+        assert_eq!(ids(&p), [5, 4, 3, 2, 1]);
+        assert_eq!(log.summary()["records"], 6, "the summary counts lines");
+    }
+
+    // REQ-SEC-014
+    #[test]
+    fn damaged_lines_are_skipped_and_counted_only_by_a_full_read() {
+        let dir = TempDir::new("audit-damage");
+        {
+            let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+            put(&log, 6);
+        }
+        let path = dir.0.join("audit.jsonl");
+        let lines: Vec<String> = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let mut text = String::new();
+        for (i, l) in lines.iter().enumerate() {
+            text.push_str(l);
+            text.push('\n');
+            if i == 1 || i == 3 {
+                text.push_str("{broken\n\n");
+            }
+        }
+        fs::write(&path, text).unwrap();
+        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+        assert_eq!(log.health().corrupt_lines, 2);
+        // Damage the count by hand, then see which queries refresh it.
+        lock(&log.state).corrupt_lines = 99;
+        let p = log.query(&Query {
+            limit: Some(2),
+            ..Query::default()
+        });
+        assert_eq!(ids(&p), [6, 5]);
+        assert_eq!(log.health().corrupt_lines, 99, "stopped before the damage");
+        let p = log.query(&Query::default());
+        assert_eq!(ids(&p), [6, 5, 4, 3, 2, 1], "damaged lines are skipped");
+        assert_eq!(log.health().corrupt_lines, 2, "a full read recounts them");
+    }
+
+    // REQ-CFG-063
+    #[test]
+    fn the_summary_counts_everything_and_lists_the_latest_failures_first() {
+        let dir = TempDir::new("audit-summary");
+        let log = AuditLog::open(&dir.0, cfg(3_000)).unwrap();
+        let args = json!({});
+        for i in 0..40_i64 {
+            let outcome = if i % 4 == 0 { Err("boom") } else { Ok("fine") };
+            let a = Act {
+                outcome: Some(outcome),
+                ..act("set_timer", Tier::Reversible, &args, decision::RAN)
+            };
+            log.record(1_000 + i, 1, 1, "voice", None, &a);
+        }
+        let s = log.summary();
+        let kept = s["records"].as_u64().unwrap();
+        assert!(
+            kept > 10 && kept < 40,
+            "rotation dropped the oldest: {kept}"
+        );
+        assert_eq!(s["by_decision"]["ran"], kept);
+        assert_eq!(s["newest"], 1_039);
+        assert_eq!(s["oldest"], 1_040 - kept);
+        let failures = s["recent_failures"].as_array().unwrap();
+        let times: Vec<i64> = failures.iter().map(|f| f["ts"].as_i64().unwrap()).collect();
+        assert_eq!(times[0], 1_036, "newest failure first");
+        assert!(times.windows(2).all(|w| w[0] > w[1]) && times.len() <= 10);
+    }
+
+    #[test]
+    fn lines_are_read_backwards_across_chunk_boundaries() {
+        let dir = TempDir::new("audit-rev");
+        let path = dir.0.join("f.txt");
+        let text = "one\n\ntwo-é-two\nthree\nfour with more text\nlast without newline";
+        fs::write(&path, text).unwrap();
+        for chunk in [1, 2, 3, 5, 8, 4096] {
+            let mut rev = RevLines::new(fs::File::open(&path).unwrap(), chunk);
+            let mut got = Vec::new();
+            while let Some(l) = rev.next_line() {
+                got.push(String::from_utf8(l).unwrap());
+            }
+            let mut want: Vec<String> = text.split('\n').map(str::to_owned).collect();
+            want.reverse();
+            want.retain(|l| !l.is_empty());
+            got.retain(|l| !l.is_empty());
+            assert_eq!(got, want, "chunk {chunk}");
+        }
+        fs::write(&path, "").unwrap();
+        let mut rev = RevLines::new(fs::File::open(&path).unwrap(), 4);
+        assert_eq!(rev.next_line(), None, "an empty file");
     }
 
     // REQ-SEC-014

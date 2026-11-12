@@ -6,8 +6,33 @@
 //! connections close, so it cannot grow past the global connection limit (REQ-NFR-110).
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::io;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+/// How long a listener waits after a failed accept before trying again.
+pub const ACCEPT_RETRY: Duration = Duration::from_millis(200);
+
+/// Run `accept` until it yields a connection. A failed accept is logged and tried again after `pause`: running out
+/// of file descriptors, or a connection reset before it was accepted, is not a reason to stop answering for good,
+/// because a flood of connections would then switch the listener off until the next restart.
+pub async fn accept_retrying<T, F, Fut>(what: &str, pause: Duration, mut accept: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = io::Result<T>>,
+{
+    loop {
+        match accept().await {
+            Ok(connection) => return connection,
+            Err(e) => {
+                crate::diag::warn(&format!("{what}: could not accept a connection: {e}"));
+                tokio::time::sleep(pause).await;
+            }
+        }
+    }
+}
 
 /// How many connections each address may hold at once.
 #[derive(Debug)]
@@ -110,6 +135,25 @@ mod tests {
         assert_eq!(l.tracked(), 3);
         drop(guards);
         assert_eq!(l.tracked(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_accept_is_retried_not_fatal() {
+        let mut failures = 2;
+        let mut calls = 0;
+        let got = accept_retrying("test", Duration::from_millis(5), || {
+            calls += 1;
+            let result = if failures > 0 {
+                failures -= 1;
+                Err(io::Error::other("too many open files"))
+            } else {
+                Ok("conn")
+            };
+            async move { result }
+        })
+        .await;
+        assert_eq!(got, "conn");
+        assert_eq!(calls, 3);
     }
 
     #[test]

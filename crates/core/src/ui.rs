@@ -763,22 +763,7 @@ fn query_param(query: Option<&str>, key: &str) -> Option<String> {
     let raw = query?
         .split('&')
         .find_map(|p| p.strip_prefix(key)?.strip_prefix('='))?;
-    let mut out = Vec::with_capacity(raw.len());
-    let b = raw.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'+' => out.push(b' '),
-            b'%' if i + 2 < b.len() => {
-                let h = std::str::from_utf8(&b[i + 1..i + 3]).ok()?;
-                out.push(u8::from_str_radix(h, 16).ok()?);
-                i += 2;
-            }
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    String::from_utf8(out).ok()
+    query_decode(raw)
 }
 
 /// The voices of OpenAI's speech service, which has a fixed set and no list to ask for.
@@ -1165,31 +1150,36 @@ fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     }
 }
 
-/// Percent-decode a query component (also `+` as a space). Invalid escapes are kept as written.
-fn query_decode(s: &str) -> String {
+/// Percent-decode a query component (also `+` as a space). `None` when an escape is broken (`%` followed by two
+/// characters that are not hex digits) or the result is not UTF-8: a request is refused rather than guessed at. A
+/// `%` with fewer than two characters after it is not an escape and stays as typed.
+fn query_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while let Some(&c) = b.get(i) {
-        let hex = |x: Option<&u8>| x.and_then(|d| char::from(*d).to_digit(16));
-        if c == b'%' {
-            if let (Some(h), Some(l)) = (hex(b.get(i + 1)), hex(b.get(i + 2))) {
-                out.push(u8::try_from(h * 16 + l).unwrap_or(b'?'));
-                i += 3;
-                continue;
+        match c {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                let digit = |x: u8| char::from(x).to_digit(16);
+                let (h, l) = (digit(b[i + 1])?, digit(b[i + 2])?);
+                out.push(u8::try_from(h * 16 + l).ok()?);
+                i += 2;
             }
+            c => out.push(c),
         }
-        out.push(if c == b'+' { b' ' } else { c });
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).ok()
 }
 
 fn parse_audit_query(raw: &str) -> Result<crate::audit::Query, String> {
     let mut q = crate::audit::Query::default();
     for pair in raw.split('&').filter(|p| !p.is_empty()).take(16) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        let (k, v) = (query_decode(k), query_decode(v));
+        let (Some(k), Some(v)) = (query_decode(k), query_decode(v)) else {
+            return Err("The query has a broken % escape or is not text.".into());
+        };
         let num = |name: &str| {
             v.parse::<u64>()
                 .map_err(|_| format!("`{name}` must be a whole number."))

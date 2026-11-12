@@ -58,10 +58,10 @@ pub struct ServeOptions {
     pub body_timeout: Duration,
     /// Idle time before an SSE comment keeps the connection alive.
     pub heartbeat: Duration,
+    /// How long a reply stream may wait for its reader to take data before it is ended, so a client that stops
+    /// reading cannot hold one of the stream slots for ever.
+    pub write_timeout: Duration,
 }
-
-/// How long to wait after a failed accept before trying again.
-const ACCEPT_RETRY: Duration = Duration::from_millis(200);
 
 /// How long the web UI waits for a request body.
 pub const BODY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -75,6 +75,7 @@ impl Default for ServeOptions {
             header_timeout: Duration::from_secs(3),
             body_timeout: BODY_TIMEOUT,
             heartbeat: Duration::from_secs(15),
+            write_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -106,17 +107,7 @@ pub async fn serve(
     tokio::pin!(shutdown);
     loop {
         let (stream, peer) = tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok(a) => a,
-                Err(e) => {
-                    // Running out of file descriptors, or a connection reset before it was accepted, is not a
-                    // reason to stop answering for good: a flood of connections would then switch the portal and
-                    // the webhooks off until the next restart. Wait a moment and try again.
-                    crate::diag::warn(&format!("could not accept a connection: {e}"));
-                    tokio::time::sleep(ACCEPT_RETRY).await;
-                    continue;
-                }
-            },
+            accepted = crate::limit::accept_retrying("http", crate::limit::ACCEPT_RETRY, || listener.accept()) => accepted,
             () = &mut shutdown => return Ok(()),
         };
         // Shed load instead of queueing it: a flood must not grow memory (REQ-NFR-110), and one
@@ -289,6 +280,38 @@ fn cross_site_write(method: &hyper::Method, segs: &[&str], headers: &HeaderMap) 
     }
 }
 
+/// Whether this request would be answered on the strength of the caller's address alone: the page and the portal's
+/// `/api` routes, and an announcement with no token. Routes that carry their own token are not (a page that was
+/// rebound to this device does not have the token), nor is the health check.
+fn answers_without_a_token(method: &hyper::Method, segs: &[&str], headers: &HeaderMap) -> bool {
+    match find(ROUTES, method.as_str(), segs) {
+        Some((row, _)) => match row.auth {
+            Page => true,
+            EndpointOrAdmin => token_from(headers).is_none(),
+            _ => false,
+        },
+        // A wrong method on a path of this table is a plain 405; any other path is the portal's.
+        None => path_row(ROUTES, segs).is_none_or(|row| row.auth == Page),
+    }
+}
+
+/// Whether the `Host` header names this device (see [`crate::hostguard`]). A request without one is not from a
+/// browser, which always sends it, so it is let through.
+fn host_is_ours(core: &Core, headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(HOST) else {
+        return true;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    let public = core.setting("public_url");
+    crate::hostguard::host_is_ours(
+        host,
+        public.as_str().unwrap_or(""),
+        crate::hostguard::machine_name().as_deref(),
+    )
+}
+
 async fn route(
     core: Arc<Core>,
     streams: Arc<AtomicUsize>,
@@ -306,6 +329,12 @@ async fn route(
             r#"{"error":"cross-site request refused"}"#,
         ));
     }
+    if answers_without_a_token(&parts.method, &segs, headers) && !host_is_ours(&core, headers) {
+        return Ok(json(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"this name does not belong to the device: open the portal by its IP address, localhost, its .local name, or set the public address in the settings"}"#,
+        ));
+    }
     // First decide whether the path names a real resource (invalid endpoint names are simply 404),
     // then whether the method is allowed on it (405).
     let resp = match find(ROUTES, parts.method.as_str(), &segs) {
@@ -317,7 +346,7 @@ async fn route(
                 crate::announce_api::handle(&core, headers, peer, body, opts.body_timeout).await
             }
             Id::Mcp => crate::mcp_server::handle(&core, headers, body, opts.body_timeout).await,
-            Id::Replies => replies_stream(core, streams, opts, headers, name),
+            Id::Replies => replies_stream(Arc::clone(&core), streams, opts, headers, name),
             Id::Ack => ack(&core, headers, name, id),
         },
         None => match path_row(ROUTES, &segs) {
@@ -336,6 +365,9 @@ async fn route(
             .unwrap_or_else(|| json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#)),
         },
     };
+    // A webhook, announcement or acknowledgement is reported as accepted only once it is on disk (REQ-INB-004).
+    // Nothing is waiting for most requests, so this returns at once.
+    core.durable().await;
     Ok(resp)
 }
 
@@ -461,7 +493,7 @@ fn replies_stream(
         let _guard = guard;
         let mut last_sent = 0_u64;
         if tx
-            .send(Bytes::from_static(b"retry: 3000\n\n"))
+            .send_timeout(Bytes::from_static(b"retry: 3000\n\n"), opts.write_timeout)
             .await
             .is_err()
         {
@@ -483,7 +515,11 @@ fn replies_stream(
                     continue;
                 };
                 let event = format!("id: {}\nevent: reply\ndata: {}\n\n", r.id, data);
-                if tx.send(Bytes::from(event)).await.is_err() {
+                if tx
+                    .send_timeout(Bytes::from(event), opts.write_timeout)
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 last_sent = last_sent.max(r.id);
@@ -491,7 +527,9 @@ fn replies_stream(
             tokio::select! {
                 () = &mut notified => {}
                 () = tokio::time::sleep(opts.heartbeat) => {
-                    if tx.send(Bytes::from_static(b": keepalive\n\n")).await.is_err() {
+                    // Nothing else is queued when the heartbeat fires, so a channel that is still full means
+                    // the reader has taken nothing for a whole interval: end the stream.
+                    if tx.try_send(Bytes::from_static(b": keepalive\n\n")).is_err() {
                         return;
                     }
                 }

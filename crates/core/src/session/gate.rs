@@ -17,7 +17,7 @@ pub(super) struct Turn<'a, H> {
     ctl: &'a TurnCtl,
     host: &'a mut H,
     conv: &'a mut Conversation,
-    usage: &'a mut UsageTracker,
+    usage: &'a UsageTracker,
     cfg: TurnConfig,
     turn: Option<TurnLog>,
     st: TurnState,
@@ -346,12 +346,12 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Record how a held or proposed action ended without running.
     fn resolved(&self, p: &PendingAction, how: &str, why: &str) {
-        note_resolved(self.turn.as_ref(), &*self.usage, p, how, why);
+        note_resolved(self.turn.as_ref(), self.usage, p, how, why);
     }
 
     /// Write one audit record for this turn, if the conversation has a log.
     fn note_act(&self, a: &Act<'_>) -> Option<u64> {
-        note(self.turn.as_ref(), &*self.usage, a)
+        note(self.turn.as_ref(), self.usage, a)
     }
 
     /// Put each of the calls through the gate, in order, and say what is left to settle. `backend` is used
@@ -662,7 +662,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                     let summary = summarise_result(
                         backend,
                         &self.cfg,
-                        &mut *self.usage,
+                        self.usage,
                         self.day,
                         &mut self.result.model_requests,
                         &call.name,

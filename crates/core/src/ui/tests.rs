@@ -110,7 +110,7 @@ async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool) -> Portal
 async fn call(p: &Portal, method: &str, path: &str, auth: &str, body: &str) -> (u16, Value) {
     let mut s = TcpStream::connect(p.addr).await.unwrap();
     let mut req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     if !auth.is_empty() {
@@ -510,7 +510,7 @@ async fn the_served_page_negotiates_the_encoding() {
     let p = start(false).await;
     for (accept, encoded) in [("", false), ("Accept-Encoding: gzip\r\n", true)] {
         let mut s = TcpStream::connect(p.addr).await.unwrap();
-        let req = format!("GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{accept}\r\n");
+        let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n{accept}\r\n");
         s.write_all(req.as_bytes()).await.unwrap();
         let mut raw = Vec::new();
         s.read_to_end(&mut raw).await.unwrap();
@@ -589,6 +589,15 @@ async fn the_audit_log_is_read_through_an_authenticated_paged_endpoint() {
     let (s, v) = get("?limit=lots").await;
     assert_eq!(s, 400);
     assert!(v["error"].as_str().unwrap().contains("limit"));
+    // One decoder for every query: a broken escape is refused here too, not read as written.
+    let (_, v) = get("?tool=docker%5F%5Frestart").await;
+    assert_eq!(
+        v["records"].as_array().unwrap().len(),
+        3,
+        "an escape is decoded"
+    );
+    assert_eq!(get("?tool=docker%zz").await.0, 400);
+    assert_eq!(get("?tool=%ff%fe").await.0, 400, "not text");
     // read-only: the log cannot be changed or cleared through the API
     for m in ["POST", "PUT", "DELETE"] {
         assert_eq!(

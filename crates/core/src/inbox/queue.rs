@@ -134,6 +134,14 @@ impl Inbox {
         store.save(&self.state)
     }
 
+    /// The bytes [`Inbox::save`] would write, so the caller can serialise under a lock and write later.
+    ///
+    /// # Errors
+    /// A state that cannot be serialised.
+    pub fn encode(&self, store: &JsonStore) -> Result<Vec<u8>, StoreError> {
+        store.encode(&self.state)
+    }
+
     /// All events, oldest first.
     #[must_use]
     pub fn events(&self) -> &[Event] {
@@ -206,8 +214,31 @@ impl Inbox {
         Ingest::Accepted(id)
     }
 
+    /// The endpoint that should give up an event now: the one holding the most of whichever limit is broken
+    /// (events, or bytes if only the byte budget is), provided it holds more than half of that limit. One token
+    /// holder who floods the queue therefore evicts its own events, not those of an endpoint that holds half the
+    /// queue or less. `None` when no endpoint is past half (a single endpoint always is, once the queue is full),
+    /// and the order below then applies to every event.
+    fn heaviest_endpoint(&self) -> Option<String> {
+        let over_count = self.state.events.len() > self.limits.max_events;
+        let (limit, weigh): (usize, fn(&Event) -> usize) = if over_count {
+            (self.limits.max_events, |_| 1)
+        } else {
+            (self.limits.max_bytes, Event::size)
+        };
+        let mut held: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for e in &self.state.events {
+            *held.entry(e.endpoint.as_str()).or_default() += weigh(e);
+        }
+        held.into_iter()
+            .max_by_key(|&(_, n)| n)
+            .filter(|&(_, n)| n > limit / 2)
+            .map(|(name, _)| name.to_owned())
+    }
+
     /// Evict until within limits. Order: finished-with events first, then announced, then the least
-    /// important unheard. The event just added is evicted only as a last resort.
+    /// important unheard, taken from the endpoint holding the most when it holds more than half the queue (see
+    /// [`Inbox::heaviest_endpoint`]). The event just added is evicted only as a last resort.
     fn enforce_limits(&mut self, protect: u64) {
         let rank = |e: &Event| -> (u8, Priority, Ts) {
             let class = match e.state {
@@ -221,13 +252,17 @@ impl Inbox {
         while self.state.events.len() > self.limits.max_events
             || self.total_bytes() > self.limits.max_bytes
         {
-            let victim = self
-                .state
-                .events
-                .iter()
-                .filter(|e| e.id != protect)
-                .min_by_key(|e| rank(e))
-                .map(|e| e.id)
+            let heaviest = self.heaviest_endpoint();
+            let pick = |only: Option<&str>| {
+                self.state
+                    .events
+                    .iter()
+                    .filter(|e| e.id != protect && only.is_none_or(|n| e.endpoint == n))
+                    .min_by_key(|e| rank(e))
+                    .map(|e| e.id)
+            };
+            let victim = pick(heaviest.as_deref())
+                .or_else(|| pick(None))
                 .or_else(|| self.state.events.first().map(|e| e.id));
             match victim {
                 Some(id) => self.state.events.retain(|e| e.id != id),
@@ -583,6 +618,80 @@ mod tests {
             vec!["urgent", "normal", "newest"],
             "the low-priority one went"
         );
+    }
+
+    fn two_endpoints() -> (Inbox, Endpoint, Endpoint) {
+        let mut eps = Endpoints::default();
+        eps.create("quiet", "generic", 0).unwrap();
+        eps.create("flood", "generic", 0).unwrap();
+        (
+            Inbox::new(InboxLimits::default()),
+            eps.get("quiet").unwrap().clone(),
+            eps.get("flood").unwrap().clone(),
+        )
+    }
+
+    fn post(inbox: &mut Inbox, ep: &Endpoint, n: u64, text_len: usize) {
+        let mut m = mapped(
+            EventKind::Done,
+            Priority::Normal,
+            &format!("{}-{n}", ep.name),
+            Some(&format!("{}-s{n}", ep.name)),
+        );
+        m.text = "x".repeat(text_len);
+        inbox.ingest(i64::try_from(n).unwrap(), ep, m);
+    }
+
+    fn held_by(inbox: &Inbox, name: &str) -> usize {
+        inbox.events().iter().filter(|e| e.endpoint == name).count()
+    }
+
+    #[test]
+    fn one_endpoint_cannot_flood_another_out_of_the_queue() {
+        let (mut inbox, quiet, flood) = two_endpoints();
+        inbox.limits.max_events = 8;
+        post(&mut inbox, &quiet, 1, 10);
+        post(&mut inbox, &quiet, 2, 10);
+        for n in 10..100 {
+            post(&mut inbox, &flood, n, 10);
+        }
+        assert_eq!(
+            held_by(&inbox, "quiet"),
+            2,
+            "the quiet endpoint's events stay"
+        );
+        assert_eq!(inbox.events().len(), 8, "the flood fills the rest");
+        assert_eq!(
+            inbox.events().last().map(|e| e.title.as_str()),
+            Some("flood-99"),
+            "and the newest of its own survives"
+        );
+    }
+
+    #[test]
+    fn the_byte_budget_is_shared_fairly_too() {
+        let (mut inbox, quiet, flood) = two_endpoints();
+        inbox.limits.max_bytes = 4_000;
+        post(&mut inbox, &quiet, 1, 300);
+        for n in 10..60 {
+            post(&mut inbox, &flood, n, 300);
+        }
+        assert_eq!(held_by(&inbox, "quiet"), 1);
+        assert!(inbox.total_bytes() <= 4_000);
+    }
+
+    #[test]
+    fn past_half_the_queue_an_endpoint_competes_on_the_old_rules() {
+        let (mut inbox, a, b) = two_endpoints();
+        inbox.limits.max_events = 4;
+        for n in 1..=3 {
+            post(&mut inbox, &a, n, 10);
+        }
+        post(&mut inbox, &b, 10, 10);
+        post(&mut inbox, &b, 11, 10);
+        // Three from a, two from b, room for four: the endpoint holding more pays, and its oldest goes.
+        assert_eq!((held_by(&inbox, "quiet"), held_by(&inbox, "flood")), (2, 2));
+        assert!(inbox.events().iter().all(|e| e.title != "quiet-1"));
     }
 
     #[test]

@@ -35,6 +35,10 @@ async fn start_with_clock(
     opts: ServeOptions,
 ) -> Harness {
     let core = Arc::new(Core::in_memory(clock, Adapters::builtin(), limits));
+    start_core(core, opts).await
+}
+
+async fn start_core(core: Arc<Core>, opts: ServeOptions) -> Harness {
     let (_, token) = core.create_endpoint("claude-code", "claude-code").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -62,9 +66,21 @@ async fn call(
     headers: &[(&str, &str)],
     body: &str,
 ) -> (u16, String, String) {
+    call_for(addr, "127.0.0.1", method, path, headers, body).await
+}
+
+/// Like [`call`], with the `Host` header the request is addressed to.
+async fn call_for(
+    addr: SocketAddr,
+    host: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, String, String) {
     let mut s = TcpStream::connect(addr).await.unwrap();
     let mut req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     for (k, v) in headers {
@@ -128,6 +144,34 @@ async fn a_claude_code_hook_is_accepted_and_the_response_is_an_empty_object() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn an_accepted_event_is_on_disk_before_the_response_arrives() {
+    let dir = crate::store::testutil::TempDir::new("http-durable");
+    let core = Arc::new(
+        Core::open(
+            Arc::new(SystemClock),
+            Adapters::builtin(),
+            Limits::default(),
+            crate::app::Stores::in_dir(&dir.0),
+        )
+        .unwrap(),
+    );
+    let h = start_core(core, ServeOptions::default()).await;
+    let auth = bearer(&h.token);
+    let (status, _, _) = call(
+        h.addr,
+        "POST",
+        "/hook/claude-code",
+        &[("Authorization", &auth)],
+        STOP,
+    )
+    .await;
+    assert_eq!(status, 202);
+    // Read at once, with no flush: the response itself must have waited for the write (REQ-INB-004).
+    let saved = std::fs::read_to_string(dir.0.join("inbox.json")).unwrap();
+    assert!(saved.contains("clawdot finished"), "{saved}");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn the_alternate_token_header_works() {
     let h = start(Limits::default(), ServeOptions::default()).await;
     let (status, _, _) = call(
@@ -168,7 +212,7 @@ async fn oversized_bodies_are_refused_without_being_read() {
     // Declares 10 MB but sends almost nothing: the server must answer 413 immediately.
     let mut s = TcpStream::connect(h.addr).await.unwrap();
     let req = format!(
-        "POST /hook/claude-code HTTP/1.1\r\nHost: t\r\nAuthorization: {auth}\r\nContent-Length: 10485760\r\nConnection: close\r\n\r\n{{}}"
+        "POST /hook/claude-code HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {auth}\r\nContent-Length: 10485760\r\nConnection: close\r\n\r\n{{}}"
     );
     s.write_all(req.as_bytes()).await.unwrap();
     let mut raw = Vec::new();
@@ -285,7 +329,7 @@ async fn read_until(s: &mut TcpStream, buf: &mut String, needle: &str) {
 async fn open_stream(addr: SocketAddr, token: &str) -> TcpStream {
     let mut s = TcpStream::connect(addr).await.unwrap();
     let req = format!(
-        "GET /bridge/claude-code/replies HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\n\r\n"
+        "GET /bridge/claude-code/replies HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\n\r\n"
     );
     s.write_all(req.as_bytes()).await.unwrap();
     s
@@ -479,6 +523,39 @@ async fn streams_require_credentials_and_are_capped() {
     )
     .await;
     assert_eq!(status, 503, "the second stream is refused");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_stream_whose_reader_stopped_reading_ends_and_frees_its_slot() {
+    let core = Arc::new(Core::in_memory(
+        Arc::new(SystemClock),
+        Adapters::builtin(),
+        Limits::default(),
+    ));
+    let (_, token) = core.create_endpoint("claude-code", "claude-code").unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&bearer(&token)).unwrap(),
+    );
+    let streams = Arc::new(AtomicUsize::new(0));
+    let opts = ServeOptions {
+        heartbeat: Duration::from_millis(5),
+        write_timeout: Duration::from_millis(50),
+        ..ServeOptions::default()
+    };
+    // The response body is held but never polled: a client that has stopped reading.
+    let response = replies_stream(core, Arc::clone(&streams), opts, &headers, "claude-code");
+    assert_eq!(response.status(), 200);
+    assert_eq!(streams.load(Ordering::SeqCst), 1);
+    let freed = timeout(Duration::from_secs(5), async {
+        while streams.load(Ordering::SeqCst) != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(freed.is_ok(), "the stalled stream must release its slot");
+    drop(response);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1223,7 +1300,7 @@ async fn answered_without_the_body(
 ) -> Option<u16> {
     let mut s = TcpStream::connect(addr).await.unwrap();
     let mut req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: 64\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 64\r\n"
     );
     if let Some((k, v)) = header {
         req.push_str(&format!("{k}: {v}\r\n"));
@@ -1283,7 +1360,7 @@ async fn the_known_differences_between_routes_are_pinned() {
     for path in ["/hook/claude-code", "/api/announce", "/mcp"] {
         let mut s = TcpStream::connect(h.addr).await.unwrap();
         let req = format!(
-            "POST {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{}: {}\r\n\r\n",
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n{}: {}\r\n\r\n",
             big.0, big.1
         );
         s.write_all(req.as_bytes()).await.unwrap();
@@ -1359,8 +1436,8 @@ async fn a_web_page_on_another_site_cannot_drive_the_portal_in_open_mode() {
     for origin in [
         "http://evil.example",
         "null",
-        "http://t.evil.example",
-        "http://t:1",
+        "http://127.0.0.1.evil.example",
+        "http://127.0.0.1:1",
     ] {
         let hdrs = [("Origin", origin)];
         let (s, _, _) = call(h.addr, "POST", "/api/endpoints", &hdrs, make).await;
@@ -1379,11 +1456,140 @@ async fn a_web_page_on_another_site_cannot_drive_the_portal_in_open_mode() {
     // Reading is left to the browser's same-origin rule, and the portal itself (origin = host) works, as does a
     // script that sends no Origin at all.
     assert_eq!(call(h.addr, "GET", "/api/overview", &evil, "").await.0, 200);
-    let same = [("Origin", "http://T")];
+    let same = [("Origin", "http://127.0.0.1")];
     assert_eq!(
         call(h.addr, "POST", "/api/endpoints", &same, make).await.0,
         201
     );
     let (s, _, _) = call(h.addr, "POST", "/api/announce", &[], say).await;
     assert_eq!(s, 202);
+}
+
+// REQ-CFG-005, threat T5: DNS rebinding. The attacker's own name is re-resolved to the device, so the page, the
+// device and the Origin all agree; only the Host header still names the attacker. In open mode the address is the
+// credential, so the portal answers only to names that are the device's.
+#[tokio::test]
+async fn a_rebound_name_cannot_reach_the_portal_but_the_devices_own_names_can() {
+    let h = start(Limits::default(), ServeOptions::default()).await;
+    assert_eq!(
+        post(&h, "/api/setup", "", r#"{"mode":"open"}"#).await.0,
+        200
+    );
+    let port = h.addr.port();
+    let mut ours = vec![
+        format!("127.0.0.1:{port}"),
+        format!("192.168.1.20:{port}"),
+        format!("[::1]:{port}"),
+        format!("localhost:{port}"),
+        "10.0.0.7".to_owned(),
+    ];
+    if let Some(m) = crate::hostguard::machine_name() {
+        ours.push(format!("{m}:{port}"));
+        ours.push(format!("{}.local:{port}", m.split('.').next().unwrap()));
+    }
+    for host in &ours {
+        for (method, path) in [("GET", "/"), ("GET", "/api/overview"), ("GET", "/api/auth")] {
+            let (s, _, _) = call_for(h.addr, host, method, path, &[], "").await;
+            assert_eq!(s, 200, "{host} {method} {path}");
+        }
+    }
+    let make = r#"{"name":"rebind","adapter":"generic"}"#;
+    for host in [
+        format!("evil.example:{port}"),
+        "evil.example".to_owned(),
+        format!("localhost.evil.example:{port}"),
+        format!("192.168.1.20.evil.example:{port}"),
+        format!("{port}"),
+    ] {
+        for (method, path, body) in [
+            ("GET", "/", ""),
+            ("HEAD", "/", ""),
+            ("GET", "/ui", ""),
+            ("GET", "/api/overview", ""),
+            ("GET", "/api/auth", ""),
+            ("POST", "/api/endpoints", make),
+            ("DELETE", "/api/endpoints/claude-code", ""),
+            ("GET", "/api/nothing-here", ""),
+            // An announcement with no token takes the administrator path, which open mode leaves to the address.
+            (
+                "POST",
+                "/api/announce",
+                r#"{"text":"hi","endpoint":"claude-code"}"#,
+            ),
+        ] {
+            let (s, _, text) = call_for(h.addr, &host, method, path, &[], body).await;
+            assert_eq!(s, 403, "{host} {method} {path}");
+            if method != "HEAD" {
+                assert!(text.contains("public address"), "{text}");
+            }
+        }
+    }
+    assert!(
+        h.core.endpoints().iter().all(|e| e.name != "rebind"),
+        "nothing was changed"
+    );
+}
+
+// Routes that carry their own token cannot be driven by a rebound page, so the Host check leaves them alone.
+#[tokio::test]
+async fn token_routes_and_the_health_check_work_under_any_host_name() {
+    let h = start(Limits::default(), ServeOptions::default()).await;
+    assert_eq!(
+        post(&h, "/api/setup", "", r#"{"mode":"open"}"#).await.0,
+        200
+    );
+    let auth = bearer(&h.token);
+    let hdr = [("Authorization", auth.as_str())];
+    let any = "agent.example.net:3335";
+    assert_eq!(
+        call_for(h.addr, any, "GET", "/healthz", &[], "").await.0,
+        200
+    );
+    assert_eq!(
+        call_for(h.addr, any, "POST", "/hook/claude-code", &hdr, STOP)
+            .await
+            .0,
+        202
+    );
+    assert_eq!(
+        call_for(
+            h.addr,
+            any,
+            "POST",
+            "/api/announce",
+            &hdr,
+            r#"{"text":"hello"}"#
+        )
+        .await
+        .0,
+        202,
+        "an announcement with a token"
+    );
+    assert_eq!(
+        call_for(
+            h.addr,
+            any,
+            "POST",
+            "/bridge/claude-code/replies/999/ack",
+            &hdr,
+            ""
+        )
+        .await
+        .0,
+        404,
+        "the bridge answers (no such reply); it is not refused for its host"
+    );
+    assert_eq!(
+        call_for(h.addr, any, "POST", "/mcp", &[], "{}").await.0,
+        401,
+        "the MCP server asks for its token"
+    );
+    let mut stream = TcpStream::connect(h.addr).await.unwrap();
+    let req = format!(
+        "GET /bridge/claude-code/replies HTTP/1.1\r\nHost: {any}\r\nAuthorization: Bearer {}\r\n\r\n",
+        h.token
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = String::new();
+    read_until(&mut stream, &mut buf, "retry:").await;
 }
