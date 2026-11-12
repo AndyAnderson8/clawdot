@@ -1,6 +1,5 @@
 /* ---- Tools and skills: one list each, a search above it, adding in a dialog ---- */
-.toolrow,
-.toolhead {
+.toolrow {
   grid-template-columns: 3rem minmax(0, 1fr) 11.5rem 5rem;
 }
 .toolbar {

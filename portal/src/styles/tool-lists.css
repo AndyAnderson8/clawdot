@@ -1,18 +1,9 @@
 /* ---- Tool lists: dense rows with labelled columns ---- */
-.toolhead,
 .toolrow {
   display: grid;
   grid-template-columns: 3.5rem minmax(0, 1fr) 17.5rem 5.5rem;
   gap: var(--spacing-2) var(--spacing-4);
   align-items: center;
-}
-.toolhead {
-  margin-top: var(--spacing-3);
-  padding: var(--spacing-2) 0;
-  border-bottom: 1px solid var(--color-card-border);
-  color: var(--color-text-secondary);
-  font-size: 0.8125rem;
-  font-weight: 650;
 }
 ul.rows.tools {
   margin: 0;
@@ -68,9 +59,6 @@ ul.rows.tools > li.toolrow:last-child {
   font-size: 0.8125rem;
 }
 @media (max-width: 48rem) {
-  .toolhead {
-    display: none;
-  }
   .toolrow {
     grid-template-columns: 3.5rem minmax(0, 1fr);
   }
