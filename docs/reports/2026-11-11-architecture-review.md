@@ -129,6 +129,37 @@ What was done about each finding the same day. "Done" means landed on `dev` with
 
 Found along the way and fixed: the core crate failed eight of its own tests when built alone without default features (CI now tests it alone), and a server error whose text contained "401" was reported as a bad key.
 
+## Code quality passes that followed (2026-11-11 to 2026-11-12)
+
+After the findings above were worked through, every module of `crates/core/src` was read critically and fixed in small batches, each landed only after the whole workspace test suite passed and with CI green afterwards. The portal had three smaller passes. The other crates (device, wake, satellite program, bridge, eval) were not reviewed: most of that code is the device daemon, and the device decision (D2) is still open.
+
+Bugs and security problems found and fixed:
+
+| Area | What was wrong |
+|---|---|
+| Portal API | A web page open in a browser on the home network could send writes to the speaker in open mode (cross-site request). Writes from another origin are refused, and the page and its API answer only to an IP address, `localhost`, the machine name or the configured public address (DNS rebinding). |
+| Webhooks | A webhook re-created under a deleted one's name inherited the old agent's waiting replies, open events and rate limit. |
+| Tools | Switching off an MCP source whose name holds `__` left its tools on. A path value of `..` could turn `DELETE /items/{id}` into `DELETE /`. A confirmation was recorded with one fixed tool-call id, and calls without an id were passed on with an empty one. |
+| Secrets | A provider that echoed the Authorization header put the key in an error message. The console log line was not redacted. Saving a key while the file was unreadable lost the other keys. |
+| Replies | A long reply in a script without spaces between words, or with accents or emoji, could abort the turn (a cut inside a character). |
+| Satellite | Saying stop during a reply let the music resume after it. Music queued by a reply that could not be spoken played after a later one. Speech synthesis ran inside the session loop and could outlast the satellite's dead-peer time. A satellite that stopped reading wedged its session. |
+| Updater | The version check accepted `10.2.0` for `0.2.0`. The new program was not flushed before the rename. Two requests could both start an install. |
+| Storage | A power cut could bring back an old file (the directory was not flushed). Every change rewrote three files; an acknowledgement now writes 166 bytes instead of about 27 KB. Usage counters and timers were written on the loop's thread after every turn. A failed save left memory and disk disagreeing for eight portal operations. |
+| Server | One failed accept stopped the portal, the webhooks and the satellite listener until restart. |
+
+Design clean-ups: the gate's argument lists became structs and its long functions were split by phase; the model loop moved onto the gate type and its fields became private; no function in the core silences the too-many-arguments lint; test modules over about 800 lines live in their own files; decisions made by matching spoken text were replaced by data from the gate; the satellite session's boolean pairs became enums. In the portal: one confirm dialog, the provider key's state out of the form values, one component for a setting's input, the browser test and the stylesheet split by area (the built page was byte-identical), and a check that the mock server serves only documented routes.
+
+Left open on purpose, each written up where noted:
+
+- Countdown timers are wall-clock deadlines, so a clock step while one runs makes it ring at the wrong time or be reported as missed. Design in `docs/open-questions.md`.
+- Pending writes (a few milliseconds' worth) are lost on SIGTERM: there is no signal handler, and adding one needs a new dependency.
+- Hive discovery accepts replies from any source address; checking needs socket options the forbid-unsafe rule rules out. It matters once speakers dial each other.
+- Replies are keyed by endpoint name; an endpoint id would remove that class of bug at the cost of a protocol and file change.
+- Saved tier and switched-off entries of an MCP source that was never connected survive its deletion.
+- Questions for the maintainer: whether a reverse proxy or another name for the portal must be supported; plain-http tools with a credential; updater redirects to this machine; a signed version line in the release file.
+
+None of this has run on the Dot.
+
 ## What this review did not do
 
 It read the code and measured it; it did not profile memory or latency on the device, audit the cryptography in the Noise or hive code line by line, or review the wake-word and device crates in depth.
