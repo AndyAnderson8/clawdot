@@ -22,6 +22,8 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 mod gate;
+#[cfg(feature = "realtime")]
+pub(crate) use gate::GONE;
 use gate::Turn;
 pub use gate::{answer_held_action, run_proposed_calls};
 

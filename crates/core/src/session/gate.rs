@@ -288,6 +288,8 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             .any(|t| t.name == held.tool);
         let outcome = if offered_now {
             let gate = self.turn.as_ref().map_or(Gate::Run, |t| t.gate(held.tier));
+            // Counted as a call only because something runs, as `admit` does for a model's call.
+            self.result.tool_calls += 1;
             let ex = self
                 .execute(
                     &Call {
@@ -310,9 +312,8 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         } else {
             self.resolved(&held, decision::INVALID, "tool no longer offered");
             self.conv.set_recent(held.recent, "no longer available");
-            "Error: that tool is no longer available.".to_owned()
+            GONE.to_owned()
         };
-        self.result.tool_calls += 1;
         let id = self.conv.host_call_id();
         let call = ToolCall {
             id: id.clone(),
@@ -887,6 +888,9 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         take(&mut self.result)
     }
 }
+
+/// The text the model gets when a confirmed action's tool is no longer offered.
+pub(crate) const GONE: &str = "Error: that tool is no longer available.";
 
 /// What one reply's calls share while they go through the gate: the model that may summarise long results,
 /// the tools on offer, and whether enough time has passed since the last spoken phrase for another.

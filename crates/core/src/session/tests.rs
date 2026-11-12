@@ -332,8 +332,9 @@ async fn a_yes_for_a_tool_that_is_no_longer_offered_runs_nothing() {
     assert_eq!(c.pending().map(PendingAction::tool), Some("gizmo"));
     h.extra.clear();
     let done = Script::new(vec![text("It is gone.")]);
-    turn(&done, &mut h, &mut c, &mut u, "yes").await;
+    let r = turn(&done, &mut h, &mut c, &mut u, "yes").await;
     assert!(h.ran.is_empty(), "nothing ran: {:?}", h.ran);
+    assert_eq!(r.tool_calls, 0, "no tool ran, so no call is counted");
     let seen = done.requests()[0].messages.last().unwrap().clone();
     assert_eq!(
         (seen.role, seen.content.as_str()),

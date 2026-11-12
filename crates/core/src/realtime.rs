@@ -706,7 +706,11 @@ where
         st.last_user = Some(text.to_owned());
         return Ok(());
     }
-    let outcome = if res.tool_calls > 0 {
+    // A confirmed action whose tool had gone ran nothing (no call counted) but has an error to report.
+    let gone = is_yes(text)
+        && res.speech == "Done."
+        && last_tool_text(env.conv, None).is_some_and(|t| t == crate::session::GONE);
+    let outcome = if res.tool_calls > 0 || gone {
         let last = last_tool_text(env.conv, None).unwrap_or_default();
         if env.host.returns_untrusted_text(&tool) {
             // Outside text never goes into an instruction.
