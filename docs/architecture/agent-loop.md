@@ -1,6 +1,6 @@
 # The agent loop
 
-How one turn runs when the user asks for something that takes more than one step. The design is [agentic-scope.md](../design/agentic-scope.md) section 2; the requirements are REQ-AST-019 to REQ-AST-025, REQ-VOI-020, REQ-SEC-017 and REQ-CFG-044. The code is `session::run_turn_ctl` (the loop), `notes` (memory), `cancel` (the stop signal), `voice::Dialog` and `satellite::run_session` (audio). The measure of it is the `AGT` and `INJ` scenarios in [evals.md](evals.md).
+How one turn runs when the user asks for something that takes more than one step. The design is [agentic-scope.md](../design/agentic-scope.md) section 2; the requirements are REQ-AST-019 to REQ-AST-025, REQ-VOI-020, REQ-SEC-017 and REQ-CFG-044. The code is `session::run_turn_with` (the loop), `notes` (memory), `cancel` (the stop signal), `voice::Dialog` and `satellite::run_session` (audio). The measure of it is the `AGT` and `INJ` scenarios in [evals.md](evals.md).
 
 ## Where a turn runs (ADR-0021, REQ-AST-026, REQ-AST-027)
 
@@ -14,7 +14,7 @@ A turn does not run inside the main loop. The loop owns the state (the timers an
                           │     prompt + skills, limits, tool list, a read-only copy of the policy,
                           │     clones of the HTTP/MCP clients, a handle on the usage counters
                           ▼
-   turn task:  run_turn_ctl (the unchanged turn) ─ HTTP/MCP tool ─► called by the task itself
+   turn task:  run_turn_with (the unchanged turn) ─ HTTP/MCP tool ─► called by the task itself
                           │                      └ built-in tool ─► ToolReq ─► loop runs it on the assistant,
                           │                                          answers with the result and its effects
                           ▼
@@ -22,7 +22,7 @@ A turn does not run inside the main loop. The loop owns the state (the timers an
                                                             deliver the reply, start the speaker's next request
 ```
 
-* **Conversations.** One per speaker (`speakers.rs`): a satellite connection (`sat:<random id>`, made per connection), the console, or any other conversing source. At most 8, each already bounded (20 messages, 24,000 bytes); one idle for 600 s is dropped; a full set gives the place of the speaker idle longest to a newcomer. The held action, the recent actions, the stored results and the "forget my notes?" question live in the conversation, so they are per speaker: a yes from another speaker or another connection releases nothing. A speaker's second request while its first runs waits (at most 2); another speaker is not held up.
+* **Conversations.** One per speaker (`speakers.rs`): a satellite connection (`sat:<random id>`, made per connection), the console, or any other conversing source. At most 8, each already bounded by `CONVERSATION_MAX_MESSAGES` and `CONVERSATION_MAX_BYTES` (currently 20 messages and 24,000 bytes); one idle for 600 s is dropped; a full set gives the place of the speaker idle longest to a newcomer. The held action, the recent actions, the stored results and the "forget my notes?" question live in the conversation, so they are per speaker: a yes from another speaker or another connection releases nothing. A speaker's second request while its first runs waits (at most 2); another speaker is not held up.
 * **Snapshot.** A turn begins with the persona, skills, model, limits, tool list, which tools are off and the tiers the administrator chose, as they were at that moment. A portal change is applied by the loop at once and reaches the next turn; the turn in flight keeps its rules.
 * **The gate.** `session/gate.rs` (`Turn`) holds the tier check, hold and release, audit, caps, limits and cancel. The model-turn loop and the realtime path both call it; realtime has no scripted backend and no extra model request.
 * **Realtime and speech.** A realtime session is a task with its own conversation and the same link for built-in tools. Spoken lines (timers, portal phrases) and the agent-event announcements go through one speaker task, in order. None of them holds the loop.
@@ -83,7 +83,7 @@ What remains for barge-in (REQ-VOI-005): hearing "stop" over the assistant's own
 
 ## Memory (REQ-AST-023, REQ-SEC-017)
 
-- **History:** as before (20 messages, 24,000 bytes, 600 s idle).
+- **History:** as before, bounded by `CONVERSATION_MAX_MESSAGES`, `CONVERSATION_MAX_BYTES` and `CONVERSATION_IDLE_SECS` (currently 20 messages, 24,000 bytes, 600 s idle).
 - **Recent actions:** the last 10 calls of the conversation (id, tool, tier, a short redacted target, how it ended) are put at the end of the system prompt as host-written data. "Undo that" and "do it again" resolve from them. They expire with the history.
 - **Notes:** off unless `agent.notes` is true. At most 500 notes of 300 characters and 64 KB in all (REQ-MEM-001), in `memory.json` in the data directory (0600, atomic writes, bounds re-applied on load). Only the host writes them, from the user's own words in a turn the user started when the sentence begins with "remember that ...", "make a note that ...", "take a note ..." and a few more (`notes::parse`); a model reply, a tool result, an event or a summary cannot. The model is not offered a tool that writes them. Text that the audit redaction would change (keys, passwords, tokens) is refused. They are listed by "what do you remember", forgotten by "forget note 2" or "forget the note about the NAS" (one match only), and "forget everything" asks first. The prompt never carries more than 1,600 characters of them (REQ-MEM-002): a memory of 20 notes or fewer that fits is shown whole, a larger one is ranked for the turn (BM25-style word overlap with the utterance and the turn before it, plus a small recency bonus; no embeddings, REQ-MEM-003) and the best 12 or fewer are shown with their true numbers, and the read-only `recall` tool (REQ-MEM-005) looks up the rest. The model sees them as the user's own labelled data after the persona; they cannot change tiers, confirmation or allow-lists. `GET /api/notes` (with `?q=` to search, REQ-MEM-004), `DELETE /api/notes/{id}` and `DELETE /api/notes` do the same for the administrator.
 

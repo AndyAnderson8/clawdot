@@ -749,7 +749,20 @@ mod tests {
             model: "m".into(),
             ..Default::default()
         };
-        crate::session::run_turn(model, a, conv, &cfg, &mut usage, 1, 1000, user).await
+        crate::session::run_turn_with(
+            &crate::session::TurnCtl::default(),
+            model,
+            crate::session::TurnInputs {
+                host: a,
+                conv,
+                cfg: &cfg,
+                usage: &mut usage,
+                day: 1,
+                now: 1000,
+            },
+            user,
+        )
+        .await
     }
 
     /// REQ-AST-015, REQ-SEC-011: an instruct reply goes out only as the exact text read back, after a

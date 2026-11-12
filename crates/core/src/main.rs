@@ -12,6 +12,7 @@ use clawdot_core::commands::{
     announce_admin, bind_error, is_quit, reset_admin, run_endpoint_commands, say_command,
     spawn_console,
 };
+use clawdot_core::diag;
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::runtime::{
     SpeakerView, deliver, dispatch, drain, mcp_connected, on_hub_event, portal_op, settings_extra,
@@ -141,8 +142,11 @@ async fn main() -> ExitCode {
             return ExitCode::from(f.code);
         }
     };
-    let mut rt_rx = brain.rt.attach();
-    let mut mcp_rx = brain.connects.attach();
+    let mut rt_rx = brain.attach_realtime();
+    let Some(mut mcp_rx) = brain.attach_connects() else {
+        eprintln!("clawdot: cannot start: the connection results were already claimed");
+        return ExitCode::from(1);
+    };
 
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
@@ -160,7 +164,7 @@ async fn main() -> ExitCode {
     if let Some(input) = args.voice_in.clone() {
         // One utterance and out: there is no loop to serve meanwhile, so wait for the sources to answer, as
         // the single turn should have their tools.
-        while !brain.connects.is_empty() {
+        while brain.is_connecting() {
             let Some(done) = mcp_rx.recv().await else {
                 break;
             };
@@ -197,7 +201,7 @@ async fn main() -> ExitCode {
     // Satellites (speakers) connect here; their questions come back to this loop through `ask_rx`.
     let (ask_tx, mut ask_rx) = mpsc::channel::<Ask>(8);
     let announcer = satellite::Announcer::default();
-    if let Err(e) = start_satellites(&args, &core, &brain.rt, &announcer, &ask_tx).await {
+    if let Err(e) = start_satellites(&args, &core, brain.realtime(), &announcer, &ask_tx).await {
         eprintln!("clawdot: {e}");
         return ExitCode::from(1);
     }
@@ -210,7 +214,7 @@ async fn main() -> ExitCode {
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         args.listen,
         core.endpoints().len(),
-        if brain.llm.is_some() {
+        if brain.has_model() {
             "connected"
         } else {
             "not configured"
@@ -238,17 +242,20 @@ async fn main() -> ExitCode {
 
     let mut portal_rx = core.attach_portal();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let (usage, usage_store) = brain.usage_handles();
     let voice = Arc::new(Voice {
         announcer: announcer.clone(),
         core: Arc::clone(&core),
-        usage: brain.usage.clone(),
-        usage_store: brain.usage_store.clone(),
+        usage,
+        usage_store,
         echo: args.console || args.echo_speech,
         available: AtomicBool::new(false),
         polling: AtomicBool::new(false),
     });
     let (say_tx, say_rx) = mpsc::unbounded_channel::<Say>();
     tokio::spawn(speak(Arc::clone(&voice), say_rx));
+    // Set once the speaker task is gone, so that the loss is reported once, not every second.
+    let mut speaker_lost = false;
     loop {
         tokio::select! {
             Some(job) = portal_rx.recv() => {
@@ -297,7 +304,7 @@ async fn main() -> ExitCode {
                 on_hub_event(&mut brain, &mut hub, &core, ev).await;
             }
             _ = tick.tick() => {
-                hub.sweep(brain.clock.now());
+                hub.sweep(brain.now());
                 let tool_counts = brain.tool_counts();
                 let view = SpeakerView {
                     available: announcer.connected() > 0 && voice.available.load(Ordering::Relaxed),
@@ -307,17 +314,23 @@ async fn main() -> ExitCode {
                 core.set_ui_status(brain.status_json(announcer.connected(), &view, &station_names, &tool_counts));
                 // Everything that speaks is handed to the speaker task, which says it in order, so the wait for
                 // a voice or a summary never holds this loop (ADR-0021).
+                let mut say = |item: Say| {
+                    if say_tx.send(item).is_err() && !speaker_lost {
+                        speaker_lost = true;
+                        diag::error("the speaker task has stopped, so nothing more will be spoken; restart ClawDot");
+                    }
+                };
                 while let Some((text, preview)) = core.take_speech_as() {
-                    let _ = say_tx.send(Say::Phrase { text, preview });
+                    say(Say::Phrase { text, preview });
                 }
-                for fired in brain.assistant.tick() {
-                    let _ = say_tx.send(Say::Line(describe_fired(&fired)));
+                for fired in brain.tick() {
+                    say(Say::Line(describe_fired(&fired)));
                 }
                 if !voice.polling.swap(true, Ordering::Relaxed) {
-                    let _ = say_tx.send(Say::Poll {
-                        minute: brain.assistant.minute_of_day(),
-                        day: brain.assistant.local_day(),
-                        llm: brain.llm.clone(),
+                    say(Say::Poll {
+                        minute: brain.minute_of_day(),
+                        day: brain.local_day(),
+                        llm: brain.model(),
                     });
                 }
                 core.maintain();

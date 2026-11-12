@@ -1,6 +1,6 @@
 # Action safety: who may run a tool, and when
 
-How the core decides whether a tool call made by the language model actually runs. The requirements are REQ-AST-008, REQ-AST-015, REQ-INB-010, REQ-CFG-036 and REQ-SEC-010 to REQ-SEC-016 in [spec 0001](../specs/0001-product-requirements.md); the reasoning is in [agentic-scope.md](../design/agentic-scope.md) section 3. The code is `crates/core/src/session.rs` (`run_turn`), with the tool hosts in `assistant/tools.rs`, `httptools.rs`, `mcp.rs` and `extensions.rs`.
+How the core decides whether a tool call made by the language model actually runs. The requirements are REQ-AST-008, REQ-AST-015, REQ-INB-010, REQ-CFG-036 and REQ-SEC-010 to REQ-SEC-016 in [spec 0001](../specs/0001-product-requirements.md); the reasoning is in [agentic-scope.md](../design/agentic-scope.md) section 3. The code is `crates/core/src/session.rs` (`run_turn_with`), with the tool hosts in `assistant/tools.rs`, `httptools.rs`, `mcp.rs` and `extensions.rs`.
 
 The model is never trusted. It can be steered by text it reads (an event, a web page, an MCP result) and it can simply be wrong. So every rule below is enforced by the host in code, from the user's own words, and none of it depends on what the model says.
 
@@ -34,7 +34,7 @@ Who said yes is unknown: ClawDot does not identify speakers, so a guest or a tel
 
 ## Turns the user did not start (REQ-SEC-012, REQ-INB-010)
 
-`run_turn` is for the user's voice. A turn started by anything else (an inbox event, a schedule, a rule) must use `run_event_turn`, which sets `Trigger::Event`:
+`run_turn_with` is for the user's voice. A turn started by anything else (an inbox event, a schedule, a rule) must use `run_event_turn_with`, which sets `Trigger::Event`:
 
 - The trigger's text is shown to the model fenced in `<event_text>` and labelled untrusted, with angle brackets removed so it cannot close the fence. It is never read as an answer: an event cannot release a held action, however it is worded.
 - Only `read_only` tools run. A call to anything else is not run and is not refused outright: it is saved as a proposal (the same pending action as above) and the host speaks it as "Suggested action: ... Say yes if you want that, or no to drop it." The user's own later turn decides, within 120 seconds, exactly as for a normal held action.
@@ -60,9 +60,9 @@ Not done: scopes for inbox endpoints and rules, and a tier ceiling per scope (ag
 
 ## Audit log (REQ-SEC-014)
 
-Every call, hold, answer, refusal and cap hit writes one line to `audit.jsonl` in the data directory (code: `crates/core/src/audit.rs`, written from `run_turn`). The file is append-only, created 0600, and rotated at 256 KB to `audit.1.jsonl` (the older file is dropped), so the disk holds at most 512 KB. At start-up a crash is tolerated: damaged lines, a half-written last line and lines from a newer format are skipped and counted, and the next record starts on a fresh line. If a record cannot be written (disk full) the action still proceeds, the failure is counted in the log's health figures and printed to the console; the alternative, refusing to act without a record, would let a full disk disable the speaker's timers.
+Every call, hold, answer, refusal and cap hit writes one line to `audit.jsonl` in the data directory (code: `crates/core/src/audit.rs`, written from `run_turn_with`). The file is append-only, created 0600, and rotated at 256 KB to `audit.1.jsonl` (the older file is dropped), so the disk holds at most 512 KB. At start-up a crash is tolerated: damaged lines, a half-written last line and lines from a newer format are skipped and counted, and the next record starts on a fresh line. If a record cannot be written (disk full) the action still proceeds, the failure is counted in the log's health figures and printed to the console; the alternative, refusing to act without a record, would let a full disk disable the speaker's timers.
 
-A record holds: `id` (counts up across restarts), `ts`, `day`, `turn`, `trigger` (`voice`, or `event:<source>` for a turn from `run_event_turn_for`), `tool`, `tier`, `args`, `decision`, `held_id`, `dry_run`, `status` and `result` (when it ran), `turn_cost_usd` (the model spend so far in that turn, when the provider reports cost) and a fixed `note`.
+A record holds: `id` (counts up across restarts), `ts`, `day`, `turn`, `trigger` (`voice`, or `event:<source>` for a turn from `run_event_turn_with`), `tool`, `tier`, `args`, `decision`, `held_id`, `dry_run`, `status` and `result` (when it ran), `turn_cost_usd` (the model spend so far in that turn, when the provider reports cost) and a fixed `note`.
 
 | `decision` | Meaning |
 |---|---|
