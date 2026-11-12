@@ -54,9 +54,10 @@ src/
   time.ts         date and time formatting in the device's time zone
   types.ts        the shapes of the device's JSON API
   tokens.css      design tokens (Astryx neutral names and values, trimmed; see ADR-0017)
-  styles.css, index.html   components and the page shell (index.html holds the build markers)
+  styles/         the stylesheet in partials by area; styles/index.css imports them in cascade order
+  index.html      the page shell (holds the build markers)
 test/unit/        node:test unit tests for api, forms, snippets, dashboard, time and the safety rules
-test/browser/     smoke test: a Chrome driver (chrome.ts), a fake device (mock-api.ts), the steps (smoke.ts)
+test/browser/     smoke test: a Chrome driver (chrome.ts), a fake device (mock-api.ts), the harness (harness.ts), the steps by area (areas/), run in order by smoke.ts
 lint/             ESLint config and its own package.json (a separate install, see above)
 build.mjs         the esbuild script
 ```

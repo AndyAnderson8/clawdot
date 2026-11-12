@@ -1,0 +1,17 @@
+/* ---- Problems ---- */
+.logrow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-3);
+}
+.logrow .badge {
+  flex: none;
+  min-width: 5rem;
+  text-align: center;
+}
+.logrow > div {
+  min-width: 0;
+}
+.loglist + p {
+  margin-top: var(--spacing-4);
+}

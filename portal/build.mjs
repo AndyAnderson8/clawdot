@@ -24,13 +24,17 @@ const js = await esbuild.build({
   define: { "process.env.NODE_ENV": '"production"' },
   logLevel: "warning",
 });
-const css = esbuild.transformSync(readFileSync(src("tokens.css"), "utf8") + readFileSync(src("styles.css"), "utf8"), {
-  loader: "css",
+// styles/index.css imports tokens.css and every area's partial; the import order is the cascade order.
+const css = await esbuild.build({
+  entryPoints: [src("styles/index.css")],
+  bundle: true,
   minify: true,
+  write: false,
+  logLevel: "warning",
 });
 
 const script = js.outputFiles[0].text.trimEnd();
-const style = css.code.trimEnd();
+const style = css.outputFiles[0].text.trimEnd();
 // A closing tag inside the inline script or style would end it early (esbuild escapes these; this guards the guard).
 for (const [what, text, tag] of [
   ["script", script, "</script"],

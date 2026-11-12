@@ -1,0 +1,38 @@
+/* ---- Settings: a vertical list of sections beside the content, full width like Home ---- */
+.settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-4) var(--spacing-8);
+  align-items: start;
+}
+@media (min-width: 56rem) {
+  .settings {
+    grid-template-columns: 13rem minmax(0, 1fr);
+  }
+  .settings .tabs {
+    position: sticky;
+    top: var(--spacing-6);
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 2px;
+    margin: 0;
+    border-bottom: 0;
+  }
+  .settings .tabs a {
+    margin: 0;
+    padding: var(--spacing-2) var(--spacing-4);
+    border-bottom: 0;
+    border-left: 3px solid transparent;
+    border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
+  }
+  .settings .tabs a:focus-visible {
+    outline-offset: -3px;
+  }
+  .settings .tabs a:hover {
+    background: var(--color-background-muted);
+  }
+  .settings .tabs a[aria-current="page"] {
+    border-left-color: var(--color-live);
+    background: var(--color-background-muted);
+  }
+}
