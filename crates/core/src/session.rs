@@ -354,6 +354,13 @@ struct Clarify {
     asked_at: Ts,
 }
 
+/// Most messages a standard conversation keeps after the system prompt (REQ-AST-007).
+pub const CONVERSATION_MAX_MESSAGES: usize = 20;
+/// Most bytes of history a standard conversation keeps (REQ-AST-007).
+pub const CONVERSATION_MAX_BYTES: usize = 24_000;
+/// Seconds of silence after which a standard conversation forgets its history (REQ-AST-007).
+pub const CONVERSATION_IDLE_SECS: i64 = 600;
+
 /// Conversation state with a hard size bound and idle expiry (REQ-AST-007).
 #[derive(Debug, Clone)]
 pub struct Conversation {
@@ -380,6 +387,18 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    /// A conversation with the standard limits ([`CONVERSATION_MAX_MESSAGES`], [`CONVERSATION_MAX_BYTES`],
+    /// [`CONVERSATION_IDLE_SECS`]).
+    #[must_use]
+    pub fn standard(system: impl Into<String>) -> Self {
+        Self::new(
+            system,
+            CONVERSATION_MAX_MESSAGES,
+            CONVERSATION_MAX_BYTES,
+            CONVERSATION_IDLE_SECS,
+        )
+    }
+
     /// A conversation with a system prompt and limits.
     #[must_use]
     pub fn new(

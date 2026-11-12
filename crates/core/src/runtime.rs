@@ -352,7 +352,7 @@ impl Brain {
         self.rt.set_error(None);
         core.patch_ui_status("realtime", self.rt.status());
         // A fresh conversation per session: it holds the transcript and any held action in memory only.
-        let mut conv = Conversation::new(self.persona.clone(), 20, 24_000, 600);
+        let mut conv = Conversation::standard(self.persona.clone());
         if let Some(a) = core.audit() {
             conv.set_audit(a);
         }
@@ -1118,7 +1118,7 @@ mod tests {
     async fn the_fast_path_answers_without_a_model_and_other_requests_say_one_is_needed() {
         let dir = TempDir::new("dispatch");
         let (mut brain, _core, _live) = started(&dir, &[]).await;
-        let mut hub = Hub::new(|| Conversation::new(String::new(), 20, 24_000, 600));
+        let mut hub = Hub::new(|| Conversation::standard(String::new()));
         let ask = |line: &str| Request {
             speaker: "console".into(),
             line: line.to_owned(),

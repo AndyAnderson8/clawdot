@@ -13,16 +13,16 @@
 //! in the set (the turn task holds it) and cannot be dropped; what it says meanwhile waits, at most
 //! [`MAX_WAITING`] utterances, until the turn hands the conversation back.
 
-use crate::session::Conversation;
+use crate::session::{CONVERSATION_IDLE_SECS, Conversation};
 use std::collections::{HashMap, VecDeque};
 
-/// Most conversations kept at once. Each is bounded by 20 messages and 24,000 bytes of history, so the set
-/// stays under a megabyte.
+/// Most conversations kept at once. Each is bounded by [`crate::session::CONVERSATION_MAX_MESSAGES`] messages
+/// and [`crate::session::CONVERSATION_MAX_BYTES`] bytes of history, so the set stays under a megabyte.
 pub const MAX_SPEAKERS: usize = 8;
 /// Most utterances held for a speaker whose turn is still running. More are refused.
 pub const MAX_WAITING: usize = 2;
-/// Seconds without activity after which an idle conversation is dropped. Matches `Conversation`'s own idle time.
-pub const IDLE_SECS: i64 = 600;
+/// Seconds without activity after which an idle conversation is dropped: a conversation's own idle time.
+pub const IDLE_SECS: i64 = CONVERSATION_IDLE_SECS;
 
 /// Who is talking.
 pub type SpeakerId = String;
@@ -180,7 +180,7 @@ mod tests {
     use super::*;
 
     fn set(max: usize) -> Speakers<String> {
-        Speakers::with_max(|| Conversation::new("system", 20, 24_000, 600), max)
+        Speakers::with_max(|| Conversation::standard("system"), max)
     }
 
     fn take(s: &mut Speakers<String>, id: &str, now: i64) -> Conversation {

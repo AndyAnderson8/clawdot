@@ -710,7 +710,7 @@ mod tests {
             let ext_view = Arc::new(ext.snapshot());
             Self {
                 assistant,
-                hub: Hub::new(|| Conversation::new("persona", 20, 24_000, 600)),
+                hub: Hub::new(|| Conversation::standard("persona")),
                 backend: Fake::new(delay_ms),
                 usage: UsageTracker::new(UsageLimits::default()),
                 http: Arc::new(http),
@@ -1027,7 +1027,7 @@ mod tests {
             builtin: ToolHost::tool_specs(&lab.assistant),
             day: 1,
             clock: Arc::new(FastClock(Instant::now())),
-            conv: Conversation::new("persona", 20, 24_000, 600),
+            conv: Conversation::standard("persona"),
         };
         let (_mic_tx, mic) = mpsc::channel(8);
         let (speaker, _spk_rx) = mpsc::channel(8);
