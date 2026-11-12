@@ -224,9 +224,11 @@ pub fn read(files: &[SkillFile]) -> (Vec<Draft>, Vec<String>) {
         let lone_md = !is_skill_md
             && file.to_ascii_lowercase().ends_with(".md")
             && !file.to_ascii_lowercase().starts_with("readme")
+            // A file below a skill folder is that skill's helper file. A SKILL.md at the top makes everything
+            // sent one skill.
             && !roots
                 .iter()
-                .any(|r| !r.is_empty() && f.path.starts_with(&format!("{r}/")));
+                .any(|r| r.is_empty() || f.path.starts_with(&format!("{r}/")));
         if !is_skill_md && !lone_md {
             continue;
         }
@@ -412,6 +414,25 @@ mod tests {
             1,
             "an empty result says why"
         );
+    }
+
+    #[test]
+    fn markdown_beside_a_top_level_skill_file_is_its_helper_not_a_second_skill() {
+        let (drafts, said) = read(&[
+            f(
+                "SKILL.md",
+                "---
+name: tea
+description: d
+---
+Boil water.",
+            ),
+            f("notes.md", "Green tea wants cooler water."),
+        ]);
+        assert_eq!(drafts.len(), 1, "{said:?}");
+        assert_eq!(drafts[0].name, "tea");
+        assert_eq!(drafts[0].files.len(), 1);
+        assert_eq!(drafts[0].files[0].path, "notes.md");
     }
 
     #[test]
