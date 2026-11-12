@@ -589,6 +589,15 @@ async fn the_audit_log_is_read_through_an_authenticated_paged_endpoint() {
     let (s, v) = get("?limit=lots").await;
     assert_eq!(s, 400);
     assert!(v["error"].as_str().unwrap().contains("limit"));
+    // One decoder for every query: a broken escape is refused here too, not read as written.
+    let (_, v) = get("?tool=docker%5F%5Frestart").await;
+    assert_eq!(
+        v["records"].as_array().unwrap().len(),
+        3,
+        "an escape is decoded"
+    );
+    assert_eq!(get("?tool=docker%zz").await.0, 400);
+    assert_eq!(get("?tool=%ff%fe").await.0, 400, "not text");
     // read-only: the log cannot be changed or cleared through the API
     for m in ["POST", "PUT", "DELETE"] {
         assert_eq!(
