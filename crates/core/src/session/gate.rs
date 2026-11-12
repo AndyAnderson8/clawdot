@@ -49,6 +49,16 @@ pub(super) struct Dispatched {
     not_run: Vec<String>,
 }
 
+/// One call as the gate runs or blocks it: which tool, with what arguments, at what tier, and the audit id of
+/// the held record when the user's yes released it.
+#[derive(Clone, Copy)]
+struct Call<'a> {
+    name: &'a str,
+    args: &'a Value,
+    tier: Tier,
+    held_id: Option<u64>,
+}
+
 /// Take the result out of a turn that is ending, leaving a blank one behind.
 fn take(result: &mut TurnResult) -> TurnResult {
     std::mem::replace(
@@ -149,18 +159,33 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         }
     }
 
-    /// End the turn because the user cancelled it.
+    /// End the turn because the user cancelled it: discard what was held, record it, and say what was and was
+    /// not done (REQ-AST-022).
     pub(super) fn cancelled(&mut self, not_run: &[String], sent: Option<&str>) -> TurnResult {
-        cancelled_turn(
-            self.conv,
-            take(&mut self.result),
-            self.turn.as_ref(),
-            self.usage,
-            &self.cfg,
-            &self.st,
-            not_run,
-            sent,
-        )
+        let mut discarded = false;
+        if let Some(p) = self.conv.pending.take() {
+            self.resolved(&p, decision::CANCELLED, "the user cancelled");
+            self.conv.set_recent(p.recent, "cancelled");
+            discarded = true;
+        }
+        self.conv.clarify = None;
+        self.conv.forget_all_asked = None;
+        self.note_act(&Act {
+            tool: "turn",
+            tier: None,
+            args: &Value::Null,
+            decision: decision::CANCELLED,
+            held_id: None,
+            outcome: None,
+            note: Some("the user cancelled the turn"),
+        });
+        let mut r = take(&mut self.result);
+        r.end = TurnEnd::Stopped(Stop::Cancelled);
+        let mut speech = stop_speech(Stop::Cancelled, &self.cfg, &self.st.steps, not_run, sent);
+        if discarded {
+            speech.push_str(" I dropped the action I was about to ask you about.");
+        }
+        finish_with(self.conv, r, &speech)
     }
 
     /// End the turn at a limit.
@@ -217,99 +242,108 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// The user's answer to a held action is read here, by the host, from the user's own words. It is the
     /// only way a held action runs (REQ-SEC-011). An event is never an answer. `Some` ends the turn.
     pub(super) async fn answer_held(&mut self, user_text: &str) -> Option<TurnResult> {
-        let (by_user, now) = (self.by_user, self.now);
-        let host: &mut H = &mut *self.host;
-        let conv: &mut Conversation = &mut *self.conv;
-        let usage: &mut UsageTracker = &mut *self.usage;
-        let cfg: &TurnConfig = &self.cfg;
-        let turn = self.turn.as_ref();
-        let st: &mut TurnState = &mut self.st;
-        let result: &mut TurnResult = &mut self.result;
-        let ctl: &TurnCtl = self.ctl;
-        if let Some(held) = conv.pending.take_if(|_| by_user) {
-            let expired = now - held.proposed_at > CONFIRM_WINDOW_SECS;
-            if is_yes(user_text) && expired {
-                note_resolved(turn, usage, &held, decision::EXPIRED, "answered too late");
-                conv.set_recent(held.recent, "expired");
-                return Some(finish_with(
-                    conv,
-                    take(result),
-                    "That took too long, so I dropped it. Please ask again.",
-                ));
+        if !self.by_user {
+            return None;
+        }
+        let held = self.conv.pending.take()?;
+        if is_yes(user_text) && self.now - held.proposed_at > CONFIRM_WINDOW_SECS {
+            let speech = "That took too long, so I dropped it. Please ask again.";
+            return Some(self.drop_held(
+                held,
+                decision::EXPIRED,
+                "answered too late",
+                "expired",
+                speech,
+            ));
+        }
+        if is_no(user_text) {
+            let speech = "Okay, I won't do that.";
+            return Some(self.drop_held(
+                held,
+                decision::DECLINED,
+                "the user said no",
+                "declined",
+                speech,
+            ));
+        }
+        if is_yes(user_text) {
+            return self.release_held(held).await;
+        }
+        // Anything else is an unrelated request: the held action is dropped and the turn goes on.
+        self.resolved(&held, decision::DECLINED, "unrelated request");
+        self.conv.set_recent(held.recent, "declined");
+        None
+    }
+
+    /// End the turn by dropping a held action without running it: the audit record, the recent-actions line,
+    /// and the words to say.
+    fn drop_held(
+        &mut self,
+        held: PendingAction,
+        how: &str,
+        why: &str,
+        recent: &str,
+        speech: &str,
+    ) -> TurnResult {
+        self.resolved(&held, how, why);
+        self.conv.set_recent(held.recent, recent);
+        self.finish(speech)
+    }
+
+    /// The user said yes in time: run the stored action, put the call and its result into the history as a
+    /// model's call would have been, and end the turn only if the user cancelled meanwhile.
+    async fn release_held(&mut self, held: PendingAction) -> Option<TurnResult> {
+        let offered_now = offered(&*self.host, &self.cfg)
+            .into_iter()
+            .any(|t| t.name == held.tool);
+        let outcome = if offered_now {
+            let gate = self.turn.as_ref().map_or(Gate::Run, |t| t.gate(held.tier));
+            let ex = self
+                .execute(
+                    &Call {
+                        name: &held.tool,
+                        args: &held.args,
+                        tier: held.tier,
+                        held_id: held.held_id,
+                    },
+                    gate,
+                )
+                .await;
+            self.conv.set_recent(held.recent, status_of(ex.kind));
+            match ex.kind {
+                Kind::Ok => self.st.record(&held.tool, How::Done, held.tier),
+                Kind::Failed => self.st.record(&held.tool, How::Failed, held.tier),
+                Kind::TimedOut => self.st.record(&held.tool, How::TimedOut, held.tier),
+                Kind::Cancelled | Kind::NotRun => {}
             }
-            if is_no(user_text) {
-                note_resolved(turn, usage, &held, decision::DECLINED, "the user said no");
-                conv.set_recent(held.recent, "declined");
-                return Some(finish_with(conv, take(result), "Okay, I won't do that."));
-            }
-            if is_yes(user_text) {
-                let known: Vec<String> = offered(host, cfg).into_iter().map(|t| t.name).collect();
-                let outcome = if known.contains(&held.tool) {
-                    let gate = turn.map_or(Gate::Run, |t| t.gate(held.tier));
-                    let ex = execute(
-                        host,
-                        conv,
-                        ctl,
-                        cfg,
-                        st,
-                        turn,
-                        usage,
-                        &held.tool,
-                        &held.args,
-                        held.tier,
-                        gate,
-                        held.held_id,
-                    )
-                    .await;
-                    conv.set_recent(held.recent, status_of(ex.kind));
-                    match ex.kind {
-                        Kind::Ok => st.record(&held.tool, How::Done, held.tier),
-                        Kind::Failed => st.record(&held.tool, How::Failed, held.tier),
-                        Kind::TimedOut => st.record(&held.tool, How::TimedOut, held.tier),
-                        Kind::Cancelled | Kind::NotRun => {}
-                    }
-                    ex.text
-                } else {
-                    note_resolved(
-                        turn,
-                        usage,
-                        &held,
-                        decision::INVALID,
-                        "tool no longer offered",
-                    );
-                    conv.set_recent(held.recent, "no longer available");
-                    "Error: that tool is no longer available.".to_owned()
-                };
-                result.tool_calls += 1;
-                let call = ToolCall {
-                    id: "host_confirmed".to_owned(),
-                    name: held.tool.clone(),
-                    arguments: held.args.to_string(),
-                };
-                conv.history
-                    .push(Message::assistant_calls(String::new(), vec![call]));
-                conv.history
-                    .push(Message::tool_result("host_confirmed", clip(&outcome)));
-                if ctl.cancel.is_cancelled() {
-                    let sent = (held.tier >= Tier::Costly).then_some(held.tool.as_str());
-                    return Some(cancelled_turn(
-                        conv,
-                        take(result),
-                        turn,
-                        usage,
-                        cfg,
-                        st,
-                        &[],
-                        sent,
-                    ));
-                }
-            } else {
-                // Anything else is an unrelated request: the held action is dropped and the turn goes on.
-                note_resolved(turn, usage, &held, decision::DECLINED, "unrelated request");
-                conv.set_recent(held.recent, "declined");
-            }
+            ex.text
+        } else {
+            self.resolved(&held, decision::INVALID, "tool no longer offered");
+            self.conv.set_recent(held.recent, "no longer available");
+            "Error: that tool is no longer available.".to_owned()
+        };
+        self.result.tool_calls += 1;
+        let call = ToolCall {
+            id: "host_confirmed".to_owned(),
+            name: held.tool.clone(),
+            arguments: held.args.to_string(),
+        };
+        self.conv
+            .history
+            .push(Message::assistant_calls(String::new(), vec![call]));
+        self.conv
+            .history
+            .push(Message::tool_result("host_confirmed", clip(&outcome)));
+        if self.ctl.cancel.is_cancelled() {
+            let sent = (held.tier >= Tier::Costly).then_some(held.tool.as_str());
+            return Some(self.cancelled(&[], sent));
         }
         None
+    }
+
+    /// Record how a held or proposed action ended without running.
+    fn resolved(&self, p: &PendingAction, how: &str, why: &str) {
+        note_resolved(self.turn.as_ref(), &*self.usage, p, how, why);
     }
 
     /// Write one audit record for this turn, if the conversation has a log.
@@ -519,15 +553,14 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             // Dry-run or a daily cap: nothing is asked and nothing runs.
             self.conv
                 .note_recent(&call.name, Some(risk.tier), &args, "not run");
-            blocked(
-                &*self.host,
-                self.turn.as_ref(),
-                &*self.usage,
-                &call.name,
-                &args,
-                risk.tier,
+            self.blocked(
+                &Call {
+                    name: &call.name,
+                    args: &args,
+                    tier: risk.tier,
+                    held_id: None,
+                },
                 gate,
-                None,
             )
         } else if risk.needs_hold() {
             d.held = Some(self.keep_pending(
@@ -601,21 +634,17 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 format!("{verb} {}.", spoken_name(&call.name)),
             );
         }
-        let ex = execute(
-            &mut *self.host,
-            &mut *self.conv,
-            self.ctl,
-            &self.cfg,
-            &self.st,
-            self.turn.as_ref(),
-            &*self.usage,
-            &call.name,
-            args,
-            tier,
-            Gate::Run,
-            None,
-        )
-        .await;
+        let ex = self
+            .execute(
+                &Call {
+                    name: &call.name,
+                    args,
+                    tier,
+                    held_id: None,
+                },
+                Gate::Run,
+            )
+            .await;
         self.conv
             .note_recent(&call.name, Some(tier), args, status_of(ex.kind));
         let mut text = ex.text;
@@ -677,13 +706,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         let (by_user, now) = (self.by_user, self.now);
         if cancelled || self.ctl.cancel.is_cancelled() {
             if let Some(h) = held.take() {
-                note_resolved(
-                    self.turn.as_ref(),
-                    self.usage,
-                    &h,
-                    decision::CANCELLED,
-                    "the user cancelled",
-                );
+                self.resolved(&h, decision::CANCELLED, "the user cancelled");
             }
             return Some(self.cancelled(&not_run, sent.as_deref()));
         }
@@ -710,13 +733,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 )
             };
             if let Some(old) = self.conv.pending.replace(h) {
-                note_resolved(
-                    self.turn.as_ref(),
-                    self.usage,
-                    &old,
-                    decision::DECLINED,
-                    "replaced by a newer request",
-                );
+                self.resolved(&old, decision::DECLINED, "replaced by a newer request");
                 self.conv.set_recent(old.recent, "declined");
             }
             self.result.expects_reply = true;
@@ -736,6 +753,132 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             return Some(failed_turn(self.conv, take(&mut self.result), &self.st));
         }
         None
+    }
+
+    /// What the model is told when dry-run mode or a daily cap stops a call, and the matching audit record
+    /// (REQ-SEC-015, REQ-SEC-016).
+    fn blocked(&self, call: &Call<'_>, gate: Gate) -> String {
+        let Call {
+            name,
+            args,
+            tier,
+            held_id,
+        } = *call;
+        let act = |d, why| Act {
+            tool: name,
+            tier: Some(tier),
+            args,
+            decision: d,
+            held_id,
+            outcome: None,
+            note: Some(why),
+        };
+        match gate {
+            Gate::DryRun => {
+                self.note_act(&act(decision::DRY_RUN, "dry-run mode"));
+                format!(
+                    "Dry run: nothing was done. It would have: {}.",
+                    self.host.describe_action(name, args).trim_end_matches('.')
+                )
+            }
+            Gate::Capped(hit) => {
+                self.note_act(&act(decision::CAP, &hit.to_string()));
+                format!("Not run: {hit}.")
+            }
+            Gate::Run => String::new(),
+        }
+    }
+
+    /// Run a call that passed every check, unless dry-run mode or a daily cap stops it, and record what
+    /// happened. `call.held_id` is set when the user's yes released it. A call that takes longer than the call
+    /// budget is an error result, not a hang (REQ-AST-019); a read-only or reversible call is dropped if the
+    /// user says stop, while a costly or destructive one is allowed to finish because it cannot be recalled
+    /// (REQ-AST-022).
+    async fn execute(&mut self, call: &Call<'_>, gate: Gate) -> Executed {
+        let Call {
+            name,
+            args,
+            tier,
+            held_id,
+        } = *call;
+        if gate != Gate::Run {
+            return Executed {
+                text: self.blocked(call, gate),
+                kind: Kind::NotRun,
+                sent: false,
+            };
+        }
+        // Whatever it returns is now in the context the model reads.
+        self.conv.tainted |= self.host.returns_untrusted_text(name);
+        let budget = self.st.call_budget(self.ctl, &self.cfg);
+        let can_drop = tier < Tier::Costly;
+        let finished = {
+            let fut = tokio::time::timeout(budget, self.host.call_tool(name, args));
+            if can_drop {
+                tokio::select! {
+                    r = fut => Some(r),
+                    () = self.ctl.cancel.cancelled() => None,
+                }
+            } else {
+                Some(fut.await)
+            }
+        };
+        let decision_name = if held_id.is_some() {
+            decision::APPROVED
+        } else {
+            decision::RAN
+        };
+        let act = |decision, outcome, note| Act {
+            tool: name,
+            tier: Some(tier),
+            args,
+            decision,
+            held_id,
+            outcome,
+            note,
+        };
+        match finished {
+            None => {
+                self.note_act(&act(
+                    decision::CANCELLED,
+                    None,
+                    Some("cancelled while it was running"),
+                ));
+                Executed {
+                    text: "Cancelled by the user before it finished.".to_owned(),
+                    kind: Kind::Cancelled,
+                    sent: false,
+                }
+            }
+            Some(Err(_)) => {
+                let secs = budget.as_secs().max(1);
+                self.note_act(&act(
+                    decision_name,
+                    Some(Err("timed out")),
+                    Some("the tool did not answer in time"),
+                ));
+                Executed {
+                    text: format!(
+                        "Error: the tool did not answer within {secs} second{}. It may or may not have done anything.",
+                        if secs == 1 { "" } else { "s" }
+                    ),
+                    kind: Kind::TimedOut,
+                    sent: false,
+                }
+            }
+            Some(Ok(out)) => {
+                self.note_act(&act(
+                    decision_name,
+                    Some(out.as_ref().map(String::as_str).map_err(String::as_str)),
+                    None,
+                ));
+                Executed {
+                    kind: if out.is_ok() { Kind::Ok } else { Kind::Failed },
+                    text: out.unwrap_or_else(|e| format!("Error: {e}")),
+                    sent: !can_drop && self.ctl.cancel.is_cancelled(),
+                }
+            }
+        }
     }
 
     /// End a turn whose calls came from somewhere other than a model round that could answer next: the words

@@ -1,6 +1,6 @@
 # The agent loop
 
-How one turn runs when the user asks for something that takes more than one step. The design is [agentic-scope.md](../design/agentic-scope.md) section 2; the requirements are REQ-AST-019 to REQ-AST-025, REQ-VOI-020, REQ-SEC-017 and REQ-CFG-044. The code is `session::run_turn_ctl` (the loop), `notes` (memory), `cancel` (the stop signal), `voice::Dialog` and `satellite::run_session` (audio). The measure of it is the `AGT` and `INJ` scenarios in [evals.md](evals.md).
+How one turn runs when the user asks for something that takes more than one step. The design is [agentic-scope.md](../design/agentic-scope.md) section 2; the requirements are REQ-AST-019 to REQ-AST-025, REQ-VOI-020, REQ-SEC-017 and REQ-CFG-044. The code is `session::run_turn_with` (the loop), `notes` (memory), `cancel` (the stop signal), `voice::Dialog` and `satellite::run_session` (audio). The measure of it is the `AGT` and `INJ` scenarios in [evals.md](evals.md).
 
 ## Where a turn runs (ADR-0021, REQ-AST-026, REQ-AST-027)
 
@@ -14,7 +14,7 @@ A turn does not run inside the main loop. The loop owns the state (the timers an
                           │     prompt + skills, limits, tool list, a read-only copy of the policy,
                           │     clones of the HTTP/MCP clients, a handle on the usage counters
                           ▼
-   turn task:  run_turn_ctl (the unchanged turn) ─ HTTP/MCP tool ─► called by the task itself
+   turn task:  run_turn_with (the unchanged turn) ─ HTTP/MCP tool ─► called by the task itself
                           │                      └ built-in tool ─► ToolReq ─► loop runs it on the assistant,
                           │                                          answers with the result and its effects
                           ▼

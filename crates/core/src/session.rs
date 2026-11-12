@@ -809,62 +809,8 @@ pub struct TurnInputs<'a, H> {
     pub now: Ts,
 }
 
-/// Run one turn: the user's words in, the words to speak out.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_turn<B: ChatBackend, H: ToolHost>(
-    backend: &B,
-    host: &mut H,
-    conv: &mut Conversation,
-    cfg: &TurnConfig,
-    usage: &mut UsageTracker,
-    day: i64,
-    now: Ts,
-    user_text: &str,
-) -> TurnResult {
-    run_turn_ctl(
-        &TurnCtl::default(),
-        backend,
-        host,
-        conv,
-        cfg,
-        usage,
-        day,
-        now,
-        user_text,
-    )
-    .await
-}
-
-/// Like [`run_turn`], with a cancel token, a speech sink and a clock (REQ-AST-020, REQ-AST-022).
-#[allow(clippy::too_many_arguments)]
-pub async fn run_turn_ctl<B: ChatBackend, H: ToolHost>(
-    ctl: &TurnCtl,
-    backend: &B,
-    host: &mut H,
-    conv: &mut Conversation,
-    cfg: &TurnConfig,
-    usage: &mut UsageTracker,
-    day: i64,
-    now: Ts,
-    user_text: &str,
-) -> TurnResult {
-    run_turn_with(
-        ctl,
-        backend,
-        TurnInputs {
-            host,
-            conv,
-            cfg,
-            usage,
-            day,
-            now,
-        },
-        user_text,
-    )
-    .await
-}
-
-/// Like [`run_turn_ctl`], with the host, conversation, limits and counters gathered in [`TurnInputs`].
+/// Run one turn: the user's words in, the words to speak out. `ctl` carries a cancel token, a speech sink and
+/// a clock (REQ-AST-020, REQ-AST-022); `TurnCtl::default()` has none of them.
 pub async fn run_turn_with<B: ChatBackend, H: ToolHost>(
     ctl: &TurnCtl,
     backend: &B,
@@ -876,61 +822,13 @@ pub async fn run_turn_with<B: ChatBackend, H: ToolHost>(
 
 /// Run one turn that something other than the user's voice started (REQ-SEC-012). `text` is what the
 /// trigger says (an event's summary): untrusted data, shown to the model as such, never read as a yes.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_event_turn<B: ChatBackend, H: ToolHost>(
-    backend: &B,
-    host: &mut H,
-    conv: &mut Conversation,
-    cfg: &TurnConfig,
-    usage: &mut UsageTracker,
-    day: i64,
-    now: Ts,
-    text: &str,
-) -> TurnResult {
-    run_event_turn_for("event", backend, host, conv, cfg, usage, day, now, text).await
-}
-
-/// Like [`run_event_turn`], naming what started the turn (an endpoint, a schedule) for the audit log. The
-/// name is clipped and made printable there; it is never trusted.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_event_turn_for<B: ChatBackend, H: ToolHost>(
-    source: &str,
-    backend: &B,
-    host: &mut H,
-    conv: &mut Conversation,
-    cfg: &TurnConfig,
-    usage: &mut UsageTracker,
-    day: i64,
-    now: Ts,
-    text: &str,
-) -> TurnResult {
-    run_event_turn_ctl(
-        &TurnCtl::default(),
-        source,
-        backend,
-        host,
-        conv,
-        cfg,
-        usage,
-        day,
-        now,
-        text,
-    )
-    .await
-}
-
-/// Like [`run_event_turn_for`], with a cancel token, a speech sink and a clock.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_event_turn_ctl<B: ChatBackend, H: ToolHost>(
+/// `source` names what started it (an endpoint, a schedule) for the audit log; it is clipped and made
+/// printable there, and never trusted.
+pub async fn run_event_turn_with<B: ChatBackend, H: ToolHost>(
     ctl: &TurnCtl,
     source: &str,
     backend: &B,
-    host: &mut H,
-    conv: &mut Conversation,
-    cfg: &TurnConfig,
-    usage: &mut UsageTracker,
-    day: i64,
-    now: Ts,
+    inputs: TurnInputs<'_, H>,
     text: &str,
 ) -> TurnResult {
     let label = if source == "event" || source.is_empty() {
@@ -938,22 +836,7 @@ pub async fn run_event_turn_ctl<B: ChatBackend, H: ToolHost>(
     } else {
         format!("event:{source}")
     };
-    run_turn_from(
-        ctl,
-        Trigger::Event,
-        &label,
-        backend,
-        TurnInputs {
-            host,
-            conv,
-            cfg,
-            usage,
-            day,
-            now,
-        },
-        text,
-    )
-    .await
+    run_turn_from(ctl, Trigger::Event, &label, backend, inputs, text).await
 }
 
 /// An event's text as the model sees it: labelled, fenced, and unable to close the fence.
@@ -1379,49 +1262,6 @@ fn run_note_command(conv: &mut Conversation, cmd: notes::Cmd, now: Ts) -> String
     }
 }
 
-/// End a turn the user cancelled: discard what was held, record it, and say what was and was not done
-/// (REQ-AST-022).
-#[allow(clippy::too_many_arguments)]
-fn cancelled_turn(
-    conv: &mut Conversation,
-    result: TurnResult,
-    turn: Option<&TurnLog>,
-    usage: &UsageTracker,
-    cfg: &TurnConfig,
-    st: &TurnState,
-    not_run: &[String],
-    sent: Option<&str>,
-) -> TurnResult {
-    let mut discarded = false;
-    if let Some(p) = conv.pending.take() {
-        note_resolved(turn, usage, &p, decision::CANCELLED, "the user cancelled");
-        conv.set_recent(p.recent, "cancelled");
-        discarded = true;
-    }
-    conv.clarify = None;
-    conv.forget_all_asked = None;
-    note(
-        turn,
-        usage,
-        &Act {
-            tool: "turn",
-            tier: None,
-            args: &Value::Null,
-            decision: decision::CANCELLED,
-            held_id: None,
-            outcome: None,
-            note: Some("the user cancelled the turn"),
-        },
-    );
-    let mut r = result;
-    r.end = TurnEnd::Stopped(Stop::Cancelled);
-    let mut speech = stop_speech(Stop::Cancelled, cfg, &st.steps, not_run, sent);
-    if discarded {
-        speech.push_str(" I dropped the action I was about to ask you about.");
-    }
-    finish_with(conv, r, &speech)
-}
-
 /// End a turn at a limit and say which one (REQ-AST-019).
 fn stopped_turn(
     conv: &mut Conversation,
@@ -1639,44 +1479,6 @@ fn note_resolved(
     );
 }
 
-/// What the model is told when dry-run mode or a daily cap stops a call, and the matching audit record
-/// (REQ-SEC-015, REQ-SEC-016).
-#[allow(clippy::too_many_arguments)]
-fn blocked<H: ToolHost>(
-    host: &H,
-    turn: Option<&TurnLog>,
-    usage: &UsageTracker,
-    name: &str,
-    args: &Value,
-    tier: Tier,
-    gate: Gate,
-    held_id: Option<u64>,
-) -> String {
-    let act = |d, why| Act {
-        tool: name,
-        tier: Some(tier),
-        args,
-        decision: d,
-        held_id,
-        outcome: None,
-        note: Some(why),
-    };
-    match gate {
-        Gate::DryRun => {
-            note(turn, usage, &act(decision::DRY_RUN, "dry-run mode"));
-            format!(
-                "Dry run: nothing was done. It would have: {}.",
-                host.describe_action(name, args).trim_end_matches('.')
-            )
-        }
-        Gate::Capped(hit) => {
-            note(turn, usage, &act(decision::CAP, &hit.to_string()));
-            format!("Not run: {hit}.")
-        }
-        Gate::Run => String::new(),
-    }
-}
-
 /// How a call ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -1696,120 +1498,6 @@ struct Executed {
     sent: bool,
 }
 
-/// Run a call that passed every check, unless dry-run mode or a daily cap stops it, and record what happened.
-/// `held_id` is set when the user's yes released it. A call that takes longer than the call budget is an error
-/// result, not a hang (REQ-AST-019); a read-only or reversible call is dropped if the user says stop, while a
-/// costly or destructive one is allowed to finish because it cannot be recalled (REQ-AST-022).
-#[allow(clippy::too_many_arguments)]
-async fn execute<H: ToolHost>(
-    host: &mut H,
-    conv: &mut Conversation,
-    ctl: &TurnCtl,
-    cfg: &TurnConfig,
-    st: &TurnState,
-    turn: Option<&TurnLog>,
-    usage: &UsageTracker,
-    name: &str,
-    args: &Value,
-    tier: Tier,
-    gate: Gate,
-    held_id: Option<u64>,
-) -> Executed {
-    if gate != Gate::Run {
-        return Executed {
-            text: blocked(&*host, turn, usage, name, args, tier, gate, held_id),
-            kind: Kind::NotRun,
-            sent: false,
-        };
-    }
-    // Whatever it returns is now in the context the model reads.
-    conv.tainted |= host.returns_untrusted_text(name);
-    let budget = st.call_budget(ctl, cfg);
-    let can_drop = tier < Tier::Costly;
-    let finished = {
-        let call = tokio::time::timeout(budget, host.call_tool(name, args));
-        if can_drop {
-            tokio::select! {
-                r = call => Some(r),
-                () = ctl.cancel.cancelled() => None,
-            }
-        } else {
-            Some(call.await)
-        }
-    };
-    let decision_name = if held_id.is_some() {
-        decision::APPROVED
-    } else {
-        decision::RAN
-    };
-    match finished {
-        None => {
-            note(
-                turn,
-                usage,
-                &Act {
-                    tool: name,
-                    tier: Some(tier),
-                    args,
-                    decision: decision::CANCELLED,
-                    held_id,
-                    outcome: None,
-                    note: Some("cancelled while it was running"),
-                },
-            );
-            Executed {
-                text: "Cancelled by the user before it finished.".to_owned(),
-                kind: Kind::Cancelled,
-                sent: false,
-            }
-        }
-        Some(Err(_)) => {
-            let secs = budget.as_secs().max(1);
-            note(
-                turn,
-                usage,
-                &Act {
-                    tool: name,
-                    tier: Some(tier),
-                    args,
-                    decision: decision_name,
-                    held_id,
-                    outcome: Some(Err("timed out")),
-                    note: Some("the tool did not answer in time"),
-                },
-            );
-            Executed {
-                text: format!(
-                    "Error: the tool did not answer within {secs} second{}. It may or may not have done anything.",
-                    if secs == 1 { "" } else { "s" }
-                ),
-                kind: Kind::TimedOut,
-                sent: false,
-            }
-        }
-        Some(Ok(out)) => {
-            note(
-                turn,
-                usage,
-                &Act {
-                    tool: name,
-                    tier: Some(tier),
-                    args,
-                    decision: decision_name,
-                    held_id,
-                    outcome: Some(out.as_ref().map(String::as_str).map_err(String::as_str)),
-                    note: None,
-                },
-            );
-            Executed {
-                kind: if out.is_ok() { Kind::Ok } else { Kind::Failed },
-                text: out.unwrap_or_else(|e| format!("Error: {e}")),
-                sent: !can_drop && ctl.cancel.is_cancelled(),
-            }
-        }
-    }
-}
-
 /// The tools the model is offered: the host's, without destructive ones unless the administrator enabled
 /// them, and without any that borrows the name of a tool the host itself provides.
 fn offered<H: ToolHost>(host: &H, cfg: &TurnConfig) -> Vec<ToolSpec> {
@@ -1822,7 +1510,7 @@ fn offered<H: ToolHost>(host: &H, cfg: &TurnConfig) -> Vec<ToolSpec> {
         .collect()
 }
 
-/// The tools to offer a model that runs outside [`run_turn`] (a realtime voice session, REQ-RTV-003): the
+/// The tools to offer a model that runs outside [`run_turn_with`] (a realtime voice session, REQ-RTV-003): the
 /// same list a turn offers, so destructive tools stay out unless the administrator enabled them.
 pub fn tools_for<H: ToolHost>(host: &H, conv: &Conversation, cfg: &TurnConfig) -> Vec<ToolSpec> {
     let mut tools = offered(host, cfg);

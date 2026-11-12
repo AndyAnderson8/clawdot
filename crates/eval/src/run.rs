@@ -12,8 +12,8 @@ use clawdot_core::audit::{ActionPolicy, AuditConfig, AuditLog, Query, Record};
 use clawdot_core::cancel::CancelToken;
 use clawdot_core::notes::NoteStore;
 use clawdot_core::session::{
-    Conversation, Stop, Tier, TurnConfig, TurnCtl, TurnEnd, TurnResult, run_event_turn_ctl,
-    run_turn_ctl,
+    Conversation, Stop, Tier, TurnConfig, TurnCtl, TurnEnd, TurnInputs, TurnResult,
+    run_event_turn_with, run_turn_with,
 };
 use clawdot_core::usage::{LimitReached, UsageTracker};
 use std::sync::Arc;
@@ -223,15 +223,36 @@ pub async fn run_scenario<M: Model>(
         }
         let result = match turn.trigger {
             Trigger::User => {
-                run_turn_ctl(
-                    &ctl, model, &mut host, &mut conv, &cfg, usage, day, now, &turn.say,
+                run_turn_with(
+                    &ctl,
+                    model,
+                    TurnInputs {
+                        host: &mut host,
+                        conv: &mut conv,
+                        cfg: &cfg,
+                        usage,
+                        day,
+                        now,
+                    },
+                    &turn.say,
                 )
                 .await
             }
             Trigger::Event => {
                 let source = turn.source.as_deref().unwrap_or("event");
-                run_event_turn_ctl(
-                    &ctl, source, model, &mut host, &mut conv, &cfg, usage, day, now, &turn.say,
+                run_event_turn_with(
+                    &ctl,
+                    source,
+                    model,
+                    TurnInputs {
+                        host: &mut host,
+                        conv: &mut conv,
+                        cfg: &cfg,
+                        usage,
+                        day,
+                        now,
+                    },
+                    &turn.say,
                 )
                 .await
             }
