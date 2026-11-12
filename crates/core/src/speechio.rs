@@ -42,19 +42,6 @@ impl SpeechHandles {
         h.languages.push(stt.language_handle());
     }
 
-    /// Make every speech client use `voice` now, and return the voice they were using (none when there is no
-    /// client).
-    pub fn swap_voice(&self, voice: &str) -> Option<String> {
-        let h = self.lock();
-        let mut old = None;
-        for slot in &h.voices {
-            let mut v = slot.lock().unwrap_or_else(PoisonError::into_inner);
-            old.get_or_insert_with(|| v.clone());
-            *v = voice.to_owned();
-        }
-        old
-    }
-
     /// Apply the voice and language that are now set to every speech client.
     pub fn apply(&self, live: &serde_json::Map<String, serde_json::Value>) {
         let h = self.lock();

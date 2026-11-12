@@ -18,7 +18,7 @@ use crate::session::is_cancel;
 use crate::speech::decode_pcm16;
 use crate::voice::{
     Config as DialogConfig, Cue, Dialog, Phase, Step, Synthesizer, Transcriber, VoiceOutcome,
-    speak_text, voice_turn,
+    speak_text_as, voice_turn,
 };
 use clawdot_protocol::frame::{Decoder, Limits, encode};
 use clawdot_protocol::message::{
@@ -137,8 +137,8 @@ impl Default for Settings {
 enum Request {
     /// Would a spoken announcement be accepted right now?
     Probe,
-    /// Speak this text.
-    Speak(String),
+    /// Speak this text, in `voice` when one is given (a portal preview) and in the configured voice otherwise.
+    Speak { text: String, voice: Option<String> },
 }
 
 struct Announce {
@@ -246,7 +246,17 @@ impl Announcer {
 
     /// Speak `text` on the first satellite that is free. Returns whether anyone did.
     pub async fn announce(&self, text: &str) -> bool {
-        self.ask(|| Request::Speak(text.to_owned())).await
+        self.announce_in_voice(text, None).await
+    }
+
+    /// Like [`Announcer::announce`], in `voice` for this one line when given. The voice travels with the
+    /// request, so the voice every other line uses is never touched.
+    pub async fn announce_in_voice(&self, text: &str, voice: Option<&str>) -> bool {
+        self.ask(|| Request::Speak {
+            text: text.to_owned(),
+            voice: voice.map(str::to_owned),
+        })
+        .await
     }
 }
 
@@ -1199,7 +1209,7 @@ where
             // `deliver_finished` waits for it, and `on_synthesized` hands it to the waiting session end.
             st.synth = Some(Synth {
                 purpose: Purpose::Closing,
-                work: self.synthesize(text),
+                work: self.synthesize(text, None),
             });
         }
         Ok(())
@@ -1214,13 +1224,13 @@ where
                 let _ = answer.send(idle);
             }
             // The speech is made while the session goes on reading; `on_synthesized` plays it and answers.
-            Request::Speak(text) if idle => {
+            Request::Speak { text, voice } if idle => {
                 st.synth = Some(Synth {
                     purpose: Purpose::Announcement(answer),
-                    work: self.synthesize(text),
+                    work: self.synthesize(text, voice),
                 });
             }
-            Request::Speak(_) => {
+            Request::Speak { .. } => {
                 let _ = answer.send(false);
             }
         }
@@ -1263,12 +1273,16 @@ where
         Ok(())
     }
 
-    /// Make speech for `text` as a future the event loop polls.
-    fn synthesize(&self, text: String) -> Pin<Box<dyn Future<Output = Vec<Vec<i16>>> + Send>> {
+    /// Make speech for `text` as a future the event loop polls, in `voice` when one is given.
+    fn synthesize(
+        &self,
+        text: String,
+        voice: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Vec<Vec<i16>>> + Send>> {
         let tts = Arc::clone(&self.tts);
         Box::pin(async move {
             let mut problems = Vec::new();
-            speak_text(&*tts, &text, &mut problems).await
+            speak_text_as(&*tts, &text, voice.as_deref(), &mut problems).await
         })
     }
 
@@ -1331,7 +1345,7 @@ where
         {
             st.synth = Some(Synth {
                 purpose: Purpose::Progress,
-                work: self.synthesize(text),
+                work: self.synthesize(text, None),
             });
         }
     }
