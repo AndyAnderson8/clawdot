@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.46 |
+| **Version** | 0.47 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -206,7 +206,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-025 | The UI MUST be a tabbed portal with a persistent header (logo, device name, a status indicator) and a footer showing the running version with a link to the release notes. The selected tab MUST be kept in the URL fragment so a tab can be bookmarked, and the tabs MUST be operable by keyboard. | Must | M4 | I |
 | REQ-CFG-026 | The portal's tabs and copy MUST use plain names a new user understands: Home, Clock, Media, Settings, and in Settings: Themes, Tools, Skills, Memory, Voice, Lights, Webhooks, Hardware. The word "inbox" MUST NOT appear in the UI and "scheduled" MUST NOT be used as a heading. Music, podcasts and radio MAY appear only on the Media page and its settings, which say plainly that nothing can play until a provider is supported. | Must | M4 | I |
 | REQ-CFG-027 | The Reminders tab MUST list every timer, alarm, and reminder with human-readable times in the device time zone, and let an administrator add, edit, and cancel them, through authenticated JSON endpoints (`/api/schedule`) handled by the same scheduler the voice commands use. | Must | M4 | T |
-| REQ-CFG-028 | The Webhooks tab MUST create, list, rotate, and delete endpoints, show the endpoint URL with a copy action, and show ready-to-paste snippets (curl, Claude Code hooks, GitHub Actions) with the token filled in only when it has just been created or rotated. | Must | M4 | D |
+| REQ-CFG-028 | The Webhooks tab MUST create, list, rotate, and delete endpoints, show the endpoint URL with a copy action, and show ready-to-paste snippets (curl, Claude Code hooks, GitHub Actions) with the token filled in only when it has just been created or rotated. Deleting an endpoint MUST also drop the replies waiting for its bridge and its events that are still open, so an endpoint created later under the same name starts empty. | Must | M4 | D |
 | REQ-CFG-029 | The Tools and Connections tabs MUST list what the backend knows: every tool the assistant can call (built in, HTTP, MCP) with its source and whether it asks for confirmation, and every configured MCP server with its connection status and discovered tools. | Must | M4 | T |
 | REQ-CFG-030 | The Settings tab MUST show, for every setting in REQ-CFG-037, the effective value and where it comes from (default, configuration file, saved in the portal, or command-line flag), pre-fill a time zone hint from the browser (never from IP geolocation), and never show a secret. Editing is specified in REQ-CFG-037..043. | Must | M4 | I |
 | REQ-CFG-031 | Any portal control whose backend does not exist yet MUST NOT be shown as a working control. It MUST show an honest "coming soon" state that says what it will do. | Must | M4 | I |
@@ -460,3 +460,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.44 | 2026-11-11 | Bounded, searchable memory and SKILL.md skill import with review (MEM-001..005, SKL-001..005) |
 | 0.45 | 2026-11-11 | Realtime voice is configured, settings-driven, and runs a turn after the wake word with a fallback (RTV-008..011) |
 | 0.46 | 2026-11-11 | REQ-AST-026 (a conversation per speaker) and REQ-AST-027 (long work does not block the loop) added. |
+| 0.47 | 2026-11-11 | REQ-CFG-028: deleting an endpoint also drops its waiting replies and its open events. |

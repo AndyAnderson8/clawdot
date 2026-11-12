@@ -1457,3 +1457,84 @@ async fn a_satellite_that_stops_reading_ends_the_session_instead_of_wedging_it()
     let why = ended.expect_err("a peer that does not read is a dead peer");
     assert!(why.contains("write"), "{why}");
 }
+
+// ----- a preview voice travels with the request (REQ-CFG-080) -----
+
+/// A voice with a configured setting. A line made with `synthesize_voice` uses the voice it was given; a
+/// normal line uses the configured one. The voice shows in the length of the audio: A is 1x, B 2x, C 3x.
+struct VoiceMouth {
+    configured: std::sync::Mutex<String>,
+}
+impl VoiceMouth {
+    fn say(text: &str, voice: &str) -> Vec<i16> {
+        let times = match voice {
+            "B" => 2,
+            "C" => 3,
+            _ => 1,
+        };
+        vec![7; text.len() * 100 * times]
+    }
+}
+impl Synthesizer for VoiceMouth {
+    async fn synthesize(&self, text: &str) -> Result<Vec<i16>, String> {
+        let voice = self.configured.lock().unwrap().clone();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        Ok(Self::say(text, &voice))
+    }
+    async fn synthesize_voice(&self, text: &str, voice: &str) -> Result<Vec<i16>, String> {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        Ok(Self::say(text, voice))
+    }
+}
+
+async fn session_with(tts: Arc<VoiceMouth>) -> (Peer, Announcer) {
+    let s = fast();
+    let ann = s.announcer.clone();
+    let (near, far) = tokio::io::duplex(1 << 20);
+    let (tx, _rx) = mpsc::channel::<Ask>(4);
+    tokio::spawn(run_session(far, Arc::new(Ears("x")), tts, tx, s));
+    let mut p = Peer {
+        io: near,
+        dec: Decoder::new(Limits::default()),
+    };
+    p.hello(None, PROTOCOL_VERSION).await;
+    assert!(matches!(p.recv().await, Message::Welcome(_)));
+    for _ in 0..100 {
+        if ann.connected() == 1 {
+            return (p, ann);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the session never registered");
+}
+
+/// A preview in voice B, a normal line and a preview in voice C are made at the same moment: each comes out in
+/// its own voice and the configured voice is unchanged afterwards.
+#[tokio::test]
+async fn overlapping_previews_and_a_normal_line_each_use_their_own_voice() {
+    let tts = Arc::new(VoiceMouth {
+        configured: std::sync::Mutex::new("A".into()),
+    });
+    let (mut b, ann_b) = session_with(Arc::clone(&tts)).await;
+    let (mut n, ann_n) = session_with(Arc::clone(&tts)).await;
+    let (mut c, ann_c) = session_with(Arc::clone(&tts)).await;
+    let (rb, rn, rc) = tokio::join!(
+        ann_b.announce_in_voice("Hello.", Some("B")),
+        ann_n.announce_in_voice("Hello.", None),
+        ann_c.announce_in_voice("Hello.", Some("C")),
+    );
+    assert!(rb && rn && rc);
+    let stop = |m: &Message| matches!(m, Message::AudioStop);
+    let sb = samples(&until(&mut b, stop).await);
+    let sn = samples(&until(&mut n, stop).await);
+    let sc = samples(&until(&mut c, stop).await);
+    assert_eq!(
+        (sb, sn, sc),
+        (
+            "Hello.".len() * 200,
+            "Hello.".len() * 100,
+            "Hello.".len() * 300
+        )
+    );
+    assert_eq!(&*tts.configured.lock().unwrap(), "A");
+}

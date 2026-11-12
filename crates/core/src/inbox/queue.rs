@@ -271,12 +271,25 @@ impl Inbox {
         }
     }
 
-    /// Drop finished-with events older than `keep_secs`.
-    pub fn prune(&mut self, now: Ts, keep_secs: i64) {
+    /// Drop the events of a deleted endpoint that are still open (not yet spoken, spoken and waiting, or
+    /// snoozed); returns how many. Handled events stay as history until [`Inbox::prune`] drops them.
+    pub fn drop_open_for(&mut self, endpoint: &str) -> usize {
+        let before = self.state.events.len();
+        self.state.events.retain(|e| {
+            e.endpoint != endpoint
+                || matches!(e.state, EventState::Dismissed | EventState::Acknowledged)
+        });
+        before - self.state.events.len()
+    }
+
+    /// Drop finished-with events older than `keep_secs`. Returns how many, so the caller knows to save.
+    pub fn prune(&mut self, now: Ts, keep_secs: i64) -> usize {
+        let before = self.state.events.len();
         self.state.events.retain(|e| {
             !matches!(e.state, EventState::Dismissed | EventState::Acknowledged)
                 || now - e.received_at <= keep_secs
         });
+        before - self.state.events.len()
     }
 
     /// Drop events whose time to live ran out before they were spoken (REQ-INB-023). Returns how many.

@@ -61,13 +61,10 @@ pub async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
                     println!("speaker> {text}");
                 }
                 if v.announcer.connected() > 0 {
-                    let before = preview
-                        .as_deref()
-                        .and_then(|p| v.core.speech_handles().swap_voice(p));
-                    v.announcer.announce(&text).await;
-                    if let Some(old) = before {
-                        v.core.speech_handles().swap_voice(&old);
-                    }
+                    // The preview voice travels with the request; the configured voice is never touched.
+                    v.announcer
+                        .announce_in_voice(&text, preview.as_deref())
+                        .await;
                 }
             }
             Say::Line(line) => {

@@ -79,19 +79,22 @@ fn pasted_keys_belong_to_one_core() {
 fn each_core_moves_only_its_own_speech_voice() {
     let (da, db) = (Dir::new("voice-a"), Dir::new("voice-b"));
     let (a, b) = (open(&da), open(&db));
-    for c in [&a, &b] {
-        build_registered_speech(&speech(), c.secrets(), c.env(), c.speech_handles()).unwrap();
-    }
+    let [(_, tts_a), (_, tts_b)] = [&a, &b].map(|c| {
+        build_registered_speech(&speech(), c.secrets(), c.env(), c.speech_handles()).unwrap()
+    });
+    let voice =
+        |t: &clawdot_core::speech::HttpSynthesizer| t.voice_handle().lock().unwrap().clone();
     assert_eq!(
-        a.speech_handles().swap_voice("nova").as_deref(),
-        Some("alloy")
+        (voice(&tts_a), voice(&tts_b)),
+        ("alloy".into(), "alloy".into())
     );
-    // b's clients still use the voice they began with, not the one a switched to.
+    let live = serde_json::json!({"voice": "nova"});
+    a.speech_handles().apply(live.as_object().unwrap());
+    // b's client still uses the voice it began with, not the one a switched to.
     assert_eq!(
-        b.speech_handles().swap_voice("echo").as_deref(),
-        Some("alloy")
+        (voice(&tts_a), voice(&tts_b)),
+        ("nova".into(), "alloy".into())
     );
-    assert_eq!(a.speech_handles().swap_voice("x").as_deref(), Some("nova"));
 }
 
 #[test]

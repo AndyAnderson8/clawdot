@@ -385,12 +385,26 @@ pub async fn speak_text<S: Synthesizer>(
     text: &str,
     problems: &mut Vec<String>,
 ) -> Vec<Vec<i16>> {
+    speak_text_as(tts, text, None, problems).await
+}
+
+/// Like [`speak_text`], in `voice` for these sentences only when one is given.
+pub async fn speak_text_as<S: Synthesizer>(
+    tts: &S,
+    text: &str,
+    voice: Option<&str>,
+    problems: &mut Vec<String>,
+) -> Vec<Vec<i16>> {
     let mut splitter = SentenceSplitter::default();
     let mut sentences = splitter.push(text);
     sentences.extend(splitter.flush());
     let mut audio = Vec::new();
     for s in sentences {
-        match tts.synthesize(&s).await {
+        let made = match voice {
+            Some(v) => tts.synthesize_voice(&s, v).await,
+            None => tts.synthesize(&s).await,
+        };
+        match made {
             Ok(a) => audio.push(a),
             Err(e) => {
                 problems.push(format!("speech synthesis: {e}"));

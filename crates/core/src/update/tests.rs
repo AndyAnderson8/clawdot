@@ -537,3 +537,34 @@ fn two_requests_at_once_start_exactly_one_install() {
         assert_eq!(started, 1, "exactly one request may start the install");
     }
 }
+
+// The remembered release is saved through the shared temporary-file rule (`update.json.tmp`), never by swapping
+// the extension (`update.tmp`).
+#[test]
+fn the_remembered_release_is_saved_through_the_shared_temporary_name() {
+    let r = rig(1, None);
+    // Block the shared temporary name with a directory: a save that uses it cannot complete.
+    let tmp = crate::store::temp_path(&r.dir.0.join("update.json"));
+    std::fs::create_dir(&tmp).unwrap();
+    r.updater.save();
+    assert!(
+        !r.dir.0.join("update.json").exists(),
+        "the save went through some other temporary file"
+    );
+    std::fs::remove_dir(&tmp).unwrap();
+    r.updater.save();
+    assert!(r.dir.0.join("update.json").exists());
+    assert!(!tmp.exists(), "the temporary file is renamed away");
+}
+
+// A save cut short leaves its temporary file; the next start removes it, including the name older versions used.
+#[test]
+fn start_removes_leftover_temporary_files_of_the_remembered_release() {
+    let r = rig(1, None);
+    let new_name = crate::store::temp_path(&r.dir.0.join("update.json"));
+    let old_name = r.dir.0.join("update.tmp");
+    std::fs::write(&new_name, "{").unwrap();
+    std::fs::write(&old_name, "{").unwrap();
+    r.updater.load();
+    assert!(!new_name.exists() && !old_name.exists());
+}
