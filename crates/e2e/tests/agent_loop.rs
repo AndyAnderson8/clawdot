@@ -118,7 +118,7 @@ fn bridge_config(f: &Fixture) -> Config {
         endpoint: "claude-code".into(),
         token: f.token.clone(),
         read_timeout: Duration::from_secs(20),
-        claude: ClaudeCode::default(),
+        harness: Box::new(ClaudeCode::default()),
     }
 }
 
@@ -298,7 +298,9 @@ fn redelivery_after_a_lost_acknowledgement_never_runs_the_instruction_twice() {
     // The bridge handled it, but its acknowledgement was lost, so the device still has it queued.
     let recorder = Recorder::default();
     let mut handled = Handled::in_memory();
-    handled.insert(reply.id).unwrap();
+    handled
+        .insert(clawdot_bridge::state::Key::of(&reply))
+        .unwrap();
     stream_once(
         &bridge_config(&f),
         &mut handled,
