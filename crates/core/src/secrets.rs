@@ -5,9 +5,10 @@
 //! This is the same protection the rest of ClawDot's data files have; it is not encryption at rest. Anyone who can read
 //! the data directory as the service user can read the key, as they could read an environment file.
 
-use crate::store::JsonStore;
+use crate::store::{JsonStore, StoreError};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// The schema version of `secrets.json`.
 pub const SCHEMA: u32 = 1;
@@ -29,6 +30,9 @@ const MAX_KEY: usize = 512;
 pub struct Secrets {
     /// Where the file lives; `None` keeps nothing (an in-memory core).
     store: Option<JsonStore>,
+    /// Held from reading the file to writing it back, so two changes at once cannot lose one of them (the portal
+    /// handlers run side by side, and the save goes through one temporary file).
+    writing: Arc<Mutex<()>>,
 }
 
 impl Secrets {
@@ -41,7 +45,10 @@ impl Secrets {
     /// Keys kept in this store.
     #[must_use]
     pub fn at(store: JsonStore) -> Self {
-        Self { store: Some(store) }
+        Self {
+            store: Some(store),
+            writing: Arc::default(),
+        }
     }
 
     /// Nowhere to keep a key: nothing is ever found and nothing can be stored.
@@ -80,11 +87,25 @@ impl Secrets {
         let Some(store) = self.store.as_ref() else {
             return Err("This ClawDot has nowhere to keep a key.".into());
         };
-        let mut all = store.load::<BTreeMap<String, String>>().unwrap_or_default();
+        let _writing = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = Self::load_for_update(store)?;
         all.insert(name.to_owned(), value.to_owned());
         store
             .save(&all)
             .map_err(|e| format!("The key could not be saved: {e}"))
+    }
+
+    /// The stored keys, to be changed and written back. A file that is damaged is replaced (there is nothing in it
+    /// to keep), but one that cannot be read right now, or that a newer version wrote, is left alone: writing it
+    /// back with one key would lose the others.
+    fn load_for_update(store: &JsonStore) -> Result<BTreeMap<String, String>, String> {
+        match store.load::<BTreeMap<String, String>>() {
+            Ok(all) => Ok(all),
+            Err(StoreError::Corrupt(_)) => Ok(BTreeMap::new()),
+            Err(e) => Err(format!(
+                "The stored keys could not be read, so none was changed: {e}"
+            )),
+        }
     }
 
     /// Forget a stored secret.
@@ -95,7 +116,8 @@ impl Secrets {
         let Some(store) = self.store.as_ref() else {
             return Ok(());
         };
-        let mut all = store.load::<BTreeMap<String, String>>().unwrap_or_default();
+        let _writing = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all = Self::load_for_update(store)?;
         if all.remove(name).is_some() {
             store
                 .save(&all)
@@ -169,6 +191,44 @@ mod tests {
         }
         s.clear(LLM_KEY).unwrap();
         assert!(s.get(LLM_KEY).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_never_overwritten_with_one_key() {
+        let dir = std::env::temp_dir().join(format!("clawdot-secrets-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Written by a newer build: this one cannot read it, so it must not rewrite it and lose the other keys.
+        let newer = JsonStore::new(dir.join("secrets.json"), SCHEMA + 1);
+        let mut kept = BTreeMap::new();
+        kept.insert(LLM_KEY.to_owned(), "sk-kept-0123456789".to_owned());
+        newer.save(&kept).unwrap();
+        let before = std::fs::read(dir.join("secrets.json")).unwrap();
+        let s = Secrets::in_dir(&dir);
+        assert!(s.set(SPEECH_KEY, "sk-other-0123456789").is_err());
+        assert!(s.clear(LLM_KEY).is_err());
+        assert_eq!(std::fs::read(dir.join("secrets.json")).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keys_set_at_the_same_moment_are_all_kept() {
+        let dir = std::env::temp_dir().join(format!("clawdot-secrets-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = Secrets::in_dir(&dir);
+        let names: Vec<String> = (0..12).map(|i| format!("key_{i}")).collect();
+        std::thread::scope(|scope| {
+            for name in &names {
+                let s = s.clone();
+                scope.spawn(move || s.set(name, "sk-value-0123456789").unwrap());
+            }
+        });
+        for name in &names {
+            assert!(
+                s.get(name).is_some(),
+                "{name} was lost to a concurrent save"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
