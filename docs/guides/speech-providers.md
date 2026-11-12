@@ -103,5 +103,19 @@ Deepgram's language detection works for the chosen model. Treat the first run as
   as with the OpenAI style.
 - Cloning or managing voices from ClawDot.
 - Changing the provider without a restart.
-- A provider with a different API than these three: add a dialect in `crates/core/src/speech.rs` (see `Dialect`)
-  with tests against a fake server.
+- A provider with a different API than these three: see "Adding a provider" below.
+
+## Adding a provider
+
+Each provider is one file in `crates/core/src/speech/` (`openai.rs`, `elevenlabs.rs`, `deepgram.rs`) that implements
+the `Provider` trait in `crates/core/src/speech.rs`: its name, defaults, accepted PCM rates, how to build a
+transcription and a synthesis request and read the answer, and how to list its voices. How it takes a key and words
+its errors is a small `Wire` implementation (`crates/core/src/apiclient.rs`; OpenAI-style servers reuse `Bearer`).
+To add one:
+
+1. Write `speech/<name>.rs` with the trait implementations, and `mod <name>;` in `speech.rs`.
+2. Add a variant to `Dialect`, to `Dialect::ALL` and to the one `match` in `Dialect::provider`. The name used in
+   `speech.provider` and `speech_provider` is the provider's `name()`; nothing else maps names.
+3. Add tests against a fake server in `speech/tests.rs`, and a row to the tables above.
+
+The transcribe, synthesise and voice-list code does not change, and no new dependency is needed.
