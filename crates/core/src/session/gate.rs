@@ -710,6 +710,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         if cancelled || self.ctl.cancel.is_cancelled() {
             if let Some(h) = held.take() {
                 self.resolved(&h, decision::CANCELLED, "the user cancelled");
+                self.conv.set_recent(h.recent, "cancelled");
             }
             return Some(self.cancelled(&not_run, sent.as_deref()));
         }

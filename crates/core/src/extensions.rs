@@ -1096,8 +1096,10 @@ impl<H: ToolHost> ToolHost for WithPolicy<'_, H> {
     }
 
     /// The tier the administrator chose in the portal replaces the declared one for HTTP and MCP tools; for a
-    /// built-in tool it can only raise it. The baseline never drops, so untrusted text still holds the call
-    /// (REQ-SEC-012, REQ-SEC-030).
+    /// built-in tool it can only raise it. The baseline never drops, so once untrusted text is in the turn a tool
+    /// lowered to reversible is held again (REQ-SEC-012, REQ-SEC-030). One lowered to read-only is NOT: `Risk::under`
+    /// leaves read-only calls alone, so such a tool runs with the model's arguments, unconfirmed, even after outside
+    /// text. Mark a tool read-only only if calling it with any arguments can give nothing away.
     fn risk(&self, name: &str, args: &Value) -> Risk {
         let declared = self.inner.risk(name, args);
         let Some(chosen) = self.ext.tier_override(name) else {

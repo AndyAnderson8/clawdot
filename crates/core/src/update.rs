@@ -34,7 +34,7 @@ const MAX_FEED: usize = 512 * 1024;
 /// The signed list of hashes and its signature are tiny.
 const MAX_SMALL: usize = 64 * 1024;
 /// The largest program file accepted.
-const MAX_BINARY: usize = 96 * 1024 * 1024;
+const MAX_BINARY: usize = 16 * 1024 * 1024;
 /// How long the install may take from start to finish.
 const APPLY_DEADLINE: Duration = Duration::from_secs(15 * 60);
 /// The names of the files a release must carry besides the program itself.
