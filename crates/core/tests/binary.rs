@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -24,16 +24,160 @@ fn version_prints_the_release_version_then_the_commit() {
     assert!(said.trim_end().ends_with(')'), "{said}");
 }
 
+/// A port nothing listens on, never handed out twice in this test process. Tests run in parallel threads, and
+/// the operating system may give a port that was just released to the next caller, so two servers could
+/// otherwise be told to bind the same one.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut given = GIVEN.lock().unwrap();
+        if !given.contains(&port) {
+            given.push(port);
+            return port;
+        }
+    }
+}
+
+// A machine that is compiling something else can take a long time to start a process, so these limits are
+// ceilings for a failure, not expected waits: every wait ends the moment its line arrives or the process exits.
+/// From spawning the binary to a line it prints once the listeners are up.
+const START: Duration = Duration::from_secs(90);
+/// For a reply from a running binary or a fake peer.
+const REPLY: Duration = Duration::from_secs(60);
+
+/// Connect to a local port, retrying while nothing accepts yet. The binary binds before it prints its first
+/// line, so after that line a refusal is not expected; this covers the other cases without a fixed sleep.
+fn connect(port: u16) -> TcpStream {
+    let end = Instant::now() + REPLY;
+    loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => return s,
+            Err(e) => {
+                assert!(
+                    Instant::now() < end,
+                    "nothing accepted a connection on port {port}: {e}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
+/// The running binary with its stdout read line by line on another thread. It is killed when dropped, so a
+/// failed assertion does not leave a process behind.
+struct Server {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    rx: mpsc::Receiver<String>,
+}
+
+impl Server {
+    /// Start the binary with `args`. `console` gives it a piped stdin (see [`Server::type_line`]).
+    fn start(args: &[&str], console: bool) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
+            .args(args)
+            .stdin(if console {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        });
+        Self { child, stdin, rx }
+    }
+
+    /// Wait for a printed line that `matches` accepts, within `within`, and return it. Fails at once, naming
+    /// `what`, if the process exits first.
+    fn wait_line(
+        &self,
+        what: &str,
+        within: Duration,
+        mut matches: impl FnMut(&str) -> bool,
+    ) -> String {
+        let end = Instant::now() + within;
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            assert!(
+                !left.is_zero(),
+                "timed out after {within:?} waiting for {what}"
+            );
+            match self.rx.recv_timeout(left) {
+                Ok(line) if matches(&line) => return line,
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("the binary exited before it printed {what}")
+                }
+            }
+        }
+    }
+
+    /// Wait until every text in `wanted` has appeared in some printed line, in any order. Returns all the
+    /// lines read, one per line.
+    fn wait_for(&self, wanted: &[&str], within: Duration) -> String {
+        let mut missing: Vec<&str> = wanted.to_vec();
+        let mut seen = String::new();
+        self.wait_line(&format!("{wanted:?}"), within, |line| {
+            seen.push_str(line);
+            seen.push('\n');
+            missing.retain(|w| !line.contains(w));
+            missing.is_empty()
+        });
+        seen
+    }
+
+    /// Wait for the first start-up line (the HTTP listener is bound before it is printed).
+    fn wait_listening(&self) -> String {
+        self.wait_for(&["listening on"], START)
+    }
+
+    /// The next line the speaker says, if one comes within [`REPLY`].
+    fn next_speech(&self) -> Option<String> {
+        let end = Instant::now() + REPLY;
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            match self.rx.recv_timeout(left) {
+                Ok(line) if line.starts_with("speaker> ") => return Some(line),
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    fn type_line(&mut self, text: &str) {
+        let stdin = self.stdin.as_mut().expect("started with a console");
+        stdin.write_all(text.as_bytes()).unwrap();
+        stdin.write_all(b"\n").unwrap();
+    }
+
+    fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 fn post_hook(port: u16, token: &str, body: &str) -> u16 {
-    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut s = connect(port);
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let req = format!(
         "POST /hook/claude-code HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -65,7 +209,7 @@ fn create_endpoint(data_dir: &std::path::Path) -> String {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + START;
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break s;
@@ -96,55 +240,26 @@ fn the_binary_serves_hooks_and_announces_them() {
     let port = free_port();
     let dir = std::env::temp_dir().join(format!("clawdot-bin-test-{}", std::process::id()));
     let token = create_endpoint(&dir);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--no-console",
             "--echo-speech",
             "--listen",
             &format!("127.0.0.1:{port}"),
             "--data-dir",
             dir.to_str().unwrap(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
-
-    let mut listening = false;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !listening {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            if line.contains("listening on") {
-                listening = true;
-            }
-        }
-    }
-    assert!(listening, "the binary should report that it is listening");
+        ],
+        false,
+    );
+    server.wait_listening();
 
     assert_eq!(post_hook(port, &token, STOP), 202);
 
-    let mut spoken = None;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline && spoken.is_none() {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
-            if line.starts_with("speaker> ") && line.contains("clawdot finished") {
-                spoken = Some(line);
-            }
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    let spoken = server.wait_line("the announcement", REPLY, |l| {
+        l.starts_with("speaker> ") && l.contains("clawdot finished")
+    });
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
-    let spoken = spoken.expect("the event should be announced within a few seconds");
     // Without an LLM the announcement is the headline only, never the agent's raw text.
     assert!(!spoken.contains("Done."), "{spoken}");
 }
@@ -188,19 +303,6 @@ fn fake_llm(responses: Vec<String>) -> (u16, std::thread::JoinHandle<Vec<String>
     (port, handle)
 }
 
-/// The next line the console speaks, or `None` after 20 seconds.
-fn next_speech(rx: &mpsc::Receiver<String>) -> Option<String> {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
-            if line.starts_with("speaker> ") {
-                return Some(line);
-            }
-        }
-    }
-    None
-}
-
 fn sse(events: &[&str]) -> String {
     let mut s = String::from(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -224,8 +326,8 @@ fn a_question_the_fast_path_cannot_answer_goes_through_the_model_and_its_tools()
     ]);
     let (llm_port, llm) = fake_llm(vec![tool_call, answer]);
     let dir = std::env::temp_dir().join(format!("clawdot-llm-test-{}", std::process::id()));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--listen",
             &format!("127.0.0.1:{}", free_port()),
             "--data-dir",
@@ -234,44 +336,15 @@ fn a_question_the_fast_path_cannot_answer_goes_through_the_model_and_its_tools()
             &format!("http://127.0.0.1:{llm_port}"),
             "--llm-model",
             "test-model",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
+        ],
+        true,
+    );
     // Wait for the console before typing.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut ready = false;
-    while Instant::now() < deadline && !ready {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            ready = line.contains("console ready");
-        }
-    }
-    assert!(ready, "the console should start");
+    server.wait_for(&["console ready"], START);
 
-    stdin
-        .write_all(b"tell me what you think about owls\n")
-        .unwrap();
-    let mut spoken = None;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && spoken.is_none() {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
-            if line.starts_with("speaker> ") {
-                spoken = Some(line);
-            }
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    server.type_line("tell me what you think about owls");
+    let spoken = server.next_speech();
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
 
     let spoken = spoken.expect("the assistant should answer");
@@ -359,46 +432,27 @@ fn a_configured_http_tool_runs_only_after_the_user_confirms() {
         ),
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--config",
             cfg.to_str().unwrap(),
             "--listen",
             &format!("127.0.0.1:{}", free_port()),
             "--data-dir",
             dir.join("state").to_str().unwrap(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut ready = false;
-    while Instant::now() < deadline && !ready {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            ready = line.contains("console ready");
-        }
-    }
-    assert!(ready);
-    stdin.write_all(b"make the den bright please\n").unwrap();
-    let asked = next_speech(&rx).expect("the host should ask");
+        ],
+        true,
+    );
+    server.wait_for(&["console ready"], START);
+    server.type_line("make the den bright please");
+    let asked = server.next_speech().expect("the host should ask");
     assert!(
         asked.contains("set_light") && asked.contains("Yes or no?"),
         "got: {asked}"
     );
-    stdin.write_all(b"yes\n").unwrap();
-    let spoken = next_speech(&rx);
-    let _ = child.kill();
-    let _ = child.wait();
+    server.type_line("yes");
+    let spoken = server.next_speech();
+    server.stop();
     let spoken = spoken.expect("the assistant should answer");
     assert!(spoken.contains("The den light is on."), "got: {spoken}");
     let bodies = llm.join().unwrap();
@@ -623,8 +677,8 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
         ),
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--no-console",
             "--echo-speech",
             "--config",
@@ -633,36 +687,20 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
             &format!("127.0.0.1:{}", free_port()),
             "--data-dir",
             dir.join("state").to_str().unwrap(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut ready = false;
-    while Instant::now() < deadline && !ready {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            ready = line.contains("satellites connect to");
-        }
-    }
-    assert!(ready, "the satellite server should start");
+        ],
+        false,
+    );
+    // The satellite listener is bound before this line is printed.
+    server.wait_for(&["satellites connect to", "listening on"], START);
 
-    let mut sock = TcpStream::connect(("127.0.0.1", sat_port)).unwrap();
+    let mut sock = connect(sat_port);
     sock.set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
     let mut dec = Decoder::new(Limits::default());
     let send =
         |sock: &mut TcpStream, m: Message| sock.write_all(&encode(&m.to_frame()).unwrap()).unwrap();
     let recv = |sock: &mut TcpStream, dec: &mut Decoder| -> Option<Message> {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + REPLY;
         let mut buf = [0u8; 8192];
         while Instant::now() < end {
             if let Some(f) = dec.next_frame().unwrap() {
@@ -731,8 +769,7 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
             _ => {}
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(speaking, "the satellite is told to show the speaking state");
     assert_eq!(
@@ -750,10 +787,10 @@ fn sat_send(sock: &mut TcpStream, m: &clawdot_protocol::message::Message) {
 fn sat_recv(
     sock: &mut TcpStream,
     dec: &mut clawdot_protocol::Decoder,
-    secs: u64,
+    within: Duration,
 ) -> Option<clawdot_protocol::message::Message> {
     use clawdot_protocol::message::Message;
-    let end = Instant::now() + Duration::from_secs(secs);
+    let end = Instant::now() + within;
     let mut buf = [0u8; 8192];
     while Instant::now() < end {
         if let Some(f) = dec.next_frame().unwrap() {
@@ -793,8 +830,8 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
     )
     .unwrap();
     let token = create_endpoint(&dir.join("state"));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--no-console",
             "--echo-speech",
             "--config",
@@ -803,30 +840,14 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
             &format!("127.0.0.1:{http_port}"),
             "--data-dir",
             dir.join("state").to_str().unwrap(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
-    let mut ready = false;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !ready {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            ready |= line.contains("satellites connect to");
-        }
-    }
-    assert!(ready);
+        ],
+        false,
+    );
+    // Both listeners are bound before these lines are printed.
+    server.wait_for(&["satellites connect to", "listening on"], START);
 
     // The satellite connects and waits.
-    let mut sock = TcpStream::connect(("127.0.0.1", sat_port)).unwrap();
+    let mut sock = connect(sat_port);
     sock.set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
     let mut dec = Decoder::new(Limits::default());
@@ -841,7 +862,7 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
         }),
     );
     assert!(matches!(
-        sat_recv(&mut sock, &mut dec, 10),
+        sat_recv(&mut sock, &mut dec, REPLY),
         Some(Message::Welcome(_))
     ));
 
@@ -849,7 +870,7 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
     assert_eq!(post_hook(http_port, &token, STOP), 202);
     let mut announced = 0usize;
     loop {
-        match sat_recv(&mut sock, &mut dec, 15).expect("the announcement should be spoken") {
+        match sat_recv(&mut sock, &mut dec, REPLY).expect("the announcement should be spoken") {
             Message::AudioChunk { payload, .. } => announced += payload.len() / 2,
             Message::AudioStop => break,
             _ => {}
@@ -860,11 +881,11 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
     // The satellite finished playing: listening reopens without the wake word.
     sat_send(&mut sock, &Message::PlaybackDone { id: None });
     assert_eq!(
-        sat_recv(&mut sock, &mut dec, 10),
+        sat_recv(&mut sock, &mut dec, REPLY),
         Some(Message::SetIndicator(Indicator::Listening))
     );
     assert_eq!(
-        sat_recv(&mut sock, &mut dec, 10),
+        sat_recv(&mut sock, &mut dec, REPLY),
         Some(Message::StreamStart)
     );
 
@@ -884,13 +905,15 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
         );
     }
     loop {
-        if sat_recv(&mut sock, &mut dec, 15).expect("a spoken confirmation") == Message::AudioStop {
+        if sat_recv(&mut sock, &mut dec, REPLY).expect("a spoken confirmation")
+            == Message::AudioStop
+        {
             break;
         }
     }
 
     // The instruction is waiting for the agent bridge.
-    let mut stream = TcpStream::connect(("127.0.0.1", http_port)).unwrap();
+    let mut stream = connect(http_port);
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -901,7 +924,7 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
     .unwrap();
     let mut got = String::new();
     let mut buf = [0u8; 4096];
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + REPLY;
     while Instant::now() < end && !got.contains("add tests") {
         if let Ok(n) = stream.read(&mut buf) {
             if n == 0 {
@@ -910,8 +933,7 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
             got.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         got.contains("add tests"),
@@ -1009,55 +1031,30 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
         ),
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--config",
             cfg.to_str().unwrap(),
             "--listen",
             &format!("127.0.0.1:{}", free_port()),
             "--data-dir",
             dir.join("state").to_str().unwrap(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut ready = false;
-    while Instant::now() < deadline && !ready {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            ready = line.contains("console ready");
-        }
-    }
-    assert!(ready);
+        ],
+        true,
+    );
     // Saved and configured MCP servers connect after the loop starts (ADR-0021); a turn that begins earlier
-    // does not have their tools, so wait for the one this test uses.
-    let mut connected = false;
-    while Instant::now() < deadline && !connected {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            connected = line.contains("mcp server `home` connected");
-        }
-    }
-    assert!(connected, "the MCP server connects in the background");
-    stdin.write_all(b"light up the den for me\n").unwrap();
-    let asked = next_speech(&rx).expect("the host should ask");
+    // does not have their tools, so wait for the one this test uses. The two lines come in either order, and
+    // reading them one after the other dropped the second when it arrived first.
+    server.wait_for(&["console ready", "mcp server `home` connected"], START);
+    server.type_line("light up the den for me");
+    let asked = server.next_speech().expect("the host should ask");
     assert!(
         asked.contains("home__turn_on") && asked.contains("Yes or no?"),
         "got: {asked}"
     );
-    stdin.write_all(b"yes\n").unwrap();
-    let spoken = next_speech(&rx);
-    let _ = child.kill();
-    let _ = child.wait();
+    server.type_line("yes");
+    let spoken = server.next_speech();
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(spoken.expect("an answer").contains("the den light is on"));
     let bodies = llm.join().unwrap();
@@ -1082,8 +1079,8 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
 
 /// One HTTP request to the running binary; returns (status, body).
 fn http(port: u16, method: &str, path: &str, token: &str, body: &str) -> (u16, String) {
-    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut s = connect(port);
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
     write!(
         s,
         "{method} {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1109,37 +1106,20 @@ fn http(port: u16, method: &str, path: &str, token: &str, body: &str) -> (u16, S
 fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
     let port = free_port();
     let dir = std::env::temp_dir().join(format!("clawdot-ui-test-{}", std::process::id()));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--no-console",
             "--echo-speech",
             "--listen",
             &format!("127.0.0.1:{port}"),
             "--data-dir",
             dir.to_str().unwrap(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
-    let (mut printed_token, mut listening) = (false, false);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !listening {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            printed_token |= line.contains("cdt_");
-            listening |= line.contains("listening on");
-        }
-    }
+        ],
+        false,
+    );
+    let seen = server.wait_listening();
     assert!(
-        listening && !printed_token,
+        !seen.contains("cdt_"),
         "no administrator token is printed (REQ-CFG-018)"
     );
     // First run: the API is closed until setup (REQ-CFG-018), then a password gives a session (REQ-CFG-019).
@@ -1163,7 +1143,7 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
 
     // Status appears within a tick or two of starting.
     let mut body = String::new();
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + REPLY;
     while Instant::now() < end {
         let (status, b) = http(port, "GET", "/api/status", &admin, "");
         assert_eq!(status, 200);
@@ -1190,17 +1170,11 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
         .0,
         202
     );
-    let mut spoken = false;
-    let end = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < end && !spoken {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(250)) {
-            spoken = line == "speaker> testing one two";
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    server.wait_line("the test phrase", REPLY, |l| {
+        l == "speaker> testing one two"
+    });
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(spoken, "the test phrase should be spoken");
 }
 
 /// Saved settings sit between the configuration file and flags, and a live change reaches the running
@@ -1217,8 +1191,8 @@ fn saved_settings_layer_under_flags_and_apply_live() {
         r#"{"schema":1,"data":{"zone":"Europe/Berlin","device_name":"Den"}}"#,
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--no-console",
             "--listen",
             &format!("127.0.0.1:{port}"),
@@ -1226,27 +1200,10 @@ fn saved_settings_layer_under_flags_and_apply_live() {
             "America/Chicago",
             "--data-dir",
             dir.to_str().unwrap(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut listening = false;
-    while Instant::now() < deadline && !listening {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            listening |= line.contains("listening on");
-        }
-    }
-    assert!(listening, "the server should start");
+        ],
+        false,
+    );
+    server.wait_listening();
     let (_, b) = http(
         port,
         "POST",
@@ -1300,15 +1257,14 @@ fn saved_settings_layer_under_flags_and_apply_live() {
     );
     assert_eq!(s, 200, "{b}");
     let mut seen = false;
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + REPLY;
     while Instant::now() < end && !seen {
         let (_, b) = http(port, "GET", "/api/status", &admin, "");
         seen = b.contains(r#""daily_spend_cap_usd":7.0"#);
         std::thread::sleep(Duration::from_millis(200));
     }
     let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
-    let _ = child.kill();
-    let _ = child.wait();
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(seen, "the new limit should reach the running assistant");
     assert!(
@@ -1324,7 +1280,7 @@ fn agent_settings_are_layered_validated_and_applied_live() {
     let port = free_port();
     let dir = std::env::temp_dir().join(format!("clawdot-agent-settings-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let (mut child, _) = start_and_read(&[
+    let (mut server, _) = start_and_read(&[
         "--no-console",
         "--dry-run",
         "--listen",
@@ -1374,7 +1330,7 @@ fn agent_settings_are_layered_validated_and_applied_live() {
     assert_eq!(v["fields"]["dry_run"]["ignored"], true);
     // The caps reach the running audit policy; the flag keeps dry run on.
     let mut policy = serde_json::Value::Null;
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + REPLY;
     while Instant::now() < end && policy["max_actions_per_day"] != 3 {
         policy = get("/api/audit")["policy"].clone();
         std::thread::sleep(Duration::from_millis(200));
@@ -1402,8 +1358,7 @@ fn agent_settings_are_layered_validated_and_applied_live() {
     assert_eq!(s, 400, "{b}");
     assert!(b.contains("1 to 20"), "{b}");
     assert_eq!(get("/api/audit")["policy"]["max_actions_per_day"], 3);
-    let _ = child.kill();
-    let _ = child.wait();
+    server.stop();
     let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
@@ -1447,31 +1402,14 @@ fn a_taken_port_fails_without_revealing_a_token() {
 }
 
 /// Start the binary, wait for the "listening" line, and return it with everything printed so far.
-fn start_and_read(args: &[&str]) -> (std::process::Child, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args(["--no-console", "--echo-speech"])
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx.send(line);
-        }
-    });
-    let mut seen = String::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline && !seen.contains("listening on") {
-        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
-            seen.push_str(&line);
-            seen.push('\n');
-        }
-    }
-    (child, seen)
+/// It fails at once if the binary exits first (a port already taken, say) and otherwise waits as long as
+/// [`START`], so a slow start is not mistaken for a missing server.
+fn start_and_read(args: &[&str]) -> (Server, String) {
+    let mut all = vec!["--no-console", "--echo-speech"];
+    all.extend_from_slice(args);
+    let server = Server::start(&all, false);
+    let seen = server.wait_listening();
+    (server, seen)
 }
 
 /// No setup code is printed, whatever the listen address: the device may have no visible console
@@ -1480,7 +1418,7 @@ fn start_and_read(args: &[&str]) -> (std::process::Child, String) {
 fn setup_prints_the_url_and_a_warning_but_no_code() {
     let dir = std::env::temp_dir().join(format!("clawdot-code-{}", std::process::id()));
     let port = free_port();
-    let (mut child, seen) = start_and_read(&[
+    let (mut server, seen) = start_and_read(&[
         "--listen",
         &format!("0.0.0.0:{port}"),
         "--data-dir",
@@ -1495,8 +1433,7 @@ fn setup_prints_the_url_and_a_warning_but_no_code() {
     assert!(!seen.contains("cdt_"), "{seen}");
     let body = r#"{"mode":"password","password":"correct horse battery"}"#;
     assert_eq!(http(port, "POST", "/api/setup", "", body).0, 200);
-    let _ = child.kill();
-    let _ = child.wait();
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1520,7 +1457,7 @@ fn legacy_token_migration_and_reset_admin() {
         dir.to_str().unwrap().to_owned(),
     ];
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (mut child, seen) = start_and_read(&args);
+    let (mut server, seen) = start_and_read(&args);
     assert!(
         seen.contains("old administrator token still works"),
         "{seen}"
@@ -1529,8 +1466,7 @@ fn legacy_token_migration_and_reset_admin() {
     let login = format!(r#"{{"password":"{old}"}}"#);
     let (status, b) = http(port, "POST", "/api/login", "", &login);
     assert_eq!(status, 200, "{b}");
-    let _ = child.kill();
-    let _ = child.wait();
+    server.stop();
 
     // Reset (server stopped): the setting goes, other state stays.
     std::fs::write(dir.join("other.json"), "keep").unwrap();
@@ -1547,14 +1483,13 @@ fn legacy_token_migration_and_reset_admin() {
     assert!(!dir.join("admin.json").exists());
     assert!(dir.join("other.json").exists());
     assert!(reset().contains("no administrator setting"));
-    let (mut child, _) = start_and_read(&args);
+    let (mut server, _) = start_and_read(&args);
     assert_eq!(
         http(port, "GET", "/api/status", "", "").0,
         403,
         "setup shows again"
     );
-    let _ = child.kill();
-    let _ = child.wait();
+    server.stop();
 
     // The removed flag explains itself.
     let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
@@ -1614,27 +1549,24 @@ fn snippets_follow_the_listen_address() {
 fn quit_leaves_the_console() {
     let port = free_port();
     let dir = std::env::temp_dir().join(format!("clawdot-quit-{}", std::process::id()));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clawdot"))
-        .args([
+    let mut server = Server::start(
+        &[
             "--listen",
             &format!("127.0.0.1:{port}"),
             "--data-dir",
             dir.to_str().unwrap(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-    child.stdin.as_mut().unwrap().write_all(b"quit\n").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+        ],
+        true,
+    );
+    // Quit only once the console reads, instead of guessing how long start-up takes.
+    server.wait_for(&["console ready"], START);
+    server.type_line("quit");
+    let deadline = Instant::now() + REPLY;
     let status = loop {
-        if let Some(s) = child.try_wait().unwrap() {
+        if let Some(s) = server.child.try_wait().unwrap() {
             break Some(s);
         }
         if Instant::now() > deadline {
-            let _ = child.kill();
             break None;
         }
         std::thread::sleep(Duration::from_millis(50));
