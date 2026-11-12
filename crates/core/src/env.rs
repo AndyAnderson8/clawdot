@@ -72,6 +72,24 @@ impl Env {
     }
 }
 
+/// The secret named by `var` (the `auth_env` of a tool or a server), or `None` when no variable is named. `what`
+/// names the owner in the message, for example ``tool `light` ``.
+///
+/// # Errors
+/// A variable that is not set or is empty: "<what>: environment variable <var> is not set".
+pub(crate) fn named_secret(
+    var: Option<&str>,
+    what: &str,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    var.map(|v| {
+        env(v)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{what}: environment variable {v} is not set"))
+    })
+    .transpose()
+}
+
 impl fmt::Debug for Env {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Env")
@@ -99,6 +117,23 @@ mod tests {
             "it keeps its own handle"
         );
         assert_eq!(Env::empty().get("A_KEY"), None);
+    }
+
+    #[test]
+    fn a_named_secret_must_be_set_and_not_empty() {
+        let env = Env::from_pairs([("KEY", "v"), ("EMPTY", "")]);
+        let get = |n: &str| env.get(n);
+        assert_eq!(named_secret(None, "tool `t`", get), Ok(None));
+        assert_eq!(
+            named_secret(Some("KEY"), "tool `t`", get),
+            Ok(Some("v".to_owned()))
+        );
+        for var in ["EMPTY", "NOPE"] {
+            assert_eq!(
+                named_secret(Some(var), "tool `t`", get).unwrap_err(),
+                format!("tool `t`: environment variable {var} is not set")
+            );
+        }
     }
 
     #[test]

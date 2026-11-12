@@ -130,6 +130,18 @@ pub struct McpTool {
     pub risk: Risk,
 }
 
+/// The bearer token of a server, read from the variable its definition names.
+fn server_secret(
+    d: &ServerDef,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    crate::env::named_secret(
+        d.auth_env.as_deref(),
+        &format!("mcp server `{}`", d.name),
+        env,
+    )
+}
+
 struct Server {
     def: ServerDef,
     endpoint: Endpoint,
@@ -341,15 +353,7 @@ impl McpClient {
             if defs[..i].iter().any(|o| o.name == d.name) {
                 return Err(format!("mcp server `{}` is listed twice", d.name));
             }
-            let secret = match &d.auth_env {
-                Some(var) => Some(env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
-                    format!(
-                        "mcp server `{}`: environment variable {var} is not set",
-                        d.name
-                    )
-                })?),
-                None => None,
-            };
+            let secret = server_secret(d, &env)?;
             servers.push(Arc::new(Server {
                 endpoint: Endpoint::parse(&d.url)?,
                 def: d.clone(),
@@ -660,15 +664,7 @@ impl McpClient {
         if self.has_server(&def.name) {
             return Err(format!("mcp server `{}` is listed twice", def.name));
         }
-        let secret = match &def.auth_env {
-            Some(var) => Some(env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
-                format!(
-                    "mcp server `{}`: environment variable {var} is not set",
-                    def.name
-                )
-            })?),
-            None => None,
-        };
+        let secret = server_secret(&def, &env)?;
         let server = Arc::new(Server {
             endpoint: Endpoint::parse(&def.url)?,
             def,
