@@ -47,7 +47,6 @@ async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool) -> Portal
         ("zone", json!("UTC")),
         ("listen", json!("127.0.0.1:3335")),
         ("llm_key_env", json!("OPENROUTER_API_KEY")),
-        ("board", json!("none")),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))

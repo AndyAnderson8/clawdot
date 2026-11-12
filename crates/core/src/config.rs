@@ -232,6 +232,60 @@ pub struct SatelliteConfig {
     pub follow_up_secs: Option<u64>,
 }
 
+/// Parts the operating system cannot show, or shows wrongly, declared by the person who set the device up. Each is
+/// `true` (it is there), `false` (ignore what was detected) or absent (as detected).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PartsConfig {
+    /// A ring or row of lights, for example one that another service drives so the kernel lists no LED.
+    pub leds: Option<bool>,
+    /// A Bluetooth adapter.
+    pub bluetooth: Option<bool>,
+    /// A wireless network adapter.
+    pub wifi: Option<bool>,
+    /// A screen.
+    pub screen: Option<bool>,
+    /// A USB serial adapter.
+    pub usb_serial: Option<bool>,
+}
+
+/// What this device is called and what its operating system cannot tell the core about it (REQ-CFG-083). The core
+/// knows no device by name: a preset for a particular device is data in this section, not code.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceConfig {
+    /// A short identifier for the kind of device, for example the `board` value of a file in `boards/`. Lower-case
+    /// letters, digits, `-` and `_`, at most 40. Reported as `hardware.board`; `unknown` when not set.
+    pub board: Option<String>,
+    /// What to call the device when showing it to a person, at most 60 characters on one line.
+    pub label: Option<String>,
+    /// Parts to declare or rule out.
+    #[serde(default)]
+    pub parts: PartsConfig,
+}
+
+impl DeviceConfig {
+    fn validate(&self) -> Result<(), String> {
+        if let Some(b) = &self.board
+            && (b.is_empty()
+                || b.len() > 40
+                || !b.bytes().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_'
+                }))
+        {
+            return Err("config: `device.board` must be 1 to 40 characters: lower-case letters, digits, - and _".into());
+        }
+        if let Some(l) = &self.label
+            && (l.trim().is_empty() || l.chars().count() > 60 || l.chars().any(char::is_control))
+        {
+            return Err(
+                "config: `device.label` must be 1 to 60 characters with no line breaks".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// The whole file.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -269,6 +323,9 @@ pub struct Config {
     /// Satellite server.
     #[serde(default)]
     pub satellite: SatelliteConfig,
+    /// What the device is called and which parts it has that cannot be seen.
+    #[serde(default)]
+    pub device: DeviceConfig,
     /// Update checks.
     #[serde(default)]
     pub updates: UpdatesConfig,
@@ -329,6 +386,7 @@ impl Config {
 
     fn validate_identity(&self) -> Result<(), String> {
         self.listen_addr()?;
+        self.device.validate()?;
         if let Some(n) = &self.name
             && (n.trim().is_empty() || n.chars().count() > 40 || n.chars().any(char::is_control))
         {
@@ -615,6 +673,10 @@ mod tests {
             ),
             (r#"{"endpoints": [" "]}"#, "empty"),
             (r#"{"name": ""}"#, "`name`"),
+            (r#"{"device": {"board": "Echo Dot"}}"#, "device.board"),
+            (r#"{"device": {"board": ""}}"#, "device.board"),
+            (r#"{"device": {"label": " "}}"#, "device.label"),
+            (r#"{"device": {"label": "a\nb"}}"#, "device.label"),
             ("{", "config"),
         ] {
             let e = Config::parse(text).unwrap_err();
@@ -692,5 +754,31 @@ mod tests {
         }
         // a typo is an error, not a silently ignored setting
         assert!(Config::parse(r#"{"agent": {"max_round": 4}}"#).is_err());
+    }
+
+    // REQ-CFG-083
+    #[test]
+    fn the_device_section_is_read_and_checked() {
+        let c = Config::parse(
+            r#"{"device": {"board": "my-board_2", "label": "Kitchen speaker", "parts": {"leds": true, "wifi": false}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.device.board.as_deref(), Some("my-board_2"));
+        assert_eq!(c.device.label.as_deref(), Some("Kitchen speaker"));
+        assert_eq!(
+            (c.device.parts.leds, c.device.parts.wifi),
+            (Some(true), Some(false))
+        );
+        assert_eq!(c.device.parts.screen, None);
+        assert_eq!(Config::parse("{}").unwrap().device, DeviceConfig::default());
+        let long = "a".repeat(61);
+        for bad in [
+            r#"{"device": {"parts": {"led": true}}}"#.to_owned(),
+            r#"{"device": {"parts": {"leds": "yes"}}}"#.to_owned(),
+            r#"{"device": {"brand": "x"}}"#.to_owned(),
+            format!(r#"{{"device": {{"label": "{long}"}}}}"#),
+        ] {
+            assert!(Config::parse(&bad).is_err(), "{bad}");
+        }
     }
 }

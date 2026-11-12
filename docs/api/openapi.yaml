@@ -1076,7 +1076,7 @@ paths:
         `deepgram`; needs a restart), `listen`, `public_url`, `daily_spend_usd`,
         `llm_usd_per_mtok_in` and `llm_usd_per_mtok_out` (what the model costs per million tokens in and out, in dollars,
         0 to 1000; empty means unknown, so the cap prices with built-in high prices, and 0 means free),
-        `board`, `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`,
+        `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`,
         `plan_speech`, `progress_speech`, `notes`, `update_check`, `max_actions_per_day`, `max_costly_per_day`,
         `dry_run`, `quiet_start`, `quiet_end`, and the optional realtime voice (REQ-RTV-008) `realtime_enabled`,
         `realtime_url`, `realtime_model`, `realtime_voice`, `realtime_key_env`, `realtime_transcription_model`,
@@ -1844,8 +1844,11 @@ components:
     Hardware:
       type: object
       properties:
-        board: { type: string, description: "`echo-dot`, `raspberry-pi`, `pc` or `unknown`." }
-        model: { type: string }
+        board:
+          type: string
+          description: "The identifier from the configuration file's `device.board`, or `unknown` when none is set. Never guessed from the model string."
+        label: { type: string, description: "What `device.label` says to call the device; empty when none is set (show `model`)." }
+        model: { type: string, description: "The model string the device gives itself (device tree or firmware); empty when it says nothing." }
         cpu: { type: string }
         cores: { type: integer }
         ram_mb: { type: integer }
@@ -1859,6 +1862,10 @@ components:
             wifi: { type: boolean }
             screen: { type: boolean }
             usb_serial: { type: boolean }
+        configured_parts:
+          type: array
+          description: "The parts whose value comes from `device.parts` in the configuration file rather than from looking at the system."
+          items: { type: string, enum: [leds, bluetooth, wifi, screen, usb_serial] }
     Status:
       type: object
       description: Every field is optional; a missing field means unknown.

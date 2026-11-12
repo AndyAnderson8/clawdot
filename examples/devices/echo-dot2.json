@@ -1,0 +1,7 @@
+{
+  "device": {
+    "board": "echo-dot2",
+    "label": "Echo Dot (2nd generation)",
+    "parts": { "leds": true }
+  }
+}

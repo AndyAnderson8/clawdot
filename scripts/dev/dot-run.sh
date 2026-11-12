@@ -9,6 +9,14 @@ cd /data/clawdot || exit 1
 . ./env
 export CLAWDOT_SUPERVISED=1
 
+# ClawDot's core knows no device by name. What this one is called, and the light ring the kernel does not list, come
+# from the "device" section of clawdot.json (examples/devices/echo-dot2.json, docs/guides/dot-ssh.md). Say so in the
+# log when it is missing; nothing else changes.
+note_device() {
+  grep -q '"device"' clawdot.json 2>/dev/null ||
+    echo "run.sh: clawdot.json has no \"device\" section (board, label, parts.leds); see examples/devices/echo-dot2.json" >> clawdot.log
+}
+
 ensure_rule() {
   iptables-legacy -C INPUT -p tcp --dport 3335 -s 192.168.0.0/24 -j ACCEPT 2>/dev/null ||
     iptables-legacy -I INPUT -p tcp --dport 3335 -s 192.168.0.0/24 -j ACCEPT
@@ -17,6 +25,7 @@ ensure_rule() {
 fails=0
 while true; do
   : > clawdot.log
+  note_device
   start=$(date +%s)
   ./clawdot --config clawdot.json --no-console --echo-speech >> clawdot.log 2>&1 &
   pid=$!

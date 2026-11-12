@@ -49,6 +49,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `tools` | Declarative HTTP tools the model may call; see [http-tools.md](http-tools.md) | none |
 | `mcp` | MCP servers whose tools the model may call; see [mcp.md](mcp.md) | none |
 | `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |
+| `device` | What the device is called and which parts it has that the system cannot show (REQ-CFG-083): `board` (an identifier: lower-case letters, digits, `-` and `_`, at most 40; use the `board` value of the file in `boards/`), `label` (what the portal shows, at most 60 characters on one line) and `parts` (`leds`, `bluetooth`, `wifi`, `screen`, `usb_serial`, each `true`, `false` or absent for as detected). Reported in the status as `hardware.board`, `hardware.label` and `hardware.configured_parts`; see [board-support.md](board-support.md). Ready-made sections are in `examples/devices/` | `board` is `unknown`, no label, every part as detected |
 
 Every `limits.*` and `agent.*` row above except `agent.summarize_over_chars` is also a portal setting (Settings, "Agent settings", REQ-CFG-062): `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`, `plan_speech`, `progress_speech`, `notes`, `max_actions_per_day`, `max_costly_per_day` and `dry_run`. They follow the usual layers (default, this file, saved in the portal, flag such as `--dry-run`), apply without a restart, and the page shows the value in force and where it came from. The same group holds the device-wide quiet hours (`quiet_start`, `quiet_end`, local `HH:MM`, both or neither; REQ-INB-040), which exist only as a setting: while the window lasts, only urgent agent events are announced.
 | `speech` | Speech-to-text and text-to-speech provider (`url`, `key_env`, `stt_model`, `tts_model`, `voice`, `language`, `tts_sample_rate`); see [voice-pipeline.md](voice-pipeline.md) | none |
@@ -73,7 +74,8 @@ warning so a headless device still starts.
 | Model prices, in dollars per million tokens in and out (0 means free; empty means unknown) | `llm_usd_per_mtok_in`, `llm_usd_per_mtok_out` | right away |
 | Voice | `voice` | after a restart (needs the `speech` section of the configuration file) |
 | Listen address, public address | `listen`, `public_url` | after a restart |
-| Board | `board` (`auto` or `none`) | after a restart; nothing reads it yet |
+
+The former `board` setting (`auto` or `none`) is retired: nothing ever read it. A `settings.json` or an export that still holds it loads, and the value is dropped. What a device is called now comes from the `device` section of the configuration file, which is read at start.
 
 A change is validated as a whole before anything is saved; an error says what is wrong and how to fix it. The page
 lists saved values that are not yet running and gives the restart instruction; it has no Restart button because the
