@@ -133,7 +133,7 @@ impl JsonStore {
         if let Some(dir) = self.path.parent() {
             create_private_dir(dir)?;
         }
-        let tmp = self.path.with_extension("tmp");
+        let tmp = temp_path(&self.path);
         {
             let mut f = create_private_file(&tmp)?;
             f.write_all(bytes)?;
@@ -144,6 +144,15 @@ impl JsonStore {
         sync_dir(self.path.parent());
         Ok(())
     }
+}
+
+/// The temporary file a save of `path` goes through: the same name with `.tmp` added, never swapped for the
+/// extension, so `a.json` and `a.toml` do not share one (`a.json.tmp`, `a.toml.tmp`).
+#[must_use]
+pub(crate) fn temp_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
 }
 
 /// Flush a directory's entries to disk, so a rename in it survives a power cut. Best effort: the data is already
@@ -247,9 +256,18 @@ mod tests {
         store.save(&doc).unwrap();
         assert_eq!(store.load::<Doc>().unwrap(), doc);
         assert!(
-            !dir.0.join("sub/d.tmp").exists(),
+            !dir.0.join("sub/d.json.tmp").exists(),
             "temp file must not linger"
         );
+    }
+
+    #[test]
+    fn files_that_differ_only_in_extension_get_different_temp_files() {
+        let t = |p: &str| temp_path(Path::new(p));
+        assert_eq!(t("/d/a.json"), Path::new("/d/a.json.tmp"));
+        assert_ne!(t("/d/a.json"), t("/d/a.toml"));
+        assert_eq!(t("/d/noext"), Path::new("/d/noext.tmp"));
+        assert_eq!(t("a.json"), Path::new("a.json.tmp"));
     }
 
     #[cfg(unix)]
@@ -280,7 +298,7 @@ mod tests {
             })
             .unwrap();
         // Simulate a crash mid-save: a half-written temp file next to the real one.
-        std::fs::write(dir.0.join("d.tmp"), b"{\"schema\":1,\"da").unwrap();
+        std::fs::write(dir.0.join("d.json.tmp"), b"{\"schema\":1,\"da").unwrap();
         assert_eq!(store.load::<Doc>().unwrap().items, vec!["old".to_string()]);
     }
 

@@ -561,8 +561,16 @@ pub fn migrate_legacy(dir: &std::path::Path) -> Result<bool, StoreError> {
 /// I/O errors other than "not found".
 pub fn reset(dir: &std::path::Path) -> std::io::Result<bool> {
     let mut removed = false;
-    for name in ["admin.json", "admin-token.hash", "admin.tmp"] {
-        match std::fs::remove_file(dir.join(name)) {
+    let store_file = dir.join("admin.json");
+    let doomed = [
+        store_file.clone(),
+        dir.join("admin-token.hash"),
+        // The temporary file of a save cut short, and the name older versions gave it.
+        crate::store::temp_path(&store_file),
+        dir.join("admin.tmp"),
+    ];
+    for path in doomed {
+        match std::fs::remove_file(path) {
             Ok(()) => removed = true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -755,6 +763,11 @@ mod tests {
         assert_eq!(Admin::open(store).unwrap().mode(), Mode::Open);
         assert!(reset(&dir.0).unwrap());
         assert!(!reset(&dir.0).unwrap());
+        // A save cut short leaves its temporary file; reset clears that too, under the name the store gives it.
+        let tmp = crate::store::temp_path(&dir.0.join("admin.json"));
+        std::fs::write(&tmp, b"{").unwrap();
+        assert!(reset(&dir.0).unwrap());
+        assert!(!tmp.exists());
         let store = JsonStore::new(dir.0.join("admin.json"), SCHEMA);
         assert_eq!(Admin::open(store).unwrap().mode(), Mode::Setup);
     }
