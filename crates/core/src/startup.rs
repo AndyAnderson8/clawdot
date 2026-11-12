@@ -176,7 +176,6 @@ pub async fn build_brain(
             core.env().lookup(),
             core.secrets().clone(),
         ),
-        env: core.env().clone(),
         connects,
     };
     if brain.rt.settings().enabled && !RtSettings::built() {

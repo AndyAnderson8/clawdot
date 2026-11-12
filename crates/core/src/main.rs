@@ -170,7 +170,7 @@ async fn main() -> ExitCode {
             &mut brain,
             &mut hub,
             &args.speech,
-            core.secrets(),
+            &core,
             &input,
             args.voice_out.as_deref(),
         )

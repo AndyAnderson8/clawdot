@@ -237,8 +237,6 @@ pub struct Brain {
     pub voice_configured: bool,
     /// The optional realtime voice: its settings, status and the way sessions reach this loop.
     pub rt: Realtime,
-    /// The environment as it was at start-up (see [`crate::env`]); keys named by settings are looked up here.
-    pub env: crate::env::Env,
     /// MCP connections being made beside the loop, for servers added in the portal.
     pub connects: Connects,
 }
@@ -272,7 +270,12 @@ impl Brain {
     }
 
     /// Carry out a change from the portal and refresh what the page shows.
-    pub async fn ext_apply(&mut self, op: ExtOp) -> Result<serde_json::Value, crate::app::Fail> {
+    /// Keys named by the change are looked up in `env`, the core's snapshot of the environment.
+    pub async fn ext_apply(
+        &mut self,
+        op: ExtOp,
+        env: &crate::env::Env,
+    ) -> Result<serde_json::Value, crate::app::Fail> {
         // A turn that is running holds its own copies of the clients; `make_mut` gives this loop a private
         // one to change, and the turn keeps what it began with.
         let applied = self
@@ -282,7 +285,7 @@ impl Brain {
                 Arc::make_mut(&mut self.http_tools),
                 Arc::make_mut(&mut self.mcp),
                 &self.builtin,
-                &self.env.lookup(),
+                &env.lookup(),
             )
             .await;
         self.ext_view = Arc::new(self.ext.snapshot());
@@ -578,7 +581,7 @@ pub async fn portal_op(
             match brain
                 .ext
                 .mcp_prepare(&v, &brain.mcp, brain.connects.portal_len(), |v| {
-                    brain.env.get(v)
+                    core.env().get(v)
                 }) {
                 Ok(pending) => {
                     brain.connects.start(pending, reply);
@@ -677,7 +680,7 @@ async fn sync_op(
             Ok(serde_json::json!({ "applied": true }))
         }
         Op::Ext(op) => {
-            let r = brain.ext_apply(op).await;
+            let r = brain.ext_apply(op, core.env()).await;
             if let Ok(listing) = &r {
                 core.set_ui_tools(listing.clone());
             }
