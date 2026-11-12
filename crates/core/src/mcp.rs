@@ -756,6 +756,14 @@ impl McpClient {
         self.find(name).is_some()
     }
 
+    /// The name of the server that offers the tool `exposed`. This is not read from the tool's name: server names
+    /// may contain `__`, so `a__b__x` can be tool `b__x` of `a` or tool `x` of `a__b`.
+    #[must_use]
+    pub fn server_of(&self, exposed: &str) -> Option<&str> {
+        let t = self.find(exposed)?;
+        self.servers.get(t.server).map(|s| s.def.name.as_str())
+    }
+
     /// The risk of a tool. An unknown name is costly.
     #[must_use]
     pub fn risk(&self, name: &str) -> Risk {
@@ -874,7 +882,7 @@ impl<H: ToolHost> ToolHost for WithMcp<'_, H> {
 pub fn summary(c: &McpClient) -> BTreeMap<String, usize> {
     let mut m = BTreeMap::new();
     for t in c.tools() {
-        let server = t.exposed.split("__").next().unwrap_or("").to_owned();
+        let server = c.server_of(&t.exposed).unwrap_or("").to_owned();
         *m.entry(server).or_insert(0) += 1;
     }
     m
@@ -1392,6 +1400,38 @@ mod tests {
         );
         assert_eq!(display_url("http://ha.local"), "http://ha.local");
         assert_eq!(display_url("nonsense"), "");
+    }
+
+    // REQ-CFG-035
+    #[tokio::test]
+    async fn a_tool_belongs_to_its_own_server_when_names_contain_a_double_underscore() {
+        use crate::extensions::{ExtOp, Extensions};
+        let (p1, _s1, _h1) = fake_server(OK).await;
+        let (p2, _s2, _h2) = fake_server(OK).await;
+        let (mut first, mut second) = (def(p1), def(p2));
+        first.name = "a".into();
+        second.name = "a__b".into();
+        let (mut c, _) = McpClient::connect(vec![first, second], &[], |_| None)
+            .await
+            .unwrap();
+        assert_eq!(c.server_of("a__b__status"), Some("a__b"));
+        assert_eq!(c.server_of("a__status"), Some("a"));
+        assert_eq!(c.server_of("nothing"), None);
+        assert_eq!(summary(&c)["a__b"], 3);
+        // Switching off `a__b` switches off its tools, and not those of `a`.
+        let mut ext = Extensions::in_memory();
+        let mut http = crate::httptools::HttpTools::new(Vec::new(), &[], |_| None).unwrap();
+        ext.apply(
+            ExtOp::McpEnable("a__b".into(), false),
+            &mut http,
+            &mut c,
+            &[],
+            |_| None,
+        )
+        .await
+        .unwrap();
+        assert!(ext.is_disabled("a__b__status", &c));
+        assert!(!ext.is_disabled("a__status", &c));
     }
 
     /// A copy of the client that is then changed copies pointers: the tools it did not touch stay one
