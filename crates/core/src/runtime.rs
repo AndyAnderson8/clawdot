@@ -387,7 +387,7 @@ impl Brain {
         if let Some(n) = core.notes() {
             conv.set_notes(n);
         }
-        let kit = turns::RtKit {
+        let kit = crate::turns::RtKit {
             settings: self.rt.settings(),
             key: self.rt.key(),
             persona: self.persona.clone(),
