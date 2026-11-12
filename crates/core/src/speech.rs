@@ -490,7 +490,7 @@ impl Client {
         if !key.is_empty() {
             req = match self.dialect {
                 Dialect::OpenAi => req.header("authorization", format!("Bearer {key}")),
-                Dialect::ElevenLabs => req.header("xi-api-key", key),
+                Dialect::ElevenLabs => req.header("xi-api-key", &key),
                 Dialect::Deepgram => req.header("authorization", format!("Token {key}")),
             };
         }
@@ -519,6 +519,8 @@ impl Client {
                     .ok()
                     .map(|v| error_text(self.dialect, &v))
                     .unwrap_or_default();
+                // A server that echoes the Authorization header must not put the key on the status page.
+                let msg = crate::transport::scrub(&msg, &key, 200);
                 let text = failure(self.dialect, status.as_u16(), &msg);
                 Err(match status.as_u16() {
                     401 | 403 => ProviderError::Unauthorized(text),

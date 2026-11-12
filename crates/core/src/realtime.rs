@@ -647,17 +647,18 @@ fn classify(code: &str, message: &str, key: &str) -> Result<(), RealtimeError> {
 
 /// A provider message made safe to speak: one line, no key, bounded.
 fn one_line(message: &str, key: &str) -> String {
-    let mut m: String = message
-        .lines()
-        .next()
-        .unwrap_or_default()
+    // The key is replaced before the cut: one cut in the middle of it would leave a prefix that no longer matches.
+    let first = message.lines().next().unwrap_or_default();
+    let first = if key.is_empty() {
+        first.to_owned()
+    } else {
+        first.replace(key, "***")
+    };
+    let m: String = first
         .chars()
         .filter(|c| !c.is_control())
         .take(160)
         .collect();
-    if !key.is_empty() {
-        m = m.replace(key, "***");
-    }
     if m.is_empty() {
         "no details were given.".into()
     } else {

@@ -176,6 +176,26 @@ async fn transcription_failures_have_clear_messages_without_secrets() {
     let e = t.transcribe(&[1]).await.unwrap_err();
     assert_eq!(e, "HTTP 401: bad key");
     assert!(!e.contains("k3y"));
+    // A server that echoes the key back in its error does not get it into the message.
+    let (port, _s) = serve_once(
+        "401 Unauthorized",
+        "application/json",
+        br#"{"error":{"message":"rejected k3y-echo-1234 sorry"}}"#.to_vec(),
+    )
+    .await;
+    let t = HttpTranscriber::new(
+        &format!("http://127.0.0.1:{port}"),
+        "k3y-echo-1234",
+        "m",
+        None,
+        T,
+    )
+    .unwrap();
+    let e = t.transcribe(&[1]).await.unwrap_err();
+    assert!(
+        !e.contains("k3y-echo-1234") && e.contains("rejected"),
+        "{e}"
+    );
     let (port, _s) = serve_once("200 OK", "text/plain", b"hello".to_vec()).await;
     let t = HttpTranscriber::new(&format!("http://127.0.0.1:{port}"), "", "m", None, T).unwrap();
     assert!(t.transcribe(&[1]).await.unwrap_err().contains("not JSON"));
