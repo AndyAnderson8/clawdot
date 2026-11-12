@@ -1,8 +1,8 @@
 //! Usage limits for the language model (REQ-AST-011).
 //!
-//! An always-on device calling a paid API needs a guardrail. Limits are per local day: a request
-//! count and an optional spend cap. When a limit is reached the assistant says so and local features
-//! (timers, alarms, the fast path) keep working.
+//! An always-on device calling a paid API needs a guardrail: an optional spend cap per local day. (Requests
+//! are counted for the activity chart; the cap on their number was retired.) When the cap is reached the
+//! assistant says so and local features (timers, alarms, the fast path) keep working.
 //!
 //! The spend cap has to work with every provider, and most do not say what a request cost. So each model
 //! request is priced by the first rule that applies:
