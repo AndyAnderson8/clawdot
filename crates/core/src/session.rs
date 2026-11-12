@@ -791,6 +791,24 @@ pub fn is_cancel(utterance: &str) -> bool {
     )
 }
 
+/// What one turn works on, borrowed for its duration: the tools, the conversation, the limits, the counters,
+/// and the day and time it runs at. These travel together through every entry point of a turn.
+#[derive(Debug)]
+pub struct TurnInputs<'a, H> {
+    /// The tools the turn may call, and what the host decides about them.
+    pub host: &'a mut H,
+    /// The speaker's conversation.
+    pub conv: &'a mut Conversation,
+    /// The turn's limits and models.
+    pub cfg: &'a TurnConfig,
+    /// The daily request and spend counters.
+    pub usage: &'a mut UsageTracker,
+    /// The day number the counters are kept by.
+    pub day: i64,
+    /// The time the turn runs at, in seconds.
+    pub now: Ts,
+}
+
 /// Run one turn: the user's words in, the words to speak out.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn<B: ChatBackend, H: ToolHost>(
@@ -830,20 +848,30 @@ pub async fn run_turn_ctl<B: ChatBackend, H: ToolHost>(
     now: Ts,
     user_text: &str,
 ) -> TurnResult {
-    run_turn_from(
+    run_turn_with(
         ctl,
-        Trigger::User,
-        "voice",
         backend,
-        host,
-        conv,
-        cfg,
-        usage,
-        day,
-        now,
+        TurnInputs {
+            host,
+            conv,
+            cfg,
+            usage,
+            day,
+            now,
+        },
         user_text,
     )
     .await
+}
+
+/// Like [`run_turn_ctl`], with the host, conversation, limits and counters gathered in [`TurnInputs`].
+pub async fn run_turn_with<B: ChatBackend, H: ToolHost>(
+    ctl: &TurnCtl,
+    backend: &B,
+    inputs: TurnInputs<'_, H>,
+    user_text: &str,
+) -> TurnResult {
+    run_turn_from(ctl, Trigger::User, "voice", backend, inputs, user_text).await
 }
 
 /// Run one turn that something other than the user's voice started (REQ-SEC-012). `text` is what the
@@ -915,12 +943,14 @@ pub async fn run_event_turn_ctl<B: ChatBackend, H: ToolHost>(
         Trigger::Event,
         &label,
         backend,
-        host,
-        conv,
-        cfg,
-        usage,
-        day,
-        now,
+        TurnInputs {
+            host,
+            conv,
+            cfg,
+            usage,
+            day,
+            now,
+        },
         text,
     )
     .await
@@ -1420,23 +1450,16 @@ fn failed_turn(conv: &mut Conversation, result: TurnResult, st: &TurnState) -> T
     finish_with(conv, r, &speech)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_turn_from<B: ChatBackend, H: ToolHost>(
     ctl: &TurnCtl,
     trigger: Trigger,
     label: &str,
     backend: &B,
-    host: &mut H,
-    conv: &mut Conversation,
-    cfg: &TurnConfig,
-    usage: &mut UsageTracker,
-    day: i64,
-    now: Ts,
+    inputs: TurnInputs<'_, H>,
     user_text: &str,
 ) -> TurnResult {
-    let mut t = Turn::begin(
-        ctl, trigger, label, host, conv, cfg, usage, day, now, user_text,
-    );
+    let (day, now) = (inputs.day, inputs.now);
+    let mut t = Turn::begin(ctl, trigger, label, inputs, user_text);
     if ctl.cancel.is_cancelled() {
         return t.cancelled(&[], None);
     }
