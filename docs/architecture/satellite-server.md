@@ -48,7 +48,8 @@ the core allocate without bound; `hello` must arrive within 5 s.
 When a satellite is connected, inbox announcements and fired timers or alarms are spoken on it as well as printed.
 A satellite accepts one only when it is idle and unmuted, so an announcement never interrupts a conversation or
 plays into a muted room. If every satellite is busy or muted, the event stays queued and is retried a second later
-(nothing is marked announced until a satellite actually spoke it). Fired timers are best effort: a busy satellite
+(nothing is marked announced until a satellite actually spoke it).
+The message is spoken as coming from the endpoint's spoken name (set by the administrator in the portal, else the endpoint's name), never from a label the sender gives itself. Fired timers are best effort: a busy satellite
 skips them, the console still shows them. After an announcement plays, the follow-up window opens, so the user can
 answer ("keep going and add tests") without the wake word, and the instruction goes to the agent bridge.
 
