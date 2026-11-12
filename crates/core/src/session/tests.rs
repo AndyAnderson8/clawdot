@@ -260,6 +260,7 @@ async fn a_risky_call_is_held_and_the_host_asks_then_runs_it_after_a_later_yes()
     assert_eq!(c.pending().map(PendingAction::tool), Some("send_money"));
     let r2 = turn(&b, &mut h, &mut c, &mut u, "Yes, please.").await;
     assert_eq!(r2.speech, "Sent.");
+    assert_eq!(r2.held, Some(HeldOutcome::Ran));
     assert_eq!(
         h.ran,
         vec![("send_money".to_owned(), json!({"amount":5,"to":"sam"}))]
@@ -335,6 +336,7 @@ async fn a_yes_for_a_tool_that_is_no_longer_offered_runs_nothing() {
     let r = turn(&done, &mut h, &mut c, &mut u, "yes").await;
     assert!(h.ran.is_empty(), "nothing ran: {:?}", h.ran);
     assert_eq!(r.tool_calls, 0, "no tool ran, so no call is counted");
+    assert_eq!(r.held, Some(HeldOutcome::Gone));
     let seen = done.requests()[0].messages.last().unwrap().clone();
     assert_eq!(
         (seen.role, seen.content.as_str()),
@@ -690,6 +692,7 @@ async fn a_proposal_from_an_event_expires_like_any_other() {
     )
     .await;
     assert!(h.ran.is_empty() && r.speech.contains("took too long"));
+    assert_eq!(r.held, Some(HeldOutcome::Expired));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1002,6 +1005,7 @@ async fn declined_expired_and_replaced_actions_are_recorded() {
     let none = Script::new(vec![]);
     let late = user_turn(&none, inputs(&mut h, &mut c, &mut u, 1130), "yes").await;
     assert!(late.speech.contains("too long"));
+    assert_eq!(late.held, Some(HeldOutcome::Expired));
     // asked, then the conversation goes idle
     turn(&Script::new(vec![ask()]), &mut h, &mut c, &mut u, "pay").await;
     let hi = Script::new(vec![text("Hi.")]);

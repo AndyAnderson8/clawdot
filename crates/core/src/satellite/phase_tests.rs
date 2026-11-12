@@ -90,7 +90,7 @@ async fn the_handshake_refuses_without_a_welcome() {
 #[tokio::test]
 async fn effects_set_the_volume_within_bounds_and_hold_stream_commands_until_speech_ends() {
     let mut st = SessionState::new(&Settings::default());
-    st.music = true;
+    st.out.music = Music::Playing;
     let mut out = Vec::new();
     let play = Effect::PlayStream {
         url: "http://x/y".into(),
@@ -114,8 +114,11 @@ async fn effects_set_the_volume_within_bounds_and_hold_stream_commands_until_spe
         })
         .collect();
     assert_eq!(levels, [60, 100, 90]);
-    assert_eq!(st.after.len(), 2, "stream commands wait");
-    assert!(st.music, "nothing was started or stopped yet");
+    assert_eq!(st.media_after_speech.len(), 2, "stream commands wait");
+    assert!(
+        st.out.music == Music::Playing,
+        "nothing was started or stopped yet"
+    );
 
     // Without the media_url capability the stream is refused once, in words, and nothing is queued.
     let mut st = SessionState::new(&Settings::default());
@@ -123,7 +126,7 @@ async fn effects_set_the_volume_within_bounds_and_hold_stream_commands_until_spe
     apply_effects(&mut st, &mut out, false, &[play])
         .await
         .unwrap();
-    assert!(st.after.is_empty());
+    assert!(st.media_after_speech.is_empty());
     let sent = decode_all(&out);
     assert!(matches!(
         sent.as_slice(),
@@ -131,13 +134,14 @@ async fn effects_set_the_volume_within_bounds_and_hold_stream_commands_until_spe
     ));
 
     // A stop clears what was waiting and marks the music as stopped.
-    st.after.push(Message::MediaControl(MediaAction::Resume));
-    st.music = true;
+    st.media_after_speech
+        .push(Message::MediaControl(MediaAction::Resume));
+    st.out.music = Music::Playing;
     let mut out = Vec::new();
     apply_effects(&mut st, &mut out, true, &[Effect::StopPlayback])
         .await
         .unwrap();
-    assert!(st.after.is_empty() && !st.music);
+    assert!(st.media_after_speech.is_empty() && st.out.music == Music::Off);
     assert_eq!(decode_all(&out), [Message::StopPlayback]);
 }
 
@@ -154,21 +158,20 @@ async fn playback_done_resumes_ducked_music_and_progress_speech_does_not_move_th
     assert!(out.is_empty() && pending.steps.is_empty());
 
     // Progress speech ended while the turn runs: no step for the dialog, music stays ducked.
-    st.playing = true;
-    st.progress_playing = true;
-    st.ducked = true;
+    st.out.audio = Audio::Progress;
+    st.out.music = Music::Ducked;
     on_playback_done(&mut st, &mut out, &mut pending)
         .await
         .unwrap();
-    assert!(!st.playing && !st.progress_playing && st.ducked);
+    assert!(st.out.audio == Audio::Idle && st.out.music == Music::Ducked);
     assert!(out.is_empty() && pending.steps.is_empty());
 
     // A reply ended: ducked music resumes and the dialog is told.
-    st.playing = true;
+    st.out.audio = Audio::Speech;
     on_playback_done(&mut st, &mut out, &mut pending)
         .await
         .unwrap();
-    assert!(!st.playing && !st.ducked && st.music);
+    assert!(st.out.audio == Audio::Idle && st.out.music == Music::Playing);
     assert_eq!(
         decode_all(&out),
         [Message::MediaControl(MediaAction::Resume)]
@@ -197,4 +200,24 @@ fn a_reset_request_is_rate_limited_trusted_and_needs_a_hook() {
     );
     s.admin_reset = Some(AdminResetHook::new(|| Err("busy".into())));
     assert_eq!(reset_answer(&s, true, false), (0, Some("busy".into())));
+}
+
+/// REQ-MUS-004: music that was paused for progress speech and then told to stop must stay stopped when the reply
+/// ends; a stop clears the pause as well as the queue.
+#[tokio::test]
+async fn a_stop_while_music_is_paused_for_speech_is_not_undone_when_the_reply_ends() {
+    let mut st = SessionState::new(&Settings::default());
+    st.out.music = Music::Ducked;
+    let mut out = Vec::new();
+    apply_effects(&mut st, &mut out, true, &[Effect::StopPlayback])
+        .await
+        .unwrap();
+    assert_eq!(decode_all(&out), [Message::StopPlayback]);
+    let mut out = Vec::new();
+    finish_speech(&mut st, &mut out).await.unwrap();
+    assert!(
+        decode_all(&out).is_empty() && st.out.music == Music::Off,
+        "the music the user stopped must not resume: {:?}",
+        decode_all(&out)
+    );
 }

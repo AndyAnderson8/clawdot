@@ -265,8 +265,59 @@ struct Finished {
 /// A running turn.
 type Work = Pin<Box<dyn Future<Output = Finished> + Send>>;
 
+/// What speech made outside a turn is for.
+enum Purpose {
+    /// An announcement from elsewhere in the program; the sender is told whether it was spoken.
+    Announcement(oneshot::Sender<bool>),
+    /// A phrase spoken while a turn works.
+    Progress,
+}
+
+/// Speech being made for the speaker. The event loop polls it beside its other events, so a slow speech
+/// provider never stops the session from reading the satellite or answering its keepalives.
+struct Synth {
+    purpose: Purpose,
+    work: Pin<Box<dyn Future<Output = Vec<Vec<i16>>> + Send>>,
+}
+
 /// A short check of audio heard while a turn runs: was it a stop phrase (REQ-VOI-020)?
 type StopCheck = Pin<Box<dyn Future<Output = bool> + Send>>;
+
+/// What the satellite's speaker is doing for this session. One value, because the kinds exclude each other: a
+/// realtime session starts only when the speaker is quiet, and progress speech and announcements start only
+/// when it is idle, so no two are ever on at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Audio {
+    /// Nothing is playing.
+    #[default]
+    Idle,
+    /// A reply or an announcement.
+    Speech,
+    /// A phrase spoken while the turn works; the dialog does not move on when it ends.
+    Progress,
+    /// A reply from the realtime session; its end must not open the follow-up window.
+    Realtime,
+}
+
+/// What the music on the satellite is doing. Paused-for-speech is a state of its own, so music cannot be both
+/// playing and waiting to be resumed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Music {
+    /// No music, or it was stopped.
+    #[default]
+    Off,
+    /// Music is playing.
+    Playing,
+    /// Music was paused for speech and is to be resumed afterwards.
+    Ducked,
+}
+
+/// What the satellite is playing: speech and music.
+#[derive(Debug, Default)]
+struct Output {
+    audio: Audio,
+    music: Music,
+}
 
 /// Model audio that stops arriving for this long ends the reply on the speaker.
 const RT_GAP: Duration = Duration::from_millis(300);
@@ -292,7 +343,6 @@ struct RtLive {
 
 enum RtEv {
     Out(Speaker),
-    SpeakerClosed,
     Gap,
     Done(Option<Done>),
 }
@@ -346,16 +396,17 @@ async fn rt_next(rt: &mut Option<RtLive>) -> RtEv {
             std::future::pending::<()>().await;
         }
     };
-    tokio::select! {
-        sp = r.speaker.recv(), if r.speaker_open => match sp {
-            Some(s) => RtEv::Out(s),
-            None => {
-                r.speaker_open = false;
-                RtEv::SpeakerClosed
-            }
-        },
-        d = &mut r.done => RtEv::Done(d.ok()),
-        () = gap => RtEv::Gap,
+    tokio::pin!(gap);
+    loop {
+        tokio::select! {
+            sp = r.speaker.recv(), if r.speaker_open => match sp {
+                Some(s) => return RtEv::Out(s),
+                // The session dropped its audio channel; its end is reported through `done`.
+                None => r.speaker_open = false,
+            },
+            d = &mut r.done => return RtEv::Done(d.ok()),
+            () = &mut gap => return RtEv::Gap,
+        }
     }
 }
 
@@ -381,10 +432,7 @@ async fn rt_play<W: AsyncWrite + Unpin>(
     w: &mut W,
     r: &mut RtLive,
     bytes: &[u8],
-    playing: &mut bool,
-    rt_audio: &mut bool,
-    music: &mut bool,
-    ducked: &mut bool,
+    out: &mut Output,
 ) -> Result<(), String> {
     r.last_audio = Instant::now();
     r.last_activity = r.last_audio;
@@ -398,12 +446,11 @@ async fn rt_play<W: AsyncWrite + Unpin>(
         return Ok(());
     }
     if !r.streaming {
-        duck(w, music, ducked).await?;
+        duck(w, &mut out.music).await?;
         send(w, &Message::SetIndicator(Indicator::Speaking)).await?;
         send(w, &Message::AudioStart(AudioFormat::PCM_16K_MONO)).await?;
         r.streaming = true;
-        *playing = true;
-        *rt_audio = true;
+        out.audio = Audio::Realtime;
     }
     for chunk in pcm.chunks(DOWNLINK_CHUNK) {
         let payload: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -424,13 +471,11 @@ async fn rt_play<W: AsyncWrite + Unpin>(
 async fn rt_flush<W: AsyncWrite + Unpin>(
     w: &mut W,
     r: Option<&mut RtLive>,
-    playing: &mut bool,
-    rt_audio: &mut bool,
+    audio: &mut Audio,
 ) -> Result<(), String> {
-    if *rt_audio {
+    if *audio == Audio::Realtime {
         send(w, &Message::StopPlayback).await?;
-        *playing = false;
-        *rt_audio = false;
+        *audio = Audio::Idle;
     }
     if let Some(r) = r {
         r.streaming = false;
@@ -536,8 +581,11 @@ where
                     stop_turn(&mut st, &mut wr).await?;
                 }
             }
+            (purpose, audio) = poll_synth(&mut st.synth), if st.synth.is_some() => {
+                env.on_synthesized(&mut st, &mut wr, purpose, audio).await?;
+            }
             Some(a) = st.announce_rx.recv() => {
-                env.on_announce(&mut st, &mut wr, a).await?;
+                env.on_announce(&mut st, a);
             }
             _ = st.tick.tick() => {
                 env.on_tick(&mut st, &mut wr, &mut pending).await?;
@@ -547,13 +595,9 @@ where
         if pending.woke {
             env.on_wake(&mut st, &mut wr, &mut pending).await?;
         }
-        // Muting must really stop the microphone, so it ends a session.
-        if st.dialog.is_muted()
-            && let Some(r) = st.rt.as_mut()
-        {
-            r.mic = None;
-        }
-        env.play_progress(&mut st, &mut wr).await?;
+        st.end_realtime_when_muted();
+        st.drop_stale_synthesis();
+        env.play_progress(&mut st);
         env.deliver_finished(&mut st, &mut wr, &mut pending).await?;
         env.run_steps(&mut st, &mut wr, pending.steps).await?;
     }
@@ -597,28 +641,23 @@ struct SessionState {
     last_heard: Instant,
     last_ping: Instant,
     volume: u8,
-    /// Audio is on the speaker (a reply, progress speech, an announcement or a realtime reply).
-    playing: bool,
-    /// Music is playing on the satellite.
-    music: bool,
-    /// Music was paused for speech and is to be resumed afterwards.
-    ducked: bool,
+    /// What is on the speaker and what the music is doing.
+    out: Output,
     /// Stream commands that wait for the speech to finish, so music never covers a reply.
-    after: Vec<Message>,
+    media_after_speech: Vec<Message>,
     work: Option<Work>,
     /// The running turn's cancel signal and the phrases it speaks while it works (REQ-AST-020, REQ-AST-022).
     turn_cancel: Option<CancelToken>,
     progress_rx: Option<mpsc::UnboundedReceiver<String>>,
     progress_q: VecDeque<String>,
-    progress_playing: bool,
     /// A finished turn (or the end of a realtime session) waits here until nothing is playing and the progress
     /// speech is spoken.
     finished: Option<Finished>,
     stop_check: Option<StopCheck>,
+    /// Speech for an announcement or a progress phrase that is being made.
+    synth: Option<Synth>,
     /// The optional realtime session and what goes with it (REQ-RTV-009, REQ-RTV-010).
     rt: Option<RtLive>,
-    /// Audio from a session is on the speaker, so its playback-done must not open the follow-up window.
-    rt_audio: bool,
     rt_blocked_until: Option<Instant>,
     warned_format: bool,
     /// A reset request is honoured from the device itself (loopback) or from a satellite that proved a token.
@@ -642,19 +681,16 @@ impl SessionState {
             last_heard: Instant::now(),
             last_ping: Instant::now(),
             volume: 50,
-            playing: false,
-            music: false,
-            ducked: false,
-            after: Vec::new(),
+            out: Output::default(),
+            media_after_speech: Vec::new(),
             work: None,
             turn_cancel: None,
             progress_rx: None,
             progress_q: VecDeque::new(),
-            progress_playing: false,
             finished: None,
             stop_check: None,
+            synth: None,
             rt: None,
-            rt_audio: false,
             rt_blocked_until: None,
             warned_format: false,
             reset_trusted: settings.peer_loopback || !settings.token_hashes.is_empty(),
@@ -668,7 +704,41 @@ impl SessionState {
             && !self.dialog.is_muted()
             && self.work.is_none()
             && self.finished.is_none()
-            && !self.playing
+            && self.out.audio == Audio::Idle
+    }
+
+    /// A progress phrase may be spoken now: the turn is working (or its answer waits), nothing is playing and
+    /// the room is not muted.
+    fn wants_progress_speech(&self) -> bool {
+        self.out.audio == Audio::Idle
+            && (self.work.is_some() || self.finished.is_some())
+            && !self.dialog.is_muted()
+    }
+
+    /// Phase: speech that is being made for something that no longer applies is thrown away. An announcement
+    /// needs a quiet speaker, so a wake word, a mute or a turn cancels it (its sender is told no); a progress
+    /// phrase needs the turn.
+    fn drop_stale_synthesis(&mut self) {
+        let stale = match self.synth.as_ref().map(|s| &s.purpose) {
+            Some(Purpose::Announcement(_)) => !(self.is_quiet() && self.rt.is_none()),
+            Some(Purpose::Progress) => {
+                self.dialog.is_muted() || (self.work.is_none() && self.finished.is_none())
+            }
+            None => false,
+        };
+        if stale {
+            self.synth = None;
+        }
+    }
+
+    /// Phase: muting must really stop the microphone, so it ends a realtime session (the session ends when its
+    /// microphone channel closes).
+    fn end_realtime_when_muted(&mut self) {
+        if self.dialog.is_muted()
+            && let Some(r) = self.rt.as_mut()
+        {
+            r.mic = None;
+        }
     }
 
     /// A turn finished: what it said while it worked comes before the answer.
@@ -771,7 +841,10 @@ async fn stop_turn<W: AsyncWrite + Unpin>(st: &mut SessionState, wr: &mut W) -> 
     if let Some(t) = &st.turn_cancel {
         t.cancel();
         st.progress_q.clear();
-        if st.progress_playing {
+        if matches!(&st.synth, Some(s) if matches!(s.purpose, Purpose::Progress)) {
+            st.synth = None;
+        }
+        if st.out.audio == Audio::Progress {
             send(wr, &Message::StopPlayback).await?;
         }
     }
@@ -783,14 +856,15 @@ async fn finish_speech<W: AsyncWrite + Unpin>(
     st: &mut SessionState,
     wr: &mut W,
 ) -> Result<(), String> {
-    if st.ducked {
-        st.ducked = false;
-        if st.after.is_empty() {
+    if st.out.music == Music::Ducked {
+        // Paused music stays paused when a stream command is waiting; that command decides what plays.
+        st.out.music = Music::Off;
+        if st.media_after_speech.is_empty() {
             send(wr, &Message::MediaControl(MediaAction::Resume)).await?;
-            st.music = true;
+            st.out.music = Music::Playing;
         }
     }
-    flush_media(wr, &mut st.after, &mut st.music).await
+    flush_media(wr, &mut st.media_after_speech, &mut st.out.music).await
 }
 
 /// The satellite finished playing what it was sent. Which kind of audio it was decides what happens next.
@@ -799,25 +873,22 @@ async fn on_playback_done<W: AsyncWrite + Unpin>(
     wr: &mut W,
     pending: &mut Pending,
 ) -> Result<(), String> {
-    if !st.playing {
-        return Ok(());
-    }
-    if st.rt_audio {
-        // A reply from the session ended. The session itself goes on listening.
-        st.playing = false;
-        st.rt_audio = false;
-        if st.rt.is_some() {
-            send(wr, &Message::SetIndicator(Indicator::Listening)).await?;
+    match std::mem::take(&mut st.out.audio) {
+        Audio::Idle => {}
+        Audio::Realtime => {
+            // A reply from the session ended. The session itself goes on listening.
+            if st.rt.is_some() {
+                send(wr, &Message::SetIndicator(Indicator::Listening)).await?;
+            }
         }
-    } else if st.progress_playing {
-        // Progress speech ended; the turn is still running, so the dialog does not move on.
-        st.playing = false;
-        st.progress_playing = false;
-        st.dialog.set_output_playing(false);
-    } else {
-        st.playing = false;
-        finish_speech(st, wr).await?;
-        pending.steps.push(st.dialog.on_playback_done());
+        Audio::Progress => {
+            // Progress speech ended; the turn is still running, so the dialog does not move on.
+            st.dialog.set_output_playing(false);
+        }
+        Audio::Speech => {
+            finish_speech(st, wr).await?;
+            pending.steps.push(st.dialog.on_playback_done());
+        }
     }
     Ok(())
 }
@@ -834,8 +905,9 @@ async fn apply_effects<W: AsyncWrite + Unpin>(
         match e {
             Effect::StopPlayback => {
                 send(wr, &Message::StopPlayback).await?;
-                st.music = false;
-                st.after.clear();
+                // Music paused for speech is stopped too, or the end of the reply would resume it.
+                st.out.music = Music::Off;
+                st.media_after_speech.clear();
             }
             Effect::VolumeSet(l) => {
                 st.volume = (*l).min(100);
@@ -850,7 +922,7 @@ async fn apply_effects<W: AsyncWrite + Unpin>(
                 send(wr, &Message::SetVolume { level: st.volume }).await?;
             }
             Effect::PlayStream { url, title } if media_url => {
-                st.after.push(Message::PlayUrl {
+                st.media_after_speech.push(Message::PlayUrl {
                     url: url.clone(),
                     title: title.clone(),
                 });
@@ -867,10 +939,12 @@ async fn apply_effects<W: AsyncWrite + Unpin>(
                 .await?;
             }
             Effect::Media(MediaCmd::Pause) if media_url => {
-                st.after.push(Message::MediaControl(MediaAction::Pause));
+                st.media_after_speech
+                    .push(Message::MediaControl(MediaAction::Pause));
             }
             Effect::Media(MediaCmd::Resume) if media_url => {
-                st.after.push(Message::MediaControl(MediaAction::Resume));
+                st.media_after_speech
+                    .push(Message::MediaControl(MediaAction::Resume));
             }
             Effect::Media(_) => {}
         }
@@ -901,7 +975,7 @@ where
             Message::Button(b) if b.name == "action" => {
                 if st.rt.is_some() {
                     // The action button ends a realtime session.
-                    rt_flush(wr, st.rt.as_mut(), &mut st.playing, &mut st.rt_audio).await?;
+                    rt_flush(wr, st.rt.as_mut(), &mut st.out.audio).await?;
                     if let Some(r) = st.rt.as_mut() {
                         r.mic = None;
                     }
@@ -981,22 +1055,12 @@ where
         match ev {
             RtEv::Out(Speaker::Audio(bytes)) => {
                 if let Some(r) = st.rt.as_mut() {
-                    rt_play(
-                        wr,
-                        r,
-                        &bytes,
-                        &mut st.playing,
-                        &mut st.rt_audio,
-                        &mut st.music,
-                        &mut st.ducked,
-                    )
-                    .await?;
+                    rt_play(wr, r, &bytes, &mut st.out).await?;
                 }
             }
             RtEv::Out(Speaker::Flush) => {
-                rt_flush(wr, st.rt.as_mut(), &mut st.playing, &mut st.rt_audio).await?;
+                rt_flush(wr, st.rt.as_mut(), &mut st.out.audio).await?;
             }
-            RtEv::SpeakerClosed => {}
             RtEv::Gap => {
                 if let Some(r) = st.rt.as_mut() {
                     r.streaming = false;
@@ -1018,16 +1082,7 @@ where
         if let Some(mut r) = st.rt.take() {
             // Whatever the model said before it ended still gets played.
             while let Ok(Speaker::Audio(bytes)) = r.speaker.try_recv() {
-                rt_play(
-                    wr,
-                    &mut r,
-                    &bytes,
-                    &mut st.playing,
-                    &mut st.rt_audio,
-                    &mut st.music,
-                    &mut st.ducked,
-                )
-                .await?;
+                rt_play(wr, &mut r, &bytes, &mut st.out).await?;
             }
             if r.streaming {
                 send(wr, &Message::AudioStop).await?;
@@ -1064,32 +1119,65 @@ where
     }
 
     /// Phase: someone elsewhere in the program wants this speaker to say something.
-    async fn on_announce<W: AsyncWrite + Unpin>(
+    fn on_announce(&self, st: &mut SessionState, a: Announce) {
+        let Announce { request, answer } = a;
+        let idle = st.is_quiet() && st.rt.is_none() && st.synth.is_none();
+        match request {
+            Request::Probe => {
+                let _ = answer.send(idle);
+            }
+            // The speech is made while the session goes on reading; `on_synthesized` plays it and answers.
+            Request::Speak(text) if idle => {
+                st.synth = Some(Synth {
+                    purpose: Purpose::Announcement(answer),
+                    work: self.synthesize(text),
+                });
+            }
+            Request::Speak(_) => {
+                let _ = answer.send(false);
+            }
+        }
+    }
+
+    /// Phase: speech made outside a turn is ready. It plays only if the speaker is still in the state it was
+    /// wanted in, since the user may have spoken, muted or stopped the turn while it was being made.
+    async fn on_synthesized<W: AsyncWrite + Unpin>(
         &self,
         st: &mut SessionState,
         wr: &mut W,
-        a: Announce,
+        purpose: Purpose,
+        audio: Vec<Vec<i16>>,
     ) -> Result<(), String> {
-        let idle = st.is_quiet() && st.rt.is_none();
-        let accepted = match a.request {
-            Request::Probe => idle,
-            Request::Speak(text) if idle => {
-                let mut problems = Vec::new();
-                let audio = speak_text(&*self.tts, &text, &mut problems).await;
-                if audio.is_empty() {
-                    false
-                } else {
+        match purpose {
+            Purpose::Announcement(answer) => {
+                let accepted = !audio.is_empty() && st.is_quiet() && st.rt.is_none();
+                if accepted {
                     st.dialog.on_reply_started();
-                    duck(wr, &mut st.music, &mut st.ducked).await?;
+                    duck(wr, &mut st.out.music).await?;
                     play_audio(wr, &audio).await?;
-                    st.playing = true;
-                    true
+                    st.out.audio = Audio::Speech;
+                }
+                let _ = answer.send(accepted);
+            }
+            Purpose::Progress => {
+                if !audio.is_empty() && st.wants_progress_speech() {
+                    st.dialog.set_output_playing(true);
+                    duck(wr, &mut st.out.music).await?;
+                    play_audio(wr, &audio).await?;
+                    st.out.audio = Audio::Progress;
                 }
             }
-            Request::Speak(_) => false,
-        };
-        let _ = a.answer.send(accepted);
+        }
         Ok(())
+    }
+
+    /// Make speech for `text` as a future the event loop polls.
+    fn synthesize(&self, text: String) -> Pin<Box<dyn Future<Output = Vec<Vec<i16>>> + Send>> {
+        let tts = Arc::clone(&self.tts);
+        Box::pin(async move {
+            let mut problems = Vec::new();
+            speak_text(&*tts, &text, &mut problems).await
+        })
     }
 
     /// Phase: the keepalive tick (liveness, ping, dialog timers, idle realtime sessions).
@@ -1109,7 +1197,7 @@ where
         pending.steps.push(st.dialog.tick(self.now_ms()));
         // A session nobody is talking in ends, so the microphone does not stream (and cost) for nothing.
         if let Some(r) = st.rt.as_mut()
-            && !st.playing
+            && st.out.audio == Audio::Idle
             && !r.streaming
             && r.last_activity.elapsed() >= self.settings.rt_idle
         {
@@ -1128,7 +1216,7 @@ where
     ) -> Result<(), String> {
         if st.rt.is_some() {
             // The wake word during a session is the user cutting in.
-            rt_flush(wr, st.rt.as_mut(), &mut st.playing, &mut st.rt_audio).await?;
+            rt_flush(wr, st.rt.as_mut(), &mut st.out.audio).await?;
         } else {
             let quiet = st.is_quiet();
             match rt_start(&self.settings, &self.speaker_id, quiet, st.rt_blocked_until) {
@@ -1144,25 +1232,16 @@ where
     }
 
     /// Phase: progress speech is played one phrase at a time while the turn goes on (REQ-AST-020).
-    async fn play_progress<W: AsyncWrite + Unpin>(
-        &self,
-        st: &mut SessionState,
-        wr: &mut W,
-    ) -> Result<(), String> {
-        if !st.playing && (st.work.is_some() || st.finished.is_some()) && !st.dialog.is_muted() {
-            if let Some(text) = st.progress_q.pop_front() {
-                let mut problems = Vec::new();
-                let audio = speak_text(&*self.tts, &text, &mut problems).await;
-                if !audio.is_empty() {
-                    st.dialog.set_output_playing(true);
-                    duck(wr, &mut st.music, &mut st.ducked).await?;
-                    play_audio(wr, &audio).await?;
-                    st.playing = true;
-                    st.progress_playing = true;
-                }
-            }
+    fn play_progress(&self, st: &mut SessionState) {
+        if st.synth.is_none()
+            && st.wants_progress_speech()
+            && let Some(text) = st.progress_q.pop_front()
+        {
+            st.synth = Some(Synth {
+                purpose: Purpose::Progress,
+                work: self.synthesize(text),
+            });
         }
-        Ok(())
     }
 
     /// Phase: the finished turn is delivered once nothing it said earlier is still playing.
@@ -1172,7 +1251,11 @@ where
         wr: &mut W,
         pending: &mut Pending,
     ) -> Result<(), String> {
-        let (playing, progress_empty) = (st.playing, st.progress_q.is_empty());
+        // Nothing is delivered while a progress phrase is still being made: it comes first.
+        let (playing, progress_empty) = (
+            st.out.audio != Audio::Idle,
+            st.progress_q.is_empty() && st.synth.is_none(),
+        );
         let Some(Finished {
             outcome,
             effects,
@@ -1190,9 +1273,9 @@ where
                 st.dialog.expect_answer();
             }
             st.dialog.on_reply_started();
-            duck(wr, &mut st.music, &mut st.ducked).await?;
+            duck(wr, &mut st.out.music).await?;
             play_audio(wr, &outcome.audio).await?;
-            st.playing = true;
+            st.out.audio = Audio::Speech;
         } else if outcome.transcript.is_some() && outcome.reply.is_empty() {
             // A command with nothing to say ("pause", "volume up"): do it now and go quiet. Music that a
             // realtime session paused comes back (nothing is playing now, or this would not run).
@@ -1317,15 +1400,10 @@ async fn play_audio<W: AsyncWrite + Unpin>(w: &mut W, audio: &[Vec<i16>]) -> Res
 }
 
 /// Pause music for the duration of speech (REQ-MUS-004); resumed on playback-done.
-async fn duck<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    music: &mut bool,
-    ducked: &mut bool,
-) -> Result<(), String> {
-    if *music {
+async fn duck<W: AsyncWrite + Unpin>(w: &mut W, music: &mut Music) -> Result<(), String> {
+    if *music == Music::Playing {
         send(w, &Message::MediaControl(MediaAction::Pause)).await?;
-        *music = false;
-        *ducked = true;
+        *music = Music::Ducked;
     }
     Ok(())
 }
@@ -1333,13 +1411,15 @@ async fn duck<W: AsyncWrite + Unpin>(
 /// Send the stream commands that were waiting for speech to finish, tracking whether music is now playing.
 async fn flush_media<W: AsyncWrite + Unpin>(
     w: &mut W,
-    after: &mut Vec<Message>,
-    music: &mut bool,
+    queued: &mut Vec<Message>,
+    music: &mut Music,
 ) -> Result<(), String> {
-    for m in after.drain(..) {
+    for m in queued.drain(..) {
         match &m {
-            Message::PlayUrl { .. } | Message::MediaControl(MediaAction::Resume) => *music = true,
-            Message::MediaControl(MediaAction::Pause) => *music = false,
+            Message::PlayUrl { .. } | Message::MediaControl(MediaAction::Resume) => {
+                *music = Music::Playing;
+            }
+            Message::MediaControl(MediaAction::Pause) => *music = Music::Off,
             _ => {}
         }
         send(w, &m).await?;
@@ -1350,6 +1430,17 @@ async fn flush_media<W: AsyncWrite + Unpin>(
 async fn poll_work(work: &mut Option<Work>) -> Finished {
     match work {
         Some(w) => w.await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn poll_synth(synth: &mut Option<Synth>) -> (Purpose, Vec<Vec<i16>>) {
+    let Some(s) = synth.as_mut() else {
+        return std::future::pending().await;
+    };
+    let audio = (&mut s.work).await;
+    match synth.take() {
+        Some(s) => (s.purpose, audio),
         None => std::future::pending().await,
     }
 }

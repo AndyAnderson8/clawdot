@@ -12,6 +12,12 @@ use tokio::sync::mpsc;
 
 pub(super) type Srv = WebSocket<DuplexStream>;
 
+thread_local! {
+    /// Set by a test server to make the host stop offering `send_money`. A test runs on one thread, so this
+    /// reaches the host the session owns without a channel.
+    static WITHDRAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(Default)]
 pub(super) struct Host {
     pub(super) ran: Vec<(String, Value)>,
@@ -21,6 +27,7 @@ impl ToolHost for Host {
     fn tool_specs(&self) -> Vec<ToolSpec> {
         ["get_time", "send_money", "web", "wipe"]
             .iter()
+            .filter(|n| !(WITHDRAWN.get() && **n == "send_money"))
             .map(|n| ToolSpec {
                 name: (*n).into(),
                 description: format!("the {n} tool"),
@@ -781,4 +788,36 @@ fn the_config_never_prints_the_key_and_resampling_changes_the_length() {
     assert_eq!(up[3], 6000);
     assert_eq!(resample(&[1, 2, 3], 24_000, 24_000), vec![1, 2, 3]);
     assert!(resample(&[], 16_000, 24_000).is_empty());
+}
+
+// REQ-SEC-011: the user says yes, but the host no longer offers the held tool. Nothing runs, and the model is
+// told the error rather than "Done.".
+#[tokio::test(flavor = "current_thread")]
+async fn a_yes_for_a_held_tool_that_has_gone_runs_nothing_and_reports_the_error() {
+    let r = session(
+        cfg(),
+        UsageLimits::default(),
+        vec![],
+        false,
+        |mut s| async move {
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, calls_done(&[("c1", "send_money", "{}")])).await;
+            next(&mut s).await;
+            next(&mut s).await;
+            put(&mut s, said("pay sam")).await;
+            // Meanwhile the host stops offering the tool.
+            WITHDRAWN.set(true);
+            put(&mut s, spoke()).await;
+            put(&mut s, said("yes")).await;
+            let rc = next(&mut s).await;
+            let tell = rc["response"]["instructions"].as_str().unwrap();
+            assert!(tell.starts_with("Tell the user"), "{tell}");
+            assert!(tell.contains("no longer available"), "{tell}");
+            s.send_close().await.unwrap();
+        },
+    )
+    .await;
+    assert_eq!(r.result, Ok(SessionEnd::Closed));
+    assert!(r.host.ran.is_empty(), "nothing ran: {:?}", r.host.ran);
 }

@@ -22,8 +22,6 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 mod gate;
-#[cfg(feature = "realtime")]
-pub(crate) use gate::GONE;
 use gate::Turn;
 pub use gate::{answer_held_action, run_proposed_calls};
 
@@ -393,8 +391,10 @@ pub struct Conversation {
     clarify: Option<Clarify>,
     /// The user was asked whether to forget every note, at this time.
     forget_all_asked: Option<Ts>,
-    /// Counter behind the ids of the calls the host writes into the history itself and the ids it gives replies that lack usable ones (see `host_call_id`, `unique_call_ids`).
-    next_host_call: u32,
+    /// Where the next tool-call id the host makes starts counting. One counter serves both the `host` ids of calls
+    /// the host writes into the history itself (`host_call_id`) and the `call` ids it gives a reply's calls that
+    /// lack a usable one (`unique_call_ids`).
+    id_counter: u32,
 }
 
 impl Conversation {
@@ -435,7 +435,7 @@ impl Conversation {
             next_result: 0,
             clarify: None,
             forget_all_asked: None,
-            next_host_call: 0,
+            id_counter: 0,
         }
     }
 
@@ -445,7 +445,7 @@ impl Conversation {
     /// constrained, so one that is already in the history is skipped; the history is short, so this ends.
     fn host_call_id(&mut self) -> String {
         let history = &self.history;
-        crate::llm::fresh_call_id("host", &mut self.next_host_call, |id| {
+        crate::llm::fresh_call_id("host", &mut self.id_counter, |id| {
             id_in_history(history, id)
         })
     }
@@ -461,7 +461,7 @@ impl Conversation {
             if bad {
                 let ahead: Vec<&str> = calls.iter().map(|c| c.id.as_str()).collect();
                 let history = &self.history;
-                calls[i].id = crate::llm::fresh_call_id("call", &mut self.next_host_call, |n| {
+                calls[i].id = crate::llm::fresh_call_id("call", &mut self.id_counter, |n| {
                     id_in_history(history, n) || seen.iter().any(|s| s == n) || ahead.contains(&n)
                 });
             }
@@ -750,6 +750,24 @@ pub struct TurnResult {
     /// The turn ended with a question for the user (a clarifying question or a held action), so the follow-up
     /// window should be longer (REQ-AST-021).
     pub expects_reply: bool,
+    /// What became of the action held for the user's yes, when this turn answered one (REQ-SEC-011). `None` when
+    /// none was held.
+    pub held: Option<HeldOutcome>,
+}
+
+/// What became of a held action when the user answered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldOutcome {
+    /// The user said yes in time and the tool ran and succeeded.
+    Ran,
+    /// The user said yes in time and the tool failed, timed out or was not run (dry run, a cap).
+    Failed,
+    /// The user said yes in time but the tool is no longer offered, so nothing ran.
+    Gone,
+    /// The user said no, or asked for something unrelated; the action was dropped.
+    Declined,
+    /// The user said yes after the confirmation window; the action was dropped.
+    Expired,
 }
 
 impl Default for TurnResult {
@@ -762,6 +780,7 @@ impl Default for TurnResult {
             model_requests: 0,
             early: Vec::new(),
             expects_reply: false,
+            held: None,
         }
     }
 }

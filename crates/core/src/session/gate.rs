@@ -240,6 +240,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             let speech = "That took too long, so I dropped it. Please ask again.";
             return Some(self.drop_held(
                 held,
+                HeldOutcome::Expired,
                 decision::EXPIRED,
                 "answered too late",
                 "expired",
@@ -250,6 +251,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             let speech = "Okay, I won't do that.";
             return Some(self.drop_held(
                 held,
+                HeldOutcome::Declined,
                 decision::DECLINED,
                 "the user said no",
                 "declined",
@@ -262,6 +264,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         // Anything else is an unrelated request: the held action is dropped and the turn goes on.
         self.resolved(&held, decision::DECLINED, "unrelated request");
         self.conv.set_recent(held.recent, "declined");
+        self.result.held = Some(HeldOutcome::Declined);
         None
     }
 
@@ -270,6 +273,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     fn drop_held(
         &mut self,
         held: PendingAction,
+        outcome: HeldOutcome,
         how: &str,
         why: &str,
         recent: &str,
@@ -277,6 +281,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     ) -> TurnResult {
         self.resolved(&held, how, why);
         self.conv.set_recent(held.recent, recent);
+        self.result.held = Some(outcome);
         self.finish(speech)
     }
 
@@ -302,6 +307,11 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 )
                 .await;
             self.conv.set_recent(held.recent, status_of(ex.kind));
+            self.result.held = Some(if ex.kind == Kind::Ok {
+                HeldOutcome::Ran
+            } else {
+                HeldOutcome::Failed
+            });
             match ex.kind {
                 Kind::Ok => self.st.record(&held.tool, How::Done, held.tier),
                 Kind::Failed => self.st.record(&held.tool, How::Failed, held.tier),
@@ -312,7 +322,8 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         } else {
             self.resolved(&held, decision::INVALID, "tool no longer offered");
             self.conv.set_recent(held.recent, "no longer available");
-            GONE.to_owned()
+            self.result.held = Some(HeldOutcome::Gone);
+            "Error: that tool is no longer available.".to_owned()
         };
         let id = self.conv.host_call_id();
         let call = ToolCall {
@@ -888,9 +899,6 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         take(&mut self.result)
     }
 }
-
-/// The text the model gets when a confirmed action's tool is no longer offered.
-pub(crate) const GONE: &str = "Error: that tool is no longer available.";
 
 /// What one reply's calls share while they go through the gate: the model that may summarise long results,
 /// the tools on offer, and whether enough time has passed since the last spoken phrase for another.
