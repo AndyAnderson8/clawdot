@@ -133,16 +133,12 @@ pub async fn serve(
     }
 }
 
-fn text(status: StatusCode, body: &'static str) -> Resp {
+fn json(status: StatusCode, body: &'static str) -> Resp {
     let mut r = Response::new(Full::new(Bytes::from_static(body.as_bytes())).boxed());
     *r.status_mut() = status;
     r.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     r
-}
-
-fn json(status: StatusCode, body: &'static str) -> Resp {
-    text(status, body)
 }
 
 pub(crate) fn token_from(headers: &HeaderMap) -> Option<String> {
