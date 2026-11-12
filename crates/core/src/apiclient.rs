@@ -223,7 +223,7 @@ pub(crate) fn check_url(url: &str) -> Result<Endpoint, String> {
     let ep = Endpoint::parse(url)?;
     if crate::netpolicy::crosses_internet_unencrypted(&ep) {
         return Err(format!(
-            "{url}: audio must not cross the internet unencrypted; use https:// (plain http:// is for localhost and the home network)"
+            "{url}: the key and audio must not cross the internet unencrypted; use https:// (plain http:// is for localhost and the home network)"
         ));
     }
     Ok(ep)
