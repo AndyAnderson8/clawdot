@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.48 |
+| **Version** | 0.49 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -462,3 +462,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.46 | 2026-11-11 | REQ-AST-026 (a conversation per speaker) and REQ-AST-027 (long work does not block the loop) added. |
 | 0.47 | 2026-11-11 | REQ-CFG-028: deleting an endpoint also drops its waiting replies and its open events. |
 | 0.48 | 2026-11-11 | REQ-AST-011: the spend cap prices every model request (reported cost, priced tokens, or an estimate). |
+| 0.49 | 2026-11-11 | REQ-SEC-011: the confirmation reads every argument in full or the action is refused. REQ-SEC-012: a tool lowered to read-only is held again after outside text. |
