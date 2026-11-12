@@ -39,6 +39,8 @@ use tokio::sync::mpsc;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    // The one read of the process environment (see clawdot_core::env).
+    let env = clawdot_core::env::Env::from_process();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // Used by an update to check that a new program starts before it replaces the running one.
     if matches!(argv.first().map(String::as_str), Some("--version" | "-V")) {
@@ -46,7 +48,7 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if argv.first().map(String::as_str) == Some("say") {
-        return say_command(&argv[1..]).await;
+        return say_command(&argv[1..], &env).await;
     }
     let mut args = match cli::parse(&argv) {
         Ok(a) => a,
@@ -62,7 +64,7 @@ async fn main() -> ExitCode {
     if args.reset_admin {
         return reset_admin(&args.data_dir);
     }
-    let (mut settings_state, warnings) = match seed::resolve_settings(&mut args) {
+    let (mut settings_state, warnings) = match seed::resolve_settings(&mut args, &env) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("clawdot: {e}");
@@ -102,7 +104,7 @@ async fn main() -> ExitCode {
         Limits::default(),
         Stores::in_dir(&args.data_dir),
     ) {
-        Ok(c) => Arc::new(c),
+        Ok(c) => Arc::new(c.with_env(env)),
         Err(e) => {
             eprintln!("clawdot: cannot open {}: {e}", args.data_dir.display());
             return ExitCode::from(1);
@@ -156,6 +158,14 @@ async fn main() -> ExitCode {
     settings_state.set_extra(settings_extra(&args));
     core.set_settings(settings_state);
     if let Some(input) = args.voice_in.clone() {
+        // One utterance and out: there is no loop to serve meanwhile, so wait for the sources to answer, as
+        // the single turn should have their tools.
+        while !brain.connects.is_empty() {
+            let Some(done) = mcp_rx.recv().await else {
+                break;
+            };
+            mcp_connected(&mut brain, &core, done);
+        }
         return match voice_once(
             &mut brain,
             &mut hub,

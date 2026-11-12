@@ -220,6 +220,7 @@ pub struct Core {
     notes: std::sync::OnceLock<Arc<crate::notes::NoteStore>>,
     asks: Mutex<Vec<ask::PendingAsk>>,
     secrets: crate::secrets::Secrets,
+    env: crate::env::Env,
     speech_handles: crate::speechio::SpeechHandles,
     speech_origin: std::sync::OnceLock<crate::speech::SpeechOrigin>,
     #[cfg(feature = "hive")]
@@ -327,6 +328,7 @@ impl Core {
             notes: std::sync::OnceLock::new(),
             asks: Mutex::new(Vec::new()),
             secrets,
+            env: crate::env::Env::empty(),
             speech_handles: crate::speechio::SpeechHandles::default(),
             speech_origin: std::sync::OnceLock::new(),
             #[cfg(feature = "hive")]
@@ -377,7 +379,23 @@ impl Core {
     /// The speech server set up at start, with the key it would use now.
     #[must_use]
     pub fn speech_source(&self) -> Option<crate::speech::SpeechSource> {
-        self.speech_origin.get().map(|o| o.resolve(&self.secrets))
+        self.speech_origin
+            .get()
+            .map(|o| o.resolve(&self.secrets, &self.env))
+    }
+
+    /// Give this core the environment snapshot taken at start-up (see [`crate::env`]). A core that is not
+    /// given one sees no variables, so tests never depend on the machine they run on.
+    #[must_use]
+    pub fn with_env(mut self, env: crate::env::Env) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// The environment as it was at start-up. Look variables up here, never in the process.
+    #[must_use]
+    pub fn env(&self) -> &crate::env::Env {
+        &self.env
     }
 
     /// The keys pasted into the portal, owned by this core.

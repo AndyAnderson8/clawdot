@@ -26,7 +26,7 @@ pub const EXPORT_FORMAT: &str = "clawdot-settings";
 pub type Layer = BTreeMap<String, Value>;
 
 /// How a lookup of an environment variable is done; tests replace it.
-pub type EnvFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub use crate::env::EnvFn;
 
 /// Which layer an effective value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

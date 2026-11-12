@@ -56,6 +56,7 @@ pub async fn build_brain(
         args.llm_url.as_deref(),
         args.llm_model.as_deref(),
         core.secrets(),
+        core.env(),
         &args.key_env,
         limits.max_output_tokens_per_turn,
         &args.agent,
@@ -129,22 +130,20 @@ pub async fn build_brain(
     );
     let mut taken = builtin.clone();
     taken.extend(tool_defs.iter().map(|t| t.name.clone()));
-    tool_defs.extend(ext.startup_tools(&taken, |v| std::env::var(v).ok()));
-    server_defs.extend(ext.startup_servers(|v| std::env::var(v).ok()));
+    tool_defs.extend(ext.startup_tools(&taken, |v| core.env().get(v)));
+    server_defs.extend(ext.startup_servers(|v| core.env().get(v)));
     let http_tools =
-        HttpTools::new(tool_defs, &builtin, |v| std::env::var(v).ok()).map_err(|e| fail(1, e))?;
+        HttpTools::new(tool_defs, &builtin, |v| core.env().get(v)).map_err(|e| fail(1, e))?;
 
-    let mut reserved = builtin.clone();
-    reserved.extend(http_tools.specs().into_iter().map(|t| t.name));
-    let mcp = match McpClient::connect(server_defs, &reserved, |v| std::env::var(v).ok()).await {
-        Ok((client, warnings)) => {
-            for w in warnings {
-                eprintln!("clawdot: {w}");
-            }
-            client
-        }
-        Err(e) => return Err(fail(1, e)),
-    };
+    // Saved and configured MCP sources are declared here and connected in tasks once the loop runs
+    // (ADR-0021): a dead server delays only itself, never the start of the speaker. Bad definitions still
+    // stop start-up.
+    let (mcp, pending) =
+        McpClient::declare(server_defs, |v| core.env().get(v)).map_err(|e| fail(1, e))?;
+    let mut connects = crate::connects::Connects::new();
+    for p in pending {
+        connects.start_saved(p);
+    }
 
     // One conversation for each speaker, made on first use (REQ-AST-026): its own history, its own held
     // confirmation, the same audit log and notes.
@@ -172,8 +171,13 @@ pub async fn build_brain(
         persona,
         agent: args.agent.clone(),
         voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
-        rt: Realtime::with_secrets(RtSettings::from_live(live), core.secrets().clone()),
-        connects: crate::connects::Connects::new(),
+        rt: Realtime::with_env_and_secrets(
+            RtSettings::from_live(live),
+            core.env().lookup(),
+            core.secrets().clone(),
+        ),
+        env: core.env().clone(),
+        connects,
     };
     if brain.rt.settings().enabled && !RtSettings::built() {
         brain.rt.set_error(Some(
@@ -189,6 +193,7 @@ pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Val
     match crate::update::UpdateConfig::new(
         args.updates.url.as_deref(),
         args.updates.public_key.as_deref(),
+        core.env(),
     ) {
         Ok(cfg) => {
             let on = live
@@ -217,15 +222,19 @@ pub async fn start_satellites(
         let addr: SocketAddr = listen
             .parse()
             .map_err(|e| format!("satellite.listen: {e}"))?;
-        let (stt, tts) =
-            build_registered_speech(&args.speech, core.secrets(), core.speech_handles())?;
+        let (stt, tts) = build_registered_speech(
+            &args.speech,
+            core.secrets(),
+            core.env(),
+            core.speech_handles(),
+        )?;
         let mut settings = satellite::Settings {
             announcer: announcer.clone(),
             realtime: Some(rt.clone()),
             ..satellite::Settings::default()
         };
         if let Some(var) = &args.satellite.token_env {
-            let token = std::env::var(var).unwrap_or_default();
+            let token = core.env().get(var).unwrap_or_default();
             if token.is_empty() {
                 return Err(format!(
                     "environment variable {var} (satellite.token_env) is not set"
@@ -275,8 +284,12 @@ pub async fn start_satellites(
     // ESPHome voice satellites (optional feature; spec 0004) share the satellite pipeline and announcer.
     #[cfg(feature = "esphome-satellite")]
     if !args.esphome.is_empty() {
-        let (stt, tts) =
-            build_registered_speech(&args.speech, core.secrets(), core.speech_handles())?;
+        let (stt, tts) = build_registered_speech(
+            &args.speech,
+            core.secrets(),
+            core.env(),
+            core.speech_handles(),
+        )?;
         let mut settings = satellite::Settings {
             announcer: announcer.clone(),
             realtime: Some(rt.clone()),
@@ -287,6 +300,7 @@ pub async fn start_satellites(
         }
         crate::esphome::start(
             &args.esphome,
+            core.env(),
             Arc::new(stt),
             Arc::new(tts),
             ask_tx.clone(),

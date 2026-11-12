@@ -2,6 +2,7 @@
 //! the registry that lets a change of voice or language in the portal reach them while running.
 
 use crate::config::SpeechConfig;
+use crate::env::Env;
 use crate::runtime::{Brain, respond_inline};
 use crate::secrets::Secrets;
 use crate::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
@@ -80,9 +81,10 @@ impl SpeechHandles {
 pub fn build_registered_speech(
     speech: &SpeechConfig,
     secrets: &Secrets,
+    env: &Env,
     handles: &SpeechHandles,
 ) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
-    let (stt, tts) = build_speech(speech, secrets)?;
+    let (stt, tts) = build_speech(speech, secrets, env)?;
     handles.register(&stt, &tts);
     Ok((stt, tts))
 }
@@ -90,6 +92,7 @@ pub fn build_registered_speech(
 pub fn build_speech(
     speech: &SpeechConfig,
     secrets: &Secrets,
+    env: &Env,
 ) -> Result<(HttpTranscriber, HttpSynthesizer), String> {
     let missing =
         |k: &str| format!("speech.{k} is not configured (see docs/architecture/voice-pipeline.md)");
@@ -97,7 +100,7 @@ pub fn build_speech(
     let key = speech
         .key_env
         .as_deref()
-        .map(|v| std::env::var(v).unwrap_or_default())
+        .map(|v| env.get(v).unwrap_or_default())
         .unwrap_or_default();
     let deadline = Duration::from_secs(30);
     let dialect = speech.dialect();
@@ -138,7 +141,7 @@ pub async fn voice_once(
     input: &std::path::Path,
     output: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let (stt, tts) = build_speech(speech, secrets)?;
+    let (stt, tts) = build_speech(speech, secrets, &brain.env)?;
     let bytes =
         std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let pcm = parse_wav(&bytes).map_err(|e| format!("{}: {e}", input.display()))?;

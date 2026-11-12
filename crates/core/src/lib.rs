@@ -21,6 +21,7 @@ pub mod commands;
 pub mod config;
 pub mod connects;
 pub mod diag;
+pub mod env;
 #[cfg(feature = "esphome-satellite")]
 pub mod esphome;
 #[cfg(feature = "esphome-satellite")]

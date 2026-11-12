@@ -4,6 +4,7 @@
 use crate::audit::ActionPolicy;
 use crate::cli::Args;
 use crate::config::{AgentConfig, Config};
+use crate::env::Env;
 use crate::inbox::endpoint::QuietHours;
 use crate::settings::{self, Layer, SettingsState};
 
@@ -106,7 +107,10 @@ pub fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
 
 /// Combine defaults, the configuration file, saved settings, and flags (REQ-CFG-038), then copy the
 /// effective values into `args`. Returns the state the portal edits and any warnings.
-pub fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>), String> {
+pub fn resolve_settings(
+    args: &mut Args,
+    env: &Env,
+) -> Result<(SettingsState, Vec<String>), String> {
     if let Some(p) = &args.persona_file {
         let text = std::fs::read_to_string(p)
             .ok()
@@ -126,7 +130,7 @@ pub fn resolve_settings(args: &mut Args) -> Result<(SettingsState, Vec<String>),
         std::mem::take(&mut args.file_layer),
         std::mem::take(&mut args.flag_layer),
         args.speech.url.is_some(),
-        Box::new(|n| std::env::var(n).ok()),
+        env.lookup(),
     )?;
     let text = |k: &str| state.get(k).as_str().map(str::to_owned);
     args.listen = text("listen")
@@ -298,7 +302,7 @@ mod tests {
         let dir = TempDir::new("seed-defaults");
         let mut a = blank_args();
         a.data_dir.clone_from(&dir.0);
-        let (state, _) = resolve_settings(&mut a).unwrap();
+        let (state, _) = resolve_settings(&mut a, &Env::empty()).unwrap();
         assert_eq!(a.listen, "127.0.0.1:3335".parse().unwrap());
         assert_eq!(a.zone, None);
         assert_eq!(a.persona, crate::assistant::DEFAULT_PERSONA);
@@ -329,7 +333,7 @@ mod tests {
             "from-flag".to_owned(),
         ])
         .unwrap();
-        let (state, _) = resolve_settings(&mut a).unwrap();
+        let (state, _) = resolve_settings(&mut a, &Env::empty()).unwrap();
         assert_eq!(a.listen, "127.0.0.1:4100".parse().unwrap());
         assert_eq!(a.llm_url.as_deref(), Some("http://x/v1"));
         assert_eq!(a.llm_model.as_deref(), Some("from-flag"));
@@ -349,12 +353,12 @@ mod tests {
         let mut a = blank_args();
         a.data_dir.clone_from(&dir.0);
         a.persona_file = Some(dir.0.join("missing.txt"));
-        let e = resolve_settings(&mut a).unwrap_err();
+        let e = resolve_settings(&mut a, &Env::empty()).unwrap_err();
         assert!(e.starts_with("cannot use persona file"), "{e}");
         std::fs::write(dir.0.join("p.txt"), "You are terse.").unwrap();
         a.persona_file = Some(dir.0.join("p.txt"));
         a.persona_flag = true;
-        resolve_settings(&mut a).unwrap();
+        resolve_settings(&mut a, &Env::empty()).unwrap();
         assert_eq!(a.persona, "You are terse.");
     }
 

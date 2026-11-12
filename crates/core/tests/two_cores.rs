@@ -80,7 +80,7 @@ fn each_core_moves_only_its_own_speech_voice() {
     let (da, db) = (Dir::new("voice-a"), Dir::new("voice-b"));
     let (a, b) = (open(&da), open(&db));
     for c in [&a, &b] {
-        build_registered_speech(&speech(), c.secrets(), c.speech_handles()).unwrap();
+        build_registered_speech(&speech(), c.secrets(), c.env(), c.speech_handles()).unwrap();
     }
     assert_eq!(
         a.speech_handles().swap_voice("nova").as_deref(),
@@ -143,4 +143,26 @@ fn each_core_has_its_own_hive() {
     assert_ne!(ja["self"]["id"], jb["self"]["id"], "separate identities");
     assert_eq!(ja["self"]["port"], 3001);
     assert_eq!(jb["self"]["port"], 3002);
+}
+
+// Review C10: the key a setting names is looked up in the core's own environment snapshot, so two cores in one
+// process can name the same variable and get different keys, and no test has to touch the process environment.
+#[test]
+fn each_core_resolves_a_named_key_variable_from_its_own_environment() {
+    use clawdot_core::env::Env;
+    let (da, db) = (Dir::new("env-a"), Dir::new("env-b"));
+    let a = open(&da).with_env(Env::from_pairs([("SPEECH_KEY_VAR", "key-for-a")]));
+    let b = open(&db).with_env(Env::from_pairs([("SPEECH_KEY_VAR", "key-for-b")]));
+    let dialect = speech().dialect();
+    for c in [&a, &b] {
+        c.set_speech_origin(SpeechOrigin::new(
+            "http://x.example/v1",
+            Some("SPEECH_KEY_VAR"),
+            dialect,
+        ));
+    }
+    assert_eq!(a.speech_source().unwrap().key, "key-for-a");
+    assert_eq!(b.speech_source().unwrap().key, "key-for-b");
+    assert_eq!(open(&da).speech_source().map(|s| s.key), None);
+    assert!(!format!("{:?}", a.env()).contains("key-for"));
 }

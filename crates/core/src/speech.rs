@@ -828,14 +828,14 @@ impl SpeechOrigin {
 
     /// The server with the key it would use now.
     #[must_use]
-    pub fn resolve(&self, secrets: &Secrets) -> SpeechSource {
+    pub fn resolve(&self, secrets: &Secrets, env: &crate::env::Env) -> SpeechSource {
         SpeechSource {
             url: self.url.clone(),
             key: secrets.get(crate::secrets::SPEECH_KEY).unwrap_or_else(|| {
                 if self.key_env.is_empty() {
                     String::new()
                 } else {
-                    std::env::var(&self.key_env).unwrap_or_default()
+                    env.get(&self.key_env).unwrap_or_default()
                 }
             }),
             dialect: self.dialect,

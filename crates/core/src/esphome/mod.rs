@@ -26,8 +26,8 @@ use tokio::sync::mpsc;
 pub use client::{Device, Pipeline, Timing, run_device};
 
 #[cfg(feature = "esphome-noise")]
-fn read_psk(var: &str) -> Result<Option<[u8; 32]>, String> {
-    let text = std::env::var(var).unwrap_or_default();
+fn read_psk(env: &crate::env::Env, var: &str) -> Result<Option<[u8; 32]>, String> {
+    let text = env.get(var).unwrap_or_default();
     if text.trim().is_empty() {
         return Err(format!(
             "environment variable {var} (esphome psk_env) is not set"
@@ -37,7 +37,7 @@ fn read_psk(var: &str) -> Result<Option<[u8; 32]>, String> {
 }
 
 #[cfg(not(feature = "esphome-noise"))]
-fn read_psk(var: &str) -> Result<Option<[u8; 32]>, String> {
+fn read_psk(_env: &crate::env::Env, var: &str) -> Result<Option<[u8; 32]>, String> {
     Err(format!(
         "`psk_env` ({var}) needs a build with the `esphome-noise` feature"
     ))
@@ -50,6 +50,7 @@ fn read_psk(var: &str) -> Result<Option<[u8; 32]>, String> {
 /// A message when the file server cannot bind or a device's key is missing or malformed.
 pub async fn start<S, T>(
     cfg: &EsphomeConfig,
+    env: &crate::env::Env,
     stt: Arc<S>,
     tts: Arc<T>,
     asks: mpsc::Sender<Ask>,
@@ -75,7 +76,7 @@ where
     }
     for d in &cfg.devices {
         let psk = match &d.psk_env {
-            Some(var) => read_psk(var)?,
+            Some(var) => read_psk(env, var)?,
             None => None,
         };
         let device = Device {

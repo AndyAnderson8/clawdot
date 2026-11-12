@@ -153,6 +153,8 @@ pub struct McpClient {
     connector: Connector,
     /// Why each server could not be used, parallel to `servers` (`None` = connected).
     errors: Vec<Option<String>>,
+    /// Whether each server has not yet reported, parallel to `servers` (see [`McpClient::declare`]).
+    connecting: Vec<bool>,
 }
 
 /// A server that is being added: checked, not yet part of the client. It owns everything the network half
@@ -312,6 +314,27 @@ impl McpClient {
         reserved: &[String],
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<(Self, Vec<String>), String> {
+        let (mut client, _) = Self::declare(defs, env)?;
+        let mut warnings = Vec::new();
+        for i in 0..client.servers.len() {
+            let loaded = client.load(i).await.map_err(|e| clip(&e, 200));
+            let name = client.servers[i].def.name.clone();
+            warnings.extend(client.settle(&name, loaded, reserved));
+        }
+        Ok((client, warnings))
+    }
+
+    /// The quick, local half of [`McpClient::connect`]: validate the definitions and read the credentials, and
+    /// return a client that lists every server as still connecting, with a [`PendingServer`] for each whose
+    /// [`PendingServer::load`] can run in a task. The result of each goes back through [`McpClient::settle`].
+    /// Nothing touches the network (ADR-0021).
+    ///
+    /// # Errors
+    /// Invalid or duplicate definitions, or a missing credential.
+    pub fn declare(
+        defs: Vec<ServerDef>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<(Self, Vec<PendingServer>), String> {
         let mut servers = Vec::new();
         for (i, d) in defs.iter().enumerate() {
             d.validate()?;
@@ -334,39 +357,87 @@ impl McpClient {
                 session: Mutex::new(None),
             }));
         }
-        let mut client = Self {
+        let connector = Connector::new()?;
+        let client = Self {
+            connecting: vec![true; servers.len()],
+            errors: vec![None; servers.len()],
             servers,
             tools: Vec::new(),
-            connector: Connector::new()?,
-            errors: Vec::new(),
+            connector,
+        };
+        let pending = client
+            .servers
+            .iter()
+            .map(|s| client.pending_for(s))
+            .collect();
+        Ok((client, pending))
+    }
+
+    /// A one-server client that shares the server (and so its session) and the connector, so the slow half of
+    /// a connection can run without `&self`.
+    fn pending_for(&self, server: &Arc<Server>) -> PendingServer {
+        PendingServer {
+            server: Arc::clone(server),
+            probe: Self {
+                servers: vec![Arc::clone(server)],
+                tools: Vec::new(),
+                connector: self.connector.clone(),
+                errors: vec![None],
+                connecting: vec![false],
+            },
+        }
+    }
+
+    /// Record how the connection to a declared server ended: `Ok` gives its tools (those that clash with
+    /// `reserved` or with tools already on offer are skipped), `Err` marks it failed with the reason. The server
+    /// stays in the client either way, so a source that cannot be reached is still listed and reported. Returns
+    /// the warnings to print. A name that is no longer in the client (it was removed meanwhile) is ignored.
+    pub fn settle(
+        &mut self,
+        name: &str,
+        result: Result<Vec<McpTool>, String>,
+        reserved: &[String],
+    ) -> Vec<String> {
+        let Some(i) = self.servers.iter().position(|s| s.def.name == name) else {
+            return Vec::new();
         };
         let mut warnings = Vec::new();
-        for i in 0..client.servers.len() {
-            let loaded = client.load(i).await;
-            client
-                .errors
-                .push(loaded.as_ref().err().map(|e| clip(e, 200)));
-            match loaded {
-                Ok(mut tools) => {
-                    tools.retain(|t| {
-                        let clash = reserved.contains(&t.exposed);
-                        if clash {
-                            warnings.push(format!(
-                                "mcp tool `{}` clashes with an existing tool and was skipped",
-                                t.exposed
-                            ));
-                        }
-                        !clash
-                    });
-                    client.tools.extend(tools);
+        self.connecting[i] = false;
+        match result {
+            Ok(mut tools) => {
+                self.errors[i] = None;
+                tools.retain(|t| {
+                    let clash = reserved.contains(&t.exposed)
+                        || self.tools.iter().any(|o| o.exposed == t.exposed);
+                    if clash {
+                        warnings.push(format!(
+                            "mcp tool `{}` clashes with an existing tool and was skipped",
+                            t.exposed
+                        ));
+                    }
+                    !clash
+                });
+                for t in &mut tools {
+                    t.server = i;
                 }
-                Err(e) => warnings.push(format!(
-                    "mcp server `{}` is unavailable: {e}",
-                    client.servers[i].def.name
-                )),
+                self.tools.extend(tools);
+            }
+            Err(e) => {
+                let e = clip(&e, 200);
+                warnings.push(format!("mcp server `{name}` is unavailable: {e}"));
+                self.errors[i] = Some(e);
             }
         }
-        Ok((client, warnings))
+        warnings
+    }
+
+    /// Whether this server was declared and has not yet reported (see [`McpClient::declare`]).
+    #[must_use]
+    pub fn is_connecting(&self, name: &str) -> bool {
+        self.servers
+            .iter()
+            .zip(&self.connecting)
+            .any(|(s, c)| *c && s.def.name == name)
     }
 
     async fn rpc(
@@ -541,8 +612,10 @@ impl McpClient {
                     .map(|t| json!({ "name": t.exposed, "description": t.description, "confirm": t.risk.tier >= Tier::Costly, "tier": t.risk.tier }))
                     .collect();
                 let error = self.errors.get(i).cloned().flatten();
+                let connecting = self.connecting.get(i).copied().unwrap_or(false);
                 json!({
-                    "name": s.def.name, "url": display_url(&s.def.url), "connected": error.is_none(),
+                    "name": s.def.name, "url": display_url(&s.def.url), "connected": error.is_none() && !connecting,
+                    "connecting": connecting,
                     "error": error, "confirm": s.def.confirm, "token_env": s.def.auth_env, "tools": tools,
                 })
             })
@@ -608,6 +681,7 @@ impl McpClient {
             tools: Vec::new(),
             connector: self.connector.clone(),
             errors: vec![None],
+            connecting: vec![false],
         };
         Ok(PendingServer { server, probe })
     }
@@ -630,6 +704,7 @@ impl McpClient {
         }
         self.servers.push(Arc::clone(&pending.server));
         self.errors.push(None);
+        self.connecting.push(false);
         let i = self.servers.len() - 1;
         tools.retain(|t| {
             !reserved.contains(&t.exposed) && !self.tools.iter().any(|o| o.exposed == t.exposed)
@@ -649,6 +724,7 @@ impl McpClient {
         };
         self.servers.remove(i);
         self.errors.remove(i);
+        self.connecting.remove(i);
         self.tools.retain(|t| t.server != i);
         for t in &mut self.tools {
             if t.server > i {

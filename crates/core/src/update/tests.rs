@@ -1,4 +1,5 @@
 use super::*;
+use crate::env::Env;
 use crate::store::testutil::TempDir;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -446,22 +447,36 @@ fn a_new_version_that_never_proved_itself_leaves_its_marker_for_the_supervisor()
 
 #[test]
 fn the_configuration_is_checked() {
-    assert!(UpdateConfig::new(None, None).is_ok());
+    assert!(UpdateConfig::new(None, None, &Env::empty()).is_ok());
     assert!(
-        UpdateConfig::new(Some("http://example.test/feed"), None)
+        UpdateConfig::new(Some("http://example.test/feed"), None, &Env::empty())
             .unwrap_err()
             .contains("https")
     );
-    assert!(UpdateConfig::new(Some("ftp://x"), None).is_err());
+    assert!(UpdateConfig::new(Some("ftp://x"), None, &Env::empty()).is_err());
     assert!(
-        UpdateConfig::new(None, Some("zz"))
+        UpdateConfig::new(None, Some("zz"), &Env::empty())
             .unwrap_err()
             .contains("64 hexadecimal")
     );
     let key = "ab".repeat(32);
     assert_eq!(
-        UpdateConfig::new(None, Some(&key)).unwrap().public_key,
+        UpdateConfig::new(None, Some(&key), &Env::empty())
+            .unwrap()
+            .public_key,
         Some([0xab; 32])
     );
     assert!(asset_name().starts_with("clawdot-"));
+}
+
+#[test]
+fn supervision_is_read_from_the_environment_snapshot() {
+    let on = |pairs: &[(&str, &str)]| {
+        UpdateConfig::new(None, None, &Env::from_pairs(pairs.iter().copied()))
+            .unwrap()
+            .supervised
+    };
+    assert!(!on(&[]));
+    assert!(on(&[("CLAWDOT_SUPERVISED", "1")]));
+    assert!(on(&[("INVOCATION_ID", "abc")]));
 }
