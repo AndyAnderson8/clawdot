@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.51 |
+| **Version** | 0.52 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -468,3 +468,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.49 | 2026-11-11 | REQ-SEC-011: the confirmation reads every argument in full or the action is refused. REQ-SEC-012: a tool lowered to read-only is held again after outside text. |
 | 0.50 | 2026-11-11 | REQ-SEC-004: failed attempts are counted per address. REQ-CFG-024: changing the password needs the current one. REQ-INB-004: a change that could not be saved is not reported as saved. |
 | 0.51 | 2026-11-11 | REQ-INB-041: a message is spoken as its endpoint, by the name the user chose, never by the sender's label. REQ-EXT-019, REQ-EXT-020: MCP tools are approved as shown, a change needs approval again, and schema text is reduced. |
+| 0.52 | 2026-11-11 | REQ-CFG-083: the device is named by its own model string or a configured preset, never guessed in code; the unused board setting is retired (REQ-CFG-037, REQ-CFG-039). |
