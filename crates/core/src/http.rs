@@ -58,6 +58,9 @@ pub struct ServeOptions {
     pub body_timeout: Duration,
     /// Idle time before an SSE comment keeps the connection alive.
     pub heartbeat: Duration,
+    /// How long a reply stream may wait for its reader to take data before it is ended, so a client that stops
+    /// reading cannot hold one of the stream slots for ever.
+    pub write_timeout: Duration,
 }
 
 /// How long the web UI waits for a request body.
@@ -72,6 +75,7 @@ impl Default for ServeOptions {
             header_timeout: Duration::from_secs(3),
             body_timeout: BODY_TIMEOUT,
             heartbeat: Duration::from_secs(15),
+            write_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -448,7 +452,7 @@ fn replies_stream(
         let _guard = guard;
         let mut last_sent = 0_u64;
         if tx
-            .send(Bytes::from_static(b"retry: 3000\n\n"))
+            .send_timeout(Bytes::from_static(b"retry: 3000\n\n"), opts.write_timeout)
             .await
             .is_err()
         {
@@ -470,7 +474,11 @@ fn replies_stream(
                     continue;
                 };
                 let event = format!("id: {}\nevent: reply\ndata: {}\n\n", r.id, data);
-                if tx.send(Bytes::from(event)).await.is_err() {
+                if tx
+                    .send_timeout(Bytes::from(event), opts.write_timeout)
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 last_sent = last_sent.max(r.id);
@@ -478,7 +486,9 @@ fn replies_stream(
             tokio::select! {
                 () = &mut notified => {}
                 () = tokio::time::sleep(opts.heartbeat) => {
-                    if tx.send(Bytes::from_static(b": keepalive\n\n")).await.is_err() {
+                    // Nothing else is queued when the heartbeat fires, so a channel that is still full means
+                    // the reader has taken nothing for a whole interval: end the stream.
+                    if tx.try_send(Bytes::from_static(b": keepalive\n\n")).is_err() {
                         return;
                     }
                 }
