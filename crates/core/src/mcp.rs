@@ -410,17 +410,9 @@ impl McpClient {
         match result {
             Ok(mut tools) => {
                 self.errors[i] = None;
-                tools.retain(|t| {
-                    let clash = reserved.contains(&t.exposed)
-                        || self.tools.iter().any(|o| o.exposed == t.exposed);
-                    if clash {
-                        warnings.push(format!(
-                            "mcp tool `{}` clashes with an existing tool and was skipped",
-                            t.exposed
-                        ));
-                    }
-                    !clash
-                });
+                let (kept, said) = self.admit(tools, reserved);
+                tools = kept;
+                warnings.extend(said);
                 for t in &mut tools {
                     t.server = i;
                 }
@@ -433,6 +425,29 @@ impl McpClient {
             }
         }
         warnings
+    }
+
+    /// The tools that may be offered, in order, and a warning for each one left out. A tool is left out when its
+    /// exposed name is reserved, is already on offer, or was already taken earlier in `tools`: names are made
+    /// lowercase and stripped of odd characters (`Foo` and `foo`, `a.b` and `a_b`), so a server can list two tools
+    /// that end up with one name, and only the first could ever be called. The first one listed stays.
+    fn admit(&self, tools: Vec<McpTool>, reserved: &[String]) -> (Vec<McpTool>, Vec<String>) {
+        let mut kept: Vec<McpTool> = Vec::with_capacity(tools.len());
+        let mut warnings = Vec::new();
+        for t in tools {
+            let clash = reserved.contains(&t.exposed)
+                || self.tools.iter().any(|o| o.exposed == t.exposed)
+                || kept.iter().any(|o| o.exposed == t.exposed);
+            if clash {
+                warnings.push(format!(
+                    "mcp tool `{}` clashes with an existing tool and was skipped",
+                    t.exposed
+                ));
+            } else {
+                kept.push(t);
+            }
+        }
+        (kept, warnings)
     }
 
     /// Whether this server was declared and has not yet reported (see [`McpClient::declare`]).
@@ -692,9 +707,11 @@ impl McpClient {
         self.errors.push(None);
         self.connecting.push(false);
         let i = self.servers.len() - 1;
-        tools.retain(|t| {
-            !reserved.contains(&t.exposed) && !self.tools.iter().any(|o| o.exposed == t.exposed)
-        });
+        let (kept, said) = self.admit(tools, reserved);
+        tools = kept;
+        for w in said {
+            crate::diag::warn(&w);
+        }
         for t in &mut tools {
             t.server = i;
         }
@@ -1003,6 +1020,56 @@ mod tests {
     }
 
     // REQ-CFG-033
+    fn listed(remote: &str) -> McpTool {
+        McpTool {
+            server: 0,
+            remote: remote.to_owned(),
+            exposed: format!("home__{}", sanitize(remote)),
+            description: String::new(),
+            schema: json!({"type": "object"}),
+            risk: Risk::set(Tier::Costly, Tier::Costly),
+        }
+    }
+
+    // Names that sanitise alike (`Foo`, `foo`, `f.o`/`f_o`) must not both be offered: only the first could be called.
+    #[test]
+    fn tools_whose_names_sanitise_alike_are_offered_once_and_the_rest_warned_about() {
+        let tools = || {
+            vec![
+                listed("Foo"),
+                listed("bar"),
+                listed("foo"),
+                listed("a.b"),
+                listed("a_b"),
+            ]
+        };
+        let (mut c, _) = McpClient::declare(vec![def(1)], |_| None).unwrap();
+        let warnings = c.settle("home", Ok(tools()), &[]);
+        let offered: Vec<(&str, &str)> = c
+            .tools()
+            .iter()
+            .map(|t| (t.exposed.as_str(), t.remote.as_str()))
+            .collect();
+        assert_eq!(
+            offered,
+            vec![
+                ("home__foo", "Foo"),
+                ("home__bar", "bar"),
+                ("home__a_b", "a.b")
+            ]
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings.iter().all(|w| w.contains("skipped")),
+            "{warnings:?}"
+        );
+
+        // The portal's add path keeps the same ones.
+        let (mut again, _) = McpClient::declare(Vec::new(), |_| None).unwrap();
+        let p = again.prepare_server(def(1), |_| None).unwrap();
+        assert_eq!(again.install_server(&p, tools(), &[]), Ok(3));
+    }
+
     #[tokio::test]
     async fn servers_can_be_added_and_removed_while_running() {
         let (port, _seen, _srv) = fake_server(OK).await;
