@@ -397,10 +397,9 @@ impl Brain {
     }
 
     /// What a model turn starts from, copied or shared now: the prompt, the tools, the policy and the limits
-    /// (ADR-0021). A change made in the portal while the turn runs reaches the next turn. `None` without a
-    /// language model.
-    pub fn kit(&mut self) -> Option<TurnKit<HttpBackend>> {
-        let l = self.llm.as_ref()?;
+    /// (ADR-0021), for the language model `l`. A change made in the portal while the turn runs reaches the next
+    /// turn. Building it is not free, so a caller builds it only when a turn will start.
+    pub fn kit(&mut self, l: &Llm) -> TurnKit<HttpBackend> {
         let host = WithPolicy {
             inner: &mut WithMcp {
                 inner: &mut WithHttp {
@@ -416,7 +415,7 @@ impl Brain {
         // The enabled skills ride along in the system prompt, after the persona (REQ-CFG-036).
         let available: Vec<String> = host.tool_specs().into_iter().map(|t| t.name).collect();
         let system = format!("{}{}", self.persona, self.ext.skills_prompt(&available));
-        Some(TurnKit {
+        TurnKit {
             backend: Arc::clone(&l.backend),
             cfg: l.cfg.clone(),
             usage: self.usage.clone(),
@@ -427,7 +426,7 @@ impl Brain {
             system,
             day: self.assistant.local_day(),
             now: self.clock.now(),
-        })
+        }
     }
 
     /// Save the usage counters. The loop is their only writer to disk.
@@ -462,7 +461,9 @@ pub fn dispatch(brain: &mut Brain, hub: &mut Hub, req: Request) -> Option<(Origi
     if let Some(reply) = brain.fast(&req.line) {
         return Some((req.origin, reply));
     }
-    let Some(kit) = brain.kit() else {
+    // Only the handle on the model is copied here; the kit (tool specs, system prompt) is built by the hub
+    // when a task starts, not for a request that is queued or refused.
+    let Some(llm) = brain.llm.clone() else {
         return Some((
             req.origin,
             Reply {
@@ -472,7 +473,7 @@ pub fn dispatch(brain: &mut Brain, hub: &mut Hub, req: Request) -> Option<(Origi
         ));
     };
     let now = brain.clock.now();
-    match hub.submit(req, now, || kit) {
+    match hub.submit(req, now, || brain.kit(&llm)) {
         Submitted::Started | Submitted::Queued => None,
         Submitted::Refused(req) => Some((
             req.origin,
