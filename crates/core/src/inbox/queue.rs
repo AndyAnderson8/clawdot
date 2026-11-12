@@ -271,6 +271,17 @@ impl Inbox {
         }
     }
 
+    /// Drop the events of a deleted endpoint that are still open (not yet spoken, spoken and waiting, or
+    /// snoozed); returns how many. Handled events stay as history until [`Inbox::prune`] drops them.
+    pub fn drop_open_for(&mut self, endpoint: &str) -> usize {
+        let before = self.state.events.len();
+        self.state.events.retain(|e| {
+            e.endpoint != endpoint
+                || matches!(e.state, EventState::Dismissed | EventState::Acknowledged)
+        });
+        before - self.state.events.len()
+    }
+
     /// Drop finished-with events older than `keep_secs`.
     pub fn prune(&mut self, now: Ts, keep_secs: i64) {
         self.state.events.retain(|e| {

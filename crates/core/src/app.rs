@@ -518,14 +518,25 @@ impl Core {
         Ok(t)
     }
 
-    /// Delete an endpoint and any replies waiting for its bridge.
+    /// Delete an endpoint, the replies waiting for its bridge and its events that are still open. Both are
+    /// keyed by the endpoint's name, so an endpoint made later under the same name would otherwise inherit
+    /// the old agent's instructions and have its queued events announced and answered.
     ///
     /// # Errors
     /// See [`endpoint::EndpointError`].
     pub fn revoke_endpoint(&self, name: &str) -> Result<(), endpoint::EndpointError> {
         let mut g = self.lock();
         g.endpoints.revoke(name)?;
-        self.persist(&g, Dirty::ENDPOINTS);
+        let replies = g.replies.drop_for(name);
+        let events = g.inbox.drop_open_for(name);
+        self.persist(
+            &g,
+            Dirty {
+                endpoints: true,
+                inbox: events > 0,
+                replies: replies > 0,
+            },
+        );
         Ok(())
     }
 
@@ -1276,6 +1287,40 @@ mod tests {
             c.bridge_pending("a", &b, 0),
             Err(HookError::Unauthorized),
             "b's token is not a's"
+        );
+    }
+
+    // REQ-CFG-028: deleting an endpoint drops what was waiting for it, so an endpoint made later under the
+    // same name starts empty and its bridge never receives the old agent's replies.
+    #[test]
+    fn a_recreated_endpoint_inherits_no_replies_and_no_events() {
+        let (c, _) = core();
+        let (_, old) = c.create_endpoint("agent", "generic").unwrap();
+        c.ingest_hook("agent", &old, br#"{"title":"first","session_ref":"s1"}"#)
+            .unwrap();
+        let first = c.next_announcement(true, 0).unwrap().event.id;
+        c.mark_announced(&[first]);
+        c.reply(ReplyKind::Instruct, "private to the old agent")
+            .unwrap();
+        c.ingest_hook("agent", &old, br#"{"title":"second","session_ref":"s2"}"#)
+            .unwrap();
+        assert_eq!(c.bridge_pending("agent", &old, 0).unwrap().len(), 1);
+
+        c.revoke_endpoint("agent").unwrap();
+        let (_, new) = c.create_endpoint("agent", "generic").unwrap();
+
+        assert!(
+            c.bridge_pending("agent", &new, 0).unwrap().is_empty(),
+            "the new endpoint got the old one's replies"
+        );
+        assert!(c.events().is_empty(), "queued events outlived the endpoint");
+        assert!(
+            c.next_announcement(true, 0).is_none(),
+            "a revoked sender's queued event was still announced"
+        );
+        assert_eq!(
+            c.reply(ReplyKind::Instruct, "x"),
+            Err(ReplyError::NothingToReplyTo)
         );
     }
 

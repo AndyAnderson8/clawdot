@@ -134,6 +134,13 @@ impl ReplyQueue {
         self.state.pending.len() != before
     }
 
+    /// Drop every reply waiting for `endpoint` (it was deleted); returns how many.
+    pub fn drop_for(&mut self, endpoint: &str) -> usize {
+        let before = self.state.pending.len();
+        self.state.pending.retain(|r| r.endpoint != endpoint);
+        before - self.state.pending.len()
+    }
+
     /// Drop replies older than the time-to-live; returns how many.
     pub fn expire(&mut self, now: Ts) -> usize {
         let before = self.state.pending.len();
