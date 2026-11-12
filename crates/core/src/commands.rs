@@ -2,6 +2,7 @@
 //! snippets, the web UI banner and the console's quit words.
 
 use crate::app::Core;
+use crate::inbox::adapter::Adapter;
 use crate::lang::Language;
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -55,6 +56,9 @@ pub fn is_quit(lang: &Language, line: &str) -> bool {
 
 pub const DEFAULT_PORT: u16 = 3335;
 
+/// The adapter an endpoint gets when none is named, or when the name is not a registered adapter.
+const GENERIC_ADAPTER: &str = "generic";
+
 /// An actionable message for a failed bind (REQ-CFG-014).
 pub fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
     let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -69,33 +73,22 @@ pub fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
     format!("cannot listen on {addr}: {e}. {hint}")
 }
 
-pub fn print_snippet(public: &str, endpoint: &str, adapter: &str, token: &str) {
-    println!(
-        "\nEndpoint `{endpoint}` created (adapter: {adapter}). The token is shown only now:\n  {token}\n"
+/// What is printed once for a new endpoint: the token, then the set-up text the adapter carries (if it has any).
+/// Ends with a newline.
+pub fn snippet_text(public: &str, endpoint: &str, adapter: &Adapter, token: &str) -> String {
+    let mut out = format!(
+        "\nEndpoint `{endpoint}` created (adapter: {}). The token is shown only now:\n  {token}\n\n",
+        adapter.name
     );
-    if adapter == "claude-code" {
-        println!(
-            "Claude Code hooks: add to ~/.claude/settings.json (merge with what is already there):"
-        );
-        let hook = |event: &str| {
-            format!(
-                "    \"{event}\": [{{ \"hooks\": [{{ \"type\": \"http\", \"url\": \"{public}/hook/{endpoint}\", \"headers\": {{ \"Authorization\": \"Bearer {token}\" }}, \"timeout\": 5 }}] }}]"
-            )
-        };
-        println!(
-            "{{\n  \"hooks\": {{\n{},\n{}\n  }}\n}}\n",
-            hook("Stop"),
-            hook("Notification")
-        );
-        println!(
-            "Voice replies reach the agent through the bridge, on the machine where the agent runs:"
-        );
-        println!("  CLAWDOT_TOKEN=<token> clawdot-bridge --url {public} --endpoint {endpoint}\n");
-    } else {
-        println!(
-            "Post events with:\n  curl -X POST {public}/hook/{endpoint} -H 'Authorization: Bearer <token>' -d '{{\"title\":\"Backup finished\",\"summary\":\"12 GB copied\"}}'\n"
-        );
+    if let Some(setup) = adapter.setup_text(public, endpoint, token) {
+        out.push_str(&setup);
+        out.push('\n');
     }
+    out
+}
+
+pub fn print_snippet(public: &str, endpoint: &str, adapter: &Adapter, token: &str) {
+    print!("{}", snippet_text(public, endpoint, adapter, token));
 }
 
 /// `clawdot say TEXT ...`: speak a message on a running ClawDot (REQ-INB-026).
@@ -142,12 +135,17 @@ pub fn run_endpoint_commands(
     let mut failed = false;
     for spec in create {
         let (name, adapter) = spec.split_once(':').unwrap_or((spec, spec));
-        let adapter = if matches!(adapter, "claude-code" | "generic") {
-            adapter
-        } else {
-            "generic"
+        // A name no adapter is registered under (including the endpoint's own name, when none was given) means
+        // the generic one.
+        let Some(adapter) = core
+            .adapter(adapter)
+            .or_else(|| core.adapter(GENERIC_ADAPTER))
+        else {
+            eprintln!("clawdot: endpoint `{name}`: no `{GENERIC_ADAPTER}` adapter is built in");
+            failed = true;
+            continue;
         };
-        match core.create_endpoint(name, adapter) {
+        match core.create_endpoint(name, &adapter.name) {
             Ok((_, token)) => print_snippet(public, name, adapter, &token),
             Err(e) => {
                 eprintln!("clawdot: endpoint `{name}`: {e}");
@@ -216,6 +214,84 @@ mod tests {
                 ("http://clawdot.local:9000".to_owned(), true)
             );
         }
+    }
+
+    fn builtin(name: &str) -> Adapter {
+        Adapter::builtins()
+            .map(Result::unwrap)
+            .find(|a| a.name == name)
+            .unwrap()
+    }
+
+    // REQ-CFG-016: the text printed for a new endpoint is pinned for both built-in adapters. It was once written in
+    // this file; it now comes from the adapter's own definition and must not change.
+    #[test]
+    fn the_printed_snippet_for_claude_code_is_unchanged() {
+        let hook = |event: &str| {
+            format!(
+                "    \"{event}\": [{{ \"hooks\": [{{ \"type\": \"http\", \"url\": \"http://dot:1/hook/ci\", \"headers\": {{ \"Authorization\": \"Bearer TKN\" }}, \"timeout\": 5 }}] }}]"
+            )
+        };
+        let expected = format!(
+            "\nEndpoint `ci` created (adapter: claude-code). The token is shown only now:\n  TKN\n\n\
+             Claude Code hooks: add to ~/.claude/settings.json (merge with what is already there):\n\
+             {{\n  \"hooks\": {{\n{},\n{}\n  }}\n}}\n\n\
+             Voice replies reach the agent through the bridge, on the machine where the agent runs:\n\
+             \x20 CLAWDOT_TOKEN=<token> clawdot-bridge --url http://dot:1 --endpoint ci\n\n",
+            hook("Stop"),
+            hook("Notification")
+        );
+        assert_eq!(
+            snippet_text("http://dot:1", "ci", &builtin("claude-code"), "TKN"),
+            expected
+        );
+    }
+
+    #[test]
+    fn the_printed_snippet_for_the_generic_adapter_is_unchanged() {
+        let expected = "\nEndpoint `ci` created (adapter: generic). The token is shown only now:\n  TKN\n\n\
+             Post events with:\n  curl -X POST http://dot:1/hook/ci -H 'Authorization: Bearer <token>' -d '{\"title\":\"Backup finished\",\"summary\":\"12 GB copied\"}'\n\n";
+        assert_eq!(
+            snippet_text("http://dot:1", "ci", &builtin("generic"), "TKN"),
+            expected
+        );
+    }
+
+    #[test]
+    fn an_adapter_without_set_up_text_prints_only_the_token() {
+        let a = Adapter::from_json(
+            r#"{"name":"bare","source":"S","rules":[{"kind":"info","title":"t"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            snippet_text("http://dot:1", "ci", &a, "TKN"),
+            "\nEndpoint `ci` created (adapter: bare). The token is shown only now:\n  TKN\n\n"
+        );
+    }
+
+    #[test]
+    fn an_unregistered_adapter_name_gets_the_generic_one() {
+        let core = Core::in_memory(
+            std::sync::Arc::new(crate::sched::SystemClock),
+            crate::app::Adapters::builtin(),
+            crate::app::Limits::default(),
+        );
+        assert!(!run_endpoint_commands(
+            &core,
+            &["a".into(), "b:nonesuch".into(), "c:claude-code".into()],
+            &[],
+            "http://dot:1"
+        ));
+        let adapter_of = |n: &str| {
+            core.endpoints()
+                .into_iter()
+                .find(|e| e.name == n)
+                .unwrap()
+                .adapter
+        };
+        assert_eq!(adapter_of("a"), "generic");
+        assert_eq!(adapter_of("b"), "generic");
+        assert_eq!(adapter_of("c"), "claude-code");
     }
 
     #[test]

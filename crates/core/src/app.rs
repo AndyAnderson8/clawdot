@@ -481,6 +481,12 @@ impl Core {
         self.adapters.get(name).is_some()
     }
 
+    /// The adapter with this name, if there is one.
+    #[must_use]
+    pub fn adapter(&self, name: &str) -> Option<&Adapter> {
+        self.adapters.get(name)
+    }
+
     /// The configured limits.
     #[must_use]
     pub fn limits(&self) -> &Limits {

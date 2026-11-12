@@ -1,6 +1,11 @@
 {
   "name": "generic",
   "source": "Webhook",
+  "setup": [
+    "Post events with:",
+    "  curl -X POST {public}/hook/{endpoint} -H 'Authorization: Bearer <token>' -d '{\"title\":\"Backup finished\",\"summary\":\"12 GB copied\"}'",
+    ""
+  ],
   "rules": [
     {
       "when": {},
