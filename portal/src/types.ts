@@ -66,6 +66,8 @@ export interface Endpoint {
   adapter: string;
   enabled: boolean;
   created_at: number;
+  /** What the speaker calls this webhook when it reads a message out; none means its name. */
+  spoken_name?: string | null;
 }
 export interface Overview {
   now: number;
@@ -119,6 +121,16 @@ export interface McpServer {
   error?: string;
   token_env?: string;
   tools: Tool[];
+  /** Tools the source offers that are new or changed since they were approved. They are off until accepted. */
+  needs_review?: ToolToReview[];
+}
+/** A tool waiting for approval. Everything in it is the source's own text: show it as text. */
+export interface ToolToReview {
+  name: string;
+  description: string;
+  reason: string;
+  reason_text: string;
+  arguments: string[];
 }
 export interface Skill {
   name: string;

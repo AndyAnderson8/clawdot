@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { Field } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { useState } from "preact/hooks";
-import { api } from "../api.ts";
+import { api, ApiError } from "../api.ts";
 import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
 import { CopyButton } from "../parts.tsx";
 import { fail, get, load, say, set, sv, useApp } from "../store.ts";
@@ -10,6 +10,8 @@ import type { Endpoint, WebhookToken } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
 const base = () => String(sv("public_url") || location.origin);
+
+const SPOKEN_RULE = "Use up to 40 letters, numbers, spaces and - _ ' . and start with a letter or a number.";
 
 function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void }) {
   const { e } = props;
@@ -46,12 +48,65 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     }
   };
 
+  const [renaming, setRenaming] = useState(false);
+  const [spoken, setSpoken] = useState(e.spoken_name ?? "");
+  const [nameErr, setNameErr] = useState("");
+  const saveSpoken = async (ev: Event) => {
+    ev.preventDefault();
+    setNameErr("");
+    try {
+      await api("PUT", "/api/endpoints/" + e.name, { spoken_name: spoken.trim() || null });
+      setRenaming(false);
+      say("Saved.");
+      await load();
+    } catch (x) {
+      if (x instanceof ApiError && x.status === 400) setNameErr(SPOKEN_RULE);
+      else fail(x);
+    }
+  };
+
   return (
     <li>
       <div class="rowhead">
         <strong>{e.name}</strong>
         <span class="badge">{adapterName(e.adapter)}</span>
       </div>
+      <p class="mut spokenas">
+        The speaker says <q>From {e.spoken_name || e.name}</q> before its messages.{" "}
+        <button class="plain small" type="button" onClick={() => setRenaming(true)}>
+          Change what it says
+        </button>
+      </p>
+      <Dialog
+        id={"spoken-" + e.name}
+        title={"What the speaker calls " + e.name}
+        open={renaming}
+        onClose={() => setRenaming(false)}
+      >
+        <form class="dlgform" onSubmit={saveSpoken}>
+          <p class="mut">
+            You choose this, not the program that sends the messages, so a message cannot claim to come from someone
+            else. Leave it empty to use the webhook's own name.
+          </p>
+          <Field id={"spokenname-" + e.name} label="Spoken name">
+            <input
+              id={"spokenname-" + e.name}
+              type="text"
+              maxLength={40}
+              autoComplete="off"
+              placeholder={e.name}
+              value={spoken}
+              onInput={(ev) => setSpoken(ev.currentTarget.value)}
+            />
+          </Field>
+          <p class="errtext" role="alert">
+            {nameErr}
+          </p>
+          <div class="row">
+            <button>Save</button>
+          </div>
+        </form>
+      </Dialog>
       <code>{url}</code>
       <div class="acts">
         <CopyButton text={url} label="Copy address" />
@@ -93,15 +148,19 @@ export function Webhooks(): JSX.Element {
   const [name, setName] = useState("");
   const [adding, setAdding] = useState(false);
   const [adapter, setAdapter] = useState("generic");
+  const [spokenName, setSpokenName] = useState("");
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const ov = s.overview;
 
   const create = async (ev: Event) => {
     ev.preventDefault();
     try {
-      const r = await api<WebhookToken>("POST", "/api/endpoints", { name: name.trim(), adapter });
+      const body: Record<string, string> = { name: name.trim(), adapter };
+      if (spokenName.trim()) body["spoken_name"] = spokenName.trim();
+      const r = await api<WebhookToken>("POST", "/api/endpoints", body);
       set({ fresh: { ...get().fresh, [r.name]: r.token } });
       setName("");
+      setSpokenName("");
       setAdding(false);
       setOpen((o) => ({ ...o, [r.name]: true }));
       say("Created. Copy the token now; it is shown once.");
@@ -158,6 +217,20 @@ export function Webhooks(): JSX.Element {
               autoCapitalize="none"
               value={name}
               onInput={(e) => setName(e.currentTarget.value)}
+            />
+          </Field>
+          <Field
+            id="wspoken"
+            label="Spoken name"
+            hint="Optional. What the speaker says a message is from, for example Kitchen. Empty uses the name above."
+          >
+            <input
+              id="wspoken"
+              type="text"
+              maxLength={40}
+              autoComplete="off"
+              value={spokenName}
+              onInput={(e) => setSpokenName(e.currentTarget.value)}
             />
           </Field>
           <Field id="wadapter" label="Message format">

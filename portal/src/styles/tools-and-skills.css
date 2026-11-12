@@ -133,3 +133,25 @@ dialog.dlg textarea {
   width: 100%;
   max-width: none;
 }
+
+.review {
+  margin-top: var(--spacing-3);
+  padding: var(--spacing-3);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--radius-md, 0.5rem);
+}
+.reviewlist {
+  list-style: none;
+  margin: var(--spacing-2) 0;
+  padding: 0;
+  display: grid;
+  gap: var(--spacing-3);
+}
+.reviewlist pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: var(--spacing-1) 0;
+}
+.spokenas {
+  margin: var(--spacing-1) 0 var(--spacing-2);
+}

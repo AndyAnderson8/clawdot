@@ -290,6 +290,7 @@ export const MOCK_ROUTES: readonly { method: string; path: string }[] = [
   { method: "PUT", path: "/api/schedule/{id}" },
   { method: "DELETE", path: "/api/schedule/{id}" },
   { method: "POST", path: "/api/endpoints" },
+  { method: "PUT", path: "/api/endpoints/{name}" },
   { method: "DELETE", path: "/api/endpoints/{name}" },
   { method: "POST", path: "/api/endpoints/{name}/rotate" },
   { method: "GET", path: "/api/tools" },
@@ -301,6 +302,7 @@ export const MOCK_ROUTES: readonly { method: string; path: string }[] = [
   { method: "POST", path: "/api/connections/test" },
   { method: "DELETE", path: "/api/connections/{name}" },
   { method: "POST", path: "/api/connections/{name}/enabled" },
+  { method: "POST", path: "/api/connections/{name}/accept" },
   { method: "GET", path: "/api/skills" },
   { method: "POST", path: "/api/skills" },
   { method: "POST", path: "/api/skills/{action}" },
@@ -576,6 +578,9 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         return send(200, settingsJson("Saved."));
       }
       if (m === "POST" && path === "/api/admin/password") {
+        // With a password in force the current one is needed; a wrong one is a 403, which does not sign the page out.
+        if (st["mode"] === "password" && body.current !== st["password"] && body.current !== PASSWORD)
+          return err(403, "the current password is missing or wrong");
         st["mode"] = "password";
         st["password"] = body.password;
         st["session"] = "sess-pw";
@@ -686,8 +691,22 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         const eps = st["endpoints"] as Json[];
         if (m === "POST" && seg.length === 1) {
           if (eps.some((e) => e["name"] === body.name)) return err(409, "That name is taken.");
-          eps.push({ name: body.name, adapter: body.adapter, enabled: true, created_at: now() });
-          return send(201, { name: body.name, adapter: body.adapter, token: "tok-" + body.name + "-1" });
+          const spoken = body.spoken_name ?? null;
+          eps.push({ name: body.name, adapter: body.adapter, enabled: true, created_at: now(), spoken_name: spoken });
+          return send(201, {
+            name: body.name,
+            adapter: body.adapter,
+            spoken_name: spoken,
+            token: "tok-" + body.name + "-1",
+          });
+        }
+        if (m === "PUT" && seg.length === 2) {
+          const e = eps.find((x) => x["name"] === seg[1]);
+          if (!e) return err(404, "no such endpoint");
+          const spoken = String(body.spoken_name ?? "").trim();
+          if (spoken && !/^[\p{L}\p{N}][\p{L}\p{N} \-_'.]{0,39}$/u.test(spoken)) return err(400, "bad spoken name");
+          e["spoken_name"] = spoken || null;
+          return send(200, e);
         }
         if (m === "POST" && seg[2] === "rotate") return send(200, { name: seg[1], token: "tok-" + seg[1] + "-2" });
         if (m === "DELETE") {
@@ -747,6 +766,24 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           }
           if (m === "DELETE") {
             st["mcp"] = mcp.filter((s) => s["name"] !== seg[1]);
+            return send(200, ext());
+          }
+          if (m === "POST" && seg[2] === "accept") {
+            const src = mcp.find((x) => x["name"] === seg[1]);
+            if (!src) return err(404, "There is no such connection.");
+            const waiting = (src["needs_review"] ?? []) as Json[];
+            const taken = body.tool ? waiting.filter((t) => t["name"] === body.tool) : waiting;
+            if (body.tool && !taken.length) return err(404, "There is no such tool waiting.");
+            src["needs_review"] = waiting.filter((t) => !taken.includes(t));
+            for (const t of taken)
+              (src["tools"] as Json[]).push({
+                name: t["name"],
+                description: t["description"],
+                enabled: true,
+                confirm: true,
+                source: "mcp",
+                server: src["name"],
+              });
             return send(200, ext());
           }
           if (seg[2] === "enabled") {
