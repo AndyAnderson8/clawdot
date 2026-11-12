@@ -11,7 +11,7 @@ use crate::extensions::{ExtOp, Extensions, WithPolicy};
 use crate::httptools::{HttpTools, WithHttp};
 use crate::mcp::{McpClient, WithMcp};
 use crate::rtvoice::{self, Realtime, RtSettings};
-use crate::sched::{Clock, FixedOffset, Zone};
+use crate::sched::{Clock, Fired, FixedOffset, Ts, Zone};
 use crate::seed::{agent_from, policy_from, quiet_from};
 #[cfg(feature = "realtime")]
 use crate::session::Conversation;
@@ -61,8 +61,8 @@ pub fn settings_extra(args: &Args) -> serde_json::Value {
 /// The language model and everything needed to use it.
 #[derive(Clone)]
 pub struct Llm {
-    pub backend: Arc<HttpBackend>,
-    pub cfg: TurnConfig,
+    pub(crate) backend: Arc<HttpBackend>,
+    pub(crate) cfg: TurnConfig,
 }
 
 /// The turn settings: the defaults of REQ-AST-019 lowered or switched by the `agent` section.
@@ -214,31 +214,31 @@ pub fn apply_live(
 
 /// Everything needed to answer one thing the user said, whether it was typed or spoken.
 pub struct Brain {
-    pub assistant: Assistant,
-    pub llm: Option<Llm>,
+    pub(crate) assistant: Assistant,
+    pub(crate) llm: Option<Llm>,
     /// The daily counters. Turns hold handles on the same ones; only this loop saves them.
-    pub usage: UsageTracker,
-    pub usage_store: JsonStore,
+    pub(crate) usage: UsageTracker,
+    pub(crate) usage_store: JsonStore,
     /// The HTTP and MCP clients. A turn takes a clone of the `Arc` when it starts and calls the tools itself.
-    pub http_tools: Arc<HttpTools>,
-    pub mcp: Arc<McpClient>,
-    pub clock: Arc<dyn Clock + Send + Sync>,
+    pub(crate) http_tools: Arc<HttpTools>,
+    pub(crate) mcp: Arc<McpClient>,
+    pub(crate) clock: Arc<dyn Clock + Send + Sync>,
     /// Tools, connections, and skills managed from the portal.
-    pub ext: Extensions,
+    pub(crate) ext: Extensions,
     /// A read-only copy of `ext` for the turns, replaced whenever `ext` changes.
-    pub ext_view: Arc<Extensions>,
+    pub(crate) ext_view: Arc<Extensions>,
     /// Names of the built-in tools.
-    pub builtin: Vec<String>,
+    pub(crate) builtin: Vec<String>,
     /// The system prompt without skills.
-    pub persona: String,
+    pub(crate) persona: String,
     /// Turn limits, speech while working and notes.
-    pub agent: AgentConfig,
+    pub(crate) agent: AgentConfig,
     /// A speech provider (address and speech model) is configured, so a speaker has a voice (REQ-CFG-070).
-    pub voice_configured: bool,
+    pub(crate) voice_configured: bool,
     /// The optional realtime voice: its settings, status and the way sessions reach this loop.
-    pub rt: Realtime,
+    pub(crate) rt: Realtime,
     /// MCP connections being made beside the loop, for servers added in the portal.
-    pub connects: Connects,
+    pub(crate) connects: Connects,
 }
 
 /// What the portal is told about the speaker (REQ-CFG-070).
@@ -252,6 +252,71 @@ pub struct SpeakerView {
 }
 
 impl Brain {
+    /// A language model is configured.
+    #[must_use]
+    pub fn has_model(&self) -> bool {
+        self.llm.is_some()
+    }
+
+    /// A handle on the language model, for work done beside the loop.
+    #[must_use]
+    pub fn model(&self) -> Option<Llm> {
+        self.llm.clone()
+    }
+
+    /// Seconds now, on the assistant's clock.
+    #[must_use]
+    pub fn now(&self) -> Ts {
+        self.clock.now()
+    }
+
+    /// The timers, alarms and reminders that fell due since the last call.
+    pub fn tick(&mut self) -> Vec<Fired> {
+        self.assistant.tick()
+    }
+
+    /// The minute of the local day, for the quiet-hours check.
+    #[must_use]
+    pub fn minute_of_day(&self) -> u16 {
+        self.assistant.minute_of_day()
+    }
+
+    /// The local day number.
+    #[must_use]
+    pub fn local_day(&self) -> i64 {
+        self.assistant.local_day()
+    }
+
+    /// Handles on the daily counters and the file they are saved to, for the speaker task.
+    #[must_use]
+    pub fn usage_handles(&self) -> (UsageTracker, JsonStore) {
+        (self.usage.clone(), self.usage_store.clone())
+    }
+
+    /// The realtime voice, for the satellites that start its sessions.
+    #[must_use]
+    pub fn realtime(&self) -> &Realtime {
+        &self.rt
+    }
+
+    /// The receiving end of realtime session requests. Call once, at start-up.
+    #[must_use]
+    pub fn attach_realtime(&self) -> tokio::sync::mpsc::Receiver<rtvoice::Job> {
+        self.rt.attach()
+    }
+
+    /// The receiving end of finished MCP connections, or `None` if it was already taken.
+    #[must_use]
+    pub fn attach_connects(&mut self) -> Option<tokio::sync::mpsc::Receiver<Done>> {
+        self.connects.attach()
+    }
+
+    /// MCP connections are still being made.
+    #[must_use]
+    pub fn is_connecting(&self) -> bool {
+        !self.connects.is_empty()
+    }
+
     /// What the Tools, Connections, and Skills tabs show (REQ-CFG-029, 036). Holds no secrets.
     pub fn listing(&self) -> serde_json::Value {
         let specs = ToolHost::tool_specs(&self.assistant);

@@ -141,8 +141,8 @@ async fn main() -> ExitCode {
             return ExitCode::from(f.code);
         }
     };
-    let mut rt_rx = brain.rt.attach();
-    let Some(mut mcp_rx) = brain.connects.attach() else {
+    let mut rt_rx = brain.attach_realtime();
+    let Some(mut mcp_rx) = brain.attach_connects() else {
         eprintln!("clawdot: cannot start: the connection results were already claimed");
         return ExitCode::from(1);
     };
@@ -163,7 +163,7 @@ async fn main() -> ExitCode {
     if let Some(input) = args.voice_in.clone() {
         // One utterance and out: there is no loop to serve meanwhile, so wait for the sources to answer, as
         // the single turn should have their tools.
-        while !brain.connects.is_empty() {
+        while brain.is_connecting() {
             let Some(done) = mcp_rx.recv().await else {
                 break;
             };
@@ -200,7 +200,7 @@ async fn main() -> ExitCode {
     // Satellites (speakers) connect here; their questions come back to this loop through `ask_rx`.
     let (ask_tx, mut ask_rx) = mpsc::channel::<Ask>(8);
     let announcer = satellite::Announcer::default();
-    if let Err(e) = start_satellites(&args, &core, &brain.rt, &announcer, &ask_tx).await {
+    if let Err(e) = start_satellites(&args, &core, brain.realtime(), &announcer, &ask_tx).await {
         eprintln!("clawdot: {e}");
         return ExitCode::from(1);
     }
@@ -213,7 +213,7 @@ async fn main() -> ExitCode {
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         args.listen,
         core.endpoints().len(),
-        if brain.llm.is_some() {
+        if brain.has_model() {
             "connected"
         } else {
             "not configured"
@@ -241,11 +241,12 @@ async fn main() -> ExitCode {
 
     let mut portal_rx = core.attach_portal();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let (usage, usage_store) = brain.usage_handles();
     let voice = Arc::new(Voice {
         announcer: announcer.clone(),
         core: Arc::clone(&core),
-        usage: brain.usage.clone(),
-        usage_store: brain.usage_store.clone(),
+        usage,
+        usage_store,
         echo: args.console || args.echo_speech,
         available: AtomicBool::new(false),
         polling: AtomicBool::new(false),
@@ -300,7 +301,7 @@ async fn main() -> ExitCode {
                 on_hub_event(&mut brain, &mut hub, &core, ev).await;
             }
             _ = tick.tick() => {
-                hub.sweep(brain.clock.now());
+                hub.sweep(brain.now());
                 let tool_counts = brain.tool_counts();
                 let view = SpeakerView {
                     available: announcer.connected() > 0 && voice.available.load(Ordering::Relaxed),
@@ -313,14 +314,14 @@ async fn main() -> ExitCode {
                 while let Some((text, preview)) = core.take_speech_as() {
                     let _ = say_tx.send(Say::Phrase { text, preview });
                 }
-                for fired in brain.assistant.tick() {
+                for fired in brain.tick() {
                     let _ = say_tx.send(Say::Line(describe_fired(&fired)));
                 }
                 if !voice.polling.swap(true, Ordering::Relaxed) {
                     let _ = say_tx.send(Say::Poll {
-                        minute: brain.assistant.minute_of_day(),
-                        day: brain.assistant.local_day(),
-                        llm: brain.llm.clone(),
+                        minute: brain.minute_of_day(),
+                        day: brain.local_day(),
+                        llm: brain.model(),
                     });
                 }
                 core.maintain();
