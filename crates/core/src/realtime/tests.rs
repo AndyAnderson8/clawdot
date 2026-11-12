@@ -7,27 +7,26 @@ use crate::session::{Conversation, Risk, Tier};
 use crate::usage::UsageLimits;
 use serde_json::{Value, json};
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{DuplexStream, duplex};
 use tokio::sync::mpsc;
 
 pub(super) type Srv = WebSocket<DuplexStream>;
 
-thread_local! {
-    /// Set by a test server to make the host stop offering `send_money`. A test runs on one thread, so this
-    /// reaches the host the session owns without a channel.
-    static WITHDRAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 #[derive(Default)]
 pub(super) struct Host {
     pub(super) ran: Vec<(String, Value)>,
+    /// Set by a test server to make the host stop offering `send_money`. Shared, so it reaches the host the
+    /// session owns whatever thread or task sets it.
+    withdrawn: Arc<AtomicBool>,
 }
 
 impl ToolHost for Host {
     fn tool_specs(&self) -> Vec<ToolSpec> {
         ["get_time", "send_money", "web", "wipe"]
             .iter()
-            .filter(|n| !(WITHDRAWN.get() && **n == "send_money"))
+            .filter(|n| !(self.withdrawn.load(Ordering::SeqCst) && **n == "send_money"))
             .map(|n| ToolSpec {
                 name: (*n).into(),
                 description: format!("the {n} tool"),
@@ -121,6 +120,22 @@ where
     F: FnOnce(Srv) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send,
 {
+    session_with(Host::default(), cfg, limits, mic, hang_up, server).await
+}
+
+/// Like `session`, with a host the test built (and kept a handle on).
+async fn session_with<F, Fut>(
+    mut host: Host,
+    cfg: RealtimeConfig,
+    limits: UsageLimits,
+    mic: Vec<Vec<u8>>,
+    hang_up: bool,
+    server: F,
+) -> Run
+where
+    F: FnOnce(Srv) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
     let (a, b) = duplex(1 << 20);
     let srv = tokio::spawn(async move {
         let (ws, _) = accept(b).await.unwrap();
@@ -136,7 +151,6 @@ where
         mic: mic_rx,
         speaker: spk_tx,
     };
-    let mut host = Host::default();
     let mut conv = Conversation::new("system", 20, 20_000, 600);
     let tcfg = TurnConfig::default();
     let mut usage = UsageTracker::new(limits);
@@ -827,12 +841,18 @@ fn the_config_never_prints_the_key_and_resampling_changes_the_length() {
 // told the error rather than "Done.".
 #[tokio::test(flavor = "current_thread")]
 async fn a_yes_for_a_held_tool_that_has_gone_runs_nothing_and_reports_the_error() {
-    let r = session(
+    let withdrawn = Arc::new(AtomicBool::new(false));
+    let host = Host {
+        withdrawn: Arc::clone(&withdrawn),
+        ..Host::default()
+    };
+    let r = session_with(
+        host,
         cfg(),
         UsageLimits::default(),
         vec![],
         false,
-        |mut s| async move {
+        move |mut s| async move {
             next(&mut s).await;
             put(&mut s, spoke()).await;
             put(&mut s, calls_done(&[("c1", "send_money", "{}")])).await;
@@ -840,7 +860,7 @@ async fn a_yes_for_a_held_tool_that_has_gone_runs_nothing_and_reports_the_error(
             next(&mut s).await;
             put(&mut s, said("pay sam")).await;
             // Meanwhile the host stops offering the tool.
-            WITHDRAWN.set(true);
+            withdrawn.store(true, Ordering::SeqCst);
             put(&mut s, spoke()).await;
             put(&mut s, said("yes")).await;
             let rc = next(&mut s).await;
