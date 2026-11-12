@@ -963,6 +963,8 @@ paths:
         export file's `settings` object can be sent as it is. Keys: `device_name`, `zone`, `persona`, `llm_url`,
         `llm_model`, `llm_key_env`, `voice`, `speech_language`, `speech_provider` (`openai`, `elevenlabs` or
         `deepgram`; needs a restart), `listen`, `public_url`, `daily_spend_usd`,
+        `llm_usd_per_mtok_in` and `llm_usd_per_mtok_out` (what the model costs per million tokens in and out, in dollars,
+        0 to 1000; empty means unknown, so the cap prices with built-in high prices, and 0 means free),
         `board`, `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`,
         `plan_speech`, `progress_speech`, `notes`, `update_check`, `max_actions_per_day`, `max_costly_per_day`,
         `dry_run`, `quiet_start`, `quiet_end`, and the optional realtime voice (REQ-RTV-008) `realtime_enabled`,
@@ -1747,6 +1749,18 @@ components:
           properties:
             requests_today: { type: integer }
             spend_today: { type: number }
+            spend_basis:
+              type: string
+              enum: [none, reported, priced, estimated]
+              description: |
+                What `spend_today` rests on, the weakest basis of anything counted today. `reported`: the
+                provider's own cost for every request. `priced`: some cost is the provider's token counts times
+                the prices the person set (`llm_usd_per_mtok_in`, `llm_usd_per_mtok_out`), or realtime audio time
+                at its rates. `estimated`: some cost uses the built-in prices (a price is not set) or tokens
+                counted from the size of the request and reply; the page should say "an estimate" and ask for
+                the prices. `none`: nothing today has cost anything yet.
+            llm_usd_per_mtok_in: { type: [number, "null"], description: "The price set per million prompt tokens; null is unset." }
+            llm_usd_per_mtok_out: { type: [number, "null"], description: "The price set per million generated tokens; null is unset." }
             daily_spend_cap_usd: { type: [number, "null"] }
             day: { type: integer, description: "The local day number today is." }
             history:

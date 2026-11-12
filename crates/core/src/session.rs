@@ -1287,7 +1287,10 @@ async fn summarise_result<B: ChatBackend>(
         };
         *model_requests += 1;
         let outcome = backend.complete(&req).await;
-        usage.record(day, outcome.as_ref().ok().and_then(|c| c.usage.as_ref()));
+        match &outcome {
+            Ok(c) => usage.record_reply(day, &req, c),
+            Err(_) => usage.record_request(day),
+        }
         if let Ok(c) = outcome {
             let spoken = clamp_for_speech(&c.text, &SummaryConfig::default());
             if !spoken.is_empty() {

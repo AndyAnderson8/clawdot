@@ -485,7 +485,7 @@ where
     if let Err(limit) = env.usage.check(day) {
         return Ok(SessionEnd::SpendCap(limit));
     }
-    env.usage.record(day, None);
+    env.usage.record_request(day);
     let tools = tools_for(&*env.host, &*env.conv, env.turn_cfg);
     send(ws, &dialect.session_update(cfg, &tools)).await?;
     let mut st = State {

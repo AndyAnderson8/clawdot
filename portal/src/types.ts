@@ -35,6 +35,8 @@ export interface Status {
   usage?: {
     requests_today: number;
     spend_today: number;
+    /** What today's spend rests on: the provider's own figure, your prices, or an estimate. */
+    spend_basis?: "reported" | "priced" | "estimated" | "none";
     /** The local day number today is, and the requests each recent day made. */
     day?: number;
     history?: { day: number; requests: number }[];
