@@ -10,6 +10,7 @@
 //! over TCP. Limits that protect a small device: connections are capped, the `hello` must arrive quickly, a
 //! silent peer is dropped after the keepalive timeout, and frames are size-limited by the protocol decoder.
 
+use self::reply::{Reply, poll_reply, stop_reply};
 use crate::assistant::{Effect, MediaCmd};
 use crate::cancel::CancelToken;
 use crate::inbox::endpoint::verify_token;
@@ -17,8 +18,8 @@ use crate::rtvoice::{Claim, Done, Job, Realtime, Speaker, resample};
 use crate::session::is_cancel;
 use crate::speech::decode_pcm16;
 use crate::voice::{
-    Config as DialogConfig, Cue, Dialog, Phase, Step, Synthesizer, Transcriber, VoiceOutcome,
-    speak_text_as, voice_turn,
+    Config as DialogConfig, Cue, Dialog, Phase, Step, Synthesizer, Transcriber, VoiceOutcome, hear,
+    sentences, speak_text_as,
 };
 use clawdot_protocol::frame::{Decoder, Limits, encode};
 use clawdot_protocol::message::{
@@ -112,6 +113,9 @@ pub struct Settings {
     pub rt_idle: Duration,
     /// After a realtime failure the normal path is used for this long (REQ-RTV-010).
     pub rt_cooldown: Duration,
+    /// How far ahead of playback a reply is synthesised: the next sentence is asked for when the speaker is
+    /// estimated to have this much audio or less left to play. A stop then wastes at most about one sentence.
+    pub reply_lead: Duration,
 }
 
 impl Default for Settings {
@@ -130,6 +134,7 @@ impl Default for Settings {
             realtime: None,
             rt_idle: Duration::from_secs(10),
             rt_cooldown: Duration::from_secs(60),
+            reply_lead: Duration::from_secs(2),
         }
     }
 }
@@ -271,6 +276,9 @@ struct Finished {
     effects: Vec<Effect>,
     /// The answer ends with a question, so the follow-up window is longer (REQ-AST-021).
     asked: bool,
+    /// The sentences of the reply, still to be synthesised and played one at a time (see `reply`). Empty when the
+    /// audio is already in `outcome`, or there is nothing to say.
+    speak: Vec<String>,
 }
 
 /// A running turn.
@@ -665,11 +673,14 @@ where
             stop = poll_stop(&mut st.stop_check), if st.stop_check.is_some() => {
                 st.stop_check = None;
                 if stop {
-                    stop_turn(&mut st, &mut wr).await?;
+                    stop_turn(&mut st, &mut wr, &mut pending).await?;
                 }
             }
             (purpose, audio) = poll_synth(&mut st.synth), if st.synth.is_some() => {
                 env.on_synthesized(&mut st, &mut wr, purpose, audio).await?;
+            }
+            made = poll_reply(&mut st.reply), if st.reply.is_some() => {
+                env.on_made(&mut st, &mut wr, made, &mut pending).await?;
             }
             Some(a) = st.announce_rx.recv() => {
                 env.on_announce(&mut st, a);
@@ -686,6 +697,7 @@ where
         st.drop_stale_synthesis();
         env.play_progress(&mut st);
         env.deliver_finished(&mut st, &mut wr, &mut pending).await?;
+        env.pump_reply(&mut st);
         env.run_steps(&mut st, &mut wr, pending.steps).await?;
     }
 }
@@ -743,6 +755,8 @@ struct SessionState {
     stop_check: Option<StopCheck>,
     /// Speech for an announcement or a progress phrase that is being made.
     synth: Option<Synth>,
+    /// The reply of a finished turn while it is being synthesised and played, a sentence at a time.
+    reply: Option<Reply>,
     /// The optional realtime session and what goes with it (REQ-RTV-009, REQ-RTV-010).
     rt: Option<RtLive>,
     rt_blocked_until: Option<Instant>,
@@ -777,6 +791,7 @@ impl SessionState {
             finished: None,
             stop_check: None,
             synth: None,
+            reply: None,
             rt: None,
             rt_blocked_until: None,
             warned_format: false,
@@ -791,6 +806,7 @@ impl SessionState {
             && !self.dialog.is_muted()
             && self.work.is_none()
             && self.finished.is_none()
+            && self.reply.is_none()
             && self.out.audio == Audio::Idle
     }
 
@@ -925,8 +941,14 @@ fn reset_answer(settings: &Settings, trusted: bool, slow: bool) -> (u32, Option<
     }
 }
 
-/// Stop the running turn and the progress speech that is playing for it (REQ-VOI-020).
-async fn stop_turn<W: AsyncWrite + Unpin>(st: &mut SessionState, wr: &mut W) -> Result<(), String> {
+/// Stop the running turn, the progress speech that is playing for it, and its reply if that is being made or
+/// spoken (REQ-VOI-020).
+async fn stop_turn<W: AsyncWrite + Unpin>(
+    st: &mut SessionState,
+    wr: &mut W,
+    pending: &mut Pending,
+) -> Result<(), String> {
+    stop_reply(st, wr, pending).await?;
     if let Some(t) = &st.turn_cancel {
         t.cancel();
         st.progress_q.clear();
@@ -975,6 +997,8 @@ async fn on_playback_done<W: AsyncWrite + Unpin>(
             st.dialog.set_output_playing(false);
         }
         Audio::Speech => {
+            // A reply the satellite stopped on its own ends here too: nobody hears the rest, so it is not made.
+            st.reply = None;
             finish_speech(st, wr).await?;
             pending.steps.push(st.dialog.on_playback_done());
         }
@@ -1068,9 +1092,12 @@ where
                     if let Some(r) = st.rt.as_mut() {
                         r.mic = None;
                     }
-                } else if st.turn_cancel.is_some() && st.dialog.phase() == Phase::Thinking {
-                    // While a turn is running the action button stops it (REQ-VOI-020).
-                    stop_turn(st, wr).await?;
+                } else if (st.turn_cancel.is_some() && st.dialog.phase() == Phase::Thinking)
+                    || st.reply.is_some()
+                {
+                    // While a turn is running, or its reply is being made or spoken, the action button stops
+                    // it (REQ-VOI-020).
+                    stop_turn(st, wr, pending).await?;
                 } else {
                     pending.woke = true;
                 }
@@ -1203,6 +1230,7 @@ where
             outcome,
             effects: done.effects,
             asked: false,
+            speak: Vec::new(),
         });
         if let Some(text) = closing {
             // The speech is made while the session goes on reading (network synthesis can take long).
@@ -1366,15 +1394,22 @@ where
             outcome,
             effects,
             asked,
+            speak,
         }) = st.finished.take_if(|_| !playing && progress_empty)
         else {
             return Ok(());
         };
-        if st.dialog.is_interrupting() {
+        // A reply made sentence by sentence keeps a stop capture open until its first sound.
+        let streamed = outcome.audio.is_empty() && !speak.is_empty();
+        if !streamed && st.dialog.is_interrupting() {
             send(wr, &Message::StreamStop).await?;
         }
         apply_effects(st, wr, self.media_url, &effects).await?;
-        if !outcome.audio.is_empty() {
+        if streamed {
+            // The reply begins when its first sentence is ready (`pump_reply` asks for it); until then the
+            // dialog is still thinking, so the cue and the stop capture work as before.
+            st.reply = Some(Reply::new(speak, asked));
+        } else if !outcome.audio.is_empty() {
             if asked {
                 st.dialog.expect_answer();
             }
@@ -1433,13 +1468,10 @@ where
         Ok(())
     }
 
-    /// Start a turn on a captured utterance: transcribe, ask the assistant, synthesize the reply.
+    /// Start a turn on a captured utterance: transcribe and ask the assistant. The reply is spoken afterwards, a
+    /// sentence at a time (see `reply`).
     fn start_turn(&self, st: &mut SessionState, pcm: Vec<i16>) {
-        let (stt, tts, asks) = (
-            Arc::clone(&self.stt),
-            Arc::clone(&self.tts),
-            self.asks.clone(),
-        );
+        let (stt, asks) = (Arc::clone(&self.stt), self.asks.clone());
         let speaker = self.speaker_id.clone();
         let cancel = CancelToken::new();
         st.turn_cancel = Some(cancel.clone());
@@ -1450,7 +1482,7 @@ where
             let sink = Arc::clone(&effects);
             let asked = Arc::new(AtomicBool::new(false));
             let asked_sink = Arc::clone(&asked);
-            let outcome = voice_turn(&*stt, &*tts, &pcm, move |text| async move {
+            let heard = hear(&*stt, &pcm, move |text| async move {
                 let (tx, rx) = oneshot::channel();
                 if asks
                     .send(Ask {
@@ -1479,10 +1511,17 @@ where
             .await;
             let effects =
                 std::mem::take(&mut *effects.lock().unwrap_or_else(PoisonError::into_inner));
+            let speak = sentences(&heard.reply);
             Finished {
-                outcome,
+                outcome: VoiceOutcome {
+                    transcript: heard.transcript,
+                    reply: heard.reply,
+                    audio: Vec::new(),
+                    problems: heard.problems,
+                },
                 effects,
                 asked: asked.load(Ordering::Relaxed),
+                speak,
             }
         }));
     }
@@ -1493,20 +1532,26 @@ async fn play_audio<W: AsyncWrite + Unpin>(w: &mut W, audio: &[Vec<i16>]) -> Res
     send(w, &Message::SetIndicator(Indicator::Speaking)).await?;
     send(w, &Message::AudioStart(AudioFormat::PCM_16K_MONO)).await?;
     for sentence in audio {
-        for chunk in sentence.chunks(DOWNLINK_CHUNK) {
-            let payload: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
-            send(
-                w,
-                &Message::AudioChunk {
-                    format: AudioFormat::PCM_16K_MONO,
-                    timestamp_ms: None,
-                    payload,
-                },
-            )
-            .await?;
-        }
+        send_chunks(w, sentence).await?;
     }
     send(w, &Message::AudioStop).await
+}
+
+/// Send audio to the speaker in pieces, inside a stream that is already open.
+async fn send_chunks<W: AsyncWrite + Unpin>(w: &mut W, audio: &[i16]) -> Result<(), String> {
+    for chunk in audio.chunks(DOWNLINK_CHUNK) {
+        let payload: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
+        send(
+            w,
+            &Message::AudioChunk {
+                format: AudioFormat::PCM_16K_MONO,
+                timestamp_ms: None,
+                payload,
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Pause music for the duration of speech (REQ-MUS-004); resumed on playback-done.
@@ -1638,6 +1683,8 @@ where
         });
     }
 }
+
+mod reply;
 
 #[cfg(test)]
 mod tests;
