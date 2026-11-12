@@ -446,7 +446,7 @@ fn open_assistant(
     core: &Arc<Core>,
 ) -> Result<Assistant, Failure> {
     let sched_store = JsonStore::new(args.data_dir.join("timers.json"), crate::sched::SCHEMA);
-    let sched = Scheduler::load(&sched_store, 64)
+    let sched = Scheduler::load(&sched_store, 64, &**clock)
         .map_err(|e| fail(1, format!("cannot load timers: {e}")))?;
     Ok(Assistant::new(
         clock.clone(),

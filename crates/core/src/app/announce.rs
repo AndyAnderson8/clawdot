@@ -213,12 +213,12 @@ impl Core {
         g: &mut super::Inner,
         token: &str,
         peer: IpAddr,
-        now: Ts,
+        mono: i64,
     ) -> Result<crate::inbox::endpoint::Endpoint, HookError> {
         if let Some(ep) = g.endpoints.authenticate_token(token) {
             return Ok(ep.clone());
         }
-        let ok = g.auth_failures.spend(peer, now);
+        let ok = g.auth_failures.spend(peer, mono);
         Err(if ok {
             HookError::Unauthorized
         } else {
@@ -247,9 +247,9 @@ impl Core {
     /// # Errors
     /// [`HookError::Unauthorized`] or [`HookError::RateLimited`].
     pub fn announce_check(&self, token: &str, peer: IpAddr) -> Result<(), HookError> {
-        let now = self.clock.now();
+        let mono = self.clock.monotonic_secs();
         let mut g = self.lock();
-        self.token_endpoint(&mut g, token, peer, now).map(|_| ())
+        self.token_endpoint(&mut g, token, peer, mono).map(|_| ())
     }
 
     /// Queue a one-way announcement on an endpoint (REQ-INB-021..024).
@@ -275,11 +275,11 @@ impl Core {
         a: &Announcement,
         audit_as: Option<AuditAs<'_>>,
     ) -> Result<(HookOutcome, String), AnnounceError> {
-        let now = self.clock.now();
+        let (now, mono) = (self.clock.now(), self.clock.monotonic_secs());
         let mut g = self.lock();
         let ep = match caller {
             Caller::Token(token, peer) => self
-                .token_endpoint(&mut g, token, peer, now)
+                .token_endpoint(&mut g, token, peer, mono)
                 .map_err(AnnounceError::Hook)?,
             Caller::Admin => {
                 let name = a.endpoint.as_deref().ok_or_else(|| {
@@ -295,11 +295,11 @@ impl Core {
         };
         let bucket = g.buckets.entry(ep.name.clone()).or_insert(Bucket {
             tokens: self.limits.hook_burst,
-            last: now,
+            last: mono,
         });
         if !take(
             bucket,
-            now,
+            mono,
             self.limits.hook_burst,
             self.limits.hook_per_sec,
         ) {

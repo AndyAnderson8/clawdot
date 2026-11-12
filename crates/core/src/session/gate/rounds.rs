@@ -41,18 +41,18 @@ impl<H: ToolHost> Turn<'_, H> {
             return None;
         }
         // A question the assistant asked is answered by this turn; "never mind" drops it.
-        let now = self.now;
+        let (now, mono) = (self.now, self.mono);
         let asked = self
             .conv
             .clarify
-            .take_if(|c| now - c.asked_at <= CONFIRM_WINDOW_SECS)
+            .take_if(|c| mono - c.asked_at <= CONFIRM_WINDOW_SECS)
             .is_some();
         if asked && is_no(user_text) {
             return Some(self.finish("Okay, never mind."));
         }
         // Notes are the user's to change, by their own words, and never go through the model (REQ-SEC-017).
         if let Some(cmd) = notes::parse(user_text) {
-            let speech = run_note_command(self.conv, cmd, now);
+            let speech = run_note_command(self.conv, cmd, now, mono);
             return Some(self.finish(&speech));
         }
         None

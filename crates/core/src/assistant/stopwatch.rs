@@ -226,7 +226,7 @@ mod tests {
             Assistant::new(
                 clock.clone(),
                 Box::new(FixedOffset(0)),
-                Scheduler::load(&store, 16).unwrap_or_else(|_| Scheduler::new(16)),
+                Scheduler::load(&store, 16, &**clock).unwrap_or_else(|_| Scheduler::new(16)),
                 Some(store.clone()),
                 None,
             )

@@ -14,6 +14,9 @@ use tokio::net::{TcpListener, TcpStream};
 /// 2026-11-09 12:00 UTC.
 struct Noon;
 impl Clock for Noon {
+    fn monotonic_secs(&self) -> i64 {
+        self.now()
+    }
     fn now(&self) -> Ts {
         1_794_225_600
     }

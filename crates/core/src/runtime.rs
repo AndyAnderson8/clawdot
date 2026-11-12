@@ -289,6 +289,12 @@ impl Brain {
         self.clock.now()
     }
 
+    /// Monotonic seconds, for measuring how long something has lasted (speaker idle time, windows).
+    #[must_use]
+    pub fn mono(&self) -> i64 {
+        self.clock.monotonic_secs()
+    }
+
     /// The timers, alarms and reminders that fell due since the last call.
     pub fn tick(&mut self) -> Vec<Fired> {
         self.assistant.tick()
@@ -539,6 +545,7 @@ impl Brain {
             system,
             day: self.assistant.local_day(),
             now: self.clock.now(),
+            mono: self.clock.monotonic_secs(),
         }
     }
 
@@ -626,7 +633,7 @@ pub fn dispatch(brain: &mut Brain, hub: &mut Hub, req: Request) -> Option<(Origi
             },
         ));
     };
-    let now = brain.clock.now();
+    let now = brain.clock.monotonic_secs();
     match hub.submit(req, now, || brain.kit(&llm)) {
         Submitted::Started | Submitted::Queued => None,
         Submitted::Refused(req) => Some((
@@ -646,7 +653,7 @@ pub fn finish_turn(brain: &mut Brain, hub: &mut Hub, f: turns::Finished) -> (Ori
     if let Some(e) = &f.failed {
         crate::diag::error(&format!("language model error: {e}"));
     }
-    let now = brain.clock.now();
+    let now = brain.clock.monotonic_secs();
     let (origin, reply, next) = hub.finish(f, now);
     if let Some(next) = next
         && let Some((o, r)) = dispatch(brain, hub, next)
@@ -672,7 +679,7 @@ pub async fn on_hub_event(brain: &mut Brain, hub: &mut Hub, core: &Core, ev: Hub
         HubEvent::Lost(speaker) => {
             // The satellite waiting for this answer sees its channel close and says it cannot answer.
             crate::diag::error("a turn ended without an answer");
-            let now = brain.clock.now();
+            let now = brain.clock.monotonic_secs();
             if let Some(next) = hub.lost(&speaker, now)
                 && let Some((origin, reply)) = dispatch(brain, hub, next)
             {
@@ -1454,9 +1461,9 @@ mod tests {
 
     fn timers_on_disk(dir: &TempDir) -> usize {
         let store = JsonStore::new(dir.0.join("timers.json"), crate::sched::SCHEMA);
-        crate::sched::Scheduler::load(&store, 64)
+        crate::sched::Scheduler::load(&store, 64, &crate::sched::SystemClock)
             .unwrap()
-            .list()
+            .list(&crate::sched::SystemClock)
             .len()
     }
 

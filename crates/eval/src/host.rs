@@ -28,6 +28,9 @@ impl ManualClock {
 }
 
 impl Clock for ManualClock {
+    fn monotonic_secs(&self) -> i64 {
+        self.now()
+    }
     fn now(&self) -> Ts {
         self.0.load(Ordering::Relaxed)
     }

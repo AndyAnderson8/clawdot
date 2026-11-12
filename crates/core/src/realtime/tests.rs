@@ -154,7 +154,7 @@ where
     let mut conv = Conversation::new("system", 20, 20_000, 600);
     let tcfg = TurnConfig::default();
     let mut usage = UsageTracker::new(limits);
-    let clock = || (1_i64, 1_000_i64);
+    let clock = || (1_i64, 1_000_i64, 1_000_i64);
     let keep_open = (!hang_up).then_some(mic_tx);
     let result = {
         let mut env = Env {
@@ -595,7 +595,7 @@ async fn a_session_refuses_to_start_when_the_cap_is_already_reached() {
     );
     let mut usage = UsageTracker::new(limits);
     usage.add_cost(1, 0.02);
-    let clock = || (1_i64, 1_000_i64);
+    let clock = || (1_i64, 1_000_i64, 1_000_i64);
     let mut env = Env {
         host: &mut host,
         conv: &mut conv,

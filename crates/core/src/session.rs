@@ -214,7 +214,8 @@ pub struct PendingAction {
     /// Tool name and canonical arguments: two actions are the same only if this is equal.
     fingerprint: String,
     description: String,
-    proposed_at: Ts,
+    /// Monotonic seconds when it was proposed (REQ-SEC-011: the window is a duration).
+    proposed_at: i64,
     /// The tier it was judged at, for the audit log.
     tier: Tier,
     /// The audit record that says it was held or proposed.
@@ -224,14 +225,14 @@ pub struct PendingAction {
 }
 
 impl PendingAction {
-    fn new(tool: &str, args: Value, description: String, now: Ts, tier: Tier) -> Self {
+    fn new(tool: &str, args: Value, description: String, mono: i64, tier: Tier) -> Self {
         let fingerprint = format!("{tool}\n{}", canonical(&args));
         Self {
             tool: tool.to_owned(),
             args,
             fingerprint,
             description,
-            proposed_at: now,
+            proposed_at: mono,
             tier,
             held_id: None,
             recent: None,
@@ -364,7 +365,7 @@ struct StoredResult {
 /// A question the assistant asked and is waiting on.
 #[derive(Debug, Clone)]
 struct Clarify {
-    asked_at: Ts,
+    asked_at: i64,
 }
 
 /// Most messages a standard conversation keeps after the system prompt (REQ-AST-007).
@@ -382,7 +383,8 @@ pub struct Conversation {
     max_messages: usize,
     max_bytes: usize,
     idle_secs: i64,
-    last_activity: Ts,
+    /// Monotonic seconds of the last turn; 0 means none yet.
+    last_activity: i64,
     pending: Option<PendingAction>,
     /// Untrusted text (an event, a web page, a tool result) is in the context the model sees (REQ-SEC-012).
     tainted: bool,
@@ -396,7 +398,7 @@ pub struct Conversation {
     next_result: u64,
     clarify: Option<Clarify>,
     /// The user was asked whether to forget every note, at this time.
-    forget_all_asked: Option<Ts>,
+    forget_all_asked: Option<i64>,
     /// Where the next tool-call id the host makes starts counting. One counter serves both the `host` ids of calls
     /// the host writes into the history itself (`host_call_id`) and the `call` ids it gives a reply's calls that
     /// lack a usable one (`unique_call_ids`).
@@ -497,9 +499,9 @@ impl Conversation {
     }
 
     /// Forget everything after the idle time. Returns the held action that was dropped, if any.
-    fn expire_if_idle(&mut self, now: Ts) -> Option<PendingAction> {
+    fn expire_if_idle(&mut self, mono: i64) -> Option<PendingAction> {
         let mut dropped = None;
-        if self.last_activity != 0 && now - self.last_activity > self.idle_secs {
+        if self.last_activity != 0 && mono - self.last_activity > self.idle_secs {
             self.history.clear();
             dropped = self.pending.take();
             self.tainted = false;
@@ -508,7 +510,7 @@ impl Conversation {
             self.clarify = None;
             self.forget_all_asked = None;
         }
-        self.last_activity = now;
+        self.last_activity = mono;
         dropped
     }
 
@@ -818,20 +820,12 @@ impl std::fmt::Debug for TurnCtl {
 }
 
 impl TurnCtl {
-    /// Seconds on the turn's clock: the one given, or a monotonic clock, so that setting the wall clock (a
-    /// device with no battery clock gets its time late, REQ-TMR-009) cannot end a turn early or stretch it.
-    fn now(&self) -> Ts {
+    /// Seconds on the turn's monotonic clock: the one given, or the system's, so that setting the wall clock
+    /// (a device with no battery clock gets its time late, REQ-TMR-009) cannot end a turn early or stretch it.
+    fn now(&self) -> i64 {
         match &self.clock {
-            Some(c) => c.now(),
-            None => {
-                // Deliberately process-wide: only the origin of a monotonic clock, not state of any core.
-                static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-                let secs = START
-                    .get_or_init(std::time::Instant::now)
-                    .elapsed()
-                    .as_secs();
-                i64::try_from(secs).unwrap_or(i64::MAX)
-            }
+            Some(c) => c.monotonic_secs(),
+            None => crate::sched::SystemClock.monotonic_secs(),
         }
     }
 }
@@ -891,8 +885,12 @@ pub struct TurnInputs<'a, H> {
     pub usage: &'a UsageTracker,
     /// The day number the counters are kept by.
     pub day: i64,
-    /// The time the turn runs at, in seconds.
+    /// The wall-clock time the turn runs at, in unix seconds: for timestamps (audit records, notes).
     pub now: Ts,
+    /// The monotonic time the turn runs at ([`Clock::monotonic_secs`]): the confirmation and clarify windows
+    /// and the conversation's idle time are measured on it, so a step of the wall clock cannot stretch or cut
+    /// them.
+    pub mono: i64,
 }
 
 /// Run one turn: the user's words in, the words to speak out. `ctl` carries a cancel token, a speech sink and
@@ -1306,7 +1304,7 @@ async fn summarise_result<B: ChatBackend>(
 }
 
 /// The user's note commands, answered by the host without asking the model (REQ-AST-023, REQ-SEC-017).
-fn run_note_command(conv: &mut Conversation, cmd: notes::Cmd, now: Ts) -> String {
+fn run_note_command(conv: &mut Conversation, cmd: notes::Cmd, now: Ts, mono: i64) -> String {
     use notes::{Cmd, NoteError};
     let Some(store) = conv.notes.clone() else {
         return NoteError::Off.spoken();
@@ -1357,7 +1355,7 @@ fn run_note_command(conv: &mut Conversation, cmd: notes::Cmd, now: Ts) -> String
             if n == 0 {
                 "I don't have any notes.".to_owned()
             } else {
-                conv.forget_all_asked = Some(now);
+                conv.forget_all_asked = Some(mono);
                 format!(
                     "Forget all {n} note{}? Yes or no?",
                     if n == 1 { "" } else { "s" }

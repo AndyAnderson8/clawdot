@@ -24,6 +24,9 @@ async fn start(limits: Limits, opts: ServeOptions) -> Harness {
 /// A clock that never moves, so token-bucket refill cannot depend on how fast the machine is.
 struct FrozenClock;
 impl crate::sched::Clock for FrozenClock {
+    fn monotonic_secs(&self) -> i64 {
+        1_800_000_000
+    }
     fn now(&self) -> crate::sched::Ts {
         1_800_000_000
     }

@@ -233,6 +233,7 @@ pub async fn run_scenario<M: Model>(
                         usage,
                         day,
                         now,
+                        mono: now,
                     },
                     &turn.say,
                 )
@@ -251,6 +252,7 @@ pub async fn run_scenario<M: Model>(
                         usage,
                         day,
                         now,
+                        mono: now,
                     },
                     &turn.say,
                 )

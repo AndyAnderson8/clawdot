@@ -23,6 +23,8 @@ pub const MAX_SPEAKERS: usize = 8;
 pub const MAX_WAITING: usize = 2;
 /// Seconds without activity after which an idle conversation is dropped: a conversation's own idle time.
 pub const IDLE_SECS: i64 = CONVERSATION_IDLE_SECS;
+// Every `now` taken below is a monotonic reading ([`crate::sched::Clock::monotonic_secs`]), not the wall clock:
+// idle time is a duration, and a step of the wall clock must not keep a conversation alive or drop it.
 
 /// Who is talking.
 pub type SpeakerId = String;
@@ -30,6 +32,7 @@ pub type SpeakerId = String;
 struct Slot<Q> {
     /// `None` while a turn holds it.
     conv: Option<Conversation>,
+    /// Monotonic seconds of the last use.
     last_used: i64,
     waiting: VecDeque<Q>,
 }

@@ -255,7 +255,7 @@ async fn rig(o: Opts, jobs: usize) -> Rig {
             core.set_error(None);
             let mut conv = Conversation::new("system", 20, 20_000, 600);
             let tcfg = TurnConfig::default();
-            let clock = || (1_i64, 1_000_i64);
+            let clock = || (1_i64, 1_000_i64, 1_000_i64);
             let finish = {
                 let mut env = Env {
                     host: &mut host,

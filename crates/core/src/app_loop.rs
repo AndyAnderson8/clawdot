@@ -216,7 +216,7 @@ impl App {
 
     /// Once a second: sweep stale conversations, publish the status, hand what is due to the speaker.
     pub fn on_tick(&mut self) {
-        self.hub.sweep(self.brain.now());
+        self.hub.sweep(self.brain.mono());
         self.publish_status();
         // Everything that speaks is handed to the speaker task (ADR-0021).
         while let Some((text, preview)) = self.core.take_speech_as() {

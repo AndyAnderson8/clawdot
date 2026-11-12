@@ -303,7 +303,7 @@ pub struct Io {
 }
 
 /// What a session shares with the rest of ClawDot: the tool host, the conversation (held actions live
-/// here), the turn limits, the usage counters, and the clock as `(local day, seconds)`.
+/// here), the turn limits, the usage counters, and the clock as `(local day, wall seconds, monotonic seconds)`.
 pub struct Env<'a, H> {
     /// The tool host.
     pub host: &'a mut H,
@@ -314,7 +314,7 @@ pub struct Env<'a, H> {
     /// Usage counters and the spend cap.
     pub usage: &'a mut UsageTracker,
     /// The clock.
-    pub clock: &'a (dyn Fn() -> (i64, Ts) + Sync),
+    pub clock: &'a (dyn Fn() -> (i64, Ts, i64) + Sync),
 }
 
 impl<H> fmt::Debug for Env<'_, H> {
@@ -477,7 +477,7 @@ where
     D: Dialect,
     H: ToolHost,
 {
-    let (day, _) = (env.clock)();
+    let (day, _, _) = (env.clock)();
     if let Err(limit) = env.usage.check(day) {
         return Ok(SessionEnd::SpendCap(limit));
     }
@@ -522,7 +522,7 @@ where
     /// The end of a session: write the audio cost not yet counted and close the socket if it is still usable.
     async fn finish(&mut self, outcome: &Result<SessionEnd, RealtimeError>) {
         if let Some(usd) = self.st.spend.rest() {
-            let (day, _) = (self.env.clock)();
+            let (day, _, _) = (self.env.clock)();
             self.env.usage.add_cost(day, usd);
         }
         if !matches!(
@@ -535,7 +535,7 @@ where
 
     /// What one turn works on: the shared environment and the time now.
     fn inputs(&mut self) -> TurnInputs<'_, H> {
-        let (day, now) = (self.env.clock)();
+        let (day, now, mono) = (self.env.clock)();
         TurnInputs {
             host: &mut *self.env.host,
             conv: &mut *self.env.conv,
@@ -543,6 +543,7 @@ where
             usage: &*self.env.usage,
             day,
             now,
+            mono,
         }
     }
 
@@ -578,7 +579,7 @@ where
     /// Add audio cost; the end of the session if that reached the cap.
     fn charge(&mut self, usd: f64) -> Option<SessionEnd> {
         let amount = self.st.spend.add(usd)?;
-        let (day, _) = (self.env.clock)();
+        let (day, _, _) = (self.env.clock)();
         self.env.usage.add_cost(day, amount);
         self.env.usage.check(day).err().map(SessionEnd::SpendCap)
     }

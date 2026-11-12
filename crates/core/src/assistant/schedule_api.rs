@@ -6,7 +6,7 @@
 
 use super::Assistant;
 use crate::app::{Fail, SchedOp};
-use crate::sched::{Item, Kind, SchedError, civil_from_days, days, days_from_civil};
+use crate::sched::{Clock, Item, Kind, SchedError, civil_from_days, days, days_from_civil};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -84,7 +84,9 @@ fn day_mask(list: &[u8]) -> Result<Option<u8>, Fail> {
     Ok(Some(mask))
 }
 
-fn item_json(i: &Item, now: i64) -> Value {
+/// One item for the portal. `fire_at` and `seconds_left` are worked out now (a countdown's wall-clock time is
+/// derived from the seconds it has left), so they stay right after the wall clock was set.
+fn item_json(i: &Item, clock: &dyn Clock) -> Value {
     let kind = match i.kind {
         Kind::Timer => "timer",
         Kind::Alarm => "alarm",
@@ -95,8 +97,8 @@ fn item_json(i: &Item, now: i64) -> Value {
         json!({ "days": list, "hour": r.hour, "minute": r.minute, "every_day": r.days & days::ALL == days::ALL })
     });
     json!({
-        "id": i.id, "kind": kind, "label": i.label, "fire_at": i.fire_at,
-        "seconds_left": (i.fire_at - now).max(0), "repeat": repeat,
+        "id": i.id, "kind": kind, "label": i.label, "fire_at": i.due_wall(clock),
+        "seconds_left": i.secs_left(clock), "repeat": repeat,
     })
 }
 
@@ -135,16 +137,17 @@ impl Assistant {
             "id": changed,
             "now": now,
             "clock_valid": self.clock.wall_clock_valid(),
-            "items": self.sched.list().into_iter().map(|i| item_json(i, now)).collect::<Vec<_>>(),
+            "items": self.sched.list(&*self.clock).into_iter().map(|i| item_json(i, &*self.clock)).collect::<Vec<_>>(),
         }))
     }
 
     fn add_item(&mut self, v: &Value) -> Result<u64, Fail> {
         let spec: Spec = serde_json::from_value(v.clone())
             .map_err(|_| invalid("The request is not a valid timer, alarm, or reminder."))?;
-        if !self.clock.wall_clock_valid() {
+        // A countdown timer needs no calendar, so it can be set before the wall clock is.
+        if !self.clock.wall_clock_valid() && spec.kind != "timer" {
             return Err(invalid(
-                "The device clock is not set yet, so nothing can be scheduled. It needs to get the time from the network.",
+                "The device clock is not set yet, so no alarm or reminder can be set. It needs to get the time from the network.",
             ));
         }
         let label = spec.label.trim();
@@ -158,7 +161,7 @@ impl Assistant {
                     .seconds
                     .ok_or_else(|| invalid("A timer needs a length."))?;
                 self.sched
-                    .set_timer(now, secs, label)
+                    .set_timer(&*self.clock, secs, label)
                     .map_err(|e| sched_fail(&e))
             }
             "alarm" => {
@@ -201,11 +204,14 @@ impl Assistant {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::sched::{Clock, FixedOffset, Scheduler, Ts};
+    use crate::sched::{FixedOffset, Scheduler, Ts};
     use std::sync::Arc;
 
     struct At(Ts);
     impl Clock for At {
+        fn monotonic_secs(&self) -> i64 {
+            self.now()
+        }
         fn now(&self) -> Ts {
             self.0
         }
@@ -332,12 +338,21 @@ mod tests {
         assert_eq!(ids(&a.admin_sched(SchedOp::List).unwrap()).len(), 0);
     }
 
-    // REQ-TMR-006
+    // REQ-TMR-006, REQ-TMR-009: a point on the calendar needs the calendar; a countdown does not.
     #[test]
-    fn nothing_can_be_added_while_the_clock_is_unset() {
+    fn no_alarm_or_reminder_can_be_added_while_the_clock_is_unset_but_a_timer_can() {
         let mut a = assistant(5);
-        let e = a.admin_sched(SchedOp::Add(json!({"kind":"timer","seconds":5})));
-        assert!(matches!(e, Err(Fail::Invalid(m)) if m.contains("clock")));
-        assert_eq!(a.admin_sched(SchedOp::List).unwrap()["clock_valid"], false);
+        for body in [
+            json!({"kind":"alarm","hour":7,"minute":0}),
+            json!({"kind":"reminder","label":"x","date":"2026-11-10","time":"09:00"}),
+        ] {
+            let e = a.admin_sched(SchedOp::Add(body));
+            assert!(matches!(e, Err(Fail::Invalid(m)) if m.contains("clock")));
+        }
+        let r = a
+            .admin_sched(SchedOp::Add(json!({"kind":"timer","seconds":5})))
+            .unwrap();
+        assert_eq!(r["clock_valid"], false);
+        assert_eq!(r["items"][0]["seconds_left"], 5);
     }
 }
