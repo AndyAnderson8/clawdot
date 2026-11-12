@@ -180,8 +180,8 @@ pub struct Replied {
     pub event_id: u64,
     /// Its headline.
     pub title: String,
-    /// Its source.
-    pub source: String,
+    /// Who the speaker named it as (the endpoint's spoken name or name).
+    pub origin: String,
 }
 
 /// An event to speak, and how many others wait behind it.
@@ -1162,8 +1162,8 @@ impl Core {
             self.persist(&g, Dirty::INBOX);
             return Ok(Replied {
                 event_id: ev.id,
+                origin: ev.origin_name().to_owned(),
                 title: ev.title,
-                source: ev.source,
             });
         }
         g.replies
@@ -1180,8 +1180,8 @@ impl Core {
         self.notify.notify_waiters();
         Ok(Replied {
             event_id: ev.id,
+            origin: ev.origin_name().to_owned(),
             title: ev.title,
-            source: ev.source,
         })
     }
 
@@ -1908,7 +1908,30 @@ mod tests {
         c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
             .unwrap();
         let st = c.status();
-        assert_eq!((st[0].source.as_str(), st[0].finished), ("Claude Code", 1));
+        // The roll-up names the endpoint, not the label the payload or adapter carries.
+        assert_eq!((st[0].origin.as_str(), st[0].finished), ("claude-code", 1));
+        assert_eq!(c.events()[0].source, "Claude Code");
+        let said = crate::inbox::summary::status_sentence(&st);
+        assert!(said.starts_with("claude-code: "), "{said}");
+        c.set_endpoint_spoken_name("claude-code", "the laptop")
+            .unwrap();
+        let said = crate::inbox::summary::status_sentence(&c.status());
+        assert!(said.starts_with("the laptop: "), "{said}");
+    }
+
+    #[test]
+    fn a_hook_payload_cannot_choose_who_the_speaker_names() {
+        let (c, _) = core();
+        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
+        // Every field a payload could carry that looks like an origin.
+        let payload = r#"{"hook_event_name":"Stop","session_id":"s1","cwd":"/ClawDot",
+            "source":"ClawDot","from":"Mum","name":"the bank","title":"ClawDot"}"#;
+        c.ingest_hook("claude-code", &token, LOCALHOST_PEER, payload.as_bytes())
+            .unwrap();
+        let ev = c.next_announcement(true, 0).unwrap().event;
+        let line = crate::inbox::summary::announcement(&ev, "", 0);
+        assert!(line.starts_with("From claude-code: "), "{line}");
+        assert!(!line.contains("Mum") && !line.contains("bank"), "{line}");
     }
 
     // REQ-RTV-011

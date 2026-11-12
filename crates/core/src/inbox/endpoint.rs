@@ -11,6 +11,8 @@ use std::fmt;
 
 /// Longest endpoint name.
 pub const MAX_NAME: usize = 32;
+/// Longest spoken name, in characters.
+pub const MAX_SPOKEN_NAME: usize = 40;
 const TOKEN_PREFIX: &str = "cdt_";
 
 /// Why an endpoint operation failed.
@@ -24,6 +26,8 @@ pub enum EndpointError {
     NotFound,
     /// The operating system could not provide randomness.
     NoRandomness,
+    /// The spoken name is too long or has characters that are not plain words.
+    InvalidSpokenName,
 }
 
 impl fmt::Display for EndpointError {
@@ -36,6 +40,10 @@ impl fmt::Display for EndpointError {
             Self::Exists => write!(f, "an endpoint with that name already exists"),
             Self::NotFound => write!(f, "no such endpoint"),
             Self::NoRandomness => write!(f, "could not generate a secure token"),
+            Self::InvalidSpokenName => write!(
+                f,
+                "the spoken name is plain words of up to {MAX_SPOKEN_NAME} characters: letters, digits, spaces, - _ ' and ."
+            ),
         }
     }
 }
@@ -107,6 +115,40 @@ pub struct Endpoint {
     /// Filtering rules.
     #[serde(default)]
     pub filter: EndpointFilter,
+    /// What the speaker says as the origin of this endpoint's messages ("From the kitchen: ..."). Set only by
+    /// the administrator; when absent the endpoint's own name is spoken. A sender can never choose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoken_name: Option<String>,
+}
+
+impl Endpoint {
+    /// The words spoken as the origin of this endpoint's messages: its spoken name, or its name.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        self.spoken_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// Check a spoken name: one line of plain words, at most [`MAX_SPOKEN_NAME`] characters (letters, digits, single
+/// spaces, `-`, `_`, `'` and `.`). No control characters, markup, brackets, quotes or links, so the name is safe to
+/// say and to place in a prompt. Blank means "none" (`Ok(None)`).
+///
+/// # Errors
+/// [`EndpointError::InvalidSpokenName`].
+pub fn clean_spoken_name(raw: &str) -> Result<Option<String>, EndpointError> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let plain = |c: char| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '\'' | '.');
+    if t.chars().count() > MAX_SPOKEN_NAME
+        || !t.chars().all(plain)
+        || t.contains("  ")
+        || !t.starts_with(char::is_alphanumeric)
+    {
+        return Err(EndpointError::InvalidSpokenName);
+    }
+    Ok(Some(t.to_owned()))
 }
 
 /// All endpoints.
@@ -200,6 +242,21 @@ impl Endpoints {
         adapter: &str,
         now: Ts,
     ) -> Result<(Endpoint, String), EndpointError> {
+        self.create_with(name, adapter, None, now)
+    }
+
+    /// [`Endpoints::create`] with a spoken name (checked by [`clean_spoken_name`]), all or nothing.
+    ///
+    /// # Errors
+    /// As [`Endpoints::create`], and [`EndpointError::InvalidSpokenName`].
+    pub fn create_with(
+        &mut self,
+        name: &str,
+        adapter: &str,
+        spoken_name: Option<&str>,
+        now: Ts,
+    ) -> Result<(Endpoint, String), EndpointError> {
+        let spoken_name = spoken_name.map(clean_spoken_name).transpose()?.flatten();
         if !valid_name(name) {
             return Err(EndpointError::InvalidName);
         }
@@ -214,6 +271,7 @@ impl Endpoints {
             created_at: now,
             enabled: true,
             filter: EndpointFilter::default(),
+            spoken_name,
         };
         self.list.push(ep.clone());
         Ok((ep, token))
@@ -232,6 +290,18 @@ impl Endpoints {
             .ok_or(EndpointError::NotFound)?;
         ep.token_hash = hash_token(&token);
         Ok(token)
+    }
+
+    /// Set (or, with a blank value, clear) an endpoint's spoken name.
+    ///
+    /// # Errors
+    /// [`EndpointError::NotFound`]; [`EndpointError::InvalidSpokenName`].
+    pub fn set_spoken_name(&mut self, name: &str, spoken: &str) -> Result<(), EndpointError> {
+        let spoken = clean_spoken_name(spoken)?;
+        self.get_mut(name)
+            .ok_or(EndpointError::NotFound)?
+            .spoken_name = spoken;
+        Ok(())
     }
 
     /// Delete an endpoint.
@@ -371,6 +441,45 @@ mod tests {
             eps.create("ci_main-1", "generic", 0).unwrap_err(),
             EndpointError::Exists
         );
+    }
+
+    #[test]
+    fn spoken_names_are_plain_words() {
+        assert_eq!(
+            clean_spoken_name("  the kitchen "),
+            Ok(Some("the kitchen".into()))
+        );
+        assert_eq!(clean_spoken_name("   "), Ok(None));
+        for bad in [
+            "a\nb",
+            "<b>x</b>",
+            "[x](http://e)",
+            "x`y",
+            "a  b",
+            "-x",
+            "say \"hi\"",
+            "a|b",
+            "a\u{7}b",
+            &"x".repeat(41),
+        ] {
+            assert_eq!(
+                clean_spoken_name(bad),
+                Err(EndpointError::InvalidSpokenName),
+                "{bad:?}"
+            );
+        }
+        assert!(clean_spoken_name(&"x".repeat(40)).is_ok());
+        let mut eps = Endpoints::default();
+        assert_eq!(
+            eps.create_with("k", "generic", Some("<x>"), 0).unwrap_err(),
+            EndpointError::InvalidSpokenName
+        );
+        assert!(eps.all().is_empty(), "nothing is created on a bad name");
+        let (ep, _) = eps.create_with("k", "generic", Some("Kitchen"), 0).unwrap();
+        assert_eq!(ep.origin(), "Kitchen");
+        eps.set_spoken_name("k", "").unwrap();
+        assert_eq!(eps.get("k").unwrap().origin(), "k");
+        assert_eq!(eps.set_spoken_name("zz", "x"), Err(EndpointError::NotFound));
     }
 
     #[test]

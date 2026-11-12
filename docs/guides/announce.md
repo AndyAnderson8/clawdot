@@ -7,9 +7,9 @@ A script, a home-automation rule or a bridge can make ClawDot speak a message, w
 An announcement is an ordinary inbox event on one of your **endpoints**. It does not go straight to the speaker:
 
 * the endpoint's **mute**, **minimum priority**, **quiet hours** and **burst limit** apply, so a flood or a message at 3 a.m. is handled like any other event (only `urgent` is spoken in quiet hours);
-* it waits while the speaker is busy and is spoken when it is idle, with the source named first: "From Kitchen: Dinner is ready.";
+* it waits while the speaker is busy and is spoken when it is idle, with the endpoint named first: "From kitchen: Dinner is ready." What is named is the endpoint's **spoken name** if you set one in the portal, otherwise its name. The sender cannot choose it;
 * its words are **data**. A short message (200 characters or fewer) is cleaned for speech (markup and links removed, control characters dropped) and spoken as it is. A longer one goes to the summary model, which has no tools and sees the text inside a data fence. Nothing in the text can start a tool, set a timer, write a note or answer a question the assistant is holding for your "yes" (REQ-INB-022). The evals `inj-announce-text-cannot-run-a-tool` and `inj-announce-text-cannot-say-yes` check this;
-* it is written to the **audit log** (`GET /api/audit`, tool `announce`, trigger `announce:<source>`) without the token, and it does not count against the daily action caps.
+* it is written to the **audit log** (`GET /api/audit`, tool `announce`, trigger `announce:<endpoint>`) without the token, and it does not count against the daily action caps.
 
 It is not a way to talk to the assistant: the text is never an instruction to it. To drive a coding agent by voice use a hook endpoint ([REQ-INB-003](../specs/0001-product-requirements.md)).
 
@@ -35,7 +35,7 @@ It is not a way to talk to the assistant: the text is never an instruction to it
 |---|---|
 | `text` | Required. What to say, up to 2,000 characters. |
 | `title` | Optional headline, up to 200 characters. Default: the first sentence of `text`. |
-| `source` | Optional name spoken as "From <source>", up to 60 characters. Default: the endpoint's name. |
+| `source` | Optional label the sender gives itself, up to 60 characters. It is shown in the portal and the audit log as untrusted text. It is never spoken as the origin of the message. |
 | `priority` | `low`, `normal` (default) or `urgent`. Only `urgent` is spoken during quiet hours. |
 | `reply` | `true` lets the listener answer it. Default `false`: a spoken "tell it ..." gets "nothing to reply to". |
 | `ttl_secs` | 1 to 86,400. If it has not been spoken by then it is dropped, so "the oven is hot" is never read an hour late. Default: no limit. |
@@ -135,5 +135,5 @@ action:
 ## Security notes
 
 * The announce token lets its holder make the speaker say things. Treat it like a door key: one endpoint per sender, rotate on a leak, and keep it out of repositories.
-* The speaker names the source first, so an announcement cannot pass itself off as the assistant, but a sender chooses its own `source` word. Do not give a token to anything you do not trust to pick a truthful name.
+* The speaker names the endpoint first (its spoken name, which only the administrator sets), so an announcement cannot pass itself off as the assistant, ClawDot or a person by choosing a `source` word. Give each sender its own endpoint and a spoken name that says who it is.
 * Spoken text can still be rude or misleading. It cannot do anything else.

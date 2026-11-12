@@ -30,7 +30,7 @@ USAGE:
     clawdot say TEXT [options]
 
 OPTIONS:
-    --source NAME     Who is speaking; the speaker says \"From NAME: ...\" (default: the endpoint's name)
+    --source NAME     A label for the message (shown in the portal; not spoken; the endpoint is named)
     --title TEXT      A short headline (default: the first sentence of the text)
     --priority P      low, normal or urgent; only urgent is spoken in quiet hours (default: normal)
     --reply           Allow the listener to answer it (default: a one-way message)

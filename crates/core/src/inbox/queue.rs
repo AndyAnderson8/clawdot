@@ -70,8 +70,8 @@ pub struct Plan {
 /// A per-source roll-up for "what are my agents doing?" (REQ-INB-016).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceStatus {
-    /// The source name.
-    pub source: String,
+    /// Who the speaker names: the endpoint's spoken name, or its name.
+    pub origin: String,
     /// Events blocked on the user (not yet acknowledged or dismissed).
     pub waiting_on_you: usize,
     /// Finished events not yet acknowledged or dismissed.
@@ -199,6 +199,7 @@ impl Inbox {
             id,
             endpoint: endpoint.name.clone(),
             source: mapped.source,
+            origin: endpoint.origin().to_owned(),
             kind: mapped.kind,
             title: mapped.title,
             text: mapped.text,
@@ -268,6 +269,18 @@ impl Inbox {
                 Some(id) => self.state.events.retain(|e| e.id != id),
                 None => break,
             }
+        }
+    }
+
+    /// An endpoint's spoken name changed: events already queued are spoken under the new one.
+    pub fn set_origin_for(&mut self, endpoint: &str, origin: &str) {
+        for e in self
+            .state
+            .events
+            .iter_mut()
+            .filter(|e| e.endpoint == endpoint)
+        {
+            origin.clone_into(&mut e.origin);
         }
     }
 
@@ -416,11 +429,11 @@ impl Inbox {
             if matches!(e.state, EventState::Dismissed | EventState::Acknowledged) {
                 continue;
             }
-            let idx = match out.iter().position(|s| s.source == e.source) {
+            let idx = match out.iter().position(|s| s.origin == e.origin_name()) {
                 Some(i) => i,
                 None => {
                     out.push(SourceStatus {
-                        source: e.source.clone(),
+                        origin: e.origin_name().to_owned(),
                         waiting_on_you: 0,
                         finished: 0,
                         unheard: 0,

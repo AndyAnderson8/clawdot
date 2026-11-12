@@ -82,7 +82,7 @@ The portal (REQ-CFG-032..036) edits three small files in the data directory, wri
 | File | Holds |
 |---|---|
 | `tools.json` | HTTP tools added in the portal, and the names of tools turned off (built in, from the config file, or portal tools) |
-| `connections.json` | MCP servers added in the portal, and the servers and tools turned off |
+| `connections.json` | MCP servers added in the portal, the servers and tools turned off, and for each server a fingerprint of every tool the administrator approved as shown (REQ-EXT-019) |
 | `skills.json` | Skills |
 
 At start-up the core loads the config-file entries first, then the portal ones. A portal entry that no longer validates (for example its token variable is no longer set) is kept in the file, not loaded, and shown with the reason. Changes apply to the running assistant at once. Only the **name** of a token environment variable is ever accepted; the value is read from the environment by the core and never passes through the portal.

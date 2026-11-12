@@ -878,6 +878,123 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
 
 // ----- forgotten password: local reset window (REQ-CFG-069); there is no recovery code -----
 
+// REQ-INB-041
+#[tokio::test]
+async fn only_the_administrator_sets_the_spoken_name_and_it_is_validated() {
+    let p = start(false).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+
+    // Created with one; a bad one is refused and nothing is created.
+    let bad = r#"{"name":"kitchen","adapter":"generic","spoken_name":"<b>Mum</b>"}"#;
+    assert_eq!(
+        call(&p, "POST", "/api/endpoints", &session, bad).await.0,
+        400
+    );
+    assert!(p.core.endpoints().is_empty());
+    let good = r#"{"name":"kitchen","adapter":"generic","spoken_name":"the kitchen"}"#;
+    let (s, e) = call(&p, "POST", "/api/endpoints", &session, good).await;
+    assert_eq!((s, e["spoken_name"].as_str()), (201, Some("the kitchen")));
+    let token = e["token"].as_str().unwrap().to_owned();
+
+    // The listing carries it, and a blank clears it.
+    let (_, o) = call(&p, "GET", "/api/overview", &session, "").await;
+    assert_eq!(o["endpoints"][0]["spoken_name"], "the kitchen");
+    let (s, e) = call(
+        &p,
+        "PUT",
+        "/api/endpoints/kitchen",
+        &session,
+        r#"{"spoken_name":"Hall"}"#,
+    )
+    .await;
+    assert_eq!((s, e["spoken_name"].as_str()), (200, Some("Hall")));
+    for (body, status) in [
+        (r#"{"spoken_name":"[x](http://e.test)"}"#, 400),
+        (r#"{"spoken_name":"line\nbreak"}"#, 400),
+        (r#"{"spoken_name":"ClawDot","x":1}"#, 400),
+        (r#"{}"#, 400),
+    ] {
+        let s = call(&p, "PUT", "/api/endpoints/kitchen", &session, body)
+            .await
+            .0;
+        assert_eq!(s, status, "{body}");
+    }
+    assert_eq!(
+        call(
+            &p,
+            "PUT",
+            "/api/endpoints/nope",
+            &session,
+            r#"{"spoken_name":"x"}"#
+        )
+        .await
+        .0,
+        404
+    );
+    let (s, e) = call(
+        &p,
+        "PUT",
+        "/api/endpoints/kitchen",
+        &session,
+        r#"{"spoken_name":null}"#,
+    )
+    .await;
+    assert_eq!((s, e["spoken_name"].is_null()), (200, true));
+
+    // Neither anonymous callers nor the endpoint's own token can change it.
+    let anon = call(
+        &p,
+        "PUT",
+        "/api/endpoints/kitchen",
+        "",
+        r#"{"spoken_name":"x"}"#,
+    )
+    .await
+    .0;
+    assert!(anon == 401 || anon == 429, "{anon}");
+    let by_token = call(
+        &p,
+        "PUT",
+        "/api/endpoints/kitchen",
+        &format!("Bearer {token}"),
+        r#"{"spoken_name":"ClawDot"}"#,
+    )
+    .await
+    .0;
+    assert!(by_token == 401 || by_token == 429, "{by_token}");
+    assert!(p.core.endpoints()[0].spoken_name.is_none());
+}
+
+// REQ-EXT-019
+#[tokio::test]
+async fn accepting_a_connections_tools_needs_the_administrator_and_a_real_connection() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    let path = "/api/connections/ghost/accept";
+    let anon = call(&p, "POST", path, "", "").await.0;
+    assert!(anon == 401 || anon == 429, "{anon}");
+    // No such connection, with an empty body or a named tool.
+    assert_eq!(call(&p, "POST", path, &session, "").await.0, 404);
+    assert_eq!(
+        call(&p, "POST", path, &session, r#"{"tool":"ghost__x"}"#)
+            .await
+            .0,
+        404
+    );
+    // A body that is not {} or {"tool": text}.
+    assert_eq!(
+        call(&p, "POST", path, &session, r#"{"all":true}"#).await.0,
+        400
+    );
+    assert_eq!(call(&p, "POST", path, &session, "not json").await.0, 400);
+    // Only POST.
+    assert_eq!(call(&p, "GET", path, &session, "").await.0, 405);
+}
+
 fn token_of(v: &Value) -> String {
     format!("Bearer {}", v["token"].as_str().unwrap())
 }

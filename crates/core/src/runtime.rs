@@ -800,13 +800,31 @@ pub fn mcp_connected(brain: &mut Brain, core: &Core, done: Done) {
             reserved.extend(brain.http_tools.specs().into_iter().map(|t| t.name));
             let name = done.pending.name().to_owned();
             let listed = done.tools.as_ref().ok().map(Vec::len);
-            let warnings =
-                Arc::make_mut(&mut brain.mcp).settle(done.pending.name(), done.tools, &reserved);
+            // Only what the administrator approved is offered; a server never approved (saved before
+            // approvals existed, or defined in the configuration file) is approved as found, once.
+            let approved = brain.ext.approved_tools(&name);
+            let warnings = Arc::make_mut(&mut brain.mcp).settle(
+                done.pending.name(),
+                done.tools,
+                &reserved,
+                approved.as_ref(),
+            );
             for w in warnings {
                 eprintln!("clawdot: {w}");
             }
             if let Some(n) = listed {
                 println!("clawdot: mcp server `{name}` connected ({n} tools listed)");
+            }
+            if approved.is_none() {
+                match brain.ext.pin_first_connect(&name, &brain.mcp) {
+                    Ok(true) => println!(
+                        "clawdot: mcp server `{name}`: its tools are approved as found (first connect); later changes wait for review"
+                    ),
+                    Ok(false) => {}
+                    Err(e) => {
+                        eprintln!("clawdot: mcp server `{name}`: could not record its tools: {e:?}")
+                    }
+                }
             }
             core.set_ui_tools(brain.listing());
             return;

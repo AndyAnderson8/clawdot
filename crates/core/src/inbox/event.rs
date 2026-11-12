@@ -93,8 +93,13 @@ pub struct Event {
     pub id: u64,
     /// The endpoint that received it.
     pub endpoint: String,
-    /// Human-readable origin, for example `Claude Code`.
+    /// The label the sender gave itself, for example `Claude Code`. Untrusted: shown as text in the portal and
+    /// recorded, never spoken as the origin and never given to the summariser as fact.
     pub source: String,
+    /// The origin the speaker names: the endpoint's spoken name, or its name, as the administrator had set it
+    /// when the event arrived. Empty on events saved before it existed (see [`Event::origin_name`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub origin: String,
     /// What it is about.
     pub kind: EventKind,
     /// Short headline.
@@ -122,10 +127,25 @@ pub struct Event {
 }
 
 impl Event {
+    /// Who the speaker says the event is from: [`Event::origin`], or the endpoint's name for an old event.
+    #[must_use]
+    pub fn origin_name(&self) -> &str {
+        if self.origin.is_empty() {
+            &self.endpoint
+        } else {
+            &self.origin
+        }
+    }
+
     /// Approximate stored size, for the queue's byte budget.
     #[must_use]
     pub fn size(&self) -> usize {
-        self.title.len() + self.text.len() + self.source.len() + self.endpoint.len() + 96
+        self.title.len()
+            + self.text.len()
+            + self.source.len()
+            + self.origin.len()
+            + self.endpoint.len()
+            + 96
     }
 }
 
@@ -160,6 +180,11 @@ mod tests {
             "priority":"normal","received_at":5,"state":{"state":"new"}}"#;
         let e: Event = serde_json::from_str(old).unwrap();
         assert!(!e.no_reply && e.expires_at.is_none());
+        assert_eq!(
+            e.origin_name(),
+            "cc",
+            "an old event is spoken as its endpoint"
+        );
         let json = serde_json::to_string(&e).unwrap();
         assert!(!json.contains("no_reply") && !json.contains("expires_at"));
     }

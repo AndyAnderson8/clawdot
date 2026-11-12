@@ -143,7 +143,7 @@ fn a_spoken_instruction_resumes_the_agent_session_and_is_acknowledged() {
         .assistant
         .handle("tell it to also add unit tests")
         .expect("handled locally");
-    assert_eq!(out.say, "Okay, sending that to Claude Code.");
+    assert_eq!(out.say, "Okay, sending that to claude-code.");
 
     let recorder = Recorder::default();
     let mut handled = Handled::in_memory();
@@ -212,7 +212,7 @@ fn thanks_ill_handle_it_acknowledges_without_running_anything() {
     announce(&f);
     assert_eq!(
         f.assistant.handle("thanks I'll handle it").unwrap().say,
-        "Okay. I'll let Claude Code know you've got it."
+        "Okay. I'll let claude-code know you've got it."
     );
 
     let recorder = Recorder::default();

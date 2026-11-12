@@ -458,7 +458,7 @@ impl Assistant {
                     String::new()
                 };
                 core.reply(kind, &body)
-                    .map(|r| format!("Sent to {}.", r.source))
+                    .map(|r| format!("Sent to {}.", r.origin))
                     .map_err(|e| match e {
                         crate::app::ReplyError::NothingToReplyTo => {
                             "no agent event is waiting for a reply".to_owned()
