@@ -183,7 +183,7 @@ The reading continued through the rest of the core's own logic, the agent bridge
 
 | Measure | Value |
 |---|---|
-| Core unit tests, all features | about 990 |
+| Core unit tests, all features | 945 |
 | `runtime.rs` | 489 lines (was 1,631) |
 | Functions over 70 lines in the core | 25 |
 | Product spec | 0.55 |
