@@ -280,7 +280,8 @@ impl fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 fn parse_usage(v: &Value) -> Option<Usage> {
-    let u = v.get("usage")?;
+    // Servers that stream usage send `"usage": null` on every chunk but the last: that is no usage.
+    let u = v.get("usage").filter(|u| u.is_object())?;
     Some(Usage {
         prompt_tokens: u
             .get("prompt_tokens")
@@ -843,5 +844,20 @@ mod tests {
         let parts = split_all(&[&long]);
         assert!(parts.len() >= 2, "{parts:?}");
         assert_eq!(parts.join("").replace(' ', ""), long.replace(' ', ""));
+    }
+
+    #[test]
+    fn a_null_usage_field_is_no_usage() {
+        // OpenAI-compatible servers put `"usage": null` on every chunk but the last.
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(r#"data: {"choices":[{"delta":{"content":"a"}}],"usage":null}"#)
+            .unwrap();
+        assert_eq!(acc.finish().usage, None);
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(r#"data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#)
+            .unwrap();
+        acc.feed_line(r#"data: {"choices":[],"usage":null}"#)
+            .unwrap();
+        assert_eq!(acc.finish().usage.map(|u| u.prompt_tokens), Some(3));
     }
 }
