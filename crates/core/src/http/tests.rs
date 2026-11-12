@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::{Adapters, Limits};
+use crate::app::{Adapters, LOCALHOST_PEER, Limits};
 use crate::inbox::reply::ReplyKind;
 use crate::sched::SystemClock;
 use std::net::SocketAddr;
@@ -78,7 +78,23 @@ async fn call_for(
     headers: &[(&str, &str)],
     body: &str,
 ) -> (u16, String, String) {
-    let mut s = TcpStream::connect(addr).await.unwrap();
+    call_from("127.0.0.1", addr, host, method, path, headers, body).await
+}
+
+/// Like [`call_for`], sent from the local address `source` (any 127.x.y.z address is this machine), so a test can
+/// be several different clients.
+async fn call_from(
+    source: &str,
+    addr: SocketAddr,
+    host: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, String, String) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(format!("{source}:0").parse().unwrap()).unwrap();
+    let mut s = socket.connect(addr).await.unwrap();
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
@@ -419,7 +435,7 @@ async fn unacknowledged_replies_are_resent_on_reconnect_and_acks_clear_them() {
     );
     assert!(
         h.core
-            .bridge_pending("claude-code", &h.token, 0)
+            .bridge_pending("claude-code", &h.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );
@@ -488,7 +504,7 @@ async fn a_stalled_request_body_is_cut_off() {
     assert!(String::from_utf8_lossy(&got).contains("413"));
     assert!(
         h.core
-            .bridge_pending("claude-code", &h.token, 0)
+            .bridge_pending("claude-code", &h.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );
@@ -545,7 +561,14 @@ async fn a_stream_whose_reader_stopped_reading_ends_and_frees_its_slot() {
         ..ServeOptions::default()
     };
     // The response body is held but never polled: a client that has stopped reading.
-    let response = replies_stream(core, Arc::clone(&streams), opts, &headers, "claude-code");
+    let response = replies_stream(
+        core,
+        Arc::clone(&streams),
+        opts,
+        &headers,
+        LOCALHOST_PEER,
+        "claude-code",
+    );
     assert_eq!(response.status(), 200);
     assert_eq!(streams.load(Ordering::SeqCst), 1);
     let freed = timeout(Duration::from_secs(5), async {
@@ -1105,11 +1128,25 @@ async fn a_password_signs_in_for_a_session_and_can_be_changed() {
             .0,
         400
     );
+    // The current password must be given, and be right (REQ-CFG-024).
+    for body in [
+        r#"{"password":"another one"}"#,
+        r#"{"password":"another one","current":"not the password"}"#,
+    ] {
+        let (status, v) = post(&h, "/api/admin/password", &s1, body).await;
+        assert_eq!(status, 403, "{body}");
+        assert!(v["error"].as_str().unwrap().contains("current password"));
+    }
+    assert_eq!(
+        get_status(&h, "/api/overview", &s1).await,
+        200,
+        "a wrong current password does not end the session"
+    );
     let (status, v) = post(
         &h,
         "/api/admin/password",
         &s1,
-        r#"{"password":"another one"}"#,
+        r#"{"password":"another one","current":"first password"}"#,
     )
     .await;
     assert_eq!(status, 200);
@@ -1245,8 +1282,8 @@ async fn an_old_administrator_token_signs_in_like_a_password() {
     let (status, v) = post(&h, "/api/login", "", &login).await;
     assert_eq!(status, 200);
     let s = session_of(&v);
-    let new = r#"{"password":"a real password"}"#;
-    assert_eq!(post(&h, "/api/admin/password", &s, new).await.0, 200);
+    let new = format!(r#"{{"password":"a real password","current":"{old}"}}"#);
+    assert_eq!(post(&h, "/api/admin/password", &s, &new).await.0, 200);
     let (_, _, body) = call(h.addr, "GET", "/api/auth", &[], "").await;
     assert_eq!(json_of(&body)["legacy"], false);
     assert_eq!(
@@ -1621,4 +1658,158 @@ async fn token_routes_and_the_health_check_work_under_any_host_name() {
     stream.write_all(req.as_bytes()).await.unwrap();
     let mut buf = String::new();
     read_until(&mut stream, &mut buf, "retry:").await;
+}
+
+// REQ-SEC-004: failed attempts are counted per source address. Address A guessing until it is refused leaves
+// address B able to present the right token and the administrator able to sign in with the right password.
+#[tokio::test(flavor = "current_thread")]
+async fn one_clients_failures_do_not_lock_out_another_client() {
+    let h = start_with_clock(
+        Arc::new(FrozenClock),
+        Limits::default(),
+        ServeOptions::default(),
+    )
+    .await;
+    admin(&h);
+    let (a, b) = ("127.0.0.2", "127.0.0.3");
+    let wrong = bearer("cdt_wrong");
+    let right = bearer(&h.token);
+    let burst = Limits::default().auth_fail_burst as usize;
+    async fn from(h: &Harness, who: &str, path: &str, auth: &str, body: &str) -> u16 {
+        let hdrs = [("Authorization", auth)];
+        let hdrs: &[(&str, &str)] = if auth.is_empty() { &[] } else { &hdrs };
+        call_from(who, h.addr, "127.0.0.1", "POST", path, hdrs, body)
+            .await
+            .0
+    }
+    for i in 0..burst {
+        let status = from(&h, a, "/hook/claude-code", &wrong, STOP).await;
+        assert_eq!(status, 401, "attempt {i}");
+    }
+    let password = r#"{"password":"adm-secret"}"#;
+    assert_eq!(from(&h, a, "/hook/claude-code", &wrong, STOP).await, 429);
+    assert_eq!(
+        from(&h, a, "/api/login", "", password).await,
+        429,
+        "A is throttled"
+    );
+    assert_eq!(
+        from(&h, b, "/hook/claude-code", &right, STOP).await,
+        202,
+        "B's token works"
+    );
+    assert_eq!(
+        from(&h, b, "/api/login", "", password).await,
+        200,
+        "B signs in"
+    );
+    assert_eq!(
+        from(&h, b, "/hook/claude-code", &wrong, STOP).await,
+        401,
+        "B is still within its own budget"
+    );
+}
+
+/// A core with its files in `dir`, served, with one endpoint (`claude-code`).
+async fn start_stored(dir: &crate::store::testutil::TempDir) -> Harness {
+    let core = Arc::new(
+        Core::open(
+            Arc::new(SystemClock),
+            Adapters::builtin(),
+            Limits::default(),
+            crate::app::Stores::in_dir(&dir.0),
+        )
+        .unwrap(),
+    );
+    start_core(core, ServeOptions::default()).await
+}
+
+/// Make every later save of `name` in `dir` fail: a directory sits where its temporary file would be written.
+fn break_saves(dir: &crate::store::testutil::TempDir, name: &str) -> std::path::PathBuf {
+    let blocker = crate::store::temp_path(&dir.0.join(name));
+    std::fs::create_dir(&blocker).unwrap();
+    blocker
+}
+
+// REQ-INB-004: a webhook is answered 202 only if it was saved. When it could not be, the answer is a 5xx with a
+// plain message (the event is still held in memory and announced), and the next one that can be saved is a 202.
+#[tokio::test(flavor = "current_thread")]
+async fn a_webhook_that_could_not_be_saved_is_not_answered_202() {
+    let dir = crate::store::testutil::TempDir::new("hook-unsaved");
+    let h = start_stored(&dir).await;
+    let auth = bearer(&h.token);
+    let hdr = [("Authorization", auth.as_str())];
+    h.core.flush_blocking();
+    let blocker = break_saves(&dir, "inbox.json");
+    let (status, _, body) = call(h.addr, "POST", "/hook/claude-code", &hdr, STOP).await;
+    assert_eq!(status, 500, "{body}");
+    assert!(
+        json_of(&body)["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not be saved")
+    );
+    assert_eq!(
+        h.core.events().len(),
+        1,
+        "the event is kept and will be announced"
+    );
+    std::fs::remove_dir(&blocker).unwrap();
+    let other = STOP.replace("s1", "s2");
+    let (status, ..) = call(h.addr, "POST", "/hook/claude-code", &hdr, &other).await;
+    assert_eq!(status, 202, "saving works again");
+    let (status, ..) = call(h.addr, "GET", "/healthz", &[], "").await;
+    assert_eq!(status, 200, "requests that save nothing are unaffected");
+}
+
+// The same for an announcement, a bridge acknowledgement and an endpoint made in the portal.
+#[tokio::test(flavor = "current_thread")]
+async fn announcements_acks_and_portal_endpoints_that_could_not_be_saved_are_5xx() {
+    let dir = crate::store::testutil::TempDir::new("others-unsaved");
+    let h = start_stored(&dir).await;
+    let auth = bearer(&h.token);
+    let hdr = [("Authorization", auth.as_str())];
+    let session = admin(&h);
+    let portal = [("Authorization", session.as_str())];
+
+    // Announcement.
+    let blocker = break_saves(&dir, "inbox.json");
+    let say = r#"{"text":"hello"}"#;
+    let (status, ..) = call(h.addr, "POST", "/api/announce", &hdr, say).await;
+    assert_eq!(status, 500);
+    std::fs::remove_dir(&blocker).unwrap();
+    let again = r#"{"text":"hello again"}"#;
+    let (status, ..) = call(h.addr, "POST", "/api/announce", &hdr, again).await;
+    assert_eq!(status, 202);
+
+    // Acknowledgement of a reply.
+    h.core
+        .ingest_hook("claude-code", &h.token, LOCALHOST_PEER, STOP.as_bytes())
+        .unwrap();
+    let id = h.core.events().last().unwrap().id;
+    h.core.mark_announced(&[id]);
+    h.core
+        .reply(crate::inbox::reply::ReplyKind::Instruct, "go on")
+        .unwrap();
+    h.core.flush_blocking();
+    let reply = h
+        .core
+        .bridge_pending("claude-code", &h.token, LOCALHOST_PEER, 0)
+        .unwrap()[0]
+        .id;
+    let blocker = break_saves(&dir, "replies.json");
+    let path = format!("/bridge/claude-code/replies/{reply}/ack");
+    let (status, ..) = call(h.addr, "POST", &path, &hdr, "").await;
+    assert_eq!(status, 500, "an acknowledgement that was not saved");
+    std::fs::remove_dir(&blocker).unwrap();
+
+    // An endpoint made in the portal is taken back, so that trying again works.
+    let blocker = break_saves(&dir, "endpoints.json");
+    let new = r#"{"name":"second","adapter":"generic"}"#;
+    let (status, _, body) = call(h.addr, "POST", "/api/endpoints", &portal, new).await;
+    assert_eq!(status, 500, "{body}");
+    assert!(h.core.endpoints().iter().all(|e| e.name != "second"));
+    std::fs::remove_dir(&blocker).unwrap();
+    let (status, ..) = call(h.addr, "POST", "/api/endpoints", &portal, new).await;
+    assert_eq!(status, 201);
 }

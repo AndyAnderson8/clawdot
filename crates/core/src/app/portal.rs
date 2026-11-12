@@ -36,11 +36,15 @@ pub enum Fail {
     Invalid(String),
     /// The assistant could not take the request now.
     Unavailable(String),
+    /// The change was made but could not be written to storage, so it will be lost on a restart; `true` when the
+    /// storage is full.
+    NotSaved(String, bool),
 }
 
 impl std::fmt::Display for Fail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (Self::NotFound(m) | Self::Invalid(m) | Self::Unavailable(m)) = self;
+        let (Self::NotFound(m) | Self::Invalid(m) | Self::Unavailable(m) | Self::NotSaved(m, _)) =
+            self;
         f.write_str(m)
     }
 }

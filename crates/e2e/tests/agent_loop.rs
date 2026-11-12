@@ -10,7 +10,7 @@ use clawdot_bridge::client::Url;
 use clawdot_bridge::harness::{ClaudeCode, CommandSpec};
 use clawdot_bridge::state::Handled;
 use clawdot_bridge::{Config, Runner, stream_once};
-use clawdot_core::app::{Adapters, Core, Limits};
+use clawdot_core::app::{Adapters, Core, LOCALHOST_PEER, Limits};
 use clawdot_core::assistant::Assistant;
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::sched::{FixedOffset, Scheduler, SystemClock};
@@ -164,7 +164,7 @@ fn a_spoken_instruction_resumes_the_agent_session_and_is_acknowledged() {
     // Acknowledged: nothing left to redeliver.
     assert!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );
@@ -230,7 +230,7 @@ fn thanks_ill_handle_it_acknowledges_without_running_anything() {
     );
     assert!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty(),
         "but it is confirmed"
@@ -259,7 +259,7 @@ fn a_command_that_could_not_start_is_redelivered_and_runs_once_fixed() {
     assert!(recorder.ran.lock().unwrap().is_empty());
     assert_eq!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .len(),
         1,
@@ -277,7 +277,7 @@ fn a_command_that_could_not_start_is_redelivered_and_runs_once_fixed() {
     assert_eq!(recorder.ran.lock().unwrap().len(), 1);
     assert!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );
@@ -291,7 +291,7 @@ fn redelivery_after_a_lost_acknowledgement_never_runs_the_instruction_twice() {
     f.assistant.handle("tell it to deploy the fix").unwrap();
     let reply = f
         .core
-        .bridge_pending("claude-code", &f.token, 0)
+        .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
         .unwrap()
         .remove(0);
 
@@ -312,7 +312,7 @@ fn redelivery_after_a_lost_acknowledgement_never_runs_the_instruction_twice() {
     );
     assert!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );

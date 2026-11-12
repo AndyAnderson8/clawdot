@@ -157,7 +157,8 @@ fn admin_error(e: AdminError) -> Resp {
             StatusCode::FORBIDDEN
         }
         AdminError::AlreadySetUp | AdminError::NoPassword => StatusCode::CONFLICT,
-        AdminError::WindowClosed => StatusCode::FORBIDDEN,
+        // Not 401: the page signs the user out on a 401, and a mistyped current password is not a lost session.
+        AdminError::WindowClosed | AdminError::WrongCurrent => StatusCode::FORBIDDEN,
         AdminError::BadPassword => StatusCode::BAD_REQUEST,
         AdminError::Storage | AdminError::NoRandomness => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -485,7 +486,7 @@ pub(crate) async fn handle(
             json_reply(StatusCode::OK, &state)
         }
         Id::Setup => setup(core, peer, body).await,
-        Id::Login => login(core, body).await,
+        Id::Login => login(core, peer, body).await,
         Id::RecoverWindow => recover_window(core, peer, body).await,
         Id::Logout => {
             if let Some(t) = bearer(headers) {
@@ -500,15 +501,23 @@ pub(crate) async fn handle(
         ),
         Id::Speak => speak(core, body).await,
         Id::EndpointCreate => create(core, body).await,
-        Id::EndpointRotate => match core.rotate_endpoint(p) {
-            Ok(t) => json_reply(StatusCode::OK, &json!({ "name": p, "token": t })),
-            Err(e) => endpoint_error(&e),
-        },
-        Id::EndpointDelete => match core.revoke_endpoint(p) {
-            Ok(()) => json_reply(StatusCode::OK, &json!({ "deleted": p })),
-            Err(e) => endpoint_error(&e),
-        },
-        Id::AdminPassword => change_password(core, body).await,
+        Id::EndpointRotate => {
+            let mark = core.save_mark();
+            let resp = match core.rotate_endpoint(p) {
+                Ok(t) => json_reply(StatusCode::OK, &json!({ "name": p, "token": t })),
+                Err(e) => endpoint_error(&e),
+            };
+            saved(core, mark, resp).await
+        }
+        Id::EndpointDelete => {
+            let mark = core.save_mark();
+            let resp = match core.revoke_endpoint(p) {
+                Ok(()) => json_reply(StatusCode::OK, &json!({ "deleted": p })),
+                Err(e) => endpoint_error(&e),
+            };
+            saved(core, mark, resp).await
+        }
+        Id::AdminPassword => change_password(core, peer, body).await,
         Id::ToolsList => json_reply(StatusCode::OK, &core.ui_tools()),
         Id::ToolAdd => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
             Ok(v) => ext(core, ExtOp::ToolAdd(v)).await,
@@ -1214,6 +1223,8 @@ fn fail_reply(f: &Fail) -> Resp {
         Fail::NotFound(_) => StatusCode::NOT_FOUND,
         Fail::Invalid(_) => StatusCode::BAD_REQUEST,
         Fail::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        Fail::NotSaved(_, true) => StatusCode::INSUFFICIENT_STORAGE,
+        Fail::NotSaved(_, false) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     error(status, &f.to_string())
 }
@@ -1377,7 +1388,7 @@ struct Login {
 }
 
 /// Sign in with the password (or, after an upgrade, the old administrator token); returns a session token.
-async fn login(core: &Arc<Core>, body: Incoming) -> Resp {
+async fn login(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
     let req: Login = match read_json(body).await {
         Ok(r) => r,
         Err((s, m)) => return error(s, m),
@@ -1385,7 +1396,7 @@ async fn login(core: &Arc<Core>, body: Incoming) -> Resp {
     if core.admin_mode() == admin::Mode::Open {
         return error(StatusCode::CONFLICT, "no password is set");
     }
-    let stored = match core.admin_login_begin() {
+    let stored = match core.admin_login_begin(peer) {
         Ok(h) => h,
         Err(e) => return admin_error(e),
     };
@@ -1395,26 +1406,58 @@ async fn login(core: &Arc<Core>, body: Incoming) -> Resp {
     if !ok {
         return admin_error(AdminError::Unauthorized);
     }
-    match core.admin_login_finish() {
+    match core.admin_login_finish(peer) {
         Ok(token) => json_reply(StatusCode::OK, &json!({ "token": token })),
         Err(e) => admin_error(e),
     }
 }
 
-/// Set a new administrator password (REQ-CFG-024). The caller is already authenticated.
-async fn change_password(core: &Arc<Core>, body: Incoming) -> Resp {
-    let req: Login = match read_json(body).await {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangePassword {
+    /// The new password.
+    password: String,
+    /// The password in force now (for an installation that still has the old administrator token, that token).
+    /// Required in password mode; there is none to give in open mode.
+    #[serde(default)]
+    current: Option<String>,
+}
+
+/// Set a new administrator password (REQ-CFG-024). The caller is already signed in, and in password mode must also
+/// give the current password: a session left open on a shared screen, or lifted from a script, must not be enough to
+/// take the account over. The check spends an attempt from the caller's address like a sign-in does, and runs off
+/// the async thread because it is deliberately slow.
+async fn change_password(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
+    let req: ChangePassword = match read_json(body).await {
         Ok(r) => r,
         Err((s, m)) => return error(s, m),
     };
     if !admin::password_ok(&req.password) {
         return admin_error(AdminError::BadPassword);
     }
+    let stored = match core.admin_password_begin(peer) {
+        Ok(s) => s,
+        Err(e) => return admin_error(e),
+    };
+    if let Some(stored) = &stored {
+        let Some(current) = req.current else {
+            return admin_error(AdminError::WrongCurrent);
+        };
+        let ok = tokio::task::spawn_blocking({
+            let stored = stored.clone();
+            move || admin::verify_password(&current, &stored)
+        })
+        .await
+        .unwrap_or(false);
+        if !ok {
+            return admin_error(AdminError::WrongCurrent);
+        }
+    }
     let hash = match hash_in_background(req.password).await {
         Ok(h) => h,
         Err(e) => return admin_error(e),
     };
-    match core.admin_set_password(hash) {
+    match core.admin_set_password(peer, stored.as_deref(), hash) {
         Ok(token) => json_reply(
             StatusCode::OK,
             &json!({ "mode": "password", "token": token }),
@@ -1563,11 +1606,30 @@ async fn create(core: &Core, body: Incoming) -> Resp {
     if !core.has_adapter(&req.adapter) {
         return error(StatusCode::BAD_REQUEST, "unknown adapter");
     }
+    let mark = core.save_mark();
     match core.create_endpoint(&req.name, &req.adapter) {
-        Ok((e, token)) => json_reply(
-            StatusCode::CREATED,
-            &json!({ "name": e.name, "adapter": e.adapter, "token": token }),
-        ),
+        Ok((e, token)) => {
+            if let Err(why) = core.saved_since(mark).await {
+                // The token would be shown only in this answer, which says it failed. Take the endpoint back, so
+                // that trying again makes it afresh instead of meeting "already exists".
+                let _ = core.revoke_endpoint(&e.name);
+                return crate::http::not_saved(why);
+            }
+            json_reply(
+                StatusCode::CREATED,
+                &json!({ "name": e.name, "adapter": e.adapter, "token": token }),
+            )
+        }
         Err(e) => endpoint_error(&e),
     }
+}
+
+/// Turn a success into the truth when what it changed could not be saved (see [`Core::saved_since`]).
+async fn saved(core: &Core, mark: crate::app::SaveMark, resp: Resp) -> Resp {
+    if resp.status().is_success() {
+        if let Err(e) = core.saved_since(mark).await {
+            return crate::http::not_saved(e);
+        }
+    }
+    resp
 }

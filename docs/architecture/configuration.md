@@ -135,7 +135,7 @@ phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, 
   the server; run them with the server stopped, then start it. Snippets use `--public-url`, or a URL derived from
   `listen` (REQ-CFG-016).
 - **Console.** Type `quit` or `exit`, or press Ctrl-D, to stop (REQ-CFG-017).
-- **Throttling.** Wrong sessions, sign-in attempts, and setup tries share the authentication rate limit.
+- **Throttling.** Wrong sessions, wrong tokens, sign-in attempts, setup tries and wrong "current password" guesses are counted per client address (20 at once, then 1 a second, for at most 64 addresses at a time), under a larger ceiling for all addresses together (100, then 5 a second). A right password gives its attempt back. A change that could not be written to storage is answered with an error (500, or 507 when the storage is full), never as a success.
 - **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
 - **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), and the clock state. It contains no secrets and no agent text. Radio and music are not shown in the portal.
 - **Test speak** makes the speaker say a short phrase (up to 200 characters, a few at a time) on the console and on any free satellite, a quick way to check the speaker end to end.
