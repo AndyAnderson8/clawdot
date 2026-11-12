@@ -750,6 +750,10 @@ pub struct TurnResult {
     /// The turn ended with a question for the user (a clarifying question or a held action), so the follow-up
     /// window should be longer (REQ-AST-021).
     pub expects_reply: bool,
+    /// The turn held an action and asked the user about it: the answer is still awaited (REQ-SEC-011). Unlike
+    /// `held`, which says what became of an action the user already answered, this is true on the turn that
+    /// asks, so a caller never has to read the spoken question to tell.
+    pub pending: bool,
     /// What became of the action held for the user's yes, when this turn answered one (REQ-SEC-011). `None` when
     /// none was held.
     pub held: Option<HeldOutcome>,
@@ -780,6 +784,7 @@ impl Default for TurnResult {
             model_requests: 0,
             early: Vec::new(),
             expects_reply: false,
+            pending: false,
             held: None,
         }
     }

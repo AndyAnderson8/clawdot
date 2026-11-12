@@ -257,10 +257,13 @@ async fn a_risky_call_is_held_and_the_host_asks_then_runs_it_after_a_later_yes()
     assert!(h.ran.is_empty(), "nothing ran before the user answered");
     assert!(r1.speech.ends_with("Yes or no?") && r1.speech.contains("send_money"));
     assert_eq!(r1.model_requests, 1, "the host asked; the model did not");
+    assert!(r1.pending, "the turn says a held action awaits an answer");
+    assert_eq!(r1.held, None, "nothing was answered yet");
     assert_eq!(c.pending().map(PendingAction::tool), Some("send_money"));
     let r2 = turn(&b, &mut h, &mut c, &mut u, "Yes, please.").await;
     assert_eq!(r2.speech, "Sent.");
     assert_eq!(r2.held, Some(HeldOutcome::Ran));
+    assert!(!r2.pending, "the answered action is no longer waiting");
     assert_eq!(
         h.ran,
         vec![("send_money".to_owned(), json!({"amount":5,"to":"sam"}))]
@@ -558,6 +561,10 @@ async fn an_event_turn_can_read_but_only_propose_anything_else() {
     let ran: Vec<&str> = h.ran.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(ran, ["web"], "the timer and the payment did not run");
     assert!(r.speech.starts_with("Suggested action:") && r.speech.contains("set_timer"));
+    assert!(
+        r.pending,
+        "an event's proposal awaits the user's answer too"
+    );
     // The model saw the event as fenced, labelled data with the fence intact.
     let first = &b.requests()[0].messages[1].content;
     assert!(

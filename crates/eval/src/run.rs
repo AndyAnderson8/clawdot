@@ -367,10 +367,8 @@ fn check_turn(
     let e: &Expect = &turn.expect;
     let speech = result.speech.as_str();
     if let Some(want) = e.ends {
-        let held = conv.pending().is_some()
-            && matches!(result.end, TurnEnd::Answered)
-            && (speech.ends_with("Yes or no?") || speech.contains("Say yes if you want that"));
-        let got = if held {
+        // The gate says it held an action and is waiting for the answer; the spoken question is not read.
+        let got = if result.pending {
             Ends::Held
         } else {
             end_name(&result.end)

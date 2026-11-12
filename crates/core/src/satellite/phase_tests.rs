@@ -141,7 +141,8 @@ async fn effects_set_the_volume_within_bounds_and_hold_stream_commands_until_spe
     apply_effects(&mut st, &mut out, true, &[Effect::StopPlayback])
         .await
         .unwrap();
-    assert!(st.media_after_speech.is_empty() && st.out.music == Music::Off);
+    assert!(st.media_after_speech.is_empty());
+    assert_eq!(st.out.music, Music::Off);
     assert_eq!(decode_all(&out), [Message::StopPlayback]);
 }
 
@@ -163,7 +164,8 @@ async fn playback_done_resumes_ducked_music_and_progress_speech_does_not_move_th
     on_playback_done(&mut st, &mut out, &mut pending)
         .await
         .unwrap();
-    assert!(st.out.audio == Audio::Idle && st.out.music == Music::Ducked);
+    assert_eq!(st.out.audio, Audio::Idle);
+    assert_eq!(st.out.music, Music::Ducked);
     assert!(out.is_empty() && pending.steps.is_empty());
 
     // A reply ended: ducked music resumes and the dialog is told.
@@ -171,7 +173,8 @@ async fn playback_done_resumes_ducked_music_and_progress_speech_does_not_move_th
     on_playback_done(&mut st, &mut out, &mut pending)
         .await
         .unwrap();
-    assert!(st.out.audio == Audio::Idle && st.out.music == Music::Playing);
+    assert_eq!(st.out.audio, Audio::Idle);
+    assert_eq!(st.out.music, Music::Playing);
     assert_eq!(
         decode_all(&out),
         [Message::MediaControl(MediaAction::Resume)]

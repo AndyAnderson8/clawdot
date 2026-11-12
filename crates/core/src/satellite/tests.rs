@@ -588,6 +588,19 @@ async fn a_closed_session_leaves_the_announcer() {
 /// Like `start`, but the assistant answers with whatever `respond` says, the satellite can play URLs when
 /// `media_url` is true, and the speech-to-text always hears `heard`.
 async fn start_music(media_url: bool, heard: &'static str, respond: fn(&str) -> Answer) -> Peer {
+    start_music_with(Mouth, media_url, heard, respond).await
+}
+
+/// Like `start_music`, with the given voice.
+async fn start_music_with<T>(
+    mouth: T,
+    media_url: bool,
+    heard: &'static str,
+    respond: fn(&str) -> Answer,
+) -> Peer
+where
+    T: Synthesizer + Send + Sync + 'static,
+{
     let (near, far) = tokio::io::duplex(1 << 20);
     let (tx, mut rx) = mpsc::channel::<Ask>(4);
     tokio::spawn(async move {
@@ -598,7 +611,7 @@ async fn start_music(media_url: bool, heard: &'static str, respond: fn(&str) -> 
     tokio::spawn(run_session(
         far,
         Arc::new(Ears(heard)),
-        Arc::new(Mouth),
+        Arc::new(mouth),
         tx,
         fast(),
     ));
@@ -1145,7 +1158,19 @@ async fn start_slow<T>(
 where
     T: Transcriber + Send + Sync + 'static,
 {
-    let s = fast();
+    start_slow_with(fast(), ears, delay, handler).await
+}
+
+/// Like `start_slow`, with the given settings.
+async fn start_slow_with<T>(
+    s: Settings,
+    ears: T,
+    delay: Duration,
+    handler: impl Fn(Ask) + Send + 'static,
+) -> (Peer, Announcer)
+where
+    T: Transcriber + Send + Sync + 'static,
+{
     let ann = s.announcer.clone();
     let (near, far) = tokio::io::duplex(1 << 20);
     let (tx, mut rx) = mpsc::channel::<Ask>(4);
@@ -1290,4 +1315,114 @@ async fn stopping_a_turn_while_a_progress_phrase_is_synthesized_is_not_delayed()
         STOPPED.len() * 100,
         "the progress phrase played after the stop: {seen:?}"
     );
+}
+
+/// A slow-voiced session with a realtime session open: the wake word starts it, then the test ends it with
+/// `speak` as the closing line. Returns the speaker's end.
+#[cfg(feature = "realtime")]
+async fn start_realtime_closing(delay: Duration, speak: &str) -> Peer {
+    use crate::rtvoice::{Done, Realtime, RtSettings};
+    let rt = Realtime::with_env(
+        RtSettings {
+            enabled: true,
+            url: Some("wss://example.invalid/v1".into()),
+            model: Some("m-1".into()),
+            ..RtSettings::default()
+        },
+        Box::new(|_| Some("sk-test".into())),
+    );
+    let mut jobs = rt.attach();
+    let settings = Settings {
+        realtime: Some(rt),
+        ..fast()
+    };
+    let (mut p, _ann) = start_slow_with(settings, Ears("x"), delay, |_: Ask| {}).await;
+    p.send(&wake()).await;
+    let job = timeout(Duration::from_secs(5), jobs.recv())
+        .await
+        .expect("no realtime job")
+        .expect("job channel closed");
+    let speak = speak.to_owned();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = job.done.send(Done {
+            speak: Some(speak),
+            failed: false,
+            effects: Vec::new(),
+        });
+    });
+    p
+}
+
+/// The closing line of a realtime session is being synthesized (1.5 s, far longer than the 400 ms dead-peer
+/// timeout of these tests): a ping is still answered at once, and the line plays once it is made.
+#[cfg(feature = "realtime")]
+#[tokio::test]
+async fn a_ping_is_answered_while_the_closing_line_of_a_realtime_session_is_synthesized() {
+    let mut p = start_realtime_closing(Duration::from_millis(1500), "Goodbye.").await;
+    // The core stops the stream when the session ends; synthesis of the closing line then runs.
+    until(&mut p, |m| matches!(m, Message::StreamStop)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    p.send(&Message::Ping).await;
+    let answered = timeout(Duration::from_millis(400), async {
+        loop {
+            match p.recv().await {
+                Message::Pong => return,
+                Message::Ping => p.send(&Message::Pong).await,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        answered.is_ok(),
+        "no pong while the closing line was synthesized"
+    );
+    let seen = until(&mut p, |m| matches!(m, Message::AudioStop)).await;
+    assert_eq!(samples(&seen), "Goodbye.".len() * 100, "{seen:?}");
+}
+
+/// Muting while the closing line of a realtime session is being synthesized is handled at once.
+#[cfg(feature = "realtime")]
+#[tokio::test]
+async fn muting_while_the_closing_line_of_a_realtime_session_is_synthesized_is_handled() {
+    let mut p = start_realtime_closing(Duration::from_millis(1500), "Goodbye.").await;
+    until(&mut p, |m| matches!(m, Message::StreamStop)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    p.send(&Message::Button(clawdot_protocol::message::Button {
+        name: "mute".into(),
+        long: false,
+    }))
+    .await;
+    let early = collect_for(&mut p, 300).await;
+    assert!(
+        early.contains(&Message::SetMute { muted: true }),
+        "the mute was not handled while synthesis ran: {early:?}"
+    );
+}
+
+// ----- a stream command never outlives a reply that could not be spoken (REQ-MUS-004) -----
+
+/// A voice that is down.
+struct BrokenMouth;
+impl Synthesizer for BrokenMouth {
+    async fn synthesize(&self, _: &str) -> Result<Vec<i16>, String> {
+        Err("the speech service is down".into())
+    }
+}
+
+/// The reply to "play jazz" cannot be spoken, so nothing is playing that the stream must wait for: the stream
+/// starts at once, instead of waiting in the queue to start after some later, unrelated speech.
+#[tokio::test]
+async fn a_stream_command_is_not_held_back_by_a_reply_that_could_not_be_spoken() {
+    let mut p = start_music_with(BrokenMouth, true, "play jazz", play_jazz).await;
+    speak(&mut p).await;
+    let seen = timeout(
+        Duration::from_secs(2),
+        until(&mut p, |m| matches!(m, Message::PlayUrl { .. })),
+    )
+    .await
+    .expect("the stream never started: it is stuck in the queue");
+    assert_eq!(seen.last(), Some(&jazz_url()));
+    assert_eq!(samples(&seen), 0, "{seen:?}");
 }
