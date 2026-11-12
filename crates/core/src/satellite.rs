@@ -835,6 +835,8 @@ async fn apply_effects<W: AsyncWrite + Unpin>(
             Effect::StopPlayback => {
                 send(wr, &Message::StopPlayback).await?;
                 st.music = false;
+                // Music paused for speech is stopped too, or the end of the reply would resume it.
+                st.ducked = false;
                 st.after.clear();
             }
             Effect::VolumeSet(l) => {

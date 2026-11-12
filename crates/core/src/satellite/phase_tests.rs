@@ -198,3 +198,23 @@ fn a_reset_request_is_rate_limited_trusted_and_needs_a_hook() {
     s.admin_reset = Some(AdminResetHook::new(|| Err("busy".into())));
     assert_eq!(reset_answer(&s, true, false), (0, Some("busy".into())));
 }
+
+/// REQ-MUS-004: music that was paused for progress speech and then told to stop must stay stopped when the reply
+/// ends; a stop clears the pause as well as the queue.
+#[tokio::test]
+async fn a_stop_while_music_is_paused_for_speech_is_not_undone_when_the_reply_ends() {
+    let mut st = SessionState::new(&Settings::default());
+    st.ducked = true;
+    let mut out = Vec::new();
+    apply_effects(&mut st, &mut out, true, &[Effect::StopPlayback])
+        .await
+        .unwrap();
+    assert_eq!(decode_all(&out), [Message::StopPlayback]);
+    let mut out = Vec::new();
+    finish_speech(&mut st, &mut out).await.unwrap();
+    assert!(
+        decode_all(&out).is_empty() && !st.music,
+        "the music the user stopped must not resume: {:?}",
+        decode_all(&out)
+    );
+}
