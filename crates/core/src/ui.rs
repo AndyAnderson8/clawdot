@@ -564,7 +564,7 @@ pub(crate) async fn handle(
             Ok(id) => notes_forget(core, Some(id)),
             Err(_) => error(StatusCode::NOT_FOUND, "no such memory"),
         },
-        Id::ModelsGet => models(core, query).await,
+        Id::ModelsGet => models(core).await,
         Id::ModelsAsk => models_with_key(core, body).await,
         Id::LlmKeySet => llm_key_set(core, body).await,
         Id::LlmKeyClear => llm_key_clear(core).await,
@@ -598,32 +598,36 @@ pub(crate) async fn handle(
     })
 }
 
-/// `GET /api/models`: the models the language-model service offers, asked of the service with the saved address and key
-/// (REQ-CFG-081). A service with no list, or a wrong key, is said in plain words and the page falls back to typing.
-async fn models(core: &Core, query: Option<&str>) -> Resp {
+/// `GET /api/models`: the models the language-model service offers, asked of the service with the SAVED address and
+/// key (REQ-CFG-081). A service with no list, or a wrong key, is said in plain words and the page falls back to typing.
+///
+/// It takes nothing from the web address. It once took `?url=` and `?key_env=`, which let any web page shown in a
+/// browser on the home network (in open mode, with a plain cross-site GET such as an image) make the device send the
+/// value of an environment variable to an address of the page's choosing. A choice that is not saved yet is asked
+/// about with `POST /api/models`, which a page on another site cannot send.
+async fn models(core: &Core) -> Resp {
     let s = core.ui_settings();
     let value = |k: &str| s["fields"][k]["value"].as_str().unwrap_or("").to_owned();
-    // The page can ask about a choice that is not saved yet: `?url=...&key_env=NAME`.
-    let url = query_param(query, "url").unwrap_or_else(|| value("llm_url"));
+    let url = value("llm_url");
     if url.is_empty() {
         return error(
             StatusCode::CONFLICT,
             "Choose who answers and save first, then the list of models can be asked for.",
         );
     }
-    let var = query_param(query, "key_env").unwrap_or_else(|| value("llm_key_env"));
-    if var.len() > 64 || !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "The key variable is a name made of letters, digits and underscores.",
-        );
-    }
-    let key = if var.is_empty() {
-        String::new()
-    } else {
-        core.env().get(&var).unwrap_or_default()
-    };
-    fetch_models(&url, &key).await
+    fetch_models(&url, &saved_llm_key(core)).await
+}
+
+/// The key in use for the language-model service: the one pasted into the portal, or else the value of the
+/// environment variable the saved settings name.
+fn saved_llm_key(core: &Core) -> String {
+    core.secrets()
+        .get(crate::secrets::LLM_KEY)
+        .unwrap_or_else(|| {
+            let s = core.ui_settings();
+            let var = s["fields"]["llm_key_env"]["value"].as_str().unwrap_or("");
+            core.env().get(var).unwrap_or_default()
+        })
 }
 
 /// Ask a language-model service for its models with `key`, and say in plain words why it could not.
@@ -663,14 +667,7 @@ async fn models_with_key(core: &Core, body: Incoming) -> Resp {
     }
     let key = match ask.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
         Some(k) => k.to_owned(),
-        None => core
-            .secrets()
-            .get(crate::secrets::LLM_KEY)
-            .unwrap_or_else(|| {
-                let s = core.ui_settings();
-                let var = s["fields"]["llm_key_env"]["value"].as_str().unwrap_or("");
-                core.env().get(var).unwrap_or_default()
-            }),
+        None => saved_llm_key(core),
     };
     fetch_models(url, &key).await
 }

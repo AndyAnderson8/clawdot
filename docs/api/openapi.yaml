@@ -1020,18 +1020,10 @@ paths:
       tags: [Settings]
       summary: The models the language-model service offers
       description: |
-        Asked of the service with the saved address and key. `url` and `key_env` can name a choice that is not
-        saved yet (`key_env` is an environment variable name, letters, digits and underscores, at most 64).
-        `409` when no address is known yet; `401` when the service rejects the key; `502` when it cannot be
-        asked. The page falls back to typing a name.
+        Asked of the service with the saved address and key. It takes no parameters: a choice that is not saved
+        yet is asked about with the `POST` form. `409` when no address is known yet; `401` when the service
+        rejects the key; `502` when it cannot be asked. The page falls back to typing a name.
       operationId: listModels
-      parameters:
-        - name: url
-          in: query
-          schema: { type: string }
-        - name: key_env
-          in: query
-          schema: { type: string, maxLength: 64, pattern: "^[A-Za-z0-9_]*$" }
       responses:
         "200": { $ref: "#/components/responses/Models" }
         "400": { $ref: "#/components/responses/BadRequest" }
