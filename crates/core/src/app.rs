@@ -1067,12 +1067,12 @@ impl Core {
         let now = self.clock.now();
         let mut g = self.lock();
         let expired = g.replies.expire(now);
-        g.inbox.prune(now, 24 * 3600);
+        let pruned = g.inbox.prune(now, 24 * 3600);
         let lapsed = g.inbox.expire(now);
         if expired > 0 {
             self.persist(&g, Dirty::REPLIES);
         }
-        if lapsed > 0 {
+        if pruned + lapsed > 0 {
             self.persist(&g, Dirty::INBOX);
         }
     }
@@ -1401,6 +1401,31 @@ mod tests {
             ["inbox.json", "replies.json"],
             "a spoken ack"
         );
+    }
+
+    // REQ-INB-004: housekeeping that only prunes old handled events still saves the inbox.
+    #[test]
+    fn pruning_alone_saves_the_inbox() {
+        let dir = TempDir::new("prune");
+        let clock = Arc::new(TestClock(AtomicI64::new(1_800_000_000)));
+        let c = Core::open(
+            clock.clone(),
+            Adapters::builtin(),
+            Limits::default(),
+            Stores::in_dir(&dir.0),
+        )
+        .unwrap();
+        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
+        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+            .unwrap();
+        let id = c.next_announcement(true, 0).unwrap().event.id;
+        c.mark_announced(&[id]);
+        assert!(c.dismiss_current());
+        written(&c, &dir);
+        clock.0.fetch_add(25 * 3600, Ordering::Relaxed);
+        c.maintain();
+        assert!(c.events().is_empty(), "the old handled event was pruned");
+        assert_eq!(written(&c, &dir), ["inbox.json"], "and the file follows");
     }
 
     #[test]
