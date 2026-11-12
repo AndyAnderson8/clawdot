@@ -17,6 +17,8 @@ export interface AppState {
   settings: Settings | null;
   /** Bumped when settings are replaced, so forms start again from the new values. */
   settingsRev: number;
+  /** Goes up when the provider's key is saved or removed, so lists that need the key are fetched again. */
+  keyRev: number;
   status: Status | null;
   overview: Overview | null;
   ext: Extensions | null;
@@ -38,6 +40,7 @@ let state: AppState = {
   windowSecs: 0,
   settings: null,
   settingsRev: 0,
+  keyRev: 0,
   status: null,
   overview: null,
   ext: null,

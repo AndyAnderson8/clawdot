@@ -4,7 +4,7 @@ import { api, ApiError } from "../api.ts";
 import { currentText, FROM, labelOf, settingsPatch, type SettingSpec, cents } from "../forms.ts";
 import { providerFor } from "../providers.ts";
 import { TimeField } from "../timefield.tsx";
-import { fail, get, say, set } from "../store.ts";
+import { fail, get, say, set, useApp } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
 import type { Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
@@ -40,6 +40,7 @@ export function Group(props: {
   below?: () => JSX.Element | null;
 }): JSX.Element {
   const { title, intro, specs, settings } = props;
+  const keyRev = useApp().keyRev;
   const current: Record<string, string> = {};
   const start0: Record<string, string> = {};
   const hints: Record<string, string> = {};
@@ -160,13 +161,13 @@ export function Group(props: {
         } else if (sp.kind === "model") {
           // A provider that needs a key is asked for its models only once a key is in place.
           const prov = providerFor(vals["llm_url"] ?? "");
-          const hasKey = vals["_keyok"] === "1" || (settings.llm?.key_present === true && vals["_keyok"] !== "0");
+          const hasKey = settings.llm?.key_present === true;
           ctl = (
             <ModelSelect
               id={id}
               value={v}
               url={vals["llm_url"] ?? ""}
-              rev={vals["_keyrev"] ?? ""}
+              rev={String(keyRev)}
               blocked={prov && prov.id !== "custom" && !hasKey ? "Add your API key to see the models" : ""}
               onInput={(x) => setVals({ ...vals, [sp.key]: x })}
             />

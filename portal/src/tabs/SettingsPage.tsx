@@ -2,7 +2,7 @@ import { Fragment, type JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, keep } from "../api.ts";
 import { restartText, type SettingSpec } from "../forms.ts";
-import { fail, say, signedOut, start, sv, useApp } from "../store.ts";
+import { fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
 import { zoneName } from "../time.ts";
 import type { HardwareInfo, Settings as SettingsData } from "../types.ts";
 import { About } from "./About.tsx";
@@ -107,19 +107,26 @@ function General(props: { s: SettingsData }): JSX.Element {
 /** The provider's key: pasted once, checked with the service, kept on the device, and shown only as its first and last few characters. */
 function KeyRow(props: {
   s: SettingsData;
-  vals: Record<string, string>;
-  setVals: (v: Record<string, string>) => void;
+  /** The provider address chosen in the form, saved or not. */
+  url: string;
 }): JSX.Element | null {
-  const { s, vals, setVals } = props;
-  const prov = providerFor(vals["llm_url"] ?? "");
+  const { s, url } = props;
+  const prov = providerFor(url);
   const [typed, setTyped] = useState("");
   const [replacing, setReplacing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [bad, setBad] = useState(false);
   if (!prov) return null;
-  const hint = vals["_keyhint"] ?? s.llm?.key_hint ?? "";
-  const fromEnv = !hint && s.llm?.key_present === true && vals["_keyok"] !== "0";
+  const hint = s.llm?.key_hint ?? "";
+  const fromEnv = !hint && s.llm?.key_present === true;
+  // What the device now holds is read back from it, and kept with the settings (not among this form's values):
+  // the form is not rebuilt, so a provider or model chosen but not yet saved stays as it is.
+  const keyChanged = async () => {
+    const fresh = await api<SettingsData>("GET", "/api/settings");
+    const old = get().settings;
+    if (old) set({ settings: { ...old, llm: fresh.llm }, keyRev: get().keyRev + 1 });
+  };
   const check = async () => {
     const key = typed.trim();
     if (!key) {
@@ -131,15 +138,15 @@ function KeyRow(props: {
     setMsg("");
     try {
       // The service is asked first, so a key that does not work is never kept.
-      const r = await api<{ models: string[] }>("POST", "/api/models", { url: vals["llm_url"] ?? "", key });
-      const k = await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
+      const r = await api<{ models: string[] }>("POST", "/api/models", { url, key });
+      await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
+      await keyChanged();
       setTyped("");
       setReplacing(false);
       setBad(false);
       setMsg(
         "Key accepted. " + r.models.length + (r.models.length === 1 ? " model is" : " models are") + " available.",
       );
-      setVals({ ...vals, _keyhint: k.hint ?? "", _keyok: "1", _keyrev: String(Date.now()) });
     } catch (x) {
       setBad(true);
       setMsg(x instanceof Error ? x.message : "The key could not be checked.");
@@ -151,7 +158,7 @@ function KeyRow(props: {
     try {
       await api("DELETE", "/api/llm/key");
       setMsg("");
-      setVals({ ...vals, _keyhint: "", _keyok: "0", _keyrev: String(Date.now()) });
+      await keyChanged();
     } catch (x) {
       fail(x);
     }
@@ -251,7 +258,6 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
                         ...vals,
                         llm_url: p.id === "custom" ? "https://" : p.url,
                         llm_model: p.id === "custom" ? "" : p.model,
-                        _keyrev: String(Date.now()),
                       });
                     }}
                   >
@@ -268,7 +274,7 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
                   </select>
                 </div>
               </div>
-              <KeyRow s={s} vals={vals} setVals={setVals} />
+              <KeyRow s={s} url={vals["llm_url"] ?? ""} />
             </>
           );
         }}
