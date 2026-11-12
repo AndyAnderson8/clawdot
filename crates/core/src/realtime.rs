@@ -347,7 +347,7 @@ pub async fn connect<D: Dialect>(
     let ep = crate::transport::Endpoint::parse(&http).map_err(RealtimeError::Config)?;
     if crate::netpolicy::crosses_internet_unencrypted(&ep) {
         return Err(RealtimeError::Config(
-            "the key and your voice must not cross the internet unencrypted; use wss://".into(),
+            crate::netpolicy::REALTIME_PLAIN_REFUSAL.into(),
         ));
     }
     let path = dialect.path(cfg, &ep.base)?;

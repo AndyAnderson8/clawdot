@@ -619,6 +619,25 @@ fn bad_realtime_values_are_refused_with_what_to_fix_and_change_nothing() {
     assert!(st.get("realtime_url").is_null() && st.get("realtime_enabled").is_null());
 }
 
+// REQ-SEC-001, REQ-RTV-008: plain ws:// beyond the private network is refused when saved, not later.
+#[test]
+fn a_plain_realtime_address_beyond_the_private_network_is_refused_when_saved() {
+    let mut st = SettingsState::in_memory(defaults(), false, env_with(&[]));
+    let e = st
+        .change(&json!({"realtime_url": "ws://api.openai.com/v1/realtime", "realtime_model": "m"}))
+        .unwrap_err();
+    assert!(e.contains("must not cross the internet unencrypted"), "{e}");
+    assert!(st.get("realtime_url").is_null());
+    for ok in [
+        "ws://192.168.1.9:8000/v1",
+        "ws://localhost:8000",
+        "wss://x.example/v1",
+    ] {
+        st.change(&json!({"realtime_url": ok, "realtime_model": "m"}))
+            .unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+}
+
 // REQ-CFG-065
 #[test]
 fn the_export_holds_only_saved_values_and_loads_back_through_the_same_checks() {

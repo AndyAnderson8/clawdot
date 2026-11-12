@@ -671,6 +671,9 @@ fn realtime_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     if u.contains(char::is_whitespace) || !(u.starts_with("wss://") || u.starts_with("ws://")) {
         return Err("The realtime voice address must start with wss:// (or ws:// on your own network), for example wss://api.openai.com/v1/realtime.".into());
     }
+    // The same rule the session applies when it connects (REQ-SEC-001).
+    crate::netpolicy::check_realtime_url(&u)
+        .map_err(|e| format!("The realtime voice address is refused: {e}."))?;
     Ok(json!(u))
 }
 

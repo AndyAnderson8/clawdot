@@ -156,6 +156,10 @@ impl RealtimeSection {
                 "`voice.realtime.url` must start with wss:// (or ws:// on this machine or your own network)",
             );
         }
+        if let Some(u) = &self.url {
+            crate::netpolicy::check_realtime_url(u)
+                .map_err(|e| format!("config: `voice.realtime.url`: {e}"))?;
+        }
         if let Some(n) = &self.key_env
             && !crate::settings::is_env_name(n)
         {
@@ -809,12 +813,19 @@ mod tests {
             (r#""usd_per_min_in": -1"#, "usd_per_min_in"),
             (r#""max_session_secs": 5"#, "max_session_secs"),
             (r#""enabled": true"#, "needs"),
+            (
+                // REQ-SEC-001: refused at load, not when the session connects.
+                r#""url": "ws://api.openai.com/v1/realtime", "model": "m""#,
+                "must not cross the internet unencrypted",
+            ),
             (r#""keey_env": "X""#, "keey_env"),
         ] {
             let e = Config::parse(&format!(r#"{{"voice": {{"realtime": {{{section}}}}}}}"#))
                 .unwrap_err();
             assert!(e.contains(needle), "{section}: {e}");
         }
+        let lan = r#"{"voice": {"realtime": {"url": "ws://192.168.1.9:8000/v1", "model": "m"}}}"#;
+        assert!(Config::parse(lan).is_ok());
         // Enabling needs a build with the feature; the message says so rather than failing silently.
         let on = r#"{"voice": {"realtime": {"enabled": true, "url": "wss://x/v1", "model": "m"}}}"#;
         if cfg!(feature = "realtime") {
