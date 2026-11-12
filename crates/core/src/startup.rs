@@ -537,7 +537,16 @@ pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Val
                 .get("update_check")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true);
-            match crate::update::start(cfg, on, Some(args.data_dir.clone())) {
+            // After an install the updater asks for an orderly stop: flush the store writer, then exit (not `exit`
+            // alone, which would drop writes still queued on the writer thread).
+            let writer = core.writer();
+            let stop: crate::update::StopFn = std::sync::Arc::new(move |code| {
+                if let Some(w) = &writer {
+                    w.flush_blocking();
+                }
+                std::process::exit(code);
+            });
+            match crate::update::start(cfg, on, Some(args.data_dir.clone()), stop) {
                 Ok(u) => core.set_updater(u),
                 Err(e) => crate::diag::error(&format!("updates are not available: {e}")),
             }

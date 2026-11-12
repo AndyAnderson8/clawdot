@@ -37,9 +37,10 @@ produce plain player commands for a satellite that has its own player. With stat
 The core never decodes or plays audio. On a satellite the stream is played by the device itself: it declares
 `media_url` in its hello and receives `clawdot.play-url` and `clawdot.media-control` ([satellite-server.md](satellite-server.md)).
 It hands the satellite effects (`PlayStream { url, title }`,
-`Media(Pause | Resume)`, `StopPlayback`) and the satellite plays the stream. **Ducking or pausing music during
-assistant speech, alarms, and announcements (REQ-MUS-004) is the satellite's job**, because only it owns the
-audio device; this keeps that rule in one place.
+`Media(Pause | Resume)`, `StopPlayback`) and the satellite plays the stream. **Pausing music during assistant speech and
+announcements (REQ-MUS-004)**: the core sends the satellite `pause` before the speech and `resume` after it
+(unless the reply itself changed the music, see [satellite-server.md](satellite-server.md)); the satellite does the
+pausing, because only it owns the audio device.
 
 ## Control shape with HTTP tools
 

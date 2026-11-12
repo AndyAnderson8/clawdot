@@ -19,9 +19,9 @@ A release has three files for each device: the program (`clawdot-<os>-<arch>`), 
 1. downloads the hash list and its signature, and checks the signature against the project's public key;
 2. downloads the program and checks that its SHA-256 matches the signed hash;
 3. writes it next to the running program and runs it with `--version`, and requires it to report the new version;
-4. keeps the old program as `<name>.prev`, moves the new one into place and restarts if something supervises it.
+4. keeps the old program as `<name>.prev` (a hard link to it, or a copy where linking is not possible), then renames the new program over the running one in a single step and syncs the directory, so there is never a moment when the path holds no program, even if the power is cut; it then restarts if something supervises it, after the changes it still had queued for storage are written.
 
-A failure at any step leaves the running program exactly as it was.
+A failure at any step leaves the running program exactly as it was. The write, the `--version` run and the swap happen on a background thread, so the speaker keeps answering while an update is installed.
 
 A build with no public key never installs. It still tells you a new version exists and links to the release page.
 

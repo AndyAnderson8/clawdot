@@ -1,13 +1,11 @@
 // A stand-in for the device: serves the built page with the real Content-Security-Policy and answers the JSON API
 // with the same shapes the Rust core uses (crates/core/src/ui.rs), keeping state in memory.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Keep in step with `CSP` in crates/core/src/ui.rs (the smoke test checks the page works under it).
-export const CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 export const PASSWORD = "correct horse battery";
 
 export interface Logged {
@@ -39,6 +37,23 @@ const pageFile = join(
   "src",
   "ui.html",
 );
+
+/** The `'sha256-...'` sources of every inline `<tag>...</tag>` block of the page (what crates/core/build.rs computes). */
+function inlineHashes(page: string, tag: string): string {
+  const hashes = new Set<string>();
+  const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g");
+  for (const m of page.matchAll(re)) hashes.add(`'sha256-${createHash("sha256").update(m[1]!).digest("base64")}'`);
+  if (!hashes.size) throw new Error(`the built page has no inline <${tag}>`);
+  return [...hashes].join(" ");
+}
+
+// The real Content-Security-Policy of crates/core/src/ui.rs: no 'unsafe-inline', the page's own inline script and
+// style allowed by hash (computed here from the built page the same way build.rs does, so the browser suite proves the
+// page works under it). Keep the rest in step with build.rs.
+const pageHtml = readFileSync(pageFile, "utf8");
+export const CSP =
+  `default-src 'none'; script-src ${inlineHashes(pageHtml, "script")}; style-src ${inlineHashes(pageHtml, "style")}; ` +
+  "connect-src 'self'; img-src data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const now = () => Math.floor(Date.now() / 1000);
 
 // What a setting goes back to when it is cleared.

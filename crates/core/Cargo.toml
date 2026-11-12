@@ -1,6 +1,6 @@
 [package]
 name = "clawdot-core"
-description = "ClawDot core: agent inbox, scheduler, fast-path commands, and the HTTP front end"
+description = "ClawDot core: the assistant program with its language-model turns, tool gate, agent inbox, timers, satellite server, MCP client and server, updater, and embedded web portal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -58,6 +58,9 @@ socket2 = { version = "0.6", features = ["all"], optional = true }
 # Build time only: compresses the portal page (REQ-CFG-043). Not linked into the program.
 [build-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Build time only: the SHA-256 of the page's inline script and style for its content-security policy. The same crate
+# and version the program already links (see [dependencies]), so Cargo.lock and the binary are unchanged.
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util"] }

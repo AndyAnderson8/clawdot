@@ -14,7 +14,7 @@ pure logic, tested with synthetic audio and fake providers, so they run in CI wi
 |---|---|---|
 | Finds where an utterance ends in raw audio: adaptive noise floor, lead-in so the first word is not clipped, clicks ignored, pauses tolerated, no-speech timeout, maximum length | `vad` | REQ-VOI-002 |
 | Dialog state machine: wake, listening, thinking, speaking; mute; half-duplex; follow-up window; late "thinking" cue | `voice::Dialog` | REQ-VOI-006, 007, 008, 010, 012 |
-| One turn: transcribe, ask the assistant, synthesise a sentence at a time | `voice::voice_turn` | REQ-VOI-003, 004 |
+| One turn: transcribe, ask the assistant (`voice::hear`), synthesise a sentence at a time (`voice::voice_turn` for the console; the satellite session plays each sentence as it is made) | `voice`, `satellite/reply.rs` | REQ-VOI-003, 004 |
 
 ## Rules the dialog enforces for every satellite
 
@@ -37,27 +37,31 @@ pure logic, tested with synthetic audio and fake providers, so they run in CI wi
 
 `speech::HttpTranscriber` (batch upload of a WAV to `/audio/transcriptions`) and `speech::HttpSynthesizer`
 (`/audio/speech` as raw PCM, resampled to 16 kHz) speak the OpenAI-compatible API that OpenAI, many hosted services,
-and self-hosted servers such as Whisper and Piper wrappers provide. Audio is sensitive, so plain `http://` is
+and self-hosted servers such as Whisper and Piper wrappers provide. Two other wire formats, ElevenLabs and Deepgram,
+are selected with the `speech` dialect ([speech providers](../guides/speech-providers.md)). Audio is sensitive, so plain `http://` is
 accepted only for localhost and private-network hosts (REQ-SEC-001); anything else needs `https://`. Audio is
-never stored or logged, and errors never include it or the key. Verified against a fake server only; no real
-provider has been called.
+never stored or logged, and errors never include it or the key. Checked against a fake server and, in the
+[proving pass](../reports/2026-11-11-proving-pass.md), against local Whisper and Piper servers. ElevenLabs and Deepgram
+have been checked only against stand-ins.
 
 ## Failure behaviour
 
 - Nothing intelligible heard: no reply, the error cue.
 - Speech recognition fails: a short spoken apology, and the assistant is not asked.
-- Speech synthesis fails part-way: the text reply is kept, sentences already synthesised can still play, and the
-  problem is recorded (it never contains audio or credentials).
+- Speech synthesis fails part-way: the text reply is kept, sentences already played stay played, the reply's
+  audio stream is closed cleanly (no error cue, the follow-up window opens as usual), and the problem is logged
+  (it never contains audio or credentials). If the first sentence fails nothing was played and the error cue shows.
+- On a satellite the reply plays while it is still being made: see [speech-latency.md](speech-latency.md).
 
 ## Not built yet
 
-- Wake-word detection (push-to-talk exists). The desktop satellite can feed live microphone audio and play the reply through
-  external programs ([guides/pc-voice-loop.md](../guides/pc-voice-loop.md)), but it has only been exercised with scripted
-  processes and recordings, not with a real microphone.
+- Wake-word detection in the core. It runs on the device side (`crates/wake`, used by `crates/device`); the core
+  accepts a satellite's `wake` event. Push-to-talk also exists. The desktop satellite can feed live microphone audio and
+  play the reply through external programs ([guides/pc-voice-loop.md](../guides/pc-voice-loop.md)).
 - Opt-in barge-in and adaptive end-of-utterance thresholds (REQ-VOI-005, REQ-VOI-011, both later milestones).
 - Starting synthesis while the model is still streaming: replies are split into sentences after they are complete.
-  (Plan and progress phrases are spoken as each model round returns, which is the sentence-level streaming that
-  exists; token streaming from the provider is not built.)
+  (Plan and progress phrases are spoken as each model round returns; token streaming from the provider is not
+  built. The design is in [speech-latency.md](speech-latency.md).)
 - A local stop-word check, so that the stop capture does not cost a speech-to-text call, and "stop" over the
   assistant's own voice (barge-in).
 

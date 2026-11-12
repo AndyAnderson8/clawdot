@@ -1,67 +1,99 @@
-# Documentation Index
+# Documentation index
 
-| Area | Document | Purpose |
-|---|---|---|
-| Process | [sdlc.md](process/sdlc.md) | Kanban board, WIP limits, spec-driven workflow, DoR/DoD, releases |
-| Process | [git-workflow.md](process/git-workflow.md) | Git flow, merge commits, gated landing, releases, enforcement layers |
-| Process | [runbook.md](process/runbook.md) | Step-by-step commands for humans and agents: work, land, release, hotfix, fixes for common errors |
-| Process | [repo-settings.md](process/repo-settings.md) | GitHub rulesets and settings that enforce the git flow server-side |
-| Process | [personal-data.md](process/personal-data.md) | What must not appear in examples, and the hashed-denylist guard |
-| Agents | [../AGENTS.md](../AGENTS.md) | Binding rules for AI coding agents (identity, branches, commits) |
-| Specs | [specs/](specs/README.md) | What the system must do, with stable requirement IDs |
-| API | [api/README.md](api/README.md) | The HTTP API as an OpenAPI 3.1 description ([openapi.yaml](api/openapi.yaml)): portal calls and webhook endpoints, with a curl session |
-| Architecture | [architecture/overview.md](architecture/overview.md) | Components, flows, constraints, risks |
-| Architecture | [architecture/extensibility.md](architecture/extensibility.md) | Core, packs, sidecars; media backends; trust model |
-| Architecture | [architecture/configuration.md](architecture/configuration.md) | The configuration file: keys, defaults, validation |
-| Architecture | [architecture/http-tools.md](architecture/http-tools.md) | Declarative HTTP tools: schema, safety rules, confirmation |
-| Architecture | [architecture/mcp.md](architecture/mcp.md) | MCP client: pinned revision, safety rules, configuration |
-| Architecture | [architecture/action-safety.md](architecture/action-safety.md) | How actions are held, tiered and scoped: host-held confirmation, risk tiers, untrusted turns, skill allow-lists |
-| Architecture | [architecture/agent-loop.md](architecture/agent-loop.md) | One multi-step turn: limits, plan and progress speech, questions, cancel, memory and notes, long-result summaries, error recovery |
-| Architecture | [architecture/evals.md](architecture/evals.md) | The scenario eval harness: format, replay gate, live mode with a spend cap, the shipped scenario set |
-| Architecture | [architecture/media.md](architecture/media.md) | Music and radio: backend shapes, built-in stations, control recipes |
-| Architecture | [architecture/voice-pipeline.md](architecture/voice-pipeline.md) | Dialog state machine, endpointing, and the speech turn |
-| Architecture | [architecture/satellite-server.md](architecture/satellite-server.md) | How speakers connect: handshake, a spoken turn, mute, limits |
-| Architecture | [architecture/board-support.md](architecture/board-support.md) | Board layer: buttons, LED ring, mute, Wi-Fi, clock, audio names; the Echo Dot Gen 2 board file |
-| Specs | [specs/0006-device-layer-contract.md](specs/0006-device-layer-contract.md) | Device layer contract: REQ-DEV, capability model, minimum hardware, conformance; board-file schema in [../schemas/board/](../schemas/board/README.md) |
-| Specs | [specs/0007-wake-word-runtime.md](specs/0007-wake-word-runtime.md) | Wake-word runtime: REQ-WAK, accepted operators, limits, agreement with the reference |
-| Architecture | [architecture/wake-word-runtime.md](architecture/wake-word-runtime.md) | The wake-word runtime: parts, validation against the reference, measurements |
-| Architecture | [architecture/device-daemon.md](architecture/device-daemon.md) | The portable device daemon: modules, what exists and what does not, running it, size |
-| Architecture | [architecture/device-conformance.md](architecture/device-conformance.md) | The device conformance suite: cases, running it, how a new board proves itself |
-| Architecture | [architecture/esphome-satellite.md](architecture/esphome-satellite.md) | Optional client for ESPHome voice satellites (a Dot base image, Voice PE): config, mapping, limits |
-| Architecture | [architecture/porting-a-satellite.md](architecture/porting-a-satellite.md) | Implementing a satellite on new hardware; the reference client |
-| Guides | [guides/pc-voice-loop.md](guides/pc-voice-loop.md) | Manual smoke test: a push-to-talk spoken turn on a PC (microphone in, speaker out) |
-| Decisions | [adr/](adr/README.md) | Why we chose what we chose |
-| Quality | [quality/testing-strategy.md](quality/testing-strategy.md) | Test levels, CI gates, review checklist |
-| Quality | [quality/traceability.md](quality/traceability.md) | Requirement-to-test map and measured results |
-| Security | [security/threat-model.md](security/threat-model.md) | Assets, threats, mitigations |
-| Design | [design/brand.md](design/brand.md) | Logo, colour tokens, contrast, usage rules, trademark stance |
-| Design | [design/portal.md](design/portal.md) | The tabbed web portal: palette, type, layout, tab names, principles |
-| Design | [design/ui-stack.md](design/ui-stack.md) | Proposed: raw JS, esbuild TypeScript, or Preact for the web UI |
-| Research | [research/](research/README.md) | Dated findings from external sources, with spec impact |
-| Recipes | [recipes/README.md](recipes/README.md) | The default toolset as tested configurations: web search, Spotify (with its policy problem), Home Assistant, GitHub, calendar, Claude Code hook |
-| Guides | [guides/announce.md](guides/announce.md) | Make the speaker say something from a script, Home Assistant or CI: `POST /api/announce` and `clawdot say`, with snippets and failure modes |
-| Guides | [guides/hermes-mcp.md](guides/hermes-mcp.md) | Let an agent harness such as Hermes speak and ask you things: the ClawDot MCP server, `announce` and `ask_user` |
-| Bridges | [../bridges/README.md](../bridges/README.md) | ntfy and Discord sidecars that make the speaker say messages, with filters, rate limits and no raw markup |
-| Guides | [guides/quick-start.md](guides/quick-start.md) | Start ClawDot on a computer, choose a language model, hear it answer, and keep it updated |
-| Guides | [guides/updates.md](guides/updates.md) | How ClawDot checks for, verifies and installs updates, and how the maintainer signs a release |
-| Guides | [guides/realtime-voice.md](guides/realtime-voice.md) | Optional realtime (speech-to-speech) voice: how to build it in, what it costs, what stays in ClawDot, and what is not yet verified against the real service |
-| Guides | [guides/local-speech.md](guides/local-speech.md) | Free local speech to text (whisper.cpp) and text to speech (Piper) with an OpenAI-compatible URL, for the PC voice loop |
-| Guides | [guides/memory-and-skills.md](guides/memory-and-skills.md) | How memories are kept, selected for each request and searched, and how skills in the open SKILL.md format are imported, reviewed and kept from running anything |
-| Guides | [guides/speech-providers.md](guides/speech-providers.md) | Choose ElevenLabs or Deepgram instead of an OpenAI-style speech server: setup, keys, cloned voices and their consent, and what is not yet verified against the real services |
-| Guides | [guides/forgot-password.md](guides/forgot-password.md) | Forgot the administrator password: the 10 second button hold, the desktop key, the command line, and the Echo Dot |
-| Guides | [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | B0 trial of the TECHO5 Dot base image on the maintainer's unit: backups, install, measurements, rollback, go/no-go |
-| Guides | [guides/hive.md](guides/hive.md) | Hive milestone H0: the speaker's Ed25519 identity and mDNS discovery of other speakers (optional `hive` feature), what it does and does not do, and the Avahi route for the Dot |
-| Process | [process/dev-environment.md](process/dev-environment.md) | Windows host plus WSL2 setup, toolchain, cross-compilation |
-| Privacy | [../PRIVACY.md](../PRIVACY.md) | What data goes where; the no-telemetry promise |
-| Planning | [open-questions.md](open-questions.md) | Questions for the maintainer, each with the default chosen meanwhile |
-| Planning | [roadmap.md](roadmap.md) | Milestones, feasibility gate, exit criteria, initial backlog |
-| Reports | [reports/2026-11-07-overnight-session.md](reports/2026-11-07-overnight-session.md) | Overnight session: what was built, measurements, decisions, open items |
-| Planning | [future-scope.md](future-scope.md) | Parked ideas with promotion conditions |
+Start with the [top-level README](../README.md) for what ClawDot is and its status, then the [architecture overview](architecture/overview.md) for how it is built.
 
-## Document precedence
+If documents disagree, the order is: accepted spec, then ADR, then architecture documents, then roadmap. Fix the disagreement in the same change. The glossary is in [spec 0001 section 3](specs/0001-product-requirements.md#3-definitions).
 
-If documents disagree: **Accepted spec > ADR > architecture overview > roadmap**. Fix the inconsistency in the same PR.
+## Using ClawDot
 
-## Glossary
+| Document | What it is |
+|---|---|
+| [guides/quick-start.md](guides/quick-start.md) | Start the program on a computer, choose a model, hear it answer |
+| [guides/local-speech.md](guides/local-speech.md) | Free local speech-to-text and text-to-speech servers |
+| [guides/speech-providers.md](guides/speech-providers.md) | ElevenLabs or Deepgram instead of an OpenAI-style server |
+| [guides/realtime-voice.md](guides/realtime-voice.md) | Optional speech-to-speech voice: build, cost, what is not yet proven |
+| [guides/pc-voice-loop.md](guides/pc-voice-loop.md) | Manual push-to-talk test on a computer |
+| [guides/announce.md](guides/announce.md) | Make the speaker say something from a script or CI (`POST /api/announce`, `clawdot say`) |
+| [guides/hermes-mcp.md](guides/hermes-mcp.md) | Let an agent harness speak and ask you things through the MCP server |
+| [guides/memory-and-skills.md](guides/memory-and-skills.md) | Notes, how they are selected, and importing skills |
+| [guides/updates.md](guides/updates.md) | How updates are checked, verified and installed; how a release is signed |
+| [guides/forgot-password.md](guides/forgot-password.md) | Recover the administrator password |
+| [guides/hive.md](guides/hive.md) | Optional device identity and discovery of other speakers on the network |
+| [recipes/README.md](recipes/README.md) | Ready configurations: [web search](recipes/web-search.md), [Spotify](recipes/spotify.md), [Home Assistant](recipes/home-assistant.md), [GitHub](recipes/github.md), [calendar](recipes/calendar.md), [Claude Code hook](recipes/claude-code-hook.md) |
+| [../bridges/README.md](../bridges/README.md) | ntfy and Discord bridges that make the speaker say messages |
+| [api/README.md](api/README.md) | The HTTP API as an OpenAPI description ([openapi.yaml](api/openapi.yaml)) |
 
-See [spec 0001 §3](specs/0001-product-requirements.md#3-definitions).
+## How it is built
+
+| Document | What it is |
+|---|---|
+| [architecture/overview.md](architecture/overview.md) | Context, crates, the core's structure, where state lives, the resource budget |
+| [architecture/agent-loop.md](architecture/agent-loop.md) | One multi-step turn: tasks, limits, speech, questions, cancel, memory |
+| [architecture/action-safety.md](architecture/action-safety.md) | Risk tiers, host-held confirmation, untrusted turns, skill allow-lists |
+| [architecture/configuration.md](architecture/configuration.md) | The configuration file, saved settings, the portal's first run |
+| [architecture/voice-pipeline.md](architecture/voice-pipeline.md) | Dialog state machine, end of speech, the spoken turn |
+| [architecture/speech-latency.md](architecture/speech-latency.md) | Time from the end of speech to the first sound: the reply played sentence by sentence as it is made (built), and speaking while the model is still writing (design) |
+| [architecture/satellite-server.md](architecture/satellite-server.md) | How speakers connect to the core |
+| [architecture/esphome-satellite.md](architecture/esphome-satellite.md) | Optional client for ESPHome voice devices |
+| [architecture/extensibility.md](architecture/extensibility.md) | Tools, packs, sidecars, media backends, trust model |
+| [architecture/http-tools.md](architecture/http-tools.md) | Declarative HTTP tools |
+| [architecture/mcp.md](architecture/mcp.md) | The MCP client |
+| [architecture/media.md](architecture/media.md) | Music and radio |
+| [architecture/evals.md](architecture/evals.md) | The scenario evaluation harness |
+
+## Devices
+
+| Document | What it is |
+|---|---|
+| [architecture/porting-a-satellite.md](architecture/porting-a-satellite.md) | Implement a satellite on new hardware |
+| [architecture/board-support.md](architecture/board-support.md) | Board files: buttons, lights, mute, audio names |
+| [architecture/device-daemon.md](architecture/device-daemon.md) | The portable device daemon |
+| [architecture/device-conformance.md](architecture/device-conformance.md) | The conformance suite a board must pass |
+| [architecture/wake-word-runtime.md](architecture/wake-word-runtime.md) | The wake-word runtime and its measurements |
+| [guides/dot-ssh.md](guides/dot-ssh.md) | Pushing builds to an Echo Dot over SSH (for developers) |
+| [guides/b0-techo5-trial-plan.md](guides/b0-techo5-trial-plan.md) | Trial plan for a Linux base image on an Echo Dot (historical) |
+
+## Specs, decisions, plans
+
+| Document | What it is |
+|---|---|
+| [specs/](specs/README.md) | What the system must do, with stable requirement IDs: [product requirements](specs/0001-product-requirements.md), [resource budget](specs/0002-resource-budget.md), [satellite protocol](specs/0003-satellite-protocol.md), [ESPHome client](specs/0004-esphome-satellite-client.md), [device layer](specs/0006-device-layer-contract.md), [wake word](specs/0007-wake-word-runtime.md) |
+| [adr/](adr/README.md) | Why decisions were made |
+| [roadmap.md](roadmap.md) | Milestones, what is done and what is next |
+| [future-scope.md](future-scope.md) | Parked ideas with the condition for promoting each |
+| [open-questions.md](open-questions.md) | Questions for the maintainer, with the default chosen meanwhile |
+| [design/agentic-scope.md](design/agentic-scope.md) | The design behind the agent loop (proposal, partly built) |
+| [research/](research/README.md) | Dated findings from outside sources |
+| [reports/](reports/) | Dated reviews: what was built, measured and proven ([latest review](reports/2026-11-11-architecture-review.md), [proving pass](reports/2026-11-11-proving-pass.md)) |
+
+## Security and privacy
+
+| Document | What it is |
+|---|---|
+| [security/threat-model.md](security/threat-model.md) | Assets, threats, mitigations |
+| [../SECURITY.md](../SECURITY.md) | How to report a vulnerability |
+| [../PRIVACY.md](../PRIVACY.md) | What is stored, what leaves the device, to whom |
+
+## Process and quality
+
+| Document | What it is |
+|---|---|
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | How to contribute |
+| [process/dev-environment.md](process/dev-environment.md) | Toolchain, Windows with WSL, cross-compiling |
+| [process/sdlc.md](process/sdlc.md) | Board, work limits, spec-driven workflow, definitions of ready and done |
+| [process/git-workflow.md](process/git-workflow.md) | Branches, merge commits, gated landing, releases |
+| [process/runbook.md](process/runbook.md) | Step-by-step commands and fixes for common errors |
+| [process/repo-settings.md](process/repo-settings.md) | Server-side rules that enforce the git flow |
+| [process/personal-data.md](process/personal-data.md) | What must not appear in files, and the guard |
+| [../AGENTS.md](../AGENTS.md) | Binding rules for AI coding agents |
+| [quality/testing-strategy.md](quality/testing-strategy.md) | Test levels, gates, review checklist |
+| [quality/traceability.md](quality/traceability.md) | Requirement-to-test map |
+
+## Design
+
+| Document | What it is |
+|---|---|
+| [design/portal.md](design/portal.md) | The web portal: tabs, layout, principles |
+| [design/portal-v2.md](design/portal-v2.md) | The reasoning, palette and wireframes behind the current portal |
+| [design/ui-stack.md](design/ui-stack.md) | The UI stack proposal (partly superseded by ADR-0016) |
+| [design/brand.md](design/brand.md) | Logo, colour tokens, usage rules |

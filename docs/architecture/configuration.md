@@ -38,6 +38,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `limits.daily_spend_usd` | Stop calling the model after this much spend. Counted from the cost the provider reports, else from its token counts times the portal settings `llm_usd_per_mtok_in` and `llm_usd_per_mtok_out`, else estimated from sizes at built-in prices of $10 and $40 per million tokens, so enter your prices (REQ-AST-011) | none |
 | `limits.max_actions_per_day` | Calls that are not read-only allowed per local day; 0 stops all actions (REQ-SEC-015) | 100 |
 | `limits.max_costly_per_day` | Costly and destructive calls allowed per local day (REQ-SEC-015) | 20 |
+| `limits.max_requests_per_day` | Retired: there is no cap on the number of requests. Still accepted so an older file loads; it is ignored. Use `daily_spend_usd` | ignored |
 | `limits.dry_run` | Describe actions instead of running them; also `--dry-run` (REQ-SEC-016) | off |
 | `agent.max_rounds` | Model rounds in one turn; at most 20 (REQ-AST-019) | 8 |
 | `agent.max_tool_calls` | Tool calls in one turn; at most 20 | 12 |
@@ -50,12 +51,12 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `mcp` | MCP servers whose tools the model may call; see [mcp.md](mcp.md) | none |
 | `stations` | Internet radio stations for the music commands; see [media.md](media.md) | none |
 | `device` | What the device is called and which parts it has that the system cannot show (REQ-CFG-083): `board` (an identifier: lower-case letters, digits, `-` and `_`, at most 40; use the `board` value of the file in `boards/`), `label` (what the portal shows, at most 60 characters on one line) and `parts` (`leds`, `bluetooth`, `wifi`, `screen`, `usb_serial`, each `true`, `false` or absent for as detected). Reported in the status as `hardware.board`, `hardware.label` and `hardware.configured_parts`; see [board-support.md](board-support.md). Ready-made sections are in `examples/devices/` | `board` is `unknown`, no label, every part as detected |
-
-Every `limits.*` and `agent.*` row above except `agent.summarize_over_chars` is also a portal setting (Settings, "Agent settings", REQ-CFG-062): `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`, `plan_speech`, `progress_speech`, `notes`, `max_actions_per_day`, `max_costly_per_day` and `dry_run`. They follow the usual layers (default, this file, saved in the portal, flag such as `--dry-run`), apply without a restart, and the page shows the value in force and where it came from. The same group holds the device-wide quiet hours (`quiet_start`, `quiet_end`, local `HH:MM`, both or neither; REQ-INB-040), which exist only as a setting: while the window lasts, only urgent agent events are announced.
 | `speech` | Speech-to-text and text-to-speech provider (`url`, `key_env`, `stt_model`, `tts_model`, `voice`, `language`, `tts_sample_rate`); see [voice-pipeline.md](voice-pipeline.md) | none |
 | `voice.realtime` | Optional realtime (speech-to-speech) voice: `enabled`, `provider` (`openai`), `url` (`wss://`), `model`, `voice`, `key_env`, `transcription_model`, `usd_per_min_in`, `usd_per_min_out`, `max_session_secs`. Needs a build with the `realtime` feature; also the portal settings `realtime_enabled`, `realtime_url`, `realtime_model`, `realtime_voice`, `realtime_key_env`, `realtime_transcription_model`, `realtime_usd_per_min_in`, `realtime_usd_per_min_out` and `realtime_max_session_secs`, all applied without a restart (REQ-RTV-008). See [../guides/realtime-voice.md](../guides/realtime-voice.md) | off |
 | `satellite` | Where speakers connect (`listen`, `token_env`, `follow_up_secs`); see [satellite-server.md](satellite-server.md) | off |
 | `esphome` | ESPHome voice satellites to dial (`devices`, `media_listen`, `media_url`); needs a build with the `esphome-satellite` feature; see [esphome-satellite.md](esphome-satellite.md) | off |
+
+Every `limits.*` and `agent.*` row above except `agent.summarize_over_chars` is also a portal setting (Settings, "Agent settings", REQ-CFG-062): `agent_max_rounds`, `agent_max_tool_calls`, `agent_deadline_secs`, `agent_tool_timeout_secs`, `plan_speech`, `progress_speech`, `notes`, `max_actions_per_day`, `max_costly_per_day` and `dry_run`. They follow the usual layers (default, this file, saved in the portal, flag such as `--dry-run`), apply without a restart, and the page shows the value in force and where it came from. The same group holds the device-wide quiet hours (`quiet_start`, `quiet_end`, local `HH:MM`, both or neither; REQ-INB-040), which exist only as a setting: while the window lasts, only urgent agent events are announced.
 
 ## Settings saved from the portal
 
@@ -89,7 +90,8 @@ mutating endpoint.
 
 - **Secrets are never in the file, and never in `settings.json`.** The API key comes from the environment variable
   named by `llm.key_env` (or the portal's "Key variable" setting, which holds the NAME). Naming a variable that is not
-  set is refused with that name. There is no stored-key option (see docs/open-questions.md).
+  set is refused with that name. A key can also be pasted into the portal; it is kept in `secrets.json` in the data
+  directory (mode 0600, not encrypted), shown only as a masked hint, and never part of an export (`secrets.rs`).
 - **The environment is read once**, at the start of `main` (`env::Env::from_process`), and a lookup is passed down; nothing else in the core reads the process environment. A setting that names a variable (`llm_key_env`, `realtime_key_env`, `speech.key_env`, a connection's `auth_env`) resolves the name chosen at that time, in that start-up snapshot. A variable exported after ClawDot started is therefore not seen until it restarts, which was already true of a running process.
 - **Validated at startup**, before anything is bound or written. (MCP sources are only declared and checked then; they connect after the listener and the loop start, and a source that cannot be reached is reported, not fatal.)
 - **Hot reload** of the configuration file (a SHOULD in the spec) is not implemented: restart to apply file changes.
@@ -98,8 +100,8 @@ mutating endpoint.
 
 ## Web UI
 
-The core serves a small page at `/` and `/ui` (REQ-CFG-001, 008): no external assets, no frameworks, usable on a
-phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, Webhooks, Settings; see [design/portal.md](../design/portal.md)) with a header and a version footer (REQ-CFG-025, 026). Webhooks (REQ-CFG-003, 028) create, rotate, and delete endpoints and show copy-paste snippets; Reminders (REQ-CFG-027) manages timers, alarms, and reminders; Tools, Connections, and Settings (REQ-CFG-029, 030) show what the device is running with.
+The core serves a small page at `/` and `/ui` (REQ-CFG-001, 008): no external assets, usable on a
+phone, as a portal with five destinations (Home, Clock, Media, Logs, Settings, whose pages hold tools, connections, skills, webhooks, notes, voice, updates and the rest; see [design/portal.md](../design/portal.md)) with a header and a version footer (REQ-CFG-025, 026). Webhooks (REQ-CFG-003, 028) create, rotate, and delete endpoints and show copy-paste snippets; the Clock page (REQ-CFG-027) manages timers, alarms, and reminders; tools, connections and settings (REQ-CFG-029, 030) show and change what the device is running with.
 
 - **First run** (REQ-CFG-018). Start `clawdot`, then open the address it prints. While nothing is configured the
   page shows one setup screen with two choices: **protect with an admin password** (recommended), or **leave the
@@ -130,6 +132,7 @@ phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, 
 - **Upgrading** (REQ-CFG-023). If `admin-token.hash` exists from an earlier version, it is converted on the first
   start: the old token keeps working, typed into the password field, and the page invites you to set a real
   password (which retires the token). `--rotate-admin-token` is gone; use `--reset-admin`.
+- **Host names.** The portal page and its sign-in-free routes answer only to the device's own names: an IP address, `localhost`, the host of `public_url` and the machine's host name (`hostguard.rs`, threat T5). Behind a reverse proxy or under another name, set `public_url`. A browser request to `/api` that changes something is refused when its `Origin` is not the host it was sent to, and any `/api` request a browser marks `Sec-Fetch-Site: cross-site` is refused. Scripts send neither header and are not affected.
 - **Binding.** The default listen address is `127.0.0.1:3335` (not 8080, which Amazon's `oobed` service holds on an Echo Dot; REQ-CFG-014). Change `listen` to the LAN address deliberately;
   there is no TLS, so use a trusted network or a VPN (REQ-CFG-005).
 - **Start-up order.** The listening address is bound first; only then is the administrator
@@ -141,4 +144,4 @@ phone, as a tabbed portal (Home, Reminders, Agents, Tools, Connections, Skills, 
 - **Untrusted text.** Agent text is rendered as text only, and the page carries a strict Content-Security-Policy.
 - **Status** shows the model and today's request count, connected satellites, how many tools are loaded (built in, HTTP, MCP), and the clock state. It contains no secrets and no agent text. Radio and music are not shown in the portal.
 - **Test speak** makes the speaker say a short phrase (up to 200 characters, a few at a time) on the console and on any free satellite, a quick way to check the speaker end to end.
-- Not yet in the UI: editing settings (the Settings tab shows them; change the file and restart), editing a tool or connection in place (delete and add it again), provider keys, wake word settings, logs, and history search. Tools, connections, and skills are managed from their tabs (REQ-CFG-032..036).
+- Not in the UI: editing the configuration file itself, hot reload of it, and wake word settings. Settings, provider keys, logs, notes, tools, connections and skills are managed from the portal (REQ-CFG-032..036, 062..064). A tool or connection is edited by deleting and adding it again.

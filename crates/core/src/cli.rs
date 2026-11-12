@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 pub const HELP: &str = "\
-clawdot: ClawDot core with a text console (pre-alpha; no audio yet)
+clawdot: the ClawDot core (assistant, web portal, HTTP API and a text console)
 
 USAGE:
     clawdot [options]

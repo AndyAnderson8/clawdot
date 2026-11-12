@@ -4,6 +4,11 @@
 //!
 //! This is the same protection the rest of ClawDot's data files have; it is not encryption at rest. Anyone who can read
 //! the data directory as the service user can read the key, as they could read an environment file.
+//!
+//! The file is read once, when the store is created; after that [`Secrets::get`] and [`Secrets::hint`] answer from memory
+//! and never touch the disk (they run on the voice path). `set` and `clear` write through. Changing `secrets.json` by hand
+//! or from another process while ClawDot runs is not supported: the running program keeps the keys it loaded until it
+//! restarts, and the next `set` or `clear` re-reads the file (to protect what it holds) and writes the result back.
 
 use crate::store::{JsonStore, StoreError};
 use std::collections::BTreeMap;
@@ -24,15 +29,27 @@ pub const SPEECH_KEY: &str = "speech_key";
 /// The longest key accepted.
 const MAX_KEY: usize = 512;
 
-/// The stored keys. A cheap handle: clones read and write the same file, and each [`crate::app::Core`] owns its own, so
-/// two cores in one process (two data directories) never see each other's keys.
+/// The keys held in memory. Its `Debug` names the keys and never shows a value, so a stray `{:?}` cannot leak one.
+#[derive(Default)]
+struct Keys(BTreeMap<String, String>);
+
+impl std::fmt::Debug for Keys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.keys().map(|k| format!("{k}: <redacted>")))
+            .finish()
+    }
+}
+
+/// The stored keys. A cheap handle: clones share one in-memory map and write the same file, and each
+/// [`crate::app::Core`] owns its own, so two cores in one process (two data directories) never see each other's keys.
 #[derive(Debug, Clone, Default)]
 pub struct Secrets {
     /// Where the file lives; `None` keeps nothing (an in-memory core).
     store: Option<JsonStore>,
-    /// Held from reading the file to writing it back, so two changes at once cannot lose one of them (the portal
-    /// handlers run side by side, and the save goes through one temporary file).
-    writing: Arc<Mutex<()>>,
+    /// The keys as of the last read or write. Also held from reading the file to writing it back, so two changes at
+    /// once cannot lose one of them (the portal handlers run side by side, and the save goes through one temporary file).
+    keys: Arc<Mutex<Keys>>,
 }
 
 impl Secrets {
@@ -45,9 +62,15 @@ impl Secrets {
     /// Keys kept in this store.
     #[must_use]
     pub fn at(store: JsonStore) -> Self {
+        // A file that cannot be read now (damaged, newer, unreadable) starts as no keys; `set` and `clear` still refuse
+        // to overwrite one that could not be read.
+        let keys = store
+            .load::<BTreeMap<String, String>>()
+            .map(Keys)
+            .unwrap_or_default();
         Self {
             store: Some(store),
-            writing: Arc::default(),
+            keys: Arc::new(Mutex::new(keys)),
         }
     }
 
@@ -57,17 +80,11 @@ impl Secrets {
         Self::default()
     }
 
-    fn load(&self) -> BTreeMap<String, String> {
-        self.store
-            .as_ref()
-            .and_then(|s| s.load::<BTreeMap<String, String>>().ok())
-            .unwrap_or_default()
-    }
-
-    /// The stored secret called `name`, if any.
+    /// The stored secret called `name`, if any. Answers from memory.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<String> {
-        self.load().remove(name).filter(|v| !v.is_empty())
+        let keys = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
+        keys.0.get(name).filter(|v| !v.is_empty()).cloned()
     }
 
     /// Store a secret, replacing any earlier one of that name.
@@ -87,12 +104,14 @@ impl Secrets {
         let Some(store) = self.store.as_ref() else {
             return Err("This ClawDot has nowhere to keep a key.".into());
         };
-        let _writing = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut keys = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
         let mut all = Self::load_for_update(store)?;
         all.insert(name.to_owned(), value.to_owned());
         store
             .save(&all)
-            .map_err(|e| format!("The key could not be saved: {e}"))
+            .map_err(|e| format!("The key could not be saved: {e}"))?;
+        keys.0 = all;
+        Ok(())
     }
 
     /// The stored keys, to be changed and written back. A file that is damaged is replaced (there is nothing in it
@@ -116,13 +135,14 @@ impl Secrets {
         let Some(store) = self.store.as_ref() else {
             return Ok(());
         };
-        let _writing = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut keys = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
         let mut all = Self::load_for_update(store)?;
         if all.remove(name).is_some() {
             store
                 .save(&all)
                 .map_err(|e| format!("The key could not be removed: {e}"))?;
         }
+        keys.0 = all;
         Ok(())
     }
 
@@ -229,6 +249,48 @@ mod tests {
                 "{name} was lost to a concurrent save"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_and_hint_never_touch_the_disk_after_the_first_load() {
+        let dir = std::env::temp_dir().join(format!("clawdot-secrets-mem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Secrets::in_dir(&dir)
+            .set(LLM_KEY, "sk-memory-0123456789")
+            .unwrap();
+        let s = Secrets::in_dir(&dir);
+        let file = dir.join("secrets.json");
+        std::fs::write(&file, b"{ not json").unwrap();
+        assert_eq!(s.get(LLM_KEY).as_deref(), Some("sk-memory-0123456789"));
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(s.get(LLM_KEY).as_deref(), Some("sk-memory-0123456789"));
+        assert_eq!(s.hint(LLM_KEY).as_deref(), Some("sk-mem…6789"));
+        // A damaged file is repaired by the next set, as before; the memory follows the write.
+        std::fs::write(&file, b"{ not json").unwrap();
+        s.set(SPEECH_KEY, "sk-speech-0123456789").unwrap();
+        assert!(s.get(SPEECH_KEY).is_some());
+        assert!(
+            s.get(LLM_KEY).is_none(),
+            "the repaired file holds only the new key"
+        );
+        // An unreadable (newer) file is refused and memory is unchanged.
+        let newer = JsonStore::new(file.clone(), SCHEMA + 1);
+        newer.save(&BTreeMap::<String, String>::new()).unwrap();
+        assert!(s.set(LLM_KEY, "sk-again-0123456789").is_err());
+        assert!(s.get(LLM_KEY).is_none());
+        assert!(s.get(SPEECH_KEY).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn debug_output_never_shows_a_value() {
+        let dir = std::env::temp_dir().join(format!("clawdot-secrets-dbg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = Secrets::in_dir(&dir);
+        s.set(LLM_KEY, "sk-secret-0123456789").unwrap();
+        let shown = format!("{s:?}");
+        assert!(!shown.contains("sk-secret"), "{shown}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
