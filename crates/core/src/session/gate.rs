@@ -740,6 +740,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 self.conv.set_recent(old.recent, "declined");
             }
             self.result.expects_reply = true;
+            self.result.pending = true;
             return Some(self.finish(&speech));
         }
         if let Some(stop) = limit_hit {
