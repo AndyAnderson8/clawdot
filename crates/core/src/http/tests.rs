@@ -1453,8 +1453,37 @@ async fn a_web_page_on_another_site_cannot_drive_the_portal_in_open_mode() {
         call(h.addr, "POST", "/api/announce", &evil, say).await.0,
         403
     );
-    // Reading is left to the browser's same-origin rule, and the portal itself (origin = host) works, as does a
-    // script that sends no Origin at all.
+    // A browser labels a request made by a page on another site, whatever its method (an image or a script tag is
+    // a GET with no Origin). Such a request is refused before it can have any effect.
+    for path in [
+        "/api/overview",
+        "/api/models?url=https://evil.example&key_env=PATH",
+    ] {
+        let labelled = [("Sec-Fetch-Site", "cross-site")];
+        assert_eq!(
+            call(h.addr, "GET", path, &labelled, "").await.0,
+            403,
+            "{path}"
+        );
+    }
+    for site in ["same-origin", "none"] {
+        let labelled = [("Sec-Fetch-Site", site)];
+        let (s, _, _) = call(h.addr, "GET", "/api/overview", &labelled, "").await;
+        assert_eq!(s, 200, "{site}");
+    }
+    // An older browser sends no label. The model list then still takes nothing from the address: with no saved
+    // provider it asks nobody, whatever address and variable the request names.
+    let (s, _, body) = call(
+        h.addr,
+        "GET",
+        "/api/models?url=https://evil.example&key_env=PATH",
+        &[],
+        "",
+    )
+    .await;
+    assert_eq!(s, 409, "{body}");
+    // Reading without that label is left to the browser's same-origin rule, and the portal itself (origin = host)
+    // works, as does a script that sends no Origin at all.
     assert_eq!(call(h.addr, "GET", "/api/overview", &evil, "").await.0, 200);
     let same = [("Origin", "http://127.0.0.1")];
     assert_eq!(

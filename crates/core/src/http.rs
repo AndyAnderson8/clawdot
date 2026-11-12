@@ -280,6 +280,21 @@ fn cross_site_write(method: &hyper::Method, segs: &[&str], headers: &HeaderMap) 
     }
 }
 
+/// Whether a browser says this request to `/api` comes from a page on another site.
+///
+/// The `Origin` rule above covers requests that change something. A plain cross-site GET (an image, a script tag)
+/// carries no `Origin`, and although the page cannot read the answer, the request itself still runs. Current
+/// browsers label every request with `Sec-Fetch-Site`; one that says `cross-site` is refused whatever its method,
+/// so no `/api` route can be set off from another site even if it has an effect. A script, and an older browser,
+/// send no such header and are not affected.
+fn fetched_from_another_site(segs: &[&str], headers: &HeaderMap) -> bool {
+    segs.first() == Some(&"api")
+        && headers
+            .get("sec-fetch-site")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("cross-site"))
+}
+
 /// Whether this request would be answered on the strength of the caller's address alone: the page and the portal's
 /// `/api` routes, and an announcement with no token. Routes that carry their own token are not (a page that was
 /// rebound to this device does not have the token), nor is the health check.
@@ -323,7 +338,8 @@ async fn route(
     let path = parts.uri.path().to_owned();
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
     let headers = &parts.headers;
-    if cross_site_write(&parts.method, &segs, headers) {
+    if cross_site_write(&parts.method, &segs, headers) || fetched_from_another_site(&segs, headers)
+    {
         return Ok(json(
             StatusCode::FORBIDDEN,
             r#"{"error":"cross-site request refused"}"#,
