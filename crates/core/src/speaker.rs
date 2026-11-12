@@ -128,7 +128,10 @@ pub async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Ev
             max_tokens: 120,
         };
         let outcome = llm.backend.complete(&req).await;
-        usage.record(day, outcome.as_ref().ok().and_then(|c| c.usage.as_ref()));
+        match &outcome {
+            Ok(c) => usage.record_reply(day, &req, c),
+            Err(_) => usage.record_request(day),
+        }
         if let Ok(c) = outcome {
             let spoken = clamp_for_speech(&c.text, &cfg);
             if !spoken.is_empty() {

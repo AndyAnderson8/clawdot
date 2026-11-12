@@ -35,7 +35,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `llm.url`, `llm.model` | Language model; set together or not at all. `https://` is required unless the host is localhost, `.local` or a private-network address (REQ-SEC-001) | none (fast path only) |
 | `llm.fallback_model`, `llm.summary_model` | Optional; need `llm.url` and `llm.model` | none |
 | `llm.key_env` | Name of the environment variable holding the key | `OPENROUTER_API_KEY` |
-| `limits.daily_spend_usd` | Stop calling the model after this much spend | none |
+| `limits.daily_spend_usd` | Stop calling the model after this much spend. Counted from the cost the provider reports, else from its token counts times the portal settings `llm_usd_per_mtok_in` and `llm_usd_per_mtok_out`, else estimated from sizes at built-in prices of $10 and $40 per million tokens, so enter your prices (REQ-AST-011) | none |
 | `limits.max_actions_per_day` | Calls that are not read-only allowed per local day; 0 stops all actions (REQ-SEC-015) | 100 |
 | `limits.max_costly_per_day` | Costly and destructive calls allowed per local day (REQ-SEC-015) | 20 |
 | `limits.dry_run` | Describe actions instead of running them; also `--dry-run` (REQ-SEC-016) | off |
@@ -70,6 +70,7 @@ warning so a headless device still starts.
 | Device name, time zone, personality (the text itself) | `device_name`, `zone`, `persona` | right away |
 | Language model address, model, backup model, summary model, key variable name | `llm_url`, `llm_model`, `llm_fallback_model`, `summary_model`, `llm_key_env` | right away (the model client is rebuilt) |
 | Daily spend | `daily_spend_usd` | right away |
+| Model prices, in dollars per million tokens in and out (0 means free; empty means unknown) | `llm_usd_per_mtok_in`, `llm_usd_per_mtok_out` | right away |
 | Voice | `voice` | after a restart (needs the `speech` section of the configuration file) |
 | Listen address, public address | `listen`, `public_url` | after a restart |
 | Board | `board` (`auto` or `none`) | after a restart; nothing reads it yet |
