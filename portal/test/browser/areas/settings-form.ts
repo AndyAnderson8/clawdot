@@ -59,6 +59,24 @@ export async function settingsForm(c: Ctx): Promise<void> {
     await T(`submit('#pwsec')`);
     await b.until(`T.q('#banner') === null`, "banner gone once a password is set");
     assert.deepEqual(mock.log.find((l) => l.path === "/api/admin/password")!.body, { password: "brand new password" });
+    // Now there is a password, changing it asks for the current one, and a wrong one changes nothing.
+    await section("security", "Security");
+    await b.until(`!!T.q('#curpw')`, "the current password is asked for");
+    await T(`set('#newpw', 'another password 2')`);
+    await T(`submit('#pwsec')`);
+    await b.until(`T.text('#pwerr').startsWith('Type your current password')`, "it must be typed");
+    await T(`set('#curpw', 'not the password')`);
+    await T(`submit('#pwsec')`);
+    await b.until(`T.text('#pwerr').startsWith('That is not the current password')`, "a wrong one is refused");
+    await eq(`T.q('#newpw').value`, "another password 2", "what was typed stays");
+    await eq(`!!T.q('#curpw')`, true, "and the page is still signed in");
+    await T(`set('#curpw', 'brand new password')`);
+    await T(`submit('#pwsec')`);
+    await b.until(`T.text('#msg') === 'Password saved.'`, "the right one changes it");
+    assert.deepEqual(mock.log.filter((l) => l.path === "/api/admin/password").pop()!.body, {
+      password: "another password 2",
+      current: "brand new password",
+    });
     await section("about", "About");
     await T(`click('#about summary')`);
     await b.until(`T.text('#notes')?.includes('First release')`, "release notes loaded");

@@ -1,6 +1,6 @@
 import { Fragment, type JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api, keep } from "../api.ts";
+import { api, keep, ApiError } from "../api.ts";
 import { restartText, type SettingSpec } from "../forms.ts";
 import { fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
 import { zoneName } from "../time.ts";
@@ -555,17 +555,33 @@ function MemorySection(): JSX.Element {
 function Security(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
+  const [cur, setCur] = useState("");
+  const [pwErr, setPwErr] = useState("");
+  const hasPassword = s.mode === "password";
   const savePassword = async (ev: Event) => {
     ev.preventDefault();
+    setPwErr("");
+    if (hasPassword && !cur) {
+      setPwErr(s.legacy ? "Type the old administrator token first." : "Type your current password first.");
+      return;
+    }
     const password = pw;
-    setPw("");
     try {
-      const r = await api<{ token: string }>("POST", "/api/admin/password", { password });
+      const r = await api<{ token: string }>(
+        "POST",
+        "/api/admin/password",
+        hasPassword ? { password, current: cur } : { password },
+      );
+      setPw("");
+      setCur("");
       keep(r.token);
       say("Password saved.");
       await start();
     } catch (x) {
-      fail(x);
+      // A wrong current password is said next to the boxes, and what was typed stays so it can be corrected.
+      if (x instanceof ApiError && x.status === 403)
+        setPwErr("That is not the current password. Check it and try again.");
+      else fail(x);
     }
   };
   const signOut = async () => {
@@ -587,6 +603,22 @@ function Security(): JSX.Element {
             You are signed in with the old administrator token. Set a password to replace it.
           </p>
         ) : null}
+        {hasPassword ? (
+          <Field
+            id="curpw"
+            label={s.legacy ? "Old administrator token" : "Current password"}
+            hint="So that only you can change it."
+          >
+            <input
+              id="curpw"
+              type="password"
+              autoComplete="current-password"
+              maxLength={128}
+              value={cur}
+              onInput={(e) => setCur(e.currentTarget.value)}
+            />
+          </Field>
+        ) : null}
         <Field id="newpw" label="New password" hint="At least 8 characters.">
           <input
             id="newpw"
@@ -598,6 +630,9 @@ function Security(): JSX.Element {
             onInput={(e) => setPw(e.currentTarget.value)}
           />
         </Field>
+        <p class="errtext" role="alert" id="pwerr">
+          {pwErr}
+        </p>
         <div class="row">
           <button>Save password</button>
         </div>
