@@ -271,6 +271,9 @@ enum Purpose {
     Announcement(oneshot::Sender<bool>),
     /// A phrase spoken while a turn works.
     Progress,
+    /// The closing line of a realtime session. The session's end waits in `SessionState::finished` without
+    /// audio; the speech fills it in when it is made.
+    Closing,
 }
 
 /// Speech being made for the speaker. The event loop polls it beside its other events, so a slow speech
@@ -724,6 +727,8 @@ impl SessionState {
             Some(Purpose::Progress) => {
                 self.dialog.is_muted() || (self.work.is_none() && self.finished.is_none())
             }
+            // Its text belongs to the waiting session end; only that being gone makes it stale.
+            Some(Purpose::Closing) => self.finished.is_none(),
             None => false,
         };
         if stale {
@@ -1104,17 +1109,25 @@ where
             transcript: Some(String::new()),
             ..VoiceOutcome::default()
         };
+        let mut closing = None;
         if let Some(text) = done.speak {
-            let mut problems = Vec::new();
-            outcome.audio = speak_text(&*self.tts, &text, &mut problems).await;
             outcome.transcript = None;
-            outcome.reply = text;
+            outcome.reply = text.clone();
+            closing = Some(text);
         }
         st.finished = Some(Finished {
             outcome,
             effects: done.effects,
             asked: false,
         });
+        if let Some(text) = closing {
+            // The speech is made while the session goes on reading (network synthesis can take long).
+            // `deliver_finished` waits for it, and `on_synthesized` hands it to the waiting session end.
+            st.synth = Some(Synth {
+                purpose: Purpose::Closing,
+                work: self.synthesize(text),
+            });
+        }
         Ok(())
     }
 
@@ -1158,6 +1171,11 @@ where
                     st.out.audio = Audio::Speech;
                 }
                 let _ = answer.send(accepted);
+            }
+            Purpose::Closing => {
+                if let Some(f) = st.finished.as_mut() {
+                    f.outcome.audio = audio;
+                }
             }
             Purpose::Progress => {
                 if !audio.is_empty() && st.wants_progress_speech() {
