@@ -1536,23 +1536,29 @@ async fn a_web_page_on_another_site_cannot_drive_the_portal_in_open_mode() {
 // credential, so the portal answers only to names that are the device's.
 #[tokio::test]
 async fn a_rebound_name_cannot_reach_the_portal_but_the_devices_own_names_can() {
-    let h = start(Limits::default(), ServeOptions::default()).await;
+    // The machine name is injected: the request path answers for the kept value and reads no file or variable.
+    let core = Core::in_memory(
+        Arc::new(SystemClock),
+        Adapters::builtin(),
+        Limits::default(),
+    )
+    .with_machine_name(Some("Speaker.Example.Lan"));
+    let h = start_core(Arc::new(core), ServeOptions::default()).await;
     assert_eq!(
         post(&h, "/api/setup", "", r#"{"mode":"open"}"#).await.0,
         200
     );
     let port = h.addr.port();
-    let mut ours = vec![
+    let ours = vec![
+        format!("speaker.example.lan:{port}"),
+        format!("speaker:{port}"),
+        format!("speaker.local:{port}"),
         format!("127.0.0.1:{port}"),
         format!("192.168.1.20:{port}"),
         format!("[::1]:{port}"),
         format!("localhost:{port}"),
         "10.0.0.7".to_owned(),
     ];
-    if let Some(m) = crate::hostguard::machine_name() {
-        ours.push(format!("{m}:{port}"));
-        ours.push(format!("{}.local:{port}", m.split('.').next().unwrap()));
-    }
     for host in &ours {
         for (method, path) in [("GET", "/"), ("GET", "/api/overview"), ("GET", "/api/auth")] {
             let (s, _, _) = call_for(h.addr, host, method, path, &[], "").await;
@@ -1593,6 +1599,34 @@ async fn a_rebound_name_cannot_reach_the_portal_but_the_devices_own_names_can() 
     assert!(
         h.core.endpoints().iter().all(|e| e.name != "rebind"),
         "nothing was changed"
+    );
+}
+
+// A core answers for its own kept name only: a core built with no name (or another one) refuses "speaker".
+#[tokio::test]
+async fn the_kept_machine_name_is_per_core() {
+    let unnamed = start(Limits::default(), ServeOptions::default()).await;
+    let other = Core::in_memory(
+        Arc::new(SystemClock),
+        Adapters::builtin(),
+        Limits::default(),
+    )
+    .with_machine_name(Some("other"));
+    let other = start_core(Arc::new(other), ServeOptions::default()).await;
+    for h in [&unnamed, &other] {
+        assert_eq!(post(h, "/api/setup", "", r#"{"mode":"open"}"#).await.0, 200);
+        let host = format!("speaker:{}", h.addr.port());
+        assert_eq!(
+            call_for(h.addr, &host, "GET", "/api/auth", &[], "").await.0,
+            403
+        );
+    }
+    let host = format!("other:{}", other.addr.port());
+    assert_eq!(
+        call_for(other.addr, &host, "GET", "/api/auth", &[], "")
+            .await
+            .0,
+        200
     );
 }
 

@@ -337,7 +337,17 @@ pub struct Updater {
     probe: bool,
     /// Exit after installing so the supervisor starts the new version (off in tests).
     exit_after: bool,
+    /// How to ask the owner for an orderly stop once the update is installed; without one the program just exits.
+    stop: Option<StopFn>,
 }
+
+/// Asks the owner of the program for an orderly stop with this exit code (flush what is queued, then exit). The
+/// updater only knows this one function; it does not know what the owner has to save. The function should not return;
+/// it runs on a blocking thread, and the updater exits by itself if it has not finished in [`STOP_WAIT`].
+pub type StopFn = Arc<dyn Fn(i32) + Send + Sync>;
+
+/// How long the owner gets to stop in order before the program exits anyway.
+const STOP_WAIT: Duration = Duration::from_secs(10);
 
 impl std::fmt::Debug for Updater {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -350,15 +360,19 @@ impl std::fmt::Debug for Updater {
 /// Make the updater of this run, start its daily check, and settle any update that was waiting to prove itself.
 /// The caller keeps the returned handle (the core holds it); the check task holds its own clone.
 ///
+/// `stop` is called (with exit code 0) when an installed update needs the program to restart; see [`StopFn`].
+///
 /// # Errors
 /// The updater could not be made (a TLS configuration failure).
 pub fn start(
     cfg: UpdateConfig,
     enabled: bool,
     data_dir: Option<PathBuf>,
+    stop: StopFn,
 ) -> Result<Arc<Updater>, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
-    let u = Updater::new(cfg, enabled, data_dir, exe, true, true)?;
+    let mut u = Updater::new(cfg, enabled, data_dir, exe, true, true)?;
+    u.stop = Some(stop);
     u.load();
     u.settle_pending();
     let u = Arc::new(u);
@@ -399,6 +413,7 @@ impl Updater {
             connector: Connector::new()?,
             probe,
             exit_after,
+            stop: None,
         })
     }
 
@@ -700,7 +715,22 @@ impl Updater {
             return Err("the downloaded file does not match its signed hash".into());
         }
         self.set_phase(Phase::Installing);
-        self.install(&data, &r.version)?;
+        // Writing, fsyncing and running the new program (`--version`) take real time and block; keep them off the
+        // runtime thread, which also runs the voice loop, the timers and the portal.
+        let (exe, pending, probe) = (self.exe.clone(), self.file(PENDING_FILE), self.probe);
+        let version = r.version.clone();
+        tokio::task::spawn_blocking(move || {
+            install_program(
+                &exe,
+                pending.as_deref(),
+                probe,
+                &data,
+                &version,
+                &|from, to| std::fs::rename(from, to),
+            )
+        })
+        .await
+        .map_err(|e| format!("the install stopped unexpectedly: {e}"))??;
         self.set_phase(Phase::Installed);
         {
             let mut s = self.lock();
@@ -713,69 +743,18 @@ impl Updater {
         if self.exit_after && self.cfg.supervised {
             self.set_phase(Phase::Restarting);
             tokio::time::sleep(Duration::from_millis(1500)).await;
-            std::process::exit(0);
-        }
-        Ok(())
-    }
-
-    /// Put the new program next to the running one, check that it starts, and swap them. The old one stays as
-    /// `.prev`. A failure at any step leaves the running program exactly as it was.
-    fn install(&self, data: &[u8], version: &str) -> Result<(), String> {
-        let name = self
-            .exe
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or("cannot tell where this program is")?
-            .to_owned();
-        let new = self.exe.with_file_name(format!("{name}.new"));
-        let prev = self.exe.with_file_name(format!("{name}.prev"));
-        // Flush it to the disk before the rename below makes it the program: after a power cut a renamed but
-        // unflushed file can come back empty, and the speaker would then have no program at all.
-        let written = std::fs::File::create(&new).and_then(|mut f| {
-            std::io::Write::write_all(&mut f, data)?;
-            f.sync_all()
-        });
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&new);
-            return Err(format!(
-                "cannot write the new program next to this one: {e}"
-            ));
-        }
-        let cleanup = |e: String| {
-            let _ = std::fs::remove_file(&new);
-            e
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
-                .map_err(|e| cleanup(format!("cannot make the new program runnable: {e}")))?;
-        }
-        if self.probe {
-            let out = std::process::Command::new(&new)
-                .arg("--version")
-                .output()
-                .map_err(|e| {
-                    cleanup(format!(
-                        "the new program does not start on this device: {e}"
-                    ))
-                })?;
-            let said = String::from_utf8_lossy(&out.stdout);
-            if !out.status.success() || !reports_version(&said, version) {
-                return Err(cleanup(
-                    "the new program did not report the expected version".into(),
-                ));
+            match self.stop.clone() {
+                // An orderly stop: the owner flushes what it has queued, then exits with this code. It runs off
+                // the runtime thread (it may wait for the disk); if it takes too long the program exits anyway,
+                // because the supervisor must get its restart.
+                Some(stop) => {
+                    let asked = tokio::task::spawn_blocking(move || stop(0));
+                    if tokio::time::timeout(STOP_WAIT, asked).await.is_err() {
+                        std::process::exit(0);
+                    }
+                }
+                None => std::process::exit(0),
             }
-        }
-        if let Some(p) = self.file(PENDING_FILE) {
-            let _ = std::fs::write(p, version);
-        }
-        let _ = std::fs::remove_file(&prev);
-        std::fs::rename(&self.exe, &prev)
-            .map_err(|e| cleanup(format!("cannot set the old program aside: {e}")))?;
-        if let Err(e) = std::fs::rename(&new, &self.exe) {
-            let _ = std::fs::rename(&prev, &self.exe);
-            return Err(cleanup(format!("cannot put the new program in place: {e}")));
         }
         Ok(())
     }
@@ -797,6 +776,124 @@ impl Updater {
             let _ = std::fs::remove_file(&path);
         });
     }
+}
+
+/// Put the new program `data` next to the running one `exe`, check that it starts (when `probe`), and swap them. The old
+/// one stays as `<name>.prev`. A failure at any step leaves the running program exactly as it was. `rename` is the
+/// file rename, passed in so a test can make a step fail. Blocking: call it from a blocking thread.
+fn install_program(
+    exe: &Path,
+    pending: Option<&Path>,
+    probe: bool,
+    data: &[u8],
+    version: &str,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let name = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("cannot tell where this program is")?
+        .to_owned();
+    let new = exe.with_file_name(format!("{name}.new"));
+    let prev = exe.with_file_name(format!("{name}.prev"));
+    // Flush it to the disk before the rename below makes it the program: after a power cut a renamed but
+    // unflushed file can come back empty, and the speaker would then have no program at all.
+    let written = std::fs::File::create(&new).and_then(|mut f| {
+        std::io::Write::write_all(&mut f, data)?;
+        f.sync_all()
+    });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&new);
+        return Err(format!(
+            "cannot write the new program next to this one: {e}"
+        ));
+    }
+    let cleanup = |e: String| {
+        let _ = std::fs::remove_file(&new);
+        e
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| cleanup(format!("cannot make the new program runnable: {e}")))?;
+    }
+    if probe {
+        let out = std::process::Command::new(&new)
+            .arg("--version")
+            .output()
+            .map_err(|e| {
+                cleanup(format!(
+                    "the new program does not start on this device: {e}"
+                ))
+            })?;
+        let said = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() || !reports_version(&said, version) {
+            return Err(cleanup(
+                "the new program did not report the expected version".into(),
+            ));
+        }
+    }
+    if let Some(p) = pending {
+        let _ = std::fs::write(p, version);
+    }
+    swap_in(exe, &new, &prev, rename).map_err(cleanup)
+}
+
+/// Make `new` the program at `exe` without a moment when there is no program there: first keep the running program
+/// as `prev` (a hard link, so no second copy of it on a small flash; a copy where linking is not possible), then
+/// rename `new` over `exe` in one step, then sync the directory so both names survive a power cut. If a step fails,
+/// `exe` still holds the old program.
+fn swap_in(
+    exe: &Path,
+    new: &Path,
+    prev: &Path,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    // Built under a temporary name and renamed over `prev`, so an earlier `.prev` is replaced in one step too.
+    let holding = prev.with_extension("prev-new");
+    let _ = std::fs::remove_file(&holding);
+    if std::fs::hard_link(exe, &holding).is_err() {
+        let copied = std::fs::copy(exe, &holding)
+            .and_then(|_| std::fs::File::open(&holding)?.sync_all())
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&holding);
+                format!("cannot keep the old program aside: {e}")
+            });
+        copied?;
+    }
+    if let Err(e) = rename(&holding, prev) {
+        let _ = std::fs::remove_file(&holding);
+        return Err(format!("cannot keep the old program aside: {e}"));
+    }
+    if let Err(e) = rename(new, exe) {
+        #[cfg(windows)]
+        {
+            // Windows will not replace a running program; it does allow renaming it away first.
+            let aside = exe.with_extension("running-old");
+            let _ = std::fs::remove_file(&aside);
+            if rename(exe, &aside).is_ok() {
+                if rename(new, exe).is_ok() {
+                    let _ = std::fs::remove_file(&aside);
+                    return Ok(());
+                }
+                let _ = rename(&aside, exe);
+            }
+        }
+        return Err(format!("cannot put the new program in place: {e}"));
+    }
+    sync_dir(exe);
+    Ok(())
+}
+
+/// Flush the directory that holds `file`, so a rename in it is on the disk (best effort; not possible on Windows).
+fn sync_dir(file: &Path) {
+    #[cfg(unix)]
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    #[cfg(not(unix))]
+    let _ = file;
 }
 
 /// Read back what [`release_json`] wrote. Anything that is not a version number or an https address is dropped.
@@ -855,5 +952,7 @@ pub fn pending_marker(data_dir: &Path) -> bool {
     data_dir.join(PENDING_FILE).exists()
 }
 
+#[cfg(test)]
+mod swap_tests;
 #[cfg(test)]
 mod tests;

@@ -7,12 +7,14 @@ use std::sync::PoisonError;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-/// How long a portal request waits for the main loop. The loop is busy while the assistant is mid-answer.
+/// How long a portal request waits for the main loop's answer. Model turns run as tasks beside the loop (ADR-0021), so
+/// an answer in progress does not hold it up; what can are a slow portal job (connecting a tool source) and a queue
+/// that is full.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a portal request waits for room in the queue to the main loop before it is refused.
 const QUEUE_WAIT: Duration = Duration::from_secs(1);
 /// What the page is told when the main loop cannot take a request now.
-const BUSY: &str = "The assistant is busy with a conversation. Try again in a few seconds.";
+const BUSY: &str = "The assistant could not take that just now. Try again in a few seconds.";
 
 /// A change to timers, alarms, and reminders asked for from the portal.
 #[derive(Debug, Clone, PartialEq)]
@@ -196,7 +198,7 @@ impl Core {
             .ok_or_else(|| Fail::Unavailable("The assistant is not running yet.".into()))?;
         let (reply, answer) = oneshot::channel();
         let wait = op.wait();
-        // The queue is small and the loop may be busy for a whole conversation: wait a moment for room, not for ever.
+        // The queue is small and the loop may be working through a slow job: wait a moment for room, not for ever.
         match tokio::time::timeout(QUEUE_WAIT, tx.send(Job { op, reply })).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => return Err(Fail::Unavailable("The assistant is not running.".into())),

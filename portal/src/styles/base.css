@@ -10,6 +10,10 @@
 html {
   -webkit-text-size-adjust: 100%;
 }
+/* The hidden symbol sheet in index.html. A class, not a style attribute: the page's policy allows no inline styles. */
+.sprite {
+  position: absolute;
+}
 body {
   margin: 0;
   background: var(--color-background-body);
