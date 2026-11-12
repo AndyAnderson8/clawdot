@@ -191,7 +191,14 @@ pub async fn serve(
     tokio::pin!(shutdown);
     loop {
         let (stream, _) = tokio::select! {
-            r = listener.accept() => match r { Ok(x) => x, Err(_) => continue },
+            r = listener.accept() => match r {
+                Ok(x) => x,
+                Err(_) => {
+                    // Out of file descriptors, for example: do not spin while it lasts.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            },
             () = &mut shutdown => return,
         };
         let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
