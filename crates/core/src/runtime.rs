@@ -7,7 +7,7 @@ use crate::assistant::Assistant;
 use crate::cli::Args;
 use crate::config::AgentConfig;
 use crate::connects::{Connects, Done, Source};
-use crate::extensions::{ExtOp, Extensions, WithPolicy};
+use crate::extensions::{ExtOp, Extensions, ToolSets, WithPolicy};
 use crate::httptools::{HttpTools, WithHttp};
 use crate::mcp::{McpClient, WithMcp};
 use crate::rtvoice::{self, Realtime, RtSettings};
@@ -366,10 +366,12 @@ impl Brain {
             .ext
             .apply(
                 op,
-                Arc::make_mut(&mut self.http_tools),
-                Arc::make_mut(&mut self.mcp),
-                &self.builtin,
-                &env.lookup(),
+                ToolSets::new(
+                    Arc::make_mut(&mut self.http_tools),
+                    Arc::make_mut(&mut self.mcp),
+                    &self.builtin,
+                    &|n: &str| env.get(n),
+                ),
             )
             .await;
         self.ext_view = Arc::new(self.ext.snapshot());
@@ -838,9 +840,12 @@ pub fn mcp_connected(brain: &mut Brain, core: &Core, done: Done) {
             let applied = brain.ext.mcp_commit(
                 &done.pending,
                 tools,
-                &brain.http_tools,
-                Arc::make_mut(&mut brain.mcp),
-                &brain.builtin,
+                ToolSets::new(
+                    Arc::make_mut(&mut brain.http_tools),
+                    Arc::make_mut(&mut brain.mcp),
+                    &brain.builtin,
+                    &|n: &str| core.env().get(n),
+                ),
             );
             brain.ext_view = Arc::new(brain.ext.snapshot());
             applied.map(|()| {

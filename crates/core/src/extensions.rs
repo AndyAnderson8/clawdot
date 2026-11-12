@@ -138,6 +138,61 @@ pub enum ExtOp {
     SkillAccept(String),
 }
 
+/// Looks up an environment variable by name.
+pub type EnvLookup<'a> = &'a (dyn Fn(&str) -> Option<String> + Sync);
+
+/// The tools a portal change acts on, borrowed together: the HTTP tools and MCP client (changed in place), the
+/// names of the built-in tools that no other tool may take, and the environment credentials are read from.
+pub struct ToolSets<'a> {
+    pub http: &'a mut HttpTools,
+    pub mcp: &'a mut McpClient,
+    pub builtin: &'a [String],
+    pub env: EnvLookup<'a>,
+}
+
+impl std::fmt::Debug for ToolSets<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolSets")
+            .field("builtin", &self.builtin.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> ToolSets<'a> {
+    #[must_use]
+    pub fn new(
+        http: &'a mut HttpTools,
+        mcp: &'a mut McpClient,
+        builtin: &'a [String],
+        env: EnvLookup<'a>,
+    ) -> Self {
+        Self {
+            http,
+            mcp,
+            builtin,
+            env,
+        }
+    }
+
+    /// Some built-in, HTTP or MCP tool has this name.
+    fn knows(&self, name: &str) -> bool {
+        self.builtin.iter().any(|b| b == name) || self.http.owns(name) || self.mcp.owns(name)
+    }
+
+    /// The names a new HTTP tool or MCP server may not take: the built-in tools and the other kind's tools.
+    fn reserved_for_http(&self) -> Vec<String> {
+        let mut reserved = self.builtin.to_vec();
+        reserved.extend(self.mcp.tools().iter().map(|t| t.exposed.clone()));
+        reserved
+    }
+
+    fn reserved_for_mcp(&self) -> Vec<String> {
+        let mut reserved = self.builtin.to_vec();
+        reserved.extend(self.http.specs().into_iter().map(|t| t.name));
+        reserved
+    }
+}
+
 /// Everything the portal manages, plus what the config file defined (which the portal can only switch).
 #[derive(Debug)]
 pub struct Extensions {
@@ -508,31 +563,21 @@ impl Extensions {
         }
     }
 
-    /// Carry out a portal change. `builtin` are the built-in tool names; `env` reads the environment.
-    /// Every change is made, saved, and undone in memory when the save fails, so what runs and what is on disk
-    /// never disagree.
+    /// Carry out a portal change on `tools`. Every change is made, saved, and undone in memory when the save
+    /// fails, so what runs and what is on disk never disagree.
     ///
     /// # Errors
     /// [`Fail::Invalid`] with what to fix, [`Fail::NotFound`], or [`Fail::Unavailable`] when saving fails.
-    pub async fn apply(
-        &mut self,
-        op: ExtOp,
-        http: &mut HttpTools,
-        mcp: &mut McpClient,
-        builtin: &[String],
-        env: impl Fn(&str) -> Option<String>,
-    ) -> Result<(), Fail> {
+    pub async fn apply(&mut self, op: ExtOp, tools: ToolSets<'_>) -> Result<(), Fail> {
         match op {
-            ExtOp::ToolAdd(v) => self.tool_add(&v, http, mcp, builtin, env),
-            ExtOp::ToolDelete(name) => self.tool_delete(&name, http),
-            ExtOp::ToolEnable(name, on) => self.tool_enable(&name, on, http, mcp, builtin),
-            ExtOp::ToolTier(name, tier) => self.tool_tier(&name, tier, http, mcp, builtin),
-            ExtOp::McpAdd(v) => self.mcp_add(&v, http, mcp, builtin, env).await,
-            ExtOp::McpDelete(name) => self.mcp_delete(&name, mcp),
-            ExtOp::McpEnable(name, on) => self.mcp_enable(&name, on, mcp),
-            ExtOp::McpAccept(name, tool) => {
-                self.mcp_accept(&name, tool.as_deref(), http, mcp, builtin)
-            }
+            ExtOp::ToolAdd(v) => self.tool_add(&v, tools),
+            ExtOp::ToolDelete(name) => self.tool_delete(&name, tools.http),
+            ExtOp::ToolEnable(name, on) => self.tool_enable(&name, on, &tools),
+            ExtOp::ToolTier(name, tier) => self.tool_tier(&name, tier, &tools),
+            ExtOp::McpAdd(v) => self.mcp_add(&v, tools).await,
+            ExtOp::McpDelete(name) => self.mcp_delete(&name, tools.mcp),
+            ExtOp::McpEnable(name, on) => self.mcp_enable(&name, on, tools.mcp),
+            ExtOp::McpAccept(name, tool) => self.mcp_accept(&name, tool.as_deref(), tools),
             ExtOp::SkillAdd(v) => self.skill_add(&v),
             ExtOp::SkillEdit(name, v) => self.skill_edit(&name, &v),
             ExtOp::SkillDelete(name) => self.skill_delete(&name),
@@ -559,16 +604,8 @@ impl Extensions {
         Ok(())
     }
 
-    fn tool_enable(
-        &mut self,
-        name: &str,
-        on: bool,
-        http: &HttpTools,
-        mcp: &McpClient,
-        builtin: &[String],
-    ) -> Result<(), Fail> {
-        let known = |n: &str| builtin.iter().any(|b| b == n) || http.owns(n) || mcp.owns(n);
-        if !known(name) {
+    fn tool_enable(&mut self, name: &str, on: bool, tools: &ToolSets<'_>) -> Result<(), Fail> {
+        if !tools.knows(name) {
             return Err(Fail::NotFound("There is no such tool.".into()));
         }
         let switch = |set: &mut BTreeSet<String>| {
@@ -579,7 +616,7 @@ impl Extensions {
             }
             Ok(())
         };
-        if mcp.owns(name) {
+        if tools.mcp.owns(name) {
             transact(&mut self.conns, self.conn_store.as_ref(), |c| {
                 switch(&mut c.disabled_tools)
             })
@@ -594,11 +631,9 @@ impl Extensions {
         &mut self,
         name: &str,
         tier: Option<Tier>,
-        http: &HttpTools,
-        mcp: &McpClient,
-        builtin: &[String],
+        tools: &ToolSets<'_>,
     ) -> Result<(), Fail> {
-        if !(builtin.iter().any(|b| b == name) || http.owns(name) || mcp.owns(name)) {
+        if !tools.knows(name) {
             return Err(Fail::NotFound("There is no such tool.".into()));
         }
         if tier == Some(Tier::Destructive) {
@@ -699,10 +734,10 @@ impl Extensions {
         &mut self,
         server: &str,
         tool: Option<&str>,
-        http: &HttpTools,
-        mcp: &mut McpClient,
-        builtin: &[String],
+        tools: ToolSets<'_>,
     ) -> Result<(), Fail> {
+        let reserved = tools.reserved_for_mcp();
+        let mcp = tools.mcp;
         if !mcp.has_server(server) {
             return Err(Fail::NotFound("There is no such connection.".into()));
         }
@@ -723,8 +758,6 @@ impl Extensions {
             }
             Ok(())
         })?;
-        let mut reserved = builtin.to_vec();
-        reserved.extend(http.specs().into_iter().map(|t| t.name));
         for w in mcp.release(server, tool, &reserved) {
             crate::diag::warn(&format!("mcp tool `{w}` was accepted and is on offer"));
         }
@@ -891,14 +924,7 @@ impl Extensions {
         saved
     }
 
-    fn tool_add(
-        &mut self,
-        v: &Value,
-        http: &mut HttpTools,
-        mcp: &McpClient,
-        builtin: &[String],
-        env: impl Fn(&str) -> Option<String>,
-    ) -> Result<(), Fail> {
+    fn tool_add(&mut self, v: &Value, tools: ToolSets<'_>) -> Result<(), Fail> {
         let def: ToolDef = serde_json::from_value(v.clone())
             .map_err(|e| invalid(format!("The tool is not described correctly: {e}")))?;
         if self.tools.tools.len() >= MAX_PORTAL_TOOLS {
@@ -906,14 +932,15 @@ impl Extensions {
                 "You can add up to {MAX_PORTAL_TOOLS} tools here. Delete one first."
             )));
         }
-        let mut reserved = builtin.to_vec();
-        reserved.extend(mcp.tools().iter().map(|t| t.exposed.clone()));
-        http.add(def.clone(), &reserved, env)
+        let reserved = tools.reserved_for_http();
+        tools
+            .http
+            .add(def.clone(), &reserved, tools.env)
             .map_err(friendly_env)?;
         self.tools.tools.push(def.clone());
         if let Err(e) = self.save_tools() {
             self.tools.tools.pop();
-            http.remove(&def.name);
+            tools.http.remove(&def.name);
             return Err(e);
         }
         Ok(())
@@ -922,17 +949,10 @@ impl Extensions {
     /// Add and connect an MCP server, waiting for the connection. Used where no main loop is being kept free
     /// (tests, tools); the loop itself splits this into [`Extensions::mcp_prepare`], a task that runs
     /// [`PendingServer::load`], and [`Extensions::mcp_commit`] (ADR-0021).
-    async fn mcp_add(
-        &mut self,
-        v: &Value,
-        http: &HttpTools,
-        mcp: &mut McpClient,
-        builtin: &[String],
-        env: impl Fn(&str) -> Option<String>,
-    ) -> Result<(), Fail> {
-        let pending = self.mcp_prepare(v, mcp, 0, env)?;
-        let tools = pending.load().await.map_err(friendly_env)?;
-        self.mcp_commit(&pending, tools, http, mcp, builtin)
+    async fn mcp_add(&mut self, v: &Value, tools: ToolSets<'_>) -> Result<(), Fail> {
+        let pending = self.mcp_prepare(v, tools.mcp, 0, tools.env)?;
+        let listed = pending.load().await.map_err(friendly_env)?;
+        self.mcp_commit(&pending, listed, tools)
     }
 
     /// The local first half of adding an MCP server from the portal: parse and check the request, with
@@ -966,19 +986,17 @@ impl Extensions {
     pub fn mcp_commit(
         &mut self,
         pending: &PendingServer,
-        tools: Vec<McpTool>,
-        http: &HttpTools,
-        mcp: &mut McpClient,
-        builtin: &[String],
+        listed: Vec<McpTool>,
+        tools: ToolSets<'_>,
     ) -> Result<(), Fail> {
         if self.conns.servers.len() >= MAX_PORTAL_SERVERS {
             return Err(invalid(format!(
                 "You can add up to {MAX_PORTAL_SERVERS} connections here. Remove one first."
             )));
         }
-        let mut reserved = builtin.to_vec();
-        reserved.extend(http.specs().into_iter().map(|t| t.name));
-        mcp.install_server(pending, tools, &reserved)
+        let reserved = tools.reserved_for_mcp();
+        let mcp = tools.mcp;
+        mcp.install_server(pending, listed, &reserved)
             .map_err(friendly_env)?;
         let def = pending.def().clone();
         // Adding the connection approves the tools it listed, as shown.
