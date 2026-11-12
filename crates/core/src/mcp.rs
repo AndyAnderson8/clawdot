@@ -675,15 +675,7 @@ impl McpClient {
             secret,
             session: Mutex::new(None),
         });
-        // A client of one server, so the same code that loads at startup loads this one without `&self`.
-        let probe = Self {
-            servers: vec![Arc::clone(&server)],
-            tools: Vec::new(),
-            connector: self.connector.clone(),
-            errors: vec![None],
-            connecting: vec![false],
-        };
-        Ok(PendingServer { server, probe })
+        Ok(self.pending_for(&server))
     }
 
     /// The quick, local second half: add a server whose tools were listed. Checked again here, because the
