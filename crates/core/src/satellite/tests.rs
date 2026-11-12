@@ -1124,3 +1124,170 @@ async fn a_satellite_cannot_hammer_the_reset_request() {
     assert_eq!(answers, [300, 0, 0, 0, 0]);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+// ----- slow speech synthesis never stalls the session (REQ-SAT-008, REQ-VOI-020) -----
+
+/// A voice that takes a while for every sentence.
+struct SlowMouth(Duration);
+impl Synthesizer for SlowMouth {
+    async fn synthesize(&self, text: &str) -> Result<Vec<i16>, String> {
+        tokio::time::sleep(self.0).await;
+        Ok(vec![7; text.len() * 100])
+    }
+}
+
+/// A registered session whose voice takes `delay` per sentence and whose assistant runs `handler`.
+async fn start_slow<T>(
+    ears: T,
+    delay: Duration,
+    handler: impl Fn(Ask) + Send + 'static,
+) -> (Peer, Announcer)
+where
+    T: Transcriber + Send + Sync + 'static,
+{
+    let s = fast();
+    let ann = s.announcer.clone();
+    let (near, far) = tokio::io::duplex(1 << 20);
+    let (tx, mut rx) = mpsc::channel::<Ask>(4);
+    tokio::spawn(async move {
+        while let Some(ask) = rx.recv().await {
+            handler(ask);
+        }
+    });
+    tokio::spawn(run_session(
+        far,
+        Arc::new(ears),
+        Arc::new(SlowMouth(delay)),
+        tx,
+        s,
+    ));
+    let mut p = Peer {
+        io: near,
+        dec: Decoder::new(Limits::default()),
+    };
+    p.hello(None, PROTOCOL_VERSION).await;
+    assert!(matches!(p.recv().await, Message::Welcome(_)));
+    for _ in 0..100 {
+        if ann.connected() == 1 {
+            return (p, ann);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the session never registered");
+}
+
+/// Everything the core sends for `ms` milliseconds, with its pings answered.
+async fn collect_for(p: &mut Peer, ms: u64) -> Vec<Message> {
+    let end = Instant::now() + Duration::from_millis(ms);
+    let mut seen = Vec::new();
+    while Instant::now() < end {
+        let left = end.saturating_duration_since(Instant::now());
+        match timeout(left, next_message(&mut p.io, &mut p.dec)).await {
+            Err(_) => break,
+            Ok(Ok(Some(Message::Ping))) => p.send(&Message::Pong).await,
+            Ok(Ok(Some(m))) => seen.push(m),
+            Ok(_) => break,
+        }
+    }
+    seen
+}
+
+/// An announcement is being synthesized (1.5 s, far longer than the 400 ms dead-peer timeout of these tests): a
+/// ping from the satellite is still answered at once, so neither side concludes the other is gone.
+#[tokio::test]
+async fn a_ping_is_answered_while_an_announcement_is_being_synthesized() {
+    let (mut p, ann) = start_slow(Ears("x"), Duration::from_millis(1500), |_: Ask| {}).await;
+    let said = tokio::spawn(async move { ann.announce("Claude finished.").await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    p.send(&Message::Ping).await;
+    let answered = timeout(Duration::from_millis(400), async {
+        loop {
+            match p.recv().await {
+                Message::Pong => return,
+                Message::Ping => p.send(&Message::Pong).await,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    })
+    .await;
+    assert!(
+        answered.is_ok(),
+        "no pong while the announcement was synthesized"
+    );
+    // The announcement still plays once it is made.
+    let seen = until(&mut p, |m| matches!(m, Message::AudioStop)).await;
+    assert_eq!(samples(&seen), "Claude finished.".len() * 100, "{seen:?}");
+    assert!(said.await.unwrap());
+}
+
+/// Muting while an announcement is being synthesized takes effect at once, and the announcement is not played
+/// into the muted room.
+#[tokio::test]
+async fn muting_while_an_announcement_is_synthesized_is_handled_and_cancels_it() {
+    let (mut p, ann) = start_slow(Ears("x"), Duration::from_millis(1000), |_: Ask| {}).await;
+    let said = tokio::spawn(async move { ann.announce("Claude finished.").await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    p.send(&Message::Button(clawdot_protocol::message::Button {
+        name: "mute".into(),
+        long: false,
+    }))
+    .await;
+    let early = collect_for(&mut p, 300).await;
+    assert!(
+        early.contains(&Message::SetMute { muted: true }),
+        "the mute was not handled while synthesis ran: {early:?}"
+    );
+    let rest = collect_for(&mut p, 1500).await;
+    assert!(
+        !rest.iter().any(|m| matches!(m, Message::AudioStart(_))),
+        "an announcement played into a muted room: {rest:?}"
+    );
+    assert!(!said.await.unwrap());
+}
+
+/// Stopping the turn while a progress phrase is being synthesized reaches the turn at once, and the phrase is
+/// not played afterwards.
+#[tokio::test]
+async fn stopping_a_turn_while_a_progress_phrase_is_synthesized_is_not_delayed() {
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&cancelled);
+    let (mut p, _ann) = start_slow(
+        Ears("check the runs"),
+        Duration::from_millis(800),
+        move |ask: Ask| {
+            let flag = Arc::clone(&flag);
+            tokio::spawn(async move {
+                if let Some(tx) = &ask.progress {
+                    let _ = tx.send("Checking the runs.".into());
+                }
+                let stopped = timeout(Duration::from_secs(3), ask.cancel.cancelled())
+                    .await
+                    .is_ok();
+                flag.store(stopped, Ordering::SeqCst);
+                let _ = ask.reply.send(Answer {
+                    say: STOPPED.into(),
+                    ..Answer::default()
+                });
+            });
+        },
+    )
+    .await;
+    ask_and_wait_for_thinking(&mut p).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    p.send(&Message::Button(clawdot_protocol::message::Button {
+        name: "action".into(),
+        long: false,
+    }))
+    .await;
+    collect_for(&mut p, 300).await;
+    assert!(
+        cancelled.load(Ordering::SeqCst),
+        "the turn was not stopped while the progress phrase was synthesized"
+    );
+    let seen = until(&mut p, |m| matches!(m, Message::AudioStop)).await;
+    assert_eq!(
+        samples(&seen),
+        STOPPED.len() * 100,
+        "the progress phrase played after the stop: {seen:?}"
+    );
+}

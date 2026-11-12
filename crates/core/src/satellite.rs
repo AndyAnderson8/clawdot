@@ -265,6 +265,21 @@ struct Finished {
 /// A running turn.
 type Work = Pin<Box<dyn Future<Output = Finished> + Send>>;
 
+/// What speech made outside a turn is for.
+enum Purpose {
+    /// An announcement from elsewhere in the program; the sender is told whether it was spoken.
+    Announcement(oneshot::Sender<bool>),
+    /// A phrase spoken while a turn works.
+    Progress,
+}
+
+/// Speech being made for the speaker. The event loop polls it beside its other events, so a slow speech
+/// provider never stops the session from reading the satellite or answering its keepalives.
+struct Synth {
+    purpose: Purpose,
+    work: Pin<Box<dyn Future<Output = Vec<Vec<i16>>> + Send>>,
+}
+
 /// A short check of audio heard while a turn runs: was it a stop phrase (REQ-VOI-020)?
 type StopCheck = Pin<Box<dyn Future<Output = bool> + Send>>;
 
@@ -566,8 +581,11 @@ where
                     stop_turn(&mut st, &mut wr).await?;
                 }
             }
+            (purpose, audio) = poll_synth(&mut st.synth), if st.synth.is_some() => {
+                env.on_synthesized(&mut st, &mut wr, purpose, audio).await?;
+            }
             Some(a) = st.announce_rx.recv() => {
-                env.on_announce(&mut st, &mut wr, a).await?;
+                env.on_announce(&mut st, a);
             }
             _ = st.tick.tick() => {
                 env.on_tick(&mut st, &mut wr, &mut pending).await?;
@@ -578,7 +596,8 @@ where
             env.on_wake(&mut st, &mut wr, &mut pending).await?;
         }
         st.end_realtime_when_muted();
-        env.play_progress(&mut st, &mut wr).await?;
+        st.drop_stale_synthesis();
+        env.play_progress(&mut st);
         env.deliver_finished(&mut st, &mut wr, &mut pending).await?;
         env.run_steps(&mut st, &mut wr, pending.steps).await?;
     }
@@ -635,6 +654,8 @@ struct SessionState {
     /// speech is spoken.
     finished: Option<Finished>,
     stop_check: Option<StopCheck>,
+    /// Speech for an announcement or a progress phrase that is being made.
+    synth: Option<Synth>,
     /// The optional realtime session and what goes with it (REQ-RTV-009, REQ-RTV-010).
     rt: Option<RtLive>,
     rt_blocked_until: Option<Instant>,
@@ -668,6 +689,7 @@ impl SessionState {
             progress_q: VecDeque::new(),
             finished: None,
             stop_check: None,
+            synth: None,
             rt: None,
             rt_blocked_until: None,
             warned_format: false,
@@ -683,6 +705,30 @@ impl SessionState {
             && self.work.is_none()
             && self.finished.is_none()
             && self.out.audio == Audio::Idle
+    }
+
+    /// A progress phrase may be spoken now: the turn is working (or its answer waits), nothing is playing and
+    /// the room is not muted.
+    fn wants_progress_speech(&self) -> bool {
+        self.out.audio == Audio::Idle
+            && (self.work.is_some() || self.finished.is_some())
+            && !self.dialog.is_muted()
+    }
+
+    /// Phase: speech that is being made for something that no longer applies is thrown away. An announcement
+    /// needs a quiet speaker, so a wake word, a mute or a turn cancels it (its sender is told no); a progress
+    /// phrase needs the turn.
+    fn drop_stale_synthesis(&mut self) {
+        let stale = match self.synth.as_ref().map(|s| &s.purpose) {
+            Some(Purpose::Announcement(_)) => !(self.is_quiet() && self.rt.is_none()),
+            Some(Purpose::Progress) => {
+                self.dialog.is_muted() || (self.work.is_none() && self.finished.is_none())
+            }
+            None => false,
+        };
+        if stale {
+            self.synth = None;
+        }
     }
 
     /// Phase: muting must really stop the microphone, so it ends a realtime session (the session ends when its
@@ -795,6 +841,9 @@ async fn stop_turn<W: AsyncWrite + Unpin>(st: &mut SessionState, wr: &mut W) -> 
     if let Some(t) = &st.turn_cancel {
         t.cancel();
         st.progress_q.clear();
+        if matches!(&st.synth, Some(s) if matches!(s.purpose, Purpose::Progress)) {
+            st.synth = None;
+        }
         if st.out.audio == Audio::Progress {
             send(wr, &Message::StopPlayback).await?;
         }
@@ -1070,32 +1119,65 @@ where
     }
 
     /// Phase: someone elsewhere in the program wants this speaker to say something.
-    async fn on_announce<W: AsyncWrite + Unpin>(
+    fn on_announce(&self, st: &mut SessionState, a: Announce) {
+        let Announce { request, answer } = a;
+        let idle = st.is_quiet() && st.rt.is_none() && st.synth.is_none();
+        match request {
+            Request::Probe => {
+                let _ = answer.send(idle);
+            }
+            // The speech is made while the session goes on reading; `on_synthesized` plays it and answers.
+            Request::Speak(text) if idle => {
+                st.synth = Some(Synth {
+                    purpose: Purpose::Announcement(answer),
+                    work: self.synthesize(text),
+                });
+            }
+            Request::Speak(_) => {
+                let _ = answer.send(false);
+            }
+        }
+    }
+
+    /// Phase: speech made outside a turn is ready. It plays only if the speaker is still in the state it was
+    /// wanted in, since the user may have spoken, muted or stopped the turn while it was being made.
+    async fn on_synthesized<W: AsyncWrite + Unpin>(
         &self,
         st: &mut SessionState,
         wr: &mut W,
-        a: Announce,
+        purpose: Purpose,
+        audio: Vec<Vec<i16>>,
     ) -> Result<(), String> {
-        let idle = st.is_quiet() && st.rt.is_none();
-        let accepted = match a.request {
-            Request::Probe => idle,
-            Request::Speak(text) if idle => {
-                let mut problems = Vec::new();
-                let audio = speak_text(&*self.tts, &text, &mut problems).await;
-                if audio.is_empty() {
-                    false
-                } else {
+        match purpose {
+            Purpose::Announcement(answer) => {
+                let accepted = !audio.is_empty() && st.is_quiet() && st.rt.is_none();
+                if accepted {
                     st.dialog.on_reply_started();
                     duck(wr, &mut st.out.music).await?;
                     play_audio(wr, &audio).await?;
                     st.out.audio = Audio::Speech;
-                    true
+                }
+                let _ = answer.send(accepted);
+            }
+            Purpose::Progress => {
+                if !audio.is_empty() && st.wants_progress_speech() {
+                    st.dialog.set_output_playing(true);
+                    duck(wr, &mut st.out.music).await?;
+                    play_audio(wr, &audio).await?;
+                    st.out.audio = Audio::Progress;
                 }
             }
-            Request::Speak(_) => false,
-        };
-        let _ = a.answer.send(accepted);
+        }
         Ok(())
+    }
+
+    /// Make speech for `text` as a future the event loop polls.
+    fn synthesize(&self, text: String) -> Pin<Box<dyn Future<Output = Vec<Vec<i16>>> + Send>> {
+        let tts = Arc::clone(&self.tts);
+        Box::pin(async move {
+            let mut problems = Vec::new();
+            speak_text(&*tts, &text, &mut problems).await
+        })
     }
 
     /// Phase: the keepalive tick (liveness, ping, dialog timers, idle realtime sessions).
@@ -1150,27 +1232,16 @@ where
     }
 
     /// Phase: progress speech is played one phrase at a time while the turn goes on (REQ-AST-020).
-    async fn play_progress<W: AsyncWrite + Unpin>(
-        &self,
-        st: &mut SessionState,
-        wr: &mut W,
-    ) -> Result<(), String> {
-        if st.out.audio == Audio::Idle
-            && (st.work.is_some() || st.finished.is_some())
-            && !st.dialog.is_muted()
+    fn play_progress(&self, st: &mut SessionState) {
+        if st.synth.is_none()
+            && st.wants_progress_speech()
+            && let Some(text) = st.progress_q.pop_front()
         {
-            if let Some(text) = st.progress_q.pop_front() {
-                let mut problems = Vec::new();
-                let audio = speak_text(&*self.tts, &text, &mut problems).await;
-                if !audio.is_empty() {
-                    st.dialog.set_output_playing(true);
-                    duck(wr, &mut st.out.music).await?;
-                    play_audio(wr, &audio).await?;
-                    st.out.audio = Audio::Progress;
-                }
-            }
+            st.synth = Some(Synth {
+                purpose: Purpose::Progress,
+                work: self.synthesize(text),
+            });
         }
-        Ok(())
     }
 
     /// Phase: the finished turn is delivered once nothing it said earlier is still playing.
@@ -1180,7 +1251,11 @@ where
         wr: &mut W,
         pending: &mut Pending,
     ) -> Result<(), String> {
-        let (playing, progress_empty) = (st.out.audio != Audio::Idle, st.progress_q.is_empty());
+        // Nothing is delivered while a progress phrase is still being made: it comes first.
+        let (playing, progress_empty) = (
+            st.out.audio != Audio::Idle,
+            st.progress_q.is_empty() && st.synth.is_none(),
+        );
         let Some(Finished {
             outcome,
             effects,
@@ -1355,6 +1430,17 @@ async fn flush_media<W: AsyncWrite + Unpin>(
 async fn poll_work(work: &mut Option<Work>) -> Finished {
     match work {
         Some(w) => w.await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn poll_synth(synth: &mut Option<Synth>) -> (Purpose, Vec<Vec<i16>>) {
+    let Some(s) = synth.as_mut() else {
+        return std::future::pending().await;
+    };
+    let audio = (&mut s.work).await;
+    match synth.take() {
+        Some(s) => (s.purpose, audio),
         None => std::future::pending().await,
     }
 }
