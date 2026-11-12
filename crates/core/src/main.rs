@@ -12,6 +12,7 @@ use clawdot_core::commands::{
     announce_admin, bind_error, is_quit, reset_admin, run_endpoint_commands, say_command,
     spawn_console,
 };
+use clawdot_core::diag;
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::runtime::{
     SpeakerView, deliver, dispatch, drain, mcp_connected, on_hub_event, portal_op, settings_extra,
@@ -253,6 +254,8 @@ async fn main() -> ExitCode {
     });
     let (say_tx, say_rx) = mpsc::unbounded_channel::<Say>();
     tokio::spawn(speak(Arc::clone(&voice), say_rx));
+    // Set once the speaker task is gone, so that the loss is reported once, not every second.
+    let mut speaker_lost = false;
     loop {
         tokio::select! {
             Some(job) = portal_rx.recv() => {
@@ -311,14 +314,20 @@ async fn main() -> ExitCode {
                 core.set_ui_status(brain.status_json(announcer.connected(), &view, &station_names, &tool_counts));
                 // Everything that speaks is handed to the speaker task, which says it in order, so the wait for
                 // a voice or a summary never holds this loop (ADR-0021).
+                let mut say = |item: Say| {
+                    if say_tx.send(item).is_err() && !speaker_lost {
+                        speaker_lost = true;
+                        diag::error("the speaker task has stopped, so nothing more will be spoken; restart ClawDot");
+                    }
+                };
                 while let Some((text, preview)) = core.take_speech_as() {
-                    let _ = say_tx.send(Say::Phrase { text, preview });
+                    say(Say::Phrase { text, preview });
                 }
                 for fired in brain.tick() {
-                    let _ = say_tx.send(Say::Line(describe_fired(&fired)));
+                    say(Say::Line(describe_fired(&fired)));
                 }
                 if !voice.polling.swap(true, Ordering::Relaxed) {
-                    let _ = say_tx.send(Say::Poll {
+                    say(Say::Poll {
                         minute: brain.minute_of_day(),
                         day: brain.local_day(),
                         llm: brain.model(),
