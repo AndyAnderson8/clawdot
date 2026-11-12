@@ -115,7 +115,14 @@ impl ToolReq {
     pub async fn serve(self, assistant: &mut Assistant) {
         let result = assistant.call_tool(&self.name, &self.args).await;
         let effects = assistant.take_effects();
-        let _ = self.reply.send(ToolAnswer { result, effects });
+        // The tool has run; if the turn that asked is gone, its result and effects have nowhere to go. Say so
+        // once (the tool name only, never its arguments) so a timer that rang for nobody can be traced.
+        if self.reply.send(ToolAnswer { result, effects }).is_err() {
+            crate::diag::error(&format!(
+                "the turn that asked for `{}` ended before its result came back; the tool had already run",
+                self.name
+            ));
+        }
     }
 }
 
@@ -1096,5 +1103,31 @@ mod tests {
         lab.say("sat:a", "after");
         lab.run_until(1).await;
         assert_eq!(lab.say_of("sat:a"), vec!["heard after".to_owned()]);
+    }
+
+    /// A tool that already ran for a turn that has since died is reported in the log, by name and never with
+    /// its arguments.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_result_for_a_dead_turn_is_logged_by_tool_name_only() {
+        let mut lab = Lab::new(0).await;
+        let (reply, answer) = oneshot::channel();
+        drop(answer);
+        let req = ToolReq {
+            name: "set_timer".into(),
+            args: serde_json::json!({"seconds": 600, "label": "zq-secret-label"}),
+            reply,
+        };
+        req.serve(&mut lab.assistant).await;
+        let lines = crate::diag::recent(200);
+        let hit = lines
+            .iter()
+            .filter(|l| l.level == "error" && l.text.contains("ended before its result"))
+            .filter(|l| l.text.contains("`set_timer`"))
+            .count();
+        assert!(hit >= 1, "no log line: {lines:?}");
+        assert!(
+            lines.iter().all(|l| !l.text.contains("zq-secret-label")),
+            "arguments were logged"
+        );
     }
 }
