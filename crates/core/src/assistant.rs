@@ -18,7 +18,10 @@ mod schedule_api;
 mod stopwatch;
 mod tools;
 
-pub use tools::{builtin_describe_action, builtin_returns_untrusted_text, builtin_risk};
+pub use tools::{
+    builtin_clean_args, builtin_describe_action, builtin_pins_args, builtin_returns_untrusted_text,
+    builtin_risk,
+};
 
 /// The system prompt used when none is configured. The evaluation harness runs the same text, so a change
 /// here is measured like any other change to the agent loop.
@@ -687,7 +690,7 @@ impl Assistant {
             }
             "inbox.ack" => match core.reply(ReplyKind::Ack, "") {
                 Ok(r) => Outcome::say(format!("Okay. I'll let {} know you've got it.", r.origin)),
-                Err(ReplyError::NothingToReplyTo) => None,
+                Err(ReplyError::NothingToReplyTo | ReplyError::NoLongerWaiting) => None,
                 Err(ReplyError::QueueFull) => {
                     Outcome::say("I couldn't pass that on; too many replies are waiting.")
                 }
@@ -696,7 +699,7 @@ impl Assistant {
                 let text = m.text("text").unwrap_or("continue").to_owned();
                 match core.reply(ReplyKind::Instruct, &text) {
                     Ok(r) => Outcome::say(format!("Okay, sending that to {}.", r.origin)),
-                    Err(ReplyError::NothingToReplyTo) => None,
+                    Err(ReplyError::NothingToReplyTo | ReplyError::NoLongerWaiting) => None,
                     Err(ReplyError::QueueFull) => {
                         Outcome::say("I couldn't pass that on; too many replies are waiting.")
                     }

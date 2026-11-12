@@ -195,6 +195,35 @@ fn replying_with_nothing_announced_is_an_error_not_a_guess() {
     );
 }
 
+// REQ-SEC-011, REQ-INB-023
+#[test]
+fn replying_to_a_named_event_needs_that_event_to_be_open_and_never_picks_another() {
+    let (c, _) = core();
+    let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
+    c.ingest_hook("claude-code", &token, LOCALHOST_PEER, STOP.as_bytes())
+        .unwrap();
+    let first = c.next_announcement(true, 0).unwrap().event.id;
+    c.mark_announced(&[first]);
+    assert_eq!(
+        c.reply_to(first + 100, ReplyKind::Instruct, "x"),
+        Err(ReplyError::NoLongerWaiting),
+        "an id that is not in the inbox"
+    );
+    assert!(c.reply_to(first, ReplyKind::Instruct, "go").is_ok());
+    assert!(c.dismiss_current());
+    assert_eq!(
+        c.reply_to(first, ReplyKind::Instruct, "again"),
+        Err(ReplyError::NoLongerWaiting),
+        "dismissed"
+    );
+    assert_eq!(
+        c.bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[test]
 fn a_bridge_never_sees_another_endpoints_replies() {
     let (c, _) = core();

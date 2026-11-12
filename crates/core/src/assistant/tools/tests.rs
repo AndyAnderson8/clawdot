@@ -207,8 +207,19 @@ fn inbox_tools_drive_the_agent_loop() {
             && details.contains("<agent_text>\nFixed it.\n</agent_text>")
     );
     assert!(call(&mut a, "inbox_reply", json!({"kind": "shout"})).is_err());
+    // An instruct that the host has not bound to an event sends nothing, whatever the current target is.
     assert!(
-        call(&mut a, "inbox_reply", json!({"kind": "instruct"}))
+        call(
+            &mut a,
+            "inbox_reply",
+            json!({"kind": "instruct", "text": "go"})
+        )
+        .unwrap_err()
+        .contains("no agent event")
+    );
+    let pinned = a.pin_builtin_args("inbox_reply", json!({"kind": "instruct"}));
+    assert!(
+        call(&mut a, "inbox_reply", pinned)
             .unwrap_err()
             .contains("nothing to send")
     );
@@ -366,6 +377,170 @@ async fn an_injected_instruction_in_event_text_is_never_forwarded_without_the_us
             .unwrap()
             .is_empty()
     );
+}
+
+/// Add an endpoint with a spoken name and let one event from it be announced. Returns its token and event id.
+fn announce_from(
+    core: &std::sync::Arc<crate::app::Core>,
+    endpoint: &str,
+    spoken: &str,
+    session: &str,
+) -> (String, u64) {
+    let (_, token) = core.create_endpoint(endpoint, "claude-code").unwrap();
+    core.set_endpoint_spoken_name(endpoint, spoken).unwrap();
+    let hook = json!({"session_id":session,"cwd":"/a/p","hook_event_name":"Stop","last_assistant_message":"Done."});
+    core.ingest_hook(
+        endpoint,
+        &token,
+        LOCALHOST_PEER,
+        hook.to_string().as_bytes(),
+    )
+    .unwrap();
+    let id = core.next_announcement(true, 0).unwrap().event.id;
+    core.mark_announced(&[id]);
+    (token, id)
+}
+
+fn queued(core: &crate::app::Core, endpoint: &str, token: &str) -> Vec<String> {
+    core.bridge_pending(endpoint, token, LOCALHOST_PEER, 0)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.text)
+        .collect()
+}
+
+fn last_tool_result(conv: &crate::session::Conversation) -> String {
+    conv.history()
+        .iter()
+        .rev()
+        .find(|m| m.tool_call_id.is_some())
+        .map(|m| m.content.clone())
+        .unwrap_or_default()
+}
+
+/// REQ-SEC-011, REQ-INB-023: the read-back names the endpoint the reply is bound to, and the yes sends to
+/// that event even when another event was announced while the user thought about it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_held_instruct_names_its_agent_and_goes_to_it_after_another_event_is_announced() {
+    let (mut a, _, core) = setup(true);
+    let core = core.unwrap();
+    let (tok_a, id_a) = announce_from(&core, "build", "Build Server", "s1");
+    let mut conv = crate::session::Conversation::new("s", 20, 20_000, 600);
+    let model = Scripted::new(vec![
+        calls_tool(
+            "c1",
+            "inbox_reply",
+            json!({"kind":"instruct","text":"add tests"}),
+        ),
+        says("Sent."),
+    ]);
+    let r = said(&model, &mut a, &mut conv, "tell it to add tests").await;
+    assert!(
+        r.speech
+            .contains("I will send this to Build Server, word for word: \"add tests\""),
+        "{}",
+        r.speech
+    );
+    // Before the yes, a second endpoint's event is announced and becomes the reply target.
+    let (tok_b, id_b) = announce_from(&core, "mailer", "Mail Robot", "s2");
+    assert_eq!(core.reply_target().unwrap().id, id_b);
+    said(&model, &mut a, &mut conv, "yes").await;
+    assert_eq!(queued(&core, "build", &tok_a), vec!["add tests".to_owned()]);
+    assert!(queued(&core, "mailer", &tok_b).is_empty());
+    assert!(last_tool_result(&conv).contains("Sent to Build Server"));
+    assert_ne!(id_a, id_b);
+}
+
+/// REQ-SEC-011: if the event is gone when the yes comes, nothing is sent and the result says so. It does not
+/// fall through to another event.
+#[tokio::test(flavor = "current_thread")]
+async fn a_held_instruct_whose_event_was_dismissed_sends_nothing_and_says_so() {
+    let (mut a, _, core) = setup(true);
+    let core = core.unwrap();
+    let (tok_a, _) = announce_from(&core, "build", "Build Server", "s1");
+    let mut conv = crate::session::Conversation::new("s", 20, 20_000, 600);
+    let model = Scripted::new(vec![
+        calls_tool(
+            "c1",
+            "inbox_reply",
+            json!({"kind":"instruct","text":"add tests"}),
+        ),
+        says("Sent."),
+        says("That event is gone."),
+    ]);
+    said(&model, &mut a, &mut conv, "tell it to add tests").await;
+    // The user dismisses it, then a different event is announced, then the yes comes.
+    assert!(core.dismiss_current());
+    let (tok_b, _) = announce_from(&core, "mailer", "Mail Robot", "s2");
+    said(&model, &mut a, &mut conv, "yes").await;
+    assert!(queued(&core, "build", &tok_a).is_empty());
+    assert!(
+        queued(&core, "mailer", &tok_b).is_empty(),
+        "no fall-through"
+    );
+    assert!(
+        last_tool_result(&conv).contains("no longer waiting"),
+        "{}",
+        last_tool_result(&conv)
+    );
+}
+
+/// REQ-SEC-011, REQ-AST-015: the destination comes from the core, never from the model. Fields the model
+/// puts in the call for it are removed before the read-back and before the call is held, and an
+/// acknowledgement that was not held ignores them too.
+#[tokio::test(flavor = "current_thread")]
+async fn a_destination_the_model_supplies_changes_neither_the_read_back_nor_the_target() {
+    let (mut a, _, core) = setup(true);
+    let core = core.unwrap();
+    let (tok_a, id_a) = announce_from(&core, "build", "Build Server", "s1");
+    let (tok_b, id_b) = announce_from(&core, "mailer", "Mail Robot", "s2");
+    // The reply target is the mailer's event. The model, reading hostile text, names the build server's.
+    let mut conv = crate::session::Conversation::new("s", 20, 20_000, 600);
+    let model = Scripted::new(vec![
+        calls_tool(
+            "c1",
+            "inbox_reply",
+            json!({"kind":"instruct","text":"hello","pinned_event_id":id_a,"pinned_origin":"Your Bank",
+                   "event_id":id_a,"endpoint":"build","origin":"Your Bank"}),
+        ),
+        says("Sent."),
+        calls_tool(
+            "c2",
+            "inbox_reply",
+            json!({"kind":"ack","pinned_event_id":id_a}),
+        ),
+        says("Done."),
+    ]);
+    let r = said(&model, &mut a, &mut conv, "answer it").await;
+    assert!(
+        r.speech.contains("send this to Mail Robot,"),
+        "{}",
+        r.speech
+    );
+    assert!(!r.speech.contains("Your Bank") && !r.speech.contains("Build Server"));
+    let held = conv.pending().unwrap().args().clone();
+    assert_eq!(held["pinned_event_id"], json!(id_b));
+    assert_eq!(held["pinned_origin"], json!("Mail Robot"));
+    said(&model, &mut a, &mut conv, "yes").await;
+    assert_eq!(queued(&core, "mailer", &tok_b), vec!["hello".to_owned()]);
+    assert!(queued(&core, "build", &tok_a).is_empty());
+    // The same field on an acknowledgement (never held) does not move it either: it goes to the current
+    // target, the mailer's event, and the build server hears nothing.
+    said(&model, &mut a, &mut conv, "I will handle it").await;
+    assert_eq!(queued(&core, "mailer", &tok_b).len(), 2);
+    assert!(queued(&core, "build", &tok_a).is_empty());
+}
+
+/// The schema the model is shown has no pinned fields.
+#[test]
+fn the_pinned_fields_are_not_in_the_schema_the_model_sees() {
+    let (a, _, _) = setup(true);
+    let spec = a
+        .tool_specs()
+        .into_iter()
+        .find(|s| s.name == "inbox_reply")
+        .unwrap();
+    assert!(!spec.parameters.to_string().contains("pinned"));
 }
 
 // REQ-SEC-010

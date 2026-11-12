@@ -1224,6 +1224,14 @@ impl<H: ToolHost> ToolHost for WithPolicy<'_, H> {
         self.inner.describe_action(name, args)
     }
 
+    fn clean_args(&self, name: &str, args: &mut Value) {
+        self.inner.clean_args(name, args);
+    }
+
+    async fn pin_args(&mut self, name: &str, args: Value) -> Value {
+        self.inner.pin_args(name, args).await
+    }
+
     fn expected_slow(&self, name: &str) -> bool {
         self.inner.expected_slow(name)
     }

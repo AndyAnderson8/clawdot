@@ -291,6 +291,18 @@ pub trait ToolHost {
     fn describe_action(&self, name: &str, args: &Value) -> String {
         describe_generic(name, args)
     }
+    /// Drop from the model's arguments any field that only the host may set (see [`ToolHost::pin_args`]).
+    /// Called on every call as it arrives, before the tier is judged, so nothing the model writes under such a
+    /// name reaches the read-back, the held action or the tool.
+    fn clean_args(&self, _name: &str, _args: &mut Value) {}
+    /// Fix the arguments of a call that is about to be held or kept as a proposal, before its read-back is
+    /// built and before it is stored. A tool whose effect depends on state that can change while the user
+    /// thinks (which agent event a reply goes to) has the host write that state into the arguments here, so
+    /// the user hears the destination and the yes releases the call to that destination and no other. The
+    /// values come from the host's own state, never from the model.
+    fn pin_args(&mut self, _name: &str, args: Value) -> impl std::future::Future<Output = Value> {
+        async move { args }
+    }
     /// Whether this tool's results are text written by someone else (a web page, an MCP server, an agent
     /// event). Such a result makes the rest of the conversation "tainted" (REQ-SEC-012). A tool that does
     /// not say is assumed to return untrusted text.
