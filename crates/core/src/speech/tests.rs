@@ -1,4 +1,9 @@
 use super::*;
+use crate::apiclient::{check_url, multipart, names_in};
+use crate::audio::{decode_pcm16, parse_wav, resample_to_16k, wav};
+use crate::netpolicy::is_private_host;
+use crate::transport::list_models;
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -406,35 +411,65 @@ fn providers_are_named_and_have_their_own_defaults() {
 #[test]
 fn error_texts_are_plain_and_keep_the_openai_style_as_it_was() {
     assert_eq!(
-        failure(Dialect::OpenAi, 401, "bad key"),
+        Dialect::OpenAi.provider().wire().failure(401, "bad key"),
         "HTTP 401: bad key"
     );
-    assert_eq!(failure(Dialect::OpenAi, 429, ""), "HTTP 429");
-    let e = failure(Dialect::ElevenLabs, 401, "Invalid API key");
+    assert_eq!(
+        Dialect::OpenAi.provider().wire().failure(429, ""),
+        "HTTP 429"
+    );
+    let e = Dialect::ElevenLabs
+        .provider()
+        .wire()
+        .failure(401, "Invalid API key");
     assert!(
         e.starts_with("HTTP 401: the key was not accepted") && e.ends_with("(Invalid API key)"),
         "{e}"
     );
-    assert!(failure(Dialect::Deepgram, 429, "").contains("wait a little"));
-    assert_eq!(failure(Dialect::Deepgram, 500, "boom"), "HTTP 500: boom");
-    let v = json!({"detail": {"status": "invalid_api_key", "message": "Invalid API key"}});
-    assert_eq!(error_text(Dialect::ElevenLabs, &v), "Invalid API key");
+    assert!(
+        Dialect::Deepgram
+            .provider()
+            .wire()
+            .failure(429, "")
+            .contains("wait a little")
+    );
     assert_eq!(
-        error_text(Dialect::ElevenLabs, &json!({"detail": "plain"})),
+        Dialect::Deepgram.provider().wire().failure(500, "boom"),
+        "HTTP 500: boom"
+    );
+    let v = json!({"detail": {"status": "invalid_api_key", "message": "Invalid API key"}});
+    assert_eq!(
+        Dialect::ElevenLabs.provider().wire().error_message(&v),
+        "Invalid API key"
+    );
+    assert_eq!(
+        Dialect::ElevenLabs
+            .provider()
+            .wire()
+            .error_message(&json!({"detail": "plain"})),
         "plain"
     );
     assert_eq!(
-        error_text(Dialect::ElevenLabs, &json!({"detail": [{"msg": "bad"}]})),
+        Dialect::ElevenLabs
+            .provider()
+            .wire()
+            .error_message(&json!({"detail": [{"msg": "bad"}]})),
         "bad"
     );
     assert_eq!(
-        error_text(
-            Dialect::Deepgram,
-            &json!({"err_msg": "Invalid credentials"})
-        ),
+        Dialect::Deepgram
+            .provider()
+            .wire()
+            .error_message(&json!({"err_msg": "Invalid credentials"})),
         "Invalid credentials"
     );
-    assert_eq!(error_text(Dialect::OpenAi, &json!({"message": "x"})), "");
+    assert_eq!(
+        Dialect::OpenAi
+            .provider()
+            .wire()
+            .error_message(&json!({"message": "x"})),
+        ""
+    );
 }
 
 /// Answer each request in turn with `responses`; returns the request heads and bodies.

@@ -53,13 +53,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{Receiver, Sender};
 use ws::{Msg, WebSocket, WsError};
 
-pub use crate::rtvoice::Speaker;
 #[cfg(test)]
-use crate::rtvoice::resample;
+use crate::audio::resample;
+pub use crate::rtvoice::Speaker;
 
 /// Sample rate of the audio on both sides of the engine: 16-bit mono little-endian PCM at 24 kHz. This is
 /// the protocol's rate, not any device's: a microphone or speaker running at another rate is converted at
-/// its end ([`crate::rtvoice::resample`]).
+/// its end ([`crate::audio::resample`]).
 pub const SAMPLE_RATE: u32 = 24_000;
 /// Bytes in one 16-bit mono sample.
 const BYTES_PER_SAMPLE: u32 = 2;
@@ -296,7 +296,7 @@ impl SessionEnd {
 /// The audio ends of a session.
 #[derive(Debug)]
 pub struct Io {
-    /// Microphone audio, PCM16 at 24 kHz ([`crate::rtvoice::resample`] converts). Closing it ends the session.
+    /// Microphone audio, PCM16 at 24 kHz ([`crate::audio::resample`] converts). Closing it ends the session.
     pub mic: Receiver<Vec<u8>>,
     /// Where spoken audio goes.
     pub speaker: Sender<Speaker>,
@@ -345,7 +345,7 @@ pub async fn connect<D: Dialect>(
         ));
     };
     let ep = crate::transport::Endpoint::parse(&http).map_err(RealtimeError::Config)?;
-    if !ep.tls && !crate::speech::is_private_host(&ep.host) {
+    if crate::netpolicy::crosses_internet_unencrypted(&ep) {
         return Err(RealtimeError::Config(
             "the key and your voice must not cross the internet unencrypted; use wss://".into(),
         ));

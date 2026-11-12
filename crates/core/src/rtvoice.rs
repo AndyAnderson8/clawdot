@@ -38,24 +38,6 @@ pub enum Speaker {
     Flush,
 }
 
-/// Linear resampling of 16-bit mono PCM, for example a 16 kHz microphone to 24 kHz.
-#[must_use]
-pub fn resample(pcm: &[i16], from: u32, to: u32) -> Vec<i16> {
-    if from == to || pcm.is_empty() || from == 0 || to == 0 {
-        return pcm.to_vec();
-    }
-    let n = (pcm.len() as u64 * u64::from(to) / u64::from(from)) as usize;
-    (0..n)
-        .map(|i| {
-            let pos = i as f64 * f64::from(from) / f64::from(to);
-            let i0 = (pos as usize).min(pcm.len() - 1);
-            let i1 = (i0 + 1).min(pcm.len() - 1);
-            let frac = pos - i0 as f64;
-            (f64::from(pcm[i0]) * (1.0 - frac) + f64::from(pcm[i1]) * frac).round() as i16
-        })
-        .collect()
-}
-
 /// The realtime settings in effect.
 #[derive(Clone, PartialEq)]
 pub struct RtSettings {
@@ -426,17 +408,5 @@ mod tests {
             rt.status()["last_error"],
             "The realtime voice service did not accept the API key."
         );
-    }
-
-    #[test]
-    fn resampling_changes_the_length_by_the_rate_ratio() {
-        let pcm: Vec<i16> = (0..160).collect();
-        assert_eq!(resample(&pcm, 16_000, 24_000).len(), 240);
-        assert_eq!(
-            resample(&resample(&pcm, 16_000, 24_000), 24_000, 16_000).len(),
-            160
-        );
-        assert_eq!(resample(&pcm, 16_000, 16_000), pcm);
-        assert!(resample(&[], 16_000, 24_000).is_empty());
     }
 }

@@ -164,7 +164,7 @@ impl HttpBackend {
         let endpoint = Endpoint::parse(base_url)?;
         // The key, the conversation and agent summaries travel here: same rule as the speech clients
         // (REQ-SEC-001), plain http only for this machine and the home network.
-        if !endpoint.tls && !crate::speech::is_private_host(&endpoint.host) {
+        if crate::netpolicy::crosses_internet_unencrypted(&endpoint) {
             return Err(format!(
                 "{base_url}: the language model API key and conversation must not cross the internet unencrypted; use https:// (plain http:// is for localhost and the home network)"
             ));
@@ -467,6 +467,18 @@ impl ChatBackend for HttpBackend {
     async fn complete(&self, req: &ChatRequest) -> Result<Completion, LlmError> {
         self.stream(req, |_| {}).await
     }
+}
+
+/// The models a language-model server offers, from `GET <base>/models` (the OpenAI-style list that OpenRouter, Ollama
+/// and most others serve).
+///
+/// # Errors
+/// A plain description of why the list could not be had.
+pub async fn list_models(
+    base_url: &str,
+    key: &str,
+) -> Result<Vec<String>, crate::apiclient::ProviderError> {
+    crate::apiclient::list_names(base_url, key, "/models", "models").await
 }
 
 #[cfg(test)]
