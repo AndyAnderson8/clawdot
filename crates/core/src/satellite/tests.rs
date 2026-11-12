@@ -1426,3 +1426,34 @@ async fn a_stream_command_is_not_held_back_by_a_reply_that_could_not_be_spoken()
     assert_eq!(seen.last(), Some(&jazz_url()));
     assert_eq!(samples(&seen), 0, "{seen:?}");
 }
+
+// ----- a satellite that stops reading cannot wedge the session (REQ-SAT-010) -----
+
+/// The satellite says hello, reads the welcome, and then never reads again. Its receive buffer fills, the core's
+/// next write waits for room that never comes, and the keepalive tick that would notice a dead peer cannot run
+/// while the loop is stuck inside the write. The write must give up after the dead-peer time and end the session.
+#[tokio::test]
+async fn a_satellite_that_stops_reading_ends_the_session_instead_of_wedging_it() {
+    let (near, far) = tokio::io::duplex(8);
+    let (tx, _rx) = mpsc::channel::<Ask>(4);
+    let session = tokio::spawn(run_session(
+        far,
+        Arc::new(Ears("x")),
+        Arc::new(Mouth),
+        tx,
+        fast(),
+    ));
+    let mut p = Peer {
+        io: near,
+        dec: Decoder::new(Limits::default()),
+    };
+    p.hello(None, PROTOCOL_VERSION).await;
+    assert!(matches!(p.recv().await, Message::Welcome(_)));
+    // From here the peer neither reads nor writes; the keepalive pings pile up in the pipe.
+    let ended = timeout(Duration::from_secs(5), session)
+        .await
+        .expect("the session is wedged on a write to a peer that does not read")
+        .unwrap();
+    let why = ended.expect_err("a peer that does not read is a dead peer");
+    assert!(why.contains("write"), "{why}");
+}

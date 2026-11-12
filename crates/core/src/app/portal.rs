@@ -9,6 +9,10 @@ use tokio::sync::{mpsc, oneshot};
 
 /// How long a portal request waits for the main loop. The loop is busy while the assistant is mid-answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a portal request waits for room in the queue to the main loop before it is refused.
+const QUEUE_WAIT: Duration = Duration::from_secs(1);
+/// What the page is told when the main loop cannot take a request now.
+const BUSY: &str = "The assistant is busy with a conversation. Try again in a few seconds.";
 
 /// A change to timers, alarms, and reminders asked for from the portal.
 #[derive(Debug, Clone, PartialEq)]
@@ -188,14 +192,55 @@ impl Core {
             .ok_or_else(|| Fail::Unavailable("The assistant is not running yet.".into()))?;
         let (reply, answer) = oneshot::channel();
         let wait = op.wait();
-        tx.send(Job { op, reply })
-            .await
-            .map_err(|_| Fail::Unavailable("The assistant is not running.".into()))?;
+        // The queue is small and the loop may be busy for a whole conversation: wait a moment for room, not for ever.
+        match tokio::time::timeout(QUEUE_WAIT, tx.send(Job { op, reply })).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(Fail::Unavailable("The assistant is not running.".into())),
+            Err(_) => return Err(Fail::Unavailable(BUSY.into())),
+        }
         match tokio::time::timeout(wait, answer).await {
             Ok(Ok(r)) => r,
-            _ => Err(Fail::Unavailable(
-                "The assistant is busy with a conversation. Try again in a few seconds.".into(),
-            )),
+            _ => Err(Fail::Unavailable(BUSY.into())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::TestClock;
+    use crate::app::{Adapters, Limits};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicI64;
+
+    /// The main loop is stuck in a long conversation and the request queue is full. A request must give up after a
+    /// short wait, not hold its connection (and one of the server's few slots) until the loop is free again.
+    #[tokio::test]
+    async fn a_request_gives_up_when_the_queue_never_has_room() {
+        let clock = Arc::new(TestClock(AtomicI64::new(1_800_000_000)));
+        let core = Core::in_memory(clock, Adapters::builtin(), Limits::default());
+        let _loop_never_reads = core.attach_portal();
+        let tx = core
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap();
+        let mut held = Vec::new();
+        while tx.capacity() > 0 {
+            let (reply, answer) = oneshot::channel();
+            tx.try_send(Job {
+                op: Op::Rekey,
+                reply,
+            })
+            .unwrap();
+            held.push(answer);
+        }
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(4), core.portal_call(Op::Rekey))
+            .await
+            .expect("a request waited for room in the queue for ever");
+        assert!(matches!(r, Err(Fail::Unavailable(_))), "{r:?}");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 }
