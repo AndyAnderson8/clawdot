@@ -1,4 +1,4 @@
-//! The parts of the optioal realtime voice (ADR-0020) that the rest of the program touches: its settigs, its
+//! The parts of the optional realtime voice (ADR-0020) that the rest of the program touches: its settings, its
 //! status, the hand-off between a speaker's connection and the session, and audio conversion.
 //!
 //! They are always compiled, are small and use no network, so the speaker loop and the settings page do not
