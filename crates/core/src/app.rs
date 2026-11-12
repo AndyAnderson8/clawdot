@@ -981,7 +981,7 @@ impl Core {
         let Some(id) = g.inbox.reply_target().map(|e| e.id) else {
             return false;
         };
-        let done = g.inbox.snooze(id, now + secs);
+        let done = g.inbox.snooze(id, now.saturating_add(secs));
         self.persist(&g);
         done
     }
@@ -1245,6 +1245,18 @@ mod tests {
         assert!(c.dismiss_current());
         assert!(c.next_announcement(true, 0).is_none());
         assert!(!c.dismiss_current(), "nothing left to dismiss");
+    }
+
+    #[test]
+    fn a_huge_snooze_postpones_for_good_instead_of_overflowing() {
+        let (c, _) = core();
+        let (_, token) = c.create_endpoint("x", "generic").unwrap();
+        c.ingest_hook("x", &token, br#"{"title":"one","session_ref":"1"}"#)
+            .unwrap();
+        let id = c.next_announcement(true, 0).unwrap().event.id;
+        c.mark_announced(&[id]);
+        assert!(c.snooze_current(i64::MAX));
+        assert!(c.next_announcement(true, 0).is_none());
     }
 
     #[test]
