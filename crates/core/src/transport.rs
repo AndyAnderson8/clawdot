@@ -22,6 +22,24 @@ const MAX_BODY: usize = 1024 * 1024;
 /// Largest error body kept for diagnostics.
 const MAX_ERROR_BODY: usize = 2048;
 
+/// Longest message from a provider that is passed on to be shown.
+const MAX_SHOWN: usize = 300;
+
+/// A remote server's message made safe to show: its first line only, with `secret` replaced everywhere (before the
+/// cut, so a key straddling the limit leaves no prefix behind), at most `max` characters.
+pub(crate) fn scrub(text: &str, secret: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    let line = if secret.is_empty() {
+        line.to_owned()
+    } else {
+        line.replace(secret, "***")
+    };
+    if line.chars().count() <= max {
+        return line;
+    }
+    line.chars().take(max).collect::<String>() + "…"
+}
+
 /// A parsed `http(s)://host[:port][/base]` URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -124,6 +142,10 @@ impl HttpBackend {
         mut on_text: impl FnMut(&str) + Send,
     ) -> Result<Completion, LlmError> {
         match timeout(self.deadline, self.exchange(req, &mut on_text)).await {
+            // The provider's words are shown to the person: never with the key in them.
+            Ok(Err(LlmError::Provider(m))) => {
+                Err(LlmError::Provider(scrub(&m, &self.api_key, MAX_SHOWN)))
+            }
             Ok(r) => r,
             Err(_) => Err(LlmError::Transport(format!(
                 "no complete response within {} s",
@@ -503,6 +525,32 @@ mod tests {
         assert!(
             matches!(b2.complete(&request()).await, Err(LlmError::Provider(m)) if m.contains("500"))
         );
+    }
+
+    // REQ-SEC-001
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_provider_that_echoes_the_key_does_not_get_it_into_the_error() {
+        const ECHO: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"Bad key sk-secret-12345 for you\"}}";
+        let (port, _s) = fake_server(ECHO, false).await;
+        let backend = HttpBackend::new(
+            &format!("http://127.0.0.1:{port}"),
+            "sk-secret-12345",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let err = backend.complete(&request()).await.unwrap_err();
+        assert!(!err.to_string().contains("sk-secret-12345"), "{err}");
+        assert!(err.to_string().contains("Bad key"), "{err}");
+    }
+
+    #[test]
+    fn scrubbing_hides_the_key_clips_and_keeps_one_line() {
+        assert_eq!(scrub("a sk-1 b", "sk-1", 100), "a *** b");
+        assert_eq!(scrub("first\nsecond", "", 100), "first");
+        assert_eq!(scrub(&"x".repeat(500), "k", 300).chars().count(), 301);
+        // A key cut by the length limit must not survive as a prefix.
+        let msg = format!("{}sk-abcdef", "x".repeat(295));
+        assert!(!scrub(&msg, "sk-abcdef", 300).contains("sk-"));
     }
 
     #[tokio::test(flavor = "current_thread")]
