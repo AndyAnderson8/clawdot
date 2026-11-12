@@ -39,16 +39,17 @@ satellite ──playback-done──► core ──(follow-up window) stream-star
 | Nothing for 20 s | Drops the connection. The core pings every 5 s; the satellite should reconnect with backoff. |
 
 Other rules: unknown events are ignored so newer satellites keep working; audio in any format other than 16 kHz
-mono 16-bit is reported once with an `error` event and dropped; up to four satellites connect at once and further
+mono 16-bit is reported once with an `error` event and dropped; up to four satellites connect at once (at most two from one address) and further
 connections are closed immediately; frames are size-limited by the protocol decoder, so a hostile peer cannot make
-the core allocate without bound; `hello` must arrive within 10 s.
+the core allocate without bound; `hello` must arrive within 5 s.
 
 ## Announcements
 
 When a satellite is connected, inbox announcements and fired timers or alarms are spoken on it as well as printed.
 A satellite accepts one only when it is idle and unmuted, so an announcement never interrupts a conversation or
 plays into a muted room. If every satellite is busy or muted, the event stays queued and is retried a second later
-(nothing is marked announced until a satellite actually spoke it). Fired timers are best effort: a busy satellite
+(nothing is marked announced until a satellite actually spoke it).
+The message is spoken as coming from the endpoint's spoken name (set by the administrator in the portal, else the endpoint's name), never from a label the sender gives itself. Fired timers are best effort: a busy satellite
 skips them, the console still shows them. After an announcement plays, the follow-up window opens, so the user can
 answer ("keep going and add tests") without the wake word, and the instruction goes to the agent bridge.
 
@@ -68,7 +69,7 @@ Replies can carry effects. Volume changes (`VolumeSet`, `VolumeUp`, `VolumeDown`
   spoken confirmation still plays, so a radio request to such a satellite is acknowledged but not carried out.
 ## Not built yet
 
-- A Raspberry Pi satellite and the conformance suite (REQ-SAT-012, REQ-SAT-015); the desktop reference satellite exists, see [porting-a-satellite.md](porting-a-satellite.md).
+- A reference satellite proven on Raspberry Pi hardware (REQ-SAT-015). The desktop reference satellite, the device daemon and the conformance suite exist; see [porting-a-satellite.md](porting-a-satellite.md) and [device-daemon.md](device-daemon.md).
 - Wake-word detection in the core for satellites that cannot do it themselves (REQ-SAT-013); today those need a
-  button, or the satellite must send `wake`.
+  button, or the satellite must send `wake`. (The wake-word runtime in `crates/wake` runs on the device side.)
 - Opus downlink (REQ-SAT-005), TLS, per-satellite tokens, and showing inbox cards on a satellite display.

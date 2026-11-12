@@ -1,54 +1,55 @@
-# Development Environment
+# Development environment
 
-Status: Draft. The host is Windows 11; CI runs on Linux. The WSL path below was validated on 2026-11-07; the audio and cross-run (qemu) parts are still intended, not yet exercised.
+The scripts need only bash and git. Rust builds run natively on Linux and macOS. On Windows, builds run inside WSL2 (Ubuntu) through `scripts/cargo.sh`, while you edit and use git on the Windows side. CI runs on Linux.
 
-## Quick start (Windows + WSL2, no sudo)
-1. Install WSL2 with Ubuntu. From a WSL shell run `bash scripts/setup-wsl.sh`. It installs Rust with rustup in your home directory and uses Zig as the C compiler and linker, so no `build-essential` or `sudo` is needed.
-2. From any shell on the repository (Git Bash on Windows included), `scripts/cargo.sh <args>` runs cargo natively if it exists, and inside WSL otherwise. Build output lives in `~/.cache/clawdot-target` in WSL (fast), not in the repository.
-3. `scripts/check.sh` uses that wrapper, so every gate works from Windows. Install `shellcheck` too (`winget install koalaman.shellcheck`) so local checks match CI.
+## Linux and macOS
 
-## Principle
-Do audio on the host, cross-compilation and budget checks in Linux. The project's own protocol makes this split natural: the core can run in Linux while the desktop satellite runs natively on Windows.
+Install Rust with rustup (it reads the version from `rust-toolchain.toml`), then:
 
-## Layout
+```
+scripts/setup.sh          # once: git hooks and identity check
+scripts/cargo.sh build --release -p clawdot-core
+scripts/check.sh          # every gate
+```
 
-| Task | Where | Why |
-|---|---|---|
-| Editing, git, desktop satellite (mic and speaker) | **Windows host** | WASAPI audio works natively; WSL2 audio is unreliable |
-| Core build and tests, cross-compile to armv7, qemu budget gate, fuzzing, `cargo deny` | **WSL2 (Ubuntu)** | Matches CI; qemu-user and musl cross toolchains are straightforward |
-| Real-hardware checks (Pi or similar) | **SSH to the device** | The only trustworthy CPU and RAM numbers |
+`scripts/cargo.sh` runs the `cargo` it finds. If `sccache` is installed it is used as the compiler cache, kept outside the repository (set `CLAWDOT_NO_SCCACHE=1` to turn that off).
 
-Keep the Rust workspace on the WSL2 ext4 filesystem for build performance (not under `/mnt/c`). Use a Windows-side clone only for editing if preferred, or edit via your IDE's WSL integration.
+## Windows with WSL2 (no sudo)
 
-## Toolchain
-- `rustup` with the version pinned in `rust-toolchain.toml`, plus the target `armv7-unknown-linux-musleabihf`.
-- Cross-compilation: `cargo-zigbuild` (Zig as the linker) or `cross` (needs Docker). Choose one in TASK-001 and record it in an ADR if it affects contributors.
-- `qemu-user-static` and binfmt for running armv7 binaries on x86_64 (budget gate).
-- `just` (task runner), `cargo-deny`, `cargo-audit`, `cargo-bloat`, `cargo-fuzz` (nightly), `cargo-nextest` (optional).
-- A devcontainer definition reproduces the Linux side for contributors who don't use WSL2.
+1. Install WSL2 with an Ubuntu distribution, and Git for Windows (for Git Bash).
+2. In a WSL shell, in the repository, run `bash scripts/setup-wsl.sh`. It installs Rust with rustup in your home directory and Zig as the C compiler and linker, so no `build-essential` package and no `sudo` are needed. It writes `~/.clawdot-env.sh`.
+3. From Git Bash, run `scripts/setup.sh` once.
+4. From then on, `scripts/cargo.sh <args>` runs native cargo if it exists and otherwise runs it inside WSL. `scripts/check.sh` goes through it, so every gate works from Windows. Use `scripts/in-wsl.sh <command>` to run any other command in WSL at the same repository path. A distribution other than Ubuntu: set `CLAWDOT_WSL_DISTRO`.
+5. Install `shellcheck` (`winget install koalaman.shellcheck`) so local shell checks match CI.
 
-## Running core and satellite across the boundary
-1. Start the core in WSL2 listening on a TCP port.
-2. Start the desktop satellite on Windows, connecting to `localhost:<port>` (WSL2 forwards localhost to the VM).
-3. This exercises the real satellite protocol, not the in-process shortcut.
+Build output lives in WSL, in `~/.cache/clawdot-target`, not in the repository. A linked git worktree gets its own directory, `~/.cache/clawdot-target-<worktree folder>`, because worktrees that share one target directory overwrite each other's builds. Delete a worktree's cache when you remove the worktree:
+
+```
+wsl -e bash -lc 'rm -rf ~/.cache/clawdot-target-<worktree folder>'
+```
+
+The repository can live on the Windows file system; only the build output needs the fast WSL disk. Process launches are slow on Windows (about 150 ms each), so scripts prefer bash builtins and one `grep -r` over many `grep` calls. The policy tests (`scripts/test-policy.sh`) spawn thousands of processes and re-run themselves inside WSL on Windows.
+
+## The portal
+
+Needs Node 24 or newer. `scripts/check.sh` installs the dependencies when `portal/node_modules` is missing; to do it by hand, see [portal/README.md](../../portal/README.md), which lists every npm script (`npm run check`, `npm test`, `npm run test:browser`, `npm run build`). The browser test needs Chrome, Chromium or Edge and skips itself without one. The built page `crates/core/src/ui.html` is committed; rebuild it with `npm run build` after a source change.
+
+## Landing gate mode
+
+`scripts/gate-mode` holds one word read by `scripts/land.sh`: `full` (the full gate and a CI run on the exact merge before `dev` moves) or `stabilization` (the fast local check only, with a visible "full gate skipped by mode" line). It is a temporary, reviewed setting ([ADR-0018](../adr/0018-landing-gate-mode.md)). Check the file to see which applies. Hotfixes into `main` and releases always run the full gate and CI.
+
+## Cross-compiling and the size budget
+
+The Echo Dot build is armv7 musl. CI builds it with `cross` (see `Cross.toml` and `.github/workflows/ci.yml`) and fails if the stripped binary is over 8 MiB. `scripts/budget.sh` measures the budget locally in WSL with Zig. The Windows programs of the PC voice loop are built from WSL by `scripts/dev/build-windows.sh` ([pc-voice-loop](../guides/pc-voice-loop.md)).
+
+## Running the core and a satellite across a boundary
+
+Start the core in WSL listening on a TCP port, and the reference satellite on Windows connecting to `localhost:<port>` (WSL2 forwards localhost). This exercises the real satellite protocol. Audio devices should be used from Windows; WSL2 audio is unreliable.
 
 ## Git on Windows
-- `core.autocrlf=false`; line endings are normalised by `.gitattributes` and `.editorconfig` (LF).
-- Commit signing with SSH keys via the Windows OpenSSH agent: `git config gpg.format ssh` and `commit.gpgsign true`.
-- `git commit -s` for the DCO sign-off once external contributors exist (see [SDLC §13](sdlc.md#13-proportionality-solo-maintainer-mode)).
+
+`core.autocrlf` is false; `.gitattributes` and `.editorconfig` keep line endings LF. `scripts/setup.sh` sets `pull.ff only` and `merge.ff false`. Never use `--no-verify`.
 
 ## Secrets in development
-- API keys live in a git-ignored `config.toml` or environment variables.
-- **CI and default tests never use real providers** (see [testing strategy §7](../quality/testing-strategy.md#7-test-cost-policy)).
 
-## Performance: process spawns are expensive on Windows
-On a typical Windows machine every process launch costs about 150 ms (measured 2026-11-07), so a script's speed is set by **how many processes it starts**, not by what it computes. Rules for scripts in this repository:
-- Prefer bash builtins (`[[ =~ ]]`, parameter expansion, `read`) over `grep`, `sed`, `tr`, `cat`, `dirname`, and `$(...)` subshells, especially in loops.
-- Batch work: one `grep -r` over the tree beats one `grep` per file.
-- The agent guard (`.claude/hooks/guard-git.sh`) runs before every shell command an agent issues. It is spawn-free on purpose (0.4 s instead of 2.7 s); keep it that way.
-- Gate steps that spawn hundreds of processes (the policy tests) run only when the policy tooling changes; CI runs them always.
-
-## Known risks to validate in TASK-001
-- Windows to WSL2 localhost forwarding behaves with raw TCP and long-lived connections.
-- Zig-based linking works with the chosen C dependencies (libopus, TFLite Micro).
-- qemu-user RSS measurements are representative (they track guest memory but not all kernel effects). The real-hardware run is the final check.
+API keys come from environment variables (for example `OPENROUTER_API_KEY`) or are pasted into the portal, which stores them in the data directory. Do not put keys in the repository. CI and the default tests never call real providers ([testing strategy](../quality/testing-strategy.md)).

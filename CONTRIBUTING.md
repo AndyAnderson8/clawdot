@@ -22,15 +22,25 @@ Maintainers and their AI pair programmers follow the same rules but integrate wi
 
 ## Development setup
 
-Prerequisites (to be finalised in M0): Rust (pinned via `rust-toolchain.toml`), [`just`](https://github.com/casey/just), `cargo-deny`, `cargo-audit`, and `cross` or Zig for cross-compilation.
+You need git and bash (Git Bash on Windows). Everything else is optional until a gate asks for it:
+
+- **Rust**, at the version pinned in `rust-toolchain.toml` (rustup installs it). On Windows without a C toolchain, `scripts/cargo.sh` runs cargo inside WSL instead; see [the development environment](docs/process/dev-environment.md).
+- **Node 24 or newer**, only when you change `portal/` or `crates/core/src/ui.html`. Install the two sets of tools once: `npm --prefix portal ci --ignore-scripts` and `npm --prefix portal/lint ci --ignore-scripts` (`scripts/check.sh` does this for you when they are missing). The portal's own commands are in [portal/README.md](portal/README.md).
+- **shellcheck**, to match the shell checks in CI.
+- Optional: `cargo-deny` (the full gate runs it when installed; CI always does), `just` (a thin wrapper over the scripts).
 
 ```
-scripts/setup.sh          # once: enable git hooks, verify identity
-scripts/check.sh --fast   # quick gate (what the pre-commit hook runs)
-scripts/check.sh          # every gate (what landing into dev runs)
+scripts/setup.sh                  # once after cloning: installs the git hooks, checks your git identity
+scripts/cargo.sh test -p clawdot-core   # any cargo command; native cargo if present, otherwise WSL
+scripts/check.sh --fast           # quick check scoped to what you changed (the pre-commit hook runs this)
+scripts/check.sh                  # every gate: format, clippy, tests, docs, commit messages, portal, shell, deny
 ```
 
-The Rust gates (format, clippy, tests, cargo-deny), the armv7 cross-build, and the budget gate activate as the workspace and CI jobs land (TASK-001..003). `just` is an optional convenience wrapper over these scripts.
+`scripts/check.sh` must pass before you ask for a merge. The full gate also builds and tests the optional `realtime` feature and replays the agent-loop evaluation scenarios.
+
+### Landing (maintainers)
+
+Maintainers and their AI pair programmers do not open pull requests. They merge a branch that already contains `dev` with `scripts/land.sh <branch>`, which runs the gates and makes a merge commit. In the current gate mode (`scripts/gate-mode`, [ADR-0018](docs/adr/0018-landing-gate-mode.md)) landing runs only the fast check and does not wait for CI, so run `scripts/check.sh` yourself first. The step-by-step commands are in the [runbook](docs/process/runbook.md). Releases use `scripts/release.sh`, and publishing is done by the maintainer.
 
 ## Process links
 

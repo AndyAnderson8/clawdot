@@ -1,6 +1,6 @@
 [package]
 name = "clawdot-core"
-description = "ClawDot core: agent inbox, scheduler, fast-path commands, and the HTTP front end"
+description = "ClawDot core: the assistant program with its language-model turns, tool gate, agent inbox, timers, satellite server, MCP client and server, updater, and embedded web portal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

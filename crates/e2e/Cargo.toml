@@ -1,6 +1,6 @@
 [package]
 name = "clawdot-e2e"
-description = "End-to-end tests: real HTTP server, real bridge client, voice fast path"
+description = "End-to-end tests and the satellite protocol conformance harness: a fake satellite and a fake core, the real core over HTTP and TCP, the real bridge client (a test crate, not part of the product)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

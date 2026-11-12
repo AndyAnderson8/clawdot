@@ -1,10 +1,8 @@
-//! `clawdot`: the core server with a text console standing in for a satellite.
-//!
-//! Until a real audio satellite exists (milestone M1), this runs the complete loop end to end: agents
-//! post webhooks, the console "speaks" announcements, and what you type is handled exactly as a
-//! transcribed utterance would be: the local fast path first, then the language model if one is
-//! configured. This file only chooses what to run; the start-up sequence is `startup::start` and the loop
-//! is `app_loop::App`.
+//! `clawdot`: the core program. It serves the portal and the HTTP API, accepts satellites, runs the assistant, and
+//! keeps a text console that stands in for a satellite: what you type is handled exactly as a transcribed
+//! utterance would be (the local fast path first, then the language model if one is configured), and what the
+//! speaker would say is printed. This file only chooses what to run; the start-up sequence is `startup::start` and
+//! the loop is `app_loop::App`.
 
 use clawdot_core::cli;
 use clawdot_core::commands::{reset_admin, say_command};

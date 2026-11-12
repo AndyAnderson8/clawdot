@@ -43,7 +43,12 @@ control, and a compromised server could try to steer the model. So:
 - Tool names are sanitised and prefixed, so a server cannot shadow a built-in tool or another server's tools
   (a clash is skipped with a warning).
 - Descriptions are cut to 300 characters; tools with a schema over 8 KB, a non-object schema, or beyond 32 per
-  server are dropped.
+  server are dropped. The schema the model sees is cleaned: nesting, item counts and parameter text (120 characters)
+  are limited.
+- **A tool is offered only as the administrator approved it** (REQ-EXT-019, `mcp/pin.rs`). A fingerprint of each
+  tool's description and argument schema is kept with the connection when the server is added. A tool that is new,
+  or whose description or schema changed since, is held back, listed in the Connections page with what changed, and
+  offered only after the administrator accepts it (`POST /api/connections/{name}/accept`).
 - Confirmation is on by default and held by the host, not by the prompt: the call waits for a later user turn that says yes (see [action-safety.md](action-safety.md)). The model is given no `confirmed`
   flag and an undeclared one is dropped, so the server never sees it.
 - Results are cut to 1000 characters; images and other non-text content become a placeholder such as
@@ -57,7 +62,9 @@ control, and a compromised server could try to steer the model. So:
 - Re-listing the tools of a server that is already connected: a server added in the portal is listed once when it is added; if its tools change, remove it and add it again, or restart.
 - OAuth. Use a static bearer token from the environment, or a small proxy that adds one.
 - Editing an MCP server in place (remove it and add it again). Adding, removing, testing, and switching servers and their tools is in the Connections tab (REQ-CFG-033); see [extensibility.md](extensibility.md).
-- Tested only against a fake server in this repository; no real MCP server has been tried.
+- Tested against a fake server in this repository. ClawDot's own MCP server (below) was checked with the official MCP
+  Inspector client ([proving pass](../reports/2026-11-11-proving-pass.md)); this client has not been tried against a
+  real third-party MCP server.
 
 ## The ClawDot MCP server
 
@@ -77,6 +84,7 @@ harness (MCP client) --POST /mcp, endpoint token--> mcp_server --announce_as--> 
   stateless (no `Mcp-Session-Id`), one JSON-RPC message per `POST`, answered with `application/json`, a
   notification answered `202`. `GET` and `DELETE` are `405`, so a client falls back to plain request and
   response. Only `initialize`, `ping`, `tools/list` and `tools/call` exist.
+  The body is limited to 16 KB.
 - **Authentication.** An endpoint token only, checked before the body is read, spending the calling address's
   failed-authentication budget on a miss. An `announce` or `ask_user` whose message could not be saved is a tool error. The endpoint it names is the identity of the caller for the filter,
   the burst limit, the audit trigger `mcp:<endpoint>` and the "one question at a time" rule.
