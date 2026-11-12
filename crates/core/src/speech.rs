@@ -757,19 +757,25 @@ impl HttpSynthesizer {
 
 impl Synthesizer for HttpSynthesizer {
     async fn synthesize(&self, text: &str) -> Result<Vec<i16>, String> {
-        let text: String = text.chars().take(MAX_TEXT).collect();
         let voice = self
             .voice
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        self.synthesize_voice(text, &voice).await
+    }
+
+    /// Speak with `voice` for this one call. The voice every other line uses (the shared handle) is not read or
+    /// changed, so a preview can overlap a normal reply. All three dialects take the voice per request.
+    async fn synthesize_voice(&self, text: &str, voice: &str) -> Result<Vec<i16>, String> {
+        let text: String = text.chars().take(MAX_TEXT).collect();
         let (path, body) = match self.client.dialect {
             Dialect::OpenAi => (
                 "/audio/speech".to_owned(),
                 json!({ "model": self.model, "voice": voice, "input": text, "response_format": "pcm" }),
             ),
             Dialect::ElevenLabs => {
-                plain_id("The voice", &voice)?;
+                plain_id("The voice", voice)?;
                 (
                     format!(
                         "/v1/text-to-speech/{voice}?output_format=pcm_{}",
@@ -780,7 +786,7 @@ impl Synthesizer for HttpSynthesizer {
             }
             Dialect::Deepgram => {
                 // The voice is the model: `aura-2-thalia-en`.
-                plain_id("The voice", &voice)?;
+                plain_id("The voice", voice)?;
                 (
                     format!(
                         "/v1/speak?model={voice}&encoding=linear16&container=none&sample_rate={}",
