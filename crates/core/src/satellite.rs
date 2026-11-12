@@ -1303,6 +1303,10 @@ where
             }
             pending.steps.push(st.dialog.on_reply_silent());
         } else {
+            // The reply could not be spoken. The stream commands were the assistant's answer to the request
+            // and do not depend on the speech, so they run now; left queued they would start after some later,
+            // unrelated speech (REQ-MUS-004 only asks that music never covers speech, and none is playing).
+            finish_speech(st, wr).await?;
             pending.steps.push(st.dialog.on_reply_failed());
         }
         Ok(())

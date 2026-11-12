@@ -588,6 +588,19 @@ async fn a_closed_session_leaves_the_announcer() {
 /// Like `start`, but the assistant answers with whatever `respond` says, the satellite can play URLs when
 /// `media_url` is true, and the speech-to-text always hears `heard`.
 async fn start_music(media_url: bool, heard: &'static str, respond: fn(&str) -> Answer) -> Peer {
+    start_music_with(Mouth, media_url, heard, respond).await
+}
+
+/// Like `start_music`, with the given voice.
+async fn start_music_with<T>(
+    mouth: T,
+    media_url: bool,
+    heard: &'static str,
+    respond: fn(&str) -> Answer,
+) -> Peer
+where
+    T: Synthesizer + Send + Sync + 'static,
+{
     let (near, far) = tokio::io::duplex(1 << 20);
     let (tx, mut rx) = mpsc::channel::<Ask>(4);
     tokio::spawn(async move {
@@ -598,7 +611,7 @@ async fn start_music(media_url: bool, heard: &'static str, respond: fn(&str) -> 
     tokio::spawn(run_session(
         far,
         Arc::new(Ears(heard)),
-        Arc::new(Mouth),
+        Arc::new(mouth),
         tx,
         fast(),
     ));
@@ -1386,4 +1399,30 @@ async fn muting_while_the_closing_line_of_a_realtime_session_is_synthesized_is_h
         early.contains(&Message::SetMute { muted: true }),
         "the mute was not handled while synthesis ran: {early:?}"
     );
+}
+
+// ----- a stream command never outlives a reply that could not be spoken (REQ-MUS-004) -----
+
+/// A voice that is down.
+struct BrokenMouth;
+impl Synthesizer for BrokenMouth {
+    async fn synthesize(&self, _: &str) -> Result<Vec<i16>, String> {
+        Err("the speech service is down".into())
+    }
+}
+
+/// The reply to "play jazz" cannot be spoken, so nothing is playing that the stream must wait for: the stream
+/// starts at once, instead of waiting in the queue to start after some later, unrelated speech.
+#[tokio::test]
+async fn a_stream_command_is_not_held_back_by_a_reply_that_could_not_be_spoken() {
+    let mut p = start_music_with(BrokenMouth, true, "play jazz", play_jazz).await;
+    speak(&mut p).await;
+    let seen = timeout(
+        Duration::from_secs(2),
+        until(&mut p, |m| matches!(m, Message::PlayUrl { .. })),
+    )
+    .await
+    .expect("the stream never started: it is stuck in the queue");
+    assert_eq!(seen.last(), Some(&jazz_url()));
+    assert_eq!(samples(&seen), 0, "{seen:?}");
 }
