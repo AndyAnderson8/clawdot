@@ -107,10 +107,11 @@ impl Connects {
         }
     }
 
-    /// Take the receiving end, for the loop to wait on beside its other arms. Only the first call gets
-    /// results; a later one gets a receiver that is closed.
-    pub fn attach(&mut self) -> mpsc::Receiver<Done> {
-        self.rx.take().unwrap_or_else(|| mpsc::channel(1).1)
+    /// Take the receiving end, for the loop to wait on beside its other arms. There is one: a second call
+    /// gets `None`, and the caller must treat that as a start-up failure, not wait on nothing.
+    #[must_use]
+    pub fn attach(&mut self) -> Option<mpsc::Receiver<Done>> {
+        self.rx.take()
     }
 
     /// How many connections are being made.
@@ -264,15 +265,17 @@ impl Connects {
 
     /// The saved source of this name was removed: stop connecting it and drop its result.
     pub fn forget_saved(&mut self, name: &str) {
-        if matches!(
-            self.open.get(name),
+        match self.open.remove(name) {
             Some(Flight {
+                task,
                 source: Source::Saved,
                 ..
-            })
-        ) && let Some(f) = self.open.remove(name)
-        {
-            f.task.abort();
+            }) => task.abort(),
+            // A portal request is left to `cancel`.
+            Some(other) => {
+                self.open.insert(name.to_owned(), other);
+            }
+            None => {}
         }
     }
 }
@@ -399,7 +402,7 @@ mod tests {
         let (open_tx, open) = watch::channel(true);
         let port = gated_server(open).await;
         let mut c = Connects::new();
-        let mut rx = c.attach();
+        let mut rx = c.attach().unwrap();
         let (r1, a1) = oneshot::channel();
         c.start(pending(port, "home").await, r1);
         let stale = rx.recv().await.unwrap();
@@ -436,7 +439,7 @@ mod tests {
         let (open_tx, open) = watch::channel(false);
         let port = gated_server(open).await;
         let mut c = Connects::new();
-        let mut rx = c.attach();
+        let mut rx = c.attach().unwrap();
         let total = MAX_PORTAL_SERVERS + 3;
         for i in 0..total {
             c.start_saved(pending(port, &format!("s{i}")).await);
@@ -513,7 +516,7 @@ mod tests {
         let (_open_tx, open) = watch::channel(true);
         let port = gated_server(open).await;
         let mut c = Connects::new();
-        let mut rx = c.attach();
+        let mut rx = c.attach().unwrap();
 
         let (r, _answer) = oneshot::channel();
         c.make_next_task_die();

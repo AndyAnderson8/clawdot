@@ -852,7 +852,7 @@ mod tests {
         let dir = TempDir::new("mcp-in-flight");
         let (mut brain, core, live) = started(&dir, &[]).await;
         let mut applied = live.clone();
-        let mut done_rx = brain.connects.attach();
+        let mut done_rx = brain.connects.attach().unwrap();
         let (open_tx, open) = tokio::sync::watch::channel(false);
         let port = crate::connects::testutil::gated_server(open).await;
         brain
@@ -912,7 +912,7 @@ mod tests {
         let dir = TempDir::new("mcp-cancel");
         let (mut brain, core, live) = started(&dir, &[]).await;
         let mut applied = live.clone();
-        let mut done_rx = brain.connects.attach();
+        let mut done_rx = brain.connects.attach().unwrap();
         let (open_tx, open) = tokio::sync::watch::channel(false);
         let port = crate::connects::testutil::gated_server(open).await;
 
@@ -987,7 +987,7 @@ mod tests {
             "start-up did not wait for the sources"
         );
         let mut applied = live.clone();
-        let mut done_rx = brain.connects.attach();
+        let mut done_rx = brain.connects.attach().unwrap();
         assert!(brain.mcp.is_connecting("stuck") && brain.mcp.is_connecting("good"));
         assert_eq!(brain.connects.len(), 2);
         assert_eq!(
@@ -1073,7 +1073,7 @@ mod tests {
         save_sources(&dir, stuck, good);
         let (mut brain, core, live) = started(&dir, &[]).await;
         let mut applied = live.clone();
-        let mut done_rx = brain.connects.attach();
+        let mut done_rx = brain.connects.attach().unwrap();
         assert!(brain.connects.is_connecting("stuck"));
 
         let (job, removed) = ask(Op::Ext(ExtOp::McpDelete("stuck".into())));
@@ -1101,7 +1101,7 @@ mod tests {
         let dir = TempDir::new("mcp-died");
         let (mut brain, core, live) = started(&dir, &[]).await;
         let mut applied = live.clone();
-        let mut done_rx = brain.connects.attach();
+        let mut done_rx = brain.connects.attach().unwrap();
         brain.connects.make_next_task_die();
         let (job, answer) = ask(add_home(9));
         portal_op(&mut brain, &core, &mut applied, job).await;
@@ -1123,7 +1123,7 @@ mod tests {
         let dir = TempDir::new("mcp-fail");
         let (mut brain, core, live) = started(&dir, &[]).await;
         let mut applied = live.clone();
-        let mut done_rx = brain.connects.attach();
+        let mut done_rx = brain.connects.attach().unwrap();
         let (job, answer) = ask(add_home(9));
         portal_op(&mut brain, &core, &mut applied, job).await;
         let done = done_rx.recv().await.unwrap();

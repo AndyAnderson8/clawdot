@@ -142,7 +142,10 @@ async fn main() -> ExitCode {
         }
     };
     let mut rt_rx = brain.rt.attach();
-    let mut mcp_rx = brain.connects.attach();
+    let Some(mut mcp_rx) = brain.connects.attach() else {
+        eprintln!("clawdot: cannot start: the connection results were already claimed");
+        return ExitCode::from(1);
+    };
 
     core.set_ui_tools(brain.listing());
     let mut applied = settings_state.live_values();
