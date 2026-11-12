@@ -126,6 +126,15 @@ pub fn build_llm(
     }))
 }
 
+/// The prices of a million model tokens, in and out, from the live settings. A missing key is `None` (unset,
+/// priced by the built-in price); 0 stays `Some(0.0)` (free).
+pub fn model_prices(
+    live: &serde_json::Map<String, serde_json::Value>,
+) -> (Option<f64>, Option<f64>) {
+    let price = |k: &str| live.get(k).and_then(serde_json::Value::as_f64);
+    (price("llm_usd_per_mtok_in"), price("llm_usd_per_mtok_out"))
+}
+
 /// Switch to the new values of the settings that apply without a restart (REQ-CFG-039). `applied` holds
 /// what is already in effect, so only real changes do any work.
 pub fn apply_live(
@@ -153,6 +162,11 @@ pub fn apply_live(
         l.daily_spend_cap_usd = live
             .get("daily_spend_usd")
             .and_then(serde_json::Value::as_f64);
+        brain.usage.set_limits(l);
+    }
+    if changed("llm_usd_per_mtok_in") || changed("llm_usd_per_mtok_out") {
+        let mut l = brain.usage.limits();
+        (l.llm_usd_per_mtok_in, l.llm_usd_per_mtok_out) = model_prices(live);
         brain.usage.set_limits(l);
     }
     if settings::group_changed(Group::Agent, live, applied) {
@@ -397,6 +411,7 @@ impl Brain {
                 serde_json::json!({ "kind": kind, "label": label, "seconds_left": secs })
             })
             .collect();
+        let limits = self.usage.limits();
         let (day, history) = self.usage.request_days();
         let history: Vec<serde_json::Value> = history
             .iter()
@@ -411,9 +426,15 @@ impl Brain {
             "usage": {
                 "day": day,
                 "history": history,
-                "daily_spend_cap_usd": self.usage.limits().daily_spend_cap_usd,
+                "daily_spend_cap_usd": limits.daily_spend_cap_usd,
                 "requests_today": self.usage.requests_today(),
                 "spend_today": self.usage.spend_today(),
+                // What spend_today rests on: "reported" (the provider's own costs), "priced" (its token
+                // counts times the person's prices), "estimated" (built-in prices and/or sizes), or "none"
+                // while nothing today has cost anything.
+                "spend_basis": self.usage.basis().map_or("none", crate::usage::Basis::as_str),
+                "llm_usd_per_mtok_in": limits.llm_usd_per_mtok_in,
+                "llm_usd_per_mtok_out": limits.llm_usd_per_mtok_out,
             },
             "hardware": crate::hardware::detected(),
             "clock_valid": self.clock.wall_clock_valid(),
@@ -1294,6 +1315,52 @@ mod tests {
         assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
     }
 
+    // REQ-AST-011: the model prices follow the settings (unset stays unset, 0 stays 0) and the status says
+    // what the day's spend rests on.
+    #[tokio::test]
+    async fn model_prices_follow_the_settings_and_the_status_names_the_basis_of_the_spend() {
+        let dir = TempDir::new("apply-live-prices");
+        let (mut brain, core, live) = started(&dir, &[]).await;
+        let mut applied = live.clone();
+        let view = SpeakerView {
+            available: false,
+            console: true,
+            quiet: None,
+        };
+        let status =
+            |b: &Brain| b.status_json(0, &view, &[], &serde_json::json!({}))["usage"].clone();
+        let u = status(&brain);
+        assert_eq!(u["spend_basis"], "none");
+        assert!(u["llm_usd_per_mtok_in"].is_null() && u["llm_usd_per_mtok_out"].is_null());
+
+        // Nothing is known about the provider: the day's spend is an estimate.
+        brain.usage.record_sized(7, None, 3000, 300);
+        assert_eq!(status(&brain)["spend_basis"], "estimated");
+
+        let next = with(
+            &live,
+            &[
+                ("llm_usd_per_mtok_in", 0.into()),
+                ("llm_usd_per_mtok_out", 2.5.into()),
+            ],
+        );
+        apply_live(&mut brain, &core, &next, &mut applied);
+        let l = brain.usage.limits();
+        assert_eq!(
+            (l.llm_usd_per_mtok_in, l.llm_usd_per_mtok_out),
+            (Some(0.0), Some(2.5))
+        );
+        let u = status(&brain);
+        assert_eq!(u["llm_usd_per_mtok_in"], 0.0);
+        assert_eq!(u["llm_usd_per_mtok_out"], 2.5);
+
+        // Clearing a price puts it back to unset, not to 0.
+        let mut cleared = next.clone();
+        cleared.remove("llm_usd_per_mtok_in");
+        apply_live(&mut brain, &core, &cleared, &mut applied);
+        assert_eq!(brain.usage.limits().llm_usd_per_mtok_in, None);
+    }
+
     #[tokio::test]
     async fn the_fast_path_answers_without_a_model_and_other_requests_say_one_is_needed() {
         let dir = TempDir::new("dispatch");
@@ -1489,7 +1556,7 @@ mod tests {
         let path = dir.0.join("usage.json");
         writer.pause();
         for _ in 0..5 {
-            brain.usage.record(7, None);
+            brain.usage.record_request(7);
             brain.save_usage();
         }
         assert!(!path.exists(), "the loop must not write the file itself");

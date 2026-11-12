@@ -62,6 +62,28 @@ struct Call<'a> {
     held_id: Option<u64>,
 }
 
+/// How an action that waits for the user is recorded: the audit decision and its note, and its line in the
+/// recent-actions list.
+struct Kept {
+    decision: &'static str,
+    why: &'static str,
+    recent: &'static str,
+}
+
+/// A costly or destructive call in a turn the user started: held, and the user is asked.
+const HOLD: Kept = Kept {
+    decision: decision::HELD,
+    why: "asked the user to confirm",
+    recent: "waiting for the user's yes",
+};
+
+/// A call in a turn the user did not start: kept as a proposal for the user's next turn.
+const PROPOSE: Kept = Kept {
+    decision: decision::PROPOSED,
+    why: "turn not started by the user",
+    recent: "proposed, waiting for the user",
+};
+
 /// Take the result out of a turn that is ending, leaving a blank one behind.
 fn take(result: &mut TurnResult) -> TurnResult {
     std::mem::take(result)
@@ -189,6 +211,15 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// End the turn with words the host chose.
     fn finish(&mut self, speech: &str) -> TurnResult {
         finish_with(self.conv, take(&mut self.result), speech)
+    }
+
+    /// End a turn on a call that was refused for being too long to read back. It counts as a stop for a failed
+    /// call, not as an answer, so a caller that waits for the model to speak (the realtime voice) is told to
+    /// say the host's words.
+    fn finish_too_long(&mut self, tool: &str) -> TurnResult {
+        let mut r = take(&mut self.result);
+        r.end = TurnEnd::Stopped(Stop::Failures);
+        finish_with(self.conv, r, &too_long_speech(tool))
     }
 
     /// End the turn because calls keep failing (REQ-AST-025).
@@ -540,18 +571,14 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             format!("Error: there is no tool called `{}`.", call.name)
         } else if !self.by_user && risk.tier != Tier::ReadOnly {
             // Nobody is here to ask: keep it as a proposal for the user's next turn.
-            d.held = Some(self.keep_pending(
-                call,
-                &args,
-                risk.tier,
-                (
-                    decision::PROPOSED,
-                    "turn not started by the user",
-                    "proposed, waiting for the user",
-                ),
-            ));
-            "Not run: this turn was not started by the user, so it can only read. The action was saved as a proposal and the user will be asked."
-                .to_owned()
+            match self.keep_pending(call, &args, risk.tier, &PROPOSE) {
+                Ok(p) => {
+                    d.held = Some(p);
+                    "Not run: this turn was not started by the user, so it can only read. The action was saved as a proposal and the user will be asked."
+                        .to_owned()
+                }
+                Err(refusal) => refusal,
+            }
         } else if gate != Gate::Run {
             // Dry-run or a daily cap: nothing is asked and nothing runs.
             self.conv
@@ -566,47 +593,66 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 gate,
             )
         } else if risk.needs_hold() {
-            d.held = Some(self.keep_pending(
-                call,
-                &args,
-                risk.tier,
-                (
-                    decision::HELD,
-                    "asked the user to confirm",
-                    "waiting for the user's yes",
-                ),
-            ));
-            "Not run. The user is being asked to confirm; the answer arrives in their next turn."
-                .to_owned()
+            match self.keep_pending(call, &args, risk.tier, &HOLD) {
+                Ok(p) => {
+                    d.held = Some(p);
+                    "Not run. The user is being asked to confirm; the answer arrives in their next turn."
+                        .to_owned()
+                }
+                Err(refusal) => refusal,
+            }
         } else {
             self.run_call(batch, call, &args, risk.tier, d).await
         }
     }
 
-    /// Write the audit record for an action that is waiting for the user, and build it. `how` is the
-    /// decision, its note, and the line for the recent-actions list.
+    /// Write the audit record for an action that is waiting for the user, and build it. The read-back must be
+    /// short enough to say (REQ-SEC-011): if it is not, nothing is held and nothing runs, and the refusal
+    /// (what the model is told) says how far over the limit it is.
     fn keep_pending(
         &mut self,
         call: &ToolCall,
         args: &Value,
         tier: Tier,
-        how: (&str, &'static str, &str),
-    ) -> PendingAction {
-        let (decision, why, recent) = how;
+        how: &Kept,
+    ) -> Result<PendingAction, String> {
         let description = self.host.describe_action(&call.name, args);
+        let len = description.chars().count();
+        if len > MAX_READ_BACK_CHARS {
+            self.note_act(&Act {
+                tool: &call.name,
+                tier: Some(tier),
+                args,
+                decision: decision::INVALID,
+                held_id: None,
+                outcome: None,
+                note: Some("too long to read back, so not held and not run"),
+            });
+            self.conv
+                .note_recent(&call.name, Some(tier), args, "too long to read back");
+            self.st.too_long = Some(call.name.clone());
+            return Err(format!(
+                "Not run, and nothing was held: reading this call back to the user would take {len} characters, and the most that can be read aloud for approval is {MAX_READ_BACK_CHARS}, so it is {} over. Shorten the values or split the work into smaller calls, then try again.",
+                len - MAX_READ_BACK_CHARS
+            ));
+        }
         let id = self.note_act(&Act {
             tool: &call.name,
             tier: Some(tier),
             args,
-            decision,
+            decision: how.decision,
             held_id: None,
             outcome: None,
-            note: Some(why),
+            note: Some(how.why),
         });
         let mut p = PendingAction::new(&call.name, args.clone(), description, self.now, tier);
         p.held_id = id;
-        p.recent = Some(self.conv.note_recent(&call.name, Some(tier), args, recent));
-        p
+        p.recent = Some(
+            self.conv
+                .note_recent(&call.name, Some(tier), args, how.recent),
+        );
+        self.st.too_long = None;
+        Ok(p)
     }
 
     /// Phase 4: run an allowed call and record how it ended: the progress phrase before a slow one, the
@@ -890,6 +936,9 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// are what an empty model reply would have been (REQ-AST-025), "Done." unless the last thing was a
     /// failure.
     fn close_after_calls(&mut self) -> TurnResult {
+        if let Some(tool) = self.st.too_long.take() {
+            return self.finish_too_long(&tool);
+        }
         if self.st.last_fail.is_some() {
             return failed_turn(self.conv, take(&mut self.result), &self.st);
         }

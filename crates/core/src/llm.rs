@@ -230,6 +230,35 @@ impl ChatRequest {
         }
         body
     }
+
+    /// Bytes this request sends, counted without building it: every message (the system prompt among them)
+    /// and every tool specification, which goes out again with each round. The basis of the estimate in
+    /// [`crate::usage`] when a provider reports no tokens.
+    #[must_use]
+    pub fn sent_bytes(&self) -> usize {
+        /// Counts what is written to it and keeps nothing.
+        struct Count(usize);
+        impl std::io::Write for Count {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0 += b.len();
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let tools: usize = self
+            .tools
+            .iter()
+            .map(|t| {
+                let mut n = Count(0);
+                // Counting cannot fail; a schema that will not serialise is counted as its name alone.
+                let _ = serde_json::to_writer(&mut n, &t.parameters);
+                t.name.len() + t.description.len() + n.0 + 48
+            })
+            .sum();
+        self.messages.iter().map(Message::size).sum::<usize>() + tools
+    }
 }
 
 /// Token and cost accounting for one response.
@@ -254,6 +283,19 @@ pub struct Completion {
     pub finish_reason: Option<String>,
     /// Accounting, if reported.
     pub usage: Option<Usage>,
+}
+
+impl Completion {
+    /// Bytes the model sent back: its words and its tool calls. See [`ChatRequest::sent_bytes`].
+    #[must_use]
+    pub fn received_bytes(&self) -> usize {
+        self.text.len()
+            + self
+                .tool_calls
+                .iter()
+                .map(|c| c.name.len() + c.arguments.len() + 24)
+                .sum::<usize>()
+    }
 }
 
 /// Why a request failed.

@@ -46,8 +46,11 @@ pub async fn build_brain(
     clock: &Arc<dyn Clock + Send + Sync>,
     core: &Arc<Core>,
 ) -> Result<(Brain, Hub), Failure> {
+    let (llm_usd_per_mtok_in, llm_usd_per_mtok_out) = crate::runtime::model_prices(live);
     let limits = UsageLimits {
         daily_spend_cap_usd: args.daily_spend,
+        llm_usd_per_mtok_in,
+        llm_usd_per_mtok_out,
         ..UsageLimits::default()
     };
     let usage_store = JsonStore::new(args.data_dir.join("usage.json"), crate::usage::SCHEMA);
