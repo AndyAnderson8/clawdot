@@ -149,7 +149,7 @@ impl std::fmt::Debug for Server {
 #[derive(Debug, Clone)]
 pub struct McpClient {
     servers: Vec<Arc<Server>>,
-    tools: Vec<McpTool>,
+    tools: Vec<Arc<McpTool>>,
     connector: Connector,
     /// Why each server could not be used, parallel to `servers` (`None` = connected).
     errors: Vec<Option<String>>,
@@ -420,7 +420,7 @@ impl McpClient {
                 for t in &mut tools {
                     t.server = i;
                 }
-                self.tools.extend(tools);
+                self.tools.extend(tools.into_iter().map(Arc::new));
             }
             Err(e) => {
                 let e = clip(&e, 200);
@@ -713,7 +713,7 @@ impl McpClient {
             t.server = i;
         }
         let n = tools.len();
-        self.tools.extend(tools);
+        self.tools.extend(tools.into_iter().map(Arc::new));
         Ok(n)
     }
 
@@ -728,7 +728,7 @@ impl McpClient {
         self.tools.retain(|t| t.server != i);
         for t in &mut self.tools {
             if t.server > i {
-                t.server -= 1;
+                Arc::make_mut(t).server -= 1;
             }
         }
         true
@@ -736,7 +736,7 @@ impl McpClient {
 
     /// The tools on offer.
     #[must_use]
-    pub fn tools(&self) -> &[McpTool] {
+    pub fn tools(&self) -> &[Arc<McpTool>] {
         &self.tools
     }
 
@@ -747,7 +747,7 @@ impl McpClient {
     }
 
     fn find(&self, name: &str) -> Option<&McpTool> {
-        self.tools.iter().find(|t| t.exposed == name)
+        self.tools.iter().map(|t| &**t).find(|t| t.exposed == name)
     }
 
     /// Whether `name` is one of these tools.
@@ -1392,5 +1392,27 @@ mod tests {
         );
         assert_eq!(display_url("http://ha.local"), "http://ha.local");
         assert_eq!(display_url("nonsense"), "");
+    }
+
+    /// A copy of the client that is then changed copies pointers: the tools it did not touch stay one
+    /// allocation in both copies.
+    #[tokio::test]
+    async fn a_changed_copy_shares_the_tools_it_did_not_touch() {
+        let (port, _s1, _h1) = fake_server(OK).await;
+        let (port2, _s2, _h2) = fake_server(OK).await;
+        let mut other = def(port2);
+        other.name = "second".into();
+        let (a, _) = McpClient::connect(vec![def(port), other], &[], |_| None)
+            .await
+            .unwrap();
+        let mut b = a.clone();
+        assert!(b.remove_server("second"));
+        assert_eq!((a.tools().len(), b.tools().len()), (6, 3));
+        let shared = b
+            .tools()
+            .iter()
+            .filter(|t| a.tools().iter().any(|o| Arc::ptr_eq(o, t)))
+            .count();
+        assert_eq!(shared, 3, "the first server's tools were copied");
     }
 }
