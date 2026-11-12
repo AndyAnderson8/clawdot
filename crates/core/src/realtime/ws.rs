@@ -39,6 +39,17 @@ pub enum Msg {
     Close,
 }
 
+/// What the data frames received so far belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fragment {
+    /// No message is half received.
+    Idle,
+    /// A text message is being assembled in `partial`.
+    Text,
+    /// A binary message (ignored) is being skipped.
+    Binary,
+}
+
 /// A connected WebSocket.
 #[derive(Debug)]
 pub struct WebSocket<S> {
@@ -47,6 +58,7 @@ pub struct WebSocket<S> {
     /// Clients mask what they send; servers (tests) do not.
     client: bool,
     partial: Vec<u8>,
+    fragment: Fragment,
 }
 
 fn io_err(e: &std::io::Error) -> WsError {
@@ -64,6 +76,10 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     path: &str,
     headers: &[(&str, &str)],
 ) -> Result<WebSocket<S>, WsError> {
+    // Everything that goes into the request line or a header is checked before anything is sent.
+    if host.contains(['\r', '\n']) || path.contains(['\r', '\n', ' ']) {
+        return Err(WsError::Protocol("the address contains a line break"));
+    }
     let mut key = [0u8; 16];
     getrandom::fill(&mut key).map_err(|_| WsError::Protocol("no random bytes for the key"))?;
     let mut req = format!(
@@ -71,8 +87,7 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         b64::encode(&key)
     );
     for (k, v) in headers {
-        if k.contains(['\r', '\n', ':']) || v.contains(['\r', '\n']) || path.contains(['\r', '\n'])
-        {
+        if k.contains(['\r', '\n', ':']) || v.contains(['\r', '\n']) {
             return Err(WsError::Protocol("a header contains a line break"));
         }
         req.push_str(&format!("{k}: {v}\r\n"));
@@ -115,6 +130,7 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         buf,
         client: true,
         partial: Vec::new(),
+        fragment: Fragment::Idle,
     })
 }
 
@@ -201,21 +217,53 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocket<S> {
             match op {
                 0x8 => return Ok(Some(Msg::Close)),
                 0x9 => return Ok(Some(Msg::Ping(payload))),
-                0xa | 0x2 => {} // pong and binary: ignored
-                0x1 | 0x0 => {
-                    if op == 0x1 && !self.partial.is_empty() {
+                0xa => {} // pong: ignored
+                0x2 => {
+                    // Binary is ignored, but the rest of a fragmented binary message must not be read as text.
+                    if self.fragment == Fragment::Idle && !fin {
+                        self.fragment = Fragment::Binary;
+                    }
+                }
+                0x1 => {
+                    if self.fragment != Fragment::Idle {
                         return Err(WsError::Protocol("a new message began inside another"));
                     }
                     self.partial.extend_from_slice(&payload);
-                    if fin {
-                        let text = String::from_utf8(std::mem::take(&mut self.partial))
-                            .map_err(|_| WsError::Protocol("text is not UTF-8"))?;
+                    if let Some(text) = self.text_piece(fin)? {
                         return Ok(Some(Msg::Text(text)));
                     }
                 }
+                0x0 => match self.fragment {
+                    Fragment::Idle => {
+                        return Err(WsError::Protocol("a continuation with nothing to continue"));
+                    }
+                    Fragment::Binary => {
+                        if fin {
+                            self.fragment = Fragment::Idle;
+                        }
+                    }
+                    Fragment::Text => {
+                        self.partial.extend_from_slice(&payload);
+                        if let Some(text) = self.text_piece(fin)? {
+                            return Ok(Some(Msg::Text(text)));
+                        }
+                    }
+                },
                 _ => return Err(WsError::Protocol("unknown opcode")),
             }
         }
+    }
+
+    /// After a text frame was added to `partial`: the whole message if `fin` ended it, else wait for more.
+    fn text_piece(&mut self, fin: bool) -> Result<Option<String>, WsError> {
+        if !fin {
+            self.fragment = Fragment::Text;
+            return Ok(None);
+        }
+        self.fragment = Fragment::Idle;
+        String::from_utf8(std::mem::take(&mut self.partial))
+            .map(Some)
+            .map_err(|_| WsError::Protocol("text is not UTF-8"))
     }
 
     async fn send_frame(&mut self, op: u8, payload: &[u8]) -> Result<(), WsError> {
@@ -302,6 +350,7 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
             buf,
             client: false,
             partial: Vec::new(),
+            fragment: Fragment::Idle,
         },
         head,
     ))
@@ -360,6 +409,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a_path_or_host_with_a_line_break_is_refused_even_without_headers() {
+        for (host, path) in [("h", "/x\r\nInjected: 1"), ("h\r\nInjected: 1", "/")] {
+            let (a, _b) = duplex(1024);
+            let e = connect(a, host, path, &[]).await.unwrap_err();
+            assert!(matches!(e, WsError::Protocol(_)), "{host:?} {path:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn a_header_with_a_line_break_is_refused_before_anything_is_sent() {
         let (a, _b) = duplex(1024);
         let e = connect(a, "h", "/", &[("X", "a\r\nInjected: 1")])
@@ -378,6 +436,23 @@ mod tests {
         let mut ws = connect(io, "h", "/", &[]).await.unwrap();
         assert_eq!(ws.recv().await.unwrap(), Msg::Ping(vec![7]));
         assert_eq!(ws.recv().await.unwrap(), Msg::Text("abcde".into()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_pieces_of_a_fragmented_binary_message_are_not_read_as_text() {
+        let mut frames = vec![0x02, 2, b'{', b'}']; // binary, not final
+        frames.extend([0x80, 2, b'1', b'2']); // its final continuation
+        frames.extend([0x81, 2, b'o', b'k']); // a real text message
+        let io = raw_server(OK, frames).await;
+        let mut ws = connect(io, "h", "/", &[]).await.unwrap();
+        assert_eq!(ws.recv().await.unwrap(), Msg::Text("ok".into()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_continuation_with_nothing_to_continue_is_an_error() {
+        let io = raw_server(OK, vec![0x80, 2, b'h', b'i']).await;
+        let mut ws = connect(io, "h", "/", &[]).await.unwrap();
+        assert!(matches!(ws.recv().await, Err(WsError::Protocol(_))));
     }
 
     #[tokio::test(flavor = "current_thread")]
