@@ -49,6 +49,8 @@ use std::sync::Arc;
 #[cfg(test)]
 mod csp_tests;
 #[cfg(test)]
+mod rekey_tests;
+#[cfg(test)]
 mod tests;
 
 type Resp = Response<BoxBody<Bytes, Infallible>>;
@@ -750,7 +752,7 @@ async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
     if let Err(m) = core.secrets().set(crate::secrets::LLM_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
     }
-    rekeyed(core).await
+    rekeyed(core, "saved").await
 }
 
 /// `DELETE /api/llm/key`: forget the stored key.
@@ -758,16 +760,27 @@ async fn llm_key_clear(core: &Core) -> Resp {
     if let Err(m) = core.secrets().clear(crate::secrets::LLM_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
-    rekeyed(core).await
+    rekeyed(core, "removed").await
 }
 
-/// Tell the running assistant about the new key and answer with what the page may know of it: the masked hint.
-async fn rekeyed(core: &Core) -> Resp {
-    let _ = core.portal_call(Op::Rekey).await;
-    json_reply(
-        StatusCode::OK,
-        &json!({ "hint": core.secrets().hint(crate::secrets::LLM_KEY) }),
-    )
+/// Tell the running assistant about the changed key and answer with what the page may know of it: the masked hint.
+/// `done` is "saved" or "removed". When the main loop cannot take the request, the change is on disk but the running
+/// model client still has the old key, so the answer is a 503 that says so (the page shows an error's message as
+/// written); the hint is included so it can still be read.
+async fn rekeyed(core: &Core, done: &str) -> Resp {
+    let hint = core.secrets().hint(crate::secrets::LLM_KEY);
+    match core.portal_call(Op::Rekey).await {
+        Ok(_) => json_reply(StatusCode::OK, &json!({ "hint": hint })),
+        Err(_) => json_reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!({
+                "error": format!(
+                    "The key is {done}, but the assistant could not switch to it just now. It will be used after a restart, or when the assistant is free."
+                ),
+                "hint": hint,
+            }),
+        ),
+    }
 }
 
 /// `PUT /api/speech/key`: keep the speech-service key pasted on the page. It is read on every request, so it applies at
