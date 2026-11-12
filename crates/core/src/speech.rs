@@ -476,7 +476,7 @@ impl Client {
         let mut req = Request::builder()
             .method(method)
             .uri(format!("{base}{path}"))
-            .header("host", &self.endpoint.host)
+            .header("host", self.endpoint.host_header())
             .header("content-type", content_type)
             .header("connection", "close")
             .header("user-agent", "clawdot");

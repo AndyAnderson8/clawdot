@@ -410,12 +410,7 @@ impl Updater {
             if !ep.tls && !is_loopback(&ep.host) {
                 return Err("updates are only fetched over https".into());
             }
-            let default_port = if ep.tls { 443 } else { 80 };
-            let host = if ep.port == default_port {
-                ep.host.clone()
-            } else {
-                format!("{}:{}", ep.host, ep.port)
-            };
+            let host = ep.host_header();
             let path = if ep.base.is_empty() {
                 "/"
             } else {

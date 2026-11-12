@@ -54,6 +54,17 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// The value of the `Host` header: the port is part of it unless it is the scheme's default (RFC 9110
+    /// section 7.2). A name-based proxy in front of a server on its own port picks the site by it.
+    #[must_use]
+    pub fn host_header(&self) -> String {
+        if self.port == if self.tls { 443 } else { 80 } {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+
     /// Parse a base URL such as `https://openrouter.ai/api/v1`.
     ///
     /// # Errors
@@ -164,7 +175,7 @@ impl HttpBackend {
         let mut builder = Request::builder()
             .method(Method::POST)
             .uri(format!("{}/chat/completions", self.endpoint.base))
-            .header("host", &self.endpoint.host)
+            .header("host", self.endpoint.host_header())
             .header(CONTENT_TYPE, "application/json")
             .header("accept", "text/event-stream, application/json")
             .header("connection", "close")
@@ -424,6 +435,16 @@ mod tests {
         let l = Endpoint::parse("http://localhost:11434/v1").unwrap();
         assert_eq!((l.tls, l.port, l.base.as_str()), (false, 11434, "/v1"));
         assert_eq!(Endpoint::parse("http://h").unwrap().base, "");
+        for (url, host) in [
+            ("http://h", "h"),
+            ("http://h:80/x", "h"),
+            ("http://h:8080", "h:8080"),
+            ("https://h:443", "h"),
+            ("https://h:8443/v1", "h:8443"),
+            ("https://h:80", "h:80"),
+        ] {
+            assert_eq!(Endpoint::parse(url).unwrap().host_header(), host, "{url}");
+        }
         for bad in ["ftp://h", "h", "http://", "http://h:x", "http://a b"] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
@@ -481,6 +502,12 @@ mod tests {
                 .contains("authorization: bearer sk-test")
         );
         assert!(seen.contains("\"stream\":true") && seen.contains("\"max_tokens\":50"));
+        // The port is part of the Host header when it is not the default one.
+        assert!(
+            seen.to_lowercase()
+                .contains(&format!("host: 127.0.0.1:{port}\r\n")),
+            "{seen}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

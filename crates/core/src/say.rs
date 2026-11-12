@@ -130,7 +130,7 @@ pub async fn run(a: &SayArgs, token: Option<&str>) -> Result<String, String> {
     let mut req = Request::builder()
         .method("POST")
         .uri(format!("{}/api/announce", endpoint.base))
-        .header("host", &endpoint.host)
+        .header("host", endpoint.host_header())
         .header("connection", "close")
         .header("user-agent", "clawdot-say")
         .header("content-type", "application/json");

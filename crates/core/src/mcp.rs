@@ -459,7 +459,7 @@ impl McpClient {
             } else {
                 s.endpoint.base.clone()
             })
-            .header("host", &s.endpoint.host)
+            .header("host", s.endpoint.host_header())
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .header("connection", "close")

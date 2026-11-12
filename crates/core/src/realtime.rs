@@ -424,11 +424,7 @@ pub async fn connect<D: Dialect>(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let host = if (ep.tls && ep.port == 443) || (!ep.tls && ep.port == 80) {
-        ep.host.clone()
-    } else {
-        format!("{}:{}", ep.host, ep.port)
-    };
+    let host = ep.host_header();
     let opened = async {
         let tcp = tokio::net::TcpStream::connect((ep.host.as_str(), ep.port))
             .await

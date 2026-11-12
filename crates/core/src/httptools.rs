@@ -424,7 +424,7 @@ impl HttpTools {
         let mut req = Request::builder()
             .method(method)
             .uri(path)
-            .header("host", &endpoint.host)
+            .header("host", endpoint.host_header())
             .header("connection", "close")
             .header("user-agent", "clawdot")
             .header("accept", "application/json, text/plain");
