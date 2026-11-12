@@ -151,6 +151,11 @@ impl<H: ToolHost> Turn<'_, H> {
 
     /// End the turn on a reply without calls: its words are the answer.
     fn finish_on_words(&mut self, completion: &Completion) -> TurnResult {
+        // The last thing was a call too long to read back: whatever the model says, the user hears that
+        // nothing was done.
+        if let Some(tool) = self.st.too_long.take() {
+            return self.finish_too_long(&tool);
+        }
         let text = completion.text.trim();
         if text.is_empty() && self.st.last_fail.is_some() {
             // The last thing that happened was a failure and the model said nothing: never "Done."

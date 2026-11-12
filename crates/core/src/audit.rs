@@ -1127,12 +1127,29 @@ fn redact_value(v: &Value, depth: usize) -> Value {
     }
 }
 
-/// Strings longer than this are spoken as "a long value" instead of being read out.
+/// Whether a name (an argument key) names something secret. One implementation for the log and for speech.
+#[must_use]
+pub fn is_secret_name(key: &str) -> bool {
+    sensitive_key(key)
+}
+
+/// The secrets in `text` replaced, with nothing clipped, for the read-back of a held action (REQ-SEC-011): the
+/// same word rules as [`redact_text`] but the whole text is kept, because the user must hear all of what will
+/// be sent. Control characters become spaces.
+#[must_use]
+pub fn redact_unclipped(text: &str) -> String {
+    redact_words(&printable(text))
+}
+
+/// The marker [`redact_unclipped`] leaves where it removed a secret.
+pub const REDACTED_MARK: &str = REDACTED;
+
+/// Strings longer than this are shortened to "a long value" in [`spoken_args`].
 pub const MAX_SPOKEN_VALUE_CHARS: usize = 60;
 
-/// Arguments as they are read aloud when a call is held (REQ-SEC-011): the same redaction as the audit log
-/// (`redact_value`), and any text value longer than [`MAX_SPOKEN_VALUE_CHARS`] replaced by "a long value".
-/// For speech only: the stored action keeps its exact arguments.
+/// Arguments in a short, redacted form for the recent-actions list the model sees: the same redaction as the
+/// audit log (`redact_value`), and any text value longer than [`MAX_SPOKEN_VALUE_CHARS`] replaced by "a long
+/// value". Not the read-back of a held action, which says everything (`session::describe_generic`).
 #[must_use]
 pub fn spoken_args(args: &Value) -> Value {
     fn shorten(v: Value) -> Value {

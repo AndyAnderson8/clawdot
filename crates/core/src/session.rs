@@ -24,6 +24,8 @@ use tokio::sync::mpsc::UnboundedSender;
 mod gate;
 use gate::Turn;
 pub use gate::{answer_held_action, run_proposed_calls};
+mod readback;
+pub use readback::{MAX_READ_BACK_CHARS, describe_agent_text, describe_generic};
 
 /// How much harm a tool call can do (REQ-SEC-010), lowest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -81,11 +83,13 @@ impl Risk {
         }
     }
 
-    /// The risk to act on. When untrusted text is in the turn, anything that is not read-only is treated at
-    /// its conservative baseline again, so an administrator's override cannot spare a costly call the
-    /// user's yes (REQ-SEC-012).
+    /// The risk to act on. When untrusted text is in the turn, a tool whose tier was lowered below its
+    /// baseline is treated at that baseline again, including one lowered to read-only: injected text could
+    /// otherwise make the model call a "read-only" fetch or search tool with the user's data in its
+    /// arguments, unasked. A tool whose baseline is itself read-only (a built-in read) is unaffected
+    /// (REQ-SEC-012).
     fn under(self, tainted: bool) -> Self {
-        if tainted && self.tier != Tier::ReadOnly {
+        if tainted {
             Self {
                 tier: self.tier.max(self.baseline),
                 baseline: self.baseline,
@@ -280,7 +284,9 @@ pub trait ToolHost {
         Risk::fixed(Tier::Costly)
     }
     /// What to say to the user when this call is held: a plain sentence built from the arguments, without a
-    /// question (the host adds that). Must not rely on anything the model wrote besides the arguments.
+    /// question (the host adds that). It must state every argument that changes what happens, in full, and
+    /// must not rely on anything the model wrote besides the arguments. One longer than
+    /// [`MAX_READ_BACK_CHARS`] is not held: the call is refused instead (REQ-SEC-011).
     fn describe_action(&self, name: &str, args: &Value) -> String {
         describe_generic(name, args)
     }
@@ -943,6 +949,9 @@ struct TurnState {
     steps: Vec<(String, How)>,
     fail_streak: usize,
     last_fail: Option<(String, How, Tier)>,
+    /// The tool of a call refused because its read-back was too long to say, until something else is held or
+    /// the same tool runs.
+    too_long: Option<String>,
     last_spoke: Option<Ts>,
     spoke_round: bool,
 }
@@ -954,6 +963,7 @@ impl TurnState {
             steps: Vec::new(),
             fail_streak: 0,
             last_fail: None,
+            too_long: None,
             last_spoke: None,
             spoke_round: false,
         }
@@ -980,8 +990,20 @@ impl TurnState {
         } else {
             self.fail_streak = 0;
             self.last_fail = None;
+            if how == How::Done && self.too_long.as_deref() == Some(tool) {
+                self.too_long = None;
+            }
         }
     }
+}
+
+/// What the user hears when a call was too long to read back and the turn ended there: plain words from the
+/// host, not the model's, so nobody believes it was done (REQ-SEC-011).
+fn too_long_speech(tool: &str) -> String {
+    format!(
+        "I did not do that. What I would send with {} was too long for me to read back to you before you agree, so nothing was done. A shorter request would work.",
+        spoken_name(tool)
+    )
 }
 
 /// Say `text` now: send it to the speech sink and remember it for the caller (REQ-AST-020).
@@ -1483,18 +1505,6 @@ fn drop_confirmed(args: &mut Value, spec: Option<&ToolSpec>) {
             o.remove("confirmed");
         }
     }
-}
-
-/// The read-back for a tool with no description of its own: its name and exact arguments.
-#[must_use]
-pub fn describe_generic(name: &str, args: &Value) -> String {
-    // The audit log's redaction plus a short form for long values: the arguments are spoken, may be shown in
-    // the portal and logged (REQ-SEC-011). The stored action keeps the exact arguments.
-    let spoken = crate::audit::spoken_args(args);
-    format!(
-        "I will run {name} with {}",
-        clip_to(&canonical(&spoken), 200)
-    )
 }
 
 fn clip_to(s: &str, max: usize) -> String {
