@@ -6,7 +6,7 @@
 
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
-use hyper::Request;
+use hyper::Method;
 use hyper::body::Bytes;
 use serde_json::{Map, Value, json};
 use std::time::Duration;
@@ -127,12 +127,12 @@ fn explain(status: u16, body: &str) -> Result<String, String> {
 /// A one-line reason: no token, no connection, or a refusal.
 pub async fn run(a: &SayArgs, token: Option<&str>) -> Result<String, String> {
     let endpoint = Endpoint::parse(&a.url)?;
-    let mut req = Request::builder()
-        .method("POST")
-        .uri(format!("{}/api/announce", endpoint.base))
-        .header("host", endpoint.host_header())
-        .header("connection", "close")
-        .header("user-agent", "clawdot-say")
+    let mut req = endpoint
+        .request_builder(
+            Method::POST,
+            &format!("{}/api/announce", endpoint.base),
+            "clawdot-say",
+        )
         .header("content-type", "application/json");
     if let Some(t) = token {
         req = req.header("authorization", format!("Bearer {t}"));

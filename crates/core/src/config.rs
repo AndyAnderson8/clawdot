@@ -319,12 +319,25 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), String> {
+        self.validate_identity()?;
+        self.validate_llm()?;
+        self.validate_agent_and_limits()?;
+        self.validate_satellite()?;
+        self.validate_speech()?;
+        self.validate_lists()
+    }
+
+    fn validate_identity(&self) -> Result<(), String> {
         self.listen_addr()?;
         if let Some(n) = &self.name
             && (n.trim().is_empty() || n.chars().count() > 40 || n.chars().any(char::is_control))
         {
             return Err("config: `name` must be 1 to 40 characters with no line breaks".into());
         }
+        Ok(())
+    }
+
+    fn validate_llm(&self) -> Result<(), String> {
         if self.llm.url.is_some() != self.llm.model.is_some() {
             return Err("config: `llm.url` and `llm.model` must be set together".into());
         }
@@ -338,6 +351,10 @@ impl Config {
         {
             return Err("config: `llm.fallback_model` and `llm.summary_model` need `llm.url` and `llm.model`".into());
         }
+        Ok(())
+    }
+
+    fn validate_agent_and_limits(&self) -> Result<(), String> {
         for (name, v) in [
             ("max_rounds", self.agent.max_rounds.map(|n| n as u64)),
             (
@@ -356,6 +373,11 @@ impl Config {
         {
             return Err("config: `limits.daily_spend_usd` must be zero or more".into());
         }
+        Ok(())
+    }
+
+    /// The network satellite and the ESPHome satellites, both of which need the `speech` section.
+    fn validate_satellite(&self) -> Result<(), String> {
         if let Some(l) = &self.satellite.listen {
             let addr: SocketAddr = l.parse().map_err(|e| {
                 format!("config: `satellite.listen` is not an address like 0.0.0.0:10400: {e}")
@@ -393,6 +415,10 @@ impl Config {
                     .into(),
             );
         }
+        Ok(())
+    }
+
+    fn validate_speech(&self) -> Result<(), String> {
         let sp = &self.speech;
         let dialect = sp
             .provider
@@ -426,6 +452,11 @@ impl Config {
         if sp.tts_sample_rate.is_some_and(|r| r < 8_000) {
             return Err("config: `speech.tts_sample_rate` must be at least 8000".into());
         }
+        Ok(())
+    }
+
+    /// Realtime voice, stations, MCP servers, HTTP tools and endpoint names.
+    fn validate_lists(&self) -> Result<(), String> {
         self.voice.realtime.validate()?;
         for s in &self.stations {
             s.validate().map_err(|e| format!("config: {e}"))?;

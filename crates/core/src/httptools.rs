@@ -14,8 +14,8 @@ use crate::llm::ToolSpec;
 use crate::session::{Risk, Tier};
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::{Method, Request};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -275,6 +275,14 @@ fn check_args(def: &ToolDef, args: &Value) -> Result<Map<String, Value>, String>
     Ok(out)
 }
 
+/// The credential of a tool, read from the variable its definition names.
+fn tool_secret(
+    d: &ToolDef,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    crate::env::named_secret(d.auth_env.as_deref(), &format!("tool `{}`", d.name), env)
+}
+
 /// One tool and its resolved credential, read once. Kept together and shared by `Arc`, so a copy of the
 /// client copies pointers: a definition and its API key exist once in memory however many turns and
 /// realtime sessions hold a clone.
@@ -316,14 +324,7 @@ impl HttpTools {
             if reserved.contains(&d.name) || defs[..i].iter().any(|o| o.name == d.name) {
                 return Err(format!("tool `{}`: the name is already taken", d.name));
             }
-            let secret = if let Some(var) = &d.auth_env {
-                let v = env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
-                    format!("tool `{}`: environment variable {var} is not set", d.name)
-                })?;
-                Some(v)
-            } else {
-                None
-            };
+            let secret = tool_secret(d, &env)?;
             tools.push(Arc::new(Entry {
                 def: d.clone(),
                 secret,
@@ -350,14 +351,7 @@ impl HttpTools {
         if reserved.contains(&def.name) || self.owns(&def.name) {
             return Err(format!("tool `{}`: the name is already taken", def.name));
         }
-        let secret = if let Some(var) = &def.auth_env {
-            let v = env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
-                format!("tool `{}`: environment variable {var} is not set", def.name)
-            })?;
-            Some(v)
-        } else {
-            None
-        };
+        let secret = tool_secret(&def, &env)?;
         self.tools.push(Arc::new(Entry { def, secret }));
         Ok(())
     }
@@ -421,12 +415,8 @@ impl HttpTools {
             .and_then(|(_, r)| r.find(['/', '?']).map(|i| r[i..].to_owned()))
             .unwrap_or_else(|| "/".into());
         let method = Method::from_bytes(def.method.as_bytes()).map_err(|e| e.to_string())?;
-        let mut req = Request::builder()
-            .method(method)
-            .uri(path)
-            .header("host", endpoint.host_header())
-            .header("connection", "close")
-            .header("user-agent", "clawdot")
+        let mut req = endpoint
+            .request_builder(method, &path, "clawdot")
             .header("accept", "application/json, text/plain");
         for (k, v) in &def.headers {
             req = req.header(k, v);

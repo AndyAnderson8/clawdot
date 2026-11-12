@@ -165,6 +165,42 @@ fn read_only(kind: &str) -> Fail {
     ))
 }
 
+/// Change `data`, save it, and put it back as it was if the change or the save fails. The one place a portal
+/// change is written, so memory and disk cannot disagree after a failed save. `store` is `None` when nothing is
+/// kept (tests, no data directory).
+fn transact<T: Clone + Serialize, R>(
+    data: &mut T,
+    store: Option<&JsonStore>,
+    change: impl FnOnce(&mut T) -> Result<R, Fail>,
+) -> Result<R, Fail> {
+    let before = data.clone();
+    let done = change(data).and_then(|out| {
+        if let Some(s) = store {
+            s.save(&*data).map_err(save_failed)?;
+        }
+        Ok(out)
+    });
+    if done.is_err() {
+        *data = before;
+    }
+    done
+}
+
+/// Whether no skill other than the one at `except` already has this name (case does not matter).
+fn skill_unique(skills: &[Skill], name: &str, except: Option<usize>) -> Result<(), Fail> {
+    let clash = skills
+        .iter()
+        .enumerate()
+        .any(|(i, k)| Some(i) != except && k.name.eq_ignore_ascii_case(name));
+    if clash {
+        Err(invalid(
+            "A skill with that name already exists. Pick another name.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Validate and normalise a skill.
 fn check_skill(mut s: Skill) -> Result<Skill, Fail> {
     s.name = s.name.trim().to_owned();
@@ -461,14 +497,9 @@ impl Extensions {
         }
     }
 
-    fn save_skills(&self) -> Result<(), Fail> {
-        match &self.skills_store {
-            Some(s) => s.save(&self.skills).map_err(save_failed),
-            None => Ok(()),
-        }
-    }
-
     /// Carry out a portal change. `builtin` are the built-in tool names; `env` reads the environment.
+    /// Every change is made, saved, and undone in memory when the save fails, so what runs and what is on disk
+    /// never disagree.
     ///
     /// # Errors
     /// [`Fail::Invalid`] with what to fix, [`Fail::NotFound`], or [`Fail::Unavailable`] when saving fails.
@@ -482,186 +513,221 @@ impl Extensions {
     ) -> Result<(), Fail> {
         match op {
             ExtOp::ToolAdd(v) => self.tool_add(&v, http, mcp, builtin, env),
-            ExtOp::ToolDelete(name) => {
-                if self.config_tools.contains(&name) {
-                    return Err(read_only("tool"));
-                }
-                let Some(pos) = self.tools.tools.iter().position(|t| t.name == name) else {
-                    return Err(Fail::NotFound("There is no such tool.".into()));
-                };
-                let old = self.tools.tools.remove(pos);
-                let was_off = self.tools.disabled.remove(&name);
-                let old_tier = self.tools.tiers.remove(&name);
-                if let Err(e) = self.save_tools() {
-                    self.tools.tools.insert(pos, old);
-                    if was_off {
-                        self.tools.disabled.insert(name.clone());
-                    }
-                    if let Some(t) = old_tier {
-                        self.tools.tiers.insert(name, t);
-                    }
-                    return Err(e);
-                }
-                http.remove(&name);
-                Ok(())
-            }
-            ExtOp::ToolEnable(name, on) => {
-                let known = builtin.contains(&name) || http.owns(&name) || mcp.owns(&name);
-                if !known {
-                    return Err(Fail::NotFound("There is no such tool.".into()));
-                }
-                let set = if mcp.owns(&name) {
-                    &mut self.conns.disabled_tools
-                } else {
-                    &mut self.tools.disabled
-                };
-                if on {
-                    set.remove(&name)
-                } else {
-                    set.insert(name.clone())
-                };
-                if mcp.owns(&name) {
-                    self.save_conns()
-                } else {
-                    self.save_tools()
-                }
-            }
-            ExtOp::ToolTier(name, tier) => {
-                let known = builtin.contains(&name) || http.owns(&name) || mcp.owns(&name);
-                if !known {
-                    return Err(Fail::NotFound("There is no such tool.".into()));
-                }
-                if tier == Some(Tier::Destructive) {
-                    return Err(invalid(
-                        "Destructive cannot be chosen here. A destructive tool stays out of reach unless the configuration allows it.",
-                    ));
-                }
-                let before = self.tools.tiers.clone();
-                match tier {
-                    Some(t) => self.tools.tiers.insert(name, t),
-                    None => self.tools.tiers.remove(&name),
-                };
-                self.save_tools().inspect_err(|_| self.tools.tiers = before)
-            }
+            ExtOp::ToolDelete(name) => self.tool_delete(&name, http),
+            ExtOp::ToolEnable(name, on) => self.tool_enable(&name, on, http, mcp, builtin),
+            ExtOp::ToolTier(name, tier) => self.tool_tier(&name, tier, http, mcp, builtin),
             ExtOp::McpAdd(v) => self.mcp_add(&v, http, mcp, builtin, env).await,
-            ExtOp::McpDelete(name) => {
-                if self.config_servers.contains(&name) {
-                    return Err(read_only("connection"));
-                }
-                let Some(pos) = self.conns.servers.iter().position(|s| s.name == name) else {
-                    return Err(Fail::NotFound("There is no such connection.".into()));
-                };
-                let tool_names: Vec<String> = mcp
-                    .tools()
-                    .iter()
-                    .filter(|t| mcp.server_of(&t.exposed) == Some(name.as_str()))
-                    .map(|t| t.exposed.clone())
-                    .collect();
-                self.conns.servers.remove(pos);
-                self.conns.disabled_servers.remove(&name);
-                let had_tiers = tool_names.iter().any(|t| self.tools.tiers.contains_key(t));
-                for t in &tool_names {
-                    self.conns.disabled_tools.remove(t);
-                    self.tools.tiers.remove(t);
-                }
-                mcp.remove_server(&name);
-                if had_tiers {
-                    self.save_tools()?;
-                }
-                self.save_conns()
-            }
-            ExtOp::McpEnable(name, on) => {
-                if !mcp.has_server(&name) {
-                    return Err(Fail::NotFound("There is no such connection.".into()));
-                }
-                if on {
-                    self.conns.disabled_servers.remove(&name);
-                } else {
-                    self.conns.disabled_servers.insert(name);
-                }
-                self.save_conns()
-            }
-            ExtOp::SkillAdd(v) => {
-                let s = parse_skill(&v)?;
-                self.skill_unique(&s.name, None)?;
-                if self.skills.skills.len() >= MAX_SKILLS {
-                    return Err(invalid(format!(
-                        "You can keep up to {MAX_SKILLS} skills. Delete one first."
-                    )));
-                }
-                self.skills.skills.push(s);
-                self.save_skills()
-            }
-            ExtOp::SkillEdit(name, v) => {
-                let mut s = parse_skill(&v)?;
-                let Some(pos) = self.skills.skills.iter().position(|k| k.name == name) else {
-                    return Err(Fail::NotFound("There is no such skill.".into()));
-                };
-                self.skill_unique(&s.name, Some(pos))?;
-                // An edit from the page that does not mention these keeps them. Review status is never
-                // changed by an edit: only accepting clears it (REQ-SKL-002).
-                let old = &self.skills.skills[pos];
-                if v.get("files").is_none() {
-                    s.files = old.files.clone();
-                }
-                if v.get("description").is_none() {
-                    s.description = old.description.clone();
-                }
-                if v.get("source").is_none() {
-                    s.source = old.source.clone();
-                }
-                s.needs_review = old.needs_review;
-                if s.needs_review {
-                    s.enabled = false;
-                }
-                self.skills.skills[pos] = s;
-                self.save_skills()
-            }
-            ExtOp::SkillDelete(name) => {
-                let before = self.skills.skills.len();
-                self.skills.skills.retain(|k| k.name != name);
-                if self.skills.skills.len() == before {
-                    return Err(Fail::NotFound("There is no such skill.".into()));
-                }
-                self.save_skills()
-            }
-            ExtOp::SkillEnable(name, on) => {
-                let Some(s) = self.skills.skills.iter_mut().find(|k| k.name == name) else {
-                    return Err(Fail::NotFound("There is no such skill.".into()));
-                };
-                if on && s.needs_review {
-                    return Err(invalid(
-                        "This skill was imported and has not been reviewed. Open it, read it, and choose Accept before turning it on.",
-                    ));
-                }
-                s.enabled = on;
-                self.save_skills()
-            }
-            ExtOp::SkillAccept(name) => {
-                let Some(s) = self.skills.skills.iter_mut().find(|k| k.name == name) else {
-                    return Err(Fail::NotFound("There is no such skill.".into()));
-                };
-                s.needs_review = false;
-                self.save_skills()
-            }
+            ExtOp::McpDelete(name) => self.mcp_delete(&name, mcp),
+            ExtOp::McpEnable(name, on) => self.mcp_enable(&name, on, mcp),
+            ExtOp::SkillAdd(v) => self.skill_add(&v),
+            ExtOp::SkillEdit(name, v) => self.skill_edit(&name, &v),
+            ExtOp::SkillDelete(name) => self.skill_delete(&name),
+            ExtOp::SkillEnable(name, on) => self.skill_enable(&name, on),
+            ExtOp::SkillAccept(name) => self.skill_accept(&name),
             ExtOp::SkillImport(v) => self.skill_import(&v),
         }
     }
 
-    fn skill_unique(&self, name: &str, except: Option<usize>) -> Result<(), Fail> {
-        let clash = self
-            .skills
-            .skills
-            .iter()
-            .enumerate()
-            .any(|(i, k)| Some(i) != except && k.name.eq_ignore_ascii_case(name));
-        if clash {
-            Err(invalid(
-                "A skill with that name already exists. Pick another name.",
-            ))
-        } else {
-            Ok(())
+    fn tool_delete(&mut self, name: &str, http: &mut HttpTools) -> Result<(), Fail> {
+        if self.config_tools.contains(name) {
+            return Err(read_only("tool"));
         }
+        transact(&mut self.tools, self.tools_store.as_ref(), |t| {
+            let Some(pos) = t.tools.iter().position(|d| d.name == name) else {
+                return Err(Fail::NotFound("There is no such tool.".into()));
+            };
+            t.tools.remove(pos);
+            t.disabled.remove(name);
+            t.tiers.remove(name);
+            Ok(())
+        })?;
+        http.remove(name);
+        Ok(())
+    }
+
+    fn tool_enable(
+        &mut self,
+        name: &str,
+        on: bool,
+        http: &HttpTools,
+        mcp: &McpClient,
+        builtin: &[String],
+    ) -> Result<(), Fail> {
+        let known = |n: &str| builtin.iter().any(|b| b == n) || http.owns(n) || mcp.owns(n);
+        if !known(name) {
+            return Err(Fail::NotFound("There is no such tool.".into()));
+        }
+        let switch = |set: &mut BTreeSet<String>| {
+            if on {
+                set.remove(name);
+            } else {
+                set.insert(name.to_owned());
+            }
+            Ok(())
+        };
+        if mcp.owns(name) {
+            transact(&mut self.conns, self.conn_store.as_ref(), |c| {
+                switch(&mut c.disabled_tools)
+            })
+        } else {
+            transact(&mut self.tools, self.tools_store.as_ref(), |t| {
+                switch(&mut t.disabled)
+            })
+        }
+    }
+
+    fn tool_tier(
+        &mut self,
+        name: &str,
+        tier: Option<Tier>,
+        http: &HttpTools,
+        mcp: &McpClient,
+        builtin: &[String],
+    ) -> Result<(), Fail> {
+        if !(builtin.iter().any(|b| b == name) || http.owns(name) || mcp.owns(name)) {
+            return Err(Fail::NotFound("There is no such tool.".into()));
+        }
+        if tier == Some(Tier::Destructive) {
+            return Err(invalid(
+                "Destructive cannot be chosen here. A destructive tool stays out of reach unless the configuration allows it.",
+            ));
+        }
+        transact(&mut self.tools, self.tools_store.as_ref(), |t| {
+            match tier {
+                Some(x) => t.tiers.insert(name.to_owned(), x),
+                None => t.tiers.remove(name),
+            };
+            Ok(())
+        })
+    }
+
+    fn mcp_delete(&mut self, name: &str, mcp: &mut McpClient) -> Result<(), Fail> {
+        if self.config_servers.contains(name) {
+            return Err(read_only("connection"));
+        }
+        let Some(pos) = self.conns.servers.iter().position(|s| s.name == name) else {
+            return Err(Fail::NotFound("There is no such connection.".into()));
+        };
+        let tool_names: Vec<String> = mcp
+            .tools()
+            .iter()
+            .filter(|t| mcp.server_of(&t.exposed) == Some(name))
+            .map(|t| t.exposed.clone())
+            .collect();
+        // Two files change. Both are put back when either save fails; the live connection is dropped last.
+        let (tools_before, conns_before) = (self.tools.clone(), self.conns.clone());
+        self.conns.servers.remove(pos);
+        self.conns.disabled_servers.remove(name);
+        let had_tiers = tool_names.iter().any(|t| self.tools.tiers.contains_key(t));
+        for t in &tool_names {
+            self.conns.disabled_tools.remove(t);
+            self.tools.tiers.remove(t);
+        }
+        let saved =
+            if had_tiers { self.save_tools() } else { Ok(()) }.and_then(|()| self.save_conns());
+        if let Err(e) = saved {
+            self.tools = tools_before;
+            self.conns = conns_before;
+            if had_tiers {
+                // The tools file may already hold the change; write the old content back (best effort).
+                let _ = self.save_tools();
+            }
+            return Err(e);
+        }
+        mcp.remove_server(name);
+        Ok(())
+    }
+
+    fn mcp_enable(&mut self, name: &str, on: bool, mcp: &McpClient) -> Result<(), Fail> {
+        if !mcp.has_server(name) {
+            return Err(Fail::NotFound("There is no such connection.".into()));
+        }
+        transact(&mut self.conns, self.conn_store.as_ref(), |c| {
+            if on {
+                c.disabled_servers.remove(name);
+            } else {
+                c.disabled_servers.insert(name.to_owned());
+            }
+            Ok(())
+        })
+    }
+
+    fn skill_add(&mut self, v: &Value) -> Result<(), Fail> {
+        let s = parse_skill(v)?;
+        transact(&mut self.skills, self.skills_store.as_ref(), |k| {
+            skill_unique(&k.skills, &s.name, None)?;
+            if k.skills.len() >= MAX_SKILLS {
+                return Err(invalid(format!(
+                    "You can keep up to {MAX_SKILLS} skills. Delete one first."
+                )));
+            }
+            k.skills.push(s);
+            Ok(())
+        })
+    }
+
+    fn skill_edit(&mut self, name: &str, v: &Value) -> Result<(), Fail> {
+        let mut s = parse_skill(v)?;
+        transact(&mut self.skills, self.skills_store.as_ref(), |k| {
+            let Some(pos) = k.skills.iter().position(|x| x.name == name) else {
+                return Err(Fail::NotFound("There is no such skill.".into()));
+            };
+            skill_unique(&k.skills, &s.name, Some(pos))?;
+            // An edit from the page that does not mention these keeps them. Review status is never
+            // changed by an edit: only accepting clears it (REQ-SKL-002).
+            let old = &k.skills[pos];
+            if v.get("files").is_none() {
+                s.files = old.files.clone();
+            }
+            if v.get("description").is_none() {
+                s.description = old.description.clone();
+            }
+            if v.get("source").is_none() {
+                s.source = old.source.clone();
+            }
+            s.needs_review = old.needs_review;
+            if s.needs_review {
+                s.enabled = false;
+            }
+            k.skills[pos] = s;
+            Ok(())
+        })
+    }
+
+    fn skill_delete(&mut self, name: &str) -> Result<(), Fail> {
+        transact(&mut self.skills, self.skills_store.as_ref(), |k| {
+            let before = k.skills.len();
+            k.skills.retain(|x| x.name != name);
+            if k.skills.len() == before {
+                return Err(Fail::NotFound("There is no such skill.".into()));
+            }
+            Ok(())
+        })
+    }
+
+    fn skill_enable(&mut self, name: &str, on: bool) -> Result<(), Fail> {
+        transact(&mut self.skills, self.skills_store.as_ref(), |k| {
+            let Some(s) = k.skills.iter_mut().find(|x| x.name == name) else {
+                return Err(Fail::NotFound("There is no such skill.".into()));
+            };
+            if on && s.needs_review {
+                return Err(invalid(
+                    "This skill was imported and has not been reviewed. Open it, read it, and choose Accept before turning it on.",
+                ));
+            }
+            s.enabled = on;
+            Ok(())
+        })
+    }
+
+    fn skill_accept(&mut self, name: &str) -> Result<(), Fail> {
+        transact(&mut self.skills, self.skills_store.as_ref(), |k| {
+            let Some(s) = k.skills.iter_mut().find(|x| x.name == name) else {
+                return Err(Fail::NotFound("There is no such skill.".into()));
+            };
+            s.needs_review = false;
+            Ok(())
+        })
     }
 
     /// Import skills. Two shapes are read: a ClawDot export (`format: clawdot-skills`) and the raw files of
@@ -709,39 +775,41 @@ impl Extensions {
             ));
         }
         let mut added = 0usize;
-        for mut s in found {
-            let label = s.name.clone();
-            if self.skills.skills.len() >= MAX_SKILLS {
-                said.push(format!("{label}: you already have the most skills allowed"));
-                continue;
-            }
-            s.enabled = false;
-            s.needs_review = true;
-            let s = match check_skill(s) {
-                Ok(s) => s,
-                Err(Fail::Invalid(why)) => {
-                    said.push(format!("{label}: {why}"));
+        let saved = transact(&mut self.skills, self.skills_store.as_ref(), |k| {
+            for mut s in found {
+                let label = s.name.clone();
+                if k.skills.len() >= MAX_SKILLS {
+                    said.push(format!("{label}: you already have the most skills allowed"));
                     continue;
                 }
-                Err(_) => continue,
-            };
-            if self.skill_unique(&s.name, None).is_err() {
-                said.push(format!("{label}: a skill with that name already exists"));
-                continue;
+                s.enabled = false;
+                s.needs_review = true;
+                let s = match check_skill(s) {
+                    Ok(s) => s,
+                    Err(Fail::Invalid(why)) => {
+                        said.push(format!("{label}: {why}"));
+                        continue;
+                    }
+                    Err(_) => continue,
+                };
+                if skill_unique(&k.skills, &s.name, None).is_err() {
+                    said.push(format!("{label}: a skill with that name already exists"));
+                    continue;
+                }
+                k.skills.push(s);
+                added += 1;
             }
-            self.skills.skills.push(s);
-            added += 1;
+            if added == 0 {
+                let why = said.first().cloned().unwrap_or_default();
+                return Err(invalid(format!("Nothing was imported. {why}")));
+            }
+            Ok(())
+        });
+        // The report says what was left out; it describes a saved import only.
+        if saved.is_ok() || added == 0 {
+            self.import_report = Some((added, said));
         }
-        self.import_report = Some((added, said));
-        if added == 0 {
-            let why = self
-                .import_report
-                .as_ref()
-                .and_then(|(_, w)| w.first().cloned())
-                .unwrap_or_default();
-            return Err(invalid(format!("Nothing was imported. {why}")));
-        }
-        self.save_skills()
+        saved
     }
 
     fn tool_add(

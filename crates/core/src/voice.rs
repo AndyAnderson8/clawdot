@@ -318,6 +318,20 @@ pub trait Synthesizer {
     /// # Errors
     /// A message describing why it failed.
     fn synthesize(&self, text: &str) -> impl Future<Output = Result<Vec<i16>, String>> + Send;
+
+    /// Synthesise with `voice` for this one call, leaving the voice every other line uses alone (a portal
+    /// preview). A provider with no choice of voice speaks as usual.
+    ///
+    /// # Errors
+    /// A message describing why it failed.
+    fn synthesize_voice(
+        &self,
+        text: &str,
+        voice: &str,
+    ) -> impl Future<Output = Result<Vec<i16>, String>> + Send {
+        let _ = voice;
+        self.synthesize(text)
+    }
 }
 
 /// The result of one voice turn.

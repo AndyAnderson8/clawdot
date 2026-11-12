@@ -288,6 +288,42 @@ async fn the_voice_and_language_can_change_while_running() {
     assert!(text.contains("name=\"language\"\r\n\r\nde"), "{text}");
 }
 
+// REQ-CFG-080: a preview overlapping a normal line uses its own voice and leaves the shared one alone.
+#[tokio::test]
+async fn a_preview_voice_applies_to_one_call_and_never_to_an_overlapping_line() {
+    for dialect in [Dialect::OpenAi, Dialect::ElevenLabs, Dialect::Deepgram] {
+        let ok = (0..2).map(|_| ("200 OK", pcm_bytes(2400))).collect();
+        let (port, server) = serve_seq(ok).await;
+        let rate = 24_000;
+        let s = HttpSynthesizer::new(
+            &format!("http://127.0.0.1:{port}"),
+            "k",
+            "m",
+            "normal-voice",
+            rate,
+            T,
+        )
+        .unwrap()
+        .with_dialect(dialect)
+        .unwrap();
+        let (a, b) = tokio::join!(
+            s.synthesize_voice("Preview.", "preview-voice"),
+            s.synthesize("A reply.")
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(*s.voice_handle().lock().unwrap(), "normal-voice");
+        let seen = server.await.unwrap();
+        let sent: Vec<String> = seen
+            .iter()
+            .map(|(head, body)| format!("{head}\n{}", String::from_utf8_lossy(body)))
+            .collect();
+        let count = |v: &str| sent.iter().filter(|r| r.contains(v)).count();
+        assert_eq!(count("preview-voice"), 1, "{dialect:?}: {sent:?}");
+        assert_eq!(count("normal-voice"), 1, "{dialect:?}: {sent:?}");
+    }
+}
+
 // REQ-CFG-081
 #[test]
 fn lists_of_names_are_read_in_every_common_shape() {

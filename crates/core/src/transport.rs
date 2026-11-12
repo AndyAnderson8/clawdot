@@ -65,6 +65,23 @@ impl Endpoint {
         }
     }
 
+    /// A request to `path` on this server, with the headers every client here sends: `host`, `connection: close`
+    /// (one request per connection) and `user-agent`. The caller adds the rest and the body.
+    #[must_use]
+    pub fn request_builder(
+        &self,
+        method: Method,
+        path: &str,
+        user_agent: &str,
+    ) -> hyper::http::request::Builder {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", self.host_header())
+            .header("connection", "close")
+            .header("user-agent", user_agent)
+    }
+
     /// Parse a base URL such as `https://openrouter.ai/api/v1`.
     ///
     /// # Errors
@@ -179,14 +196,15 @@ impl HttpBackend {
     ) -> Result<Completion, LlmError> {
         let body = serde_json::to_vec(&req.to_json(true))
             .map_err(|e| LlmError::Malformed(e.to_string()))?;
-        let mut builder = Request::builder()
-            .method(Method::POST)
-            .uri(format!("{}/chat/completions", self.endpoint.base))
-            .header("host", self.endpoint.host_header())
+        let mut builder = self
+            .endpoint
+            .request_builder(
+                Method::POST,
+                &format!("{}/chat/completions", self.endpoint.base),
+                "clawdot",
+            )
             .header(CONTENT_TYPE, "application/json")
-            .header("accept", "text/event-stream, application/json")
-            .header("connection", "close")
-            .header("user-agent", "clawdot");
+            .header("accept", "text/event-stream, application/json");
         if !self.api_key.is_empty() {
             builder = builder.header(AUTHORIZATION, format!("Bearer {}", self.api_key));
         }
@@ -310,25 +328,61 @@ impl Connector {
         endpoint: &Endpoint,
         request: Request<Full<Bytes>>,
     ) -> Result<hyper::Response<hyper::body::Incoming>, String> {
+        let io = self.dial(endpoint).await.map_err(|e| e.to_string())?;
+        roundtrip(TokioIo::new(io), request).await
+    }
+
+    /// Open a connection to `endpoint`, with TLS when its URL asks for it, and hand back the stream. The one
+    /// place a connection is made: HTTP requests and the realtime WebSocket both start here.
+    ///
+    /// # Errors
+    /// [`DialError`] saying which step failed.
+    pub async fn dial(&self, endpoint: &Endpoint) -> Result<Box<dyn Io>, DialError> {
         let tcp = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
             .await
-            .map_err(|e| format!("connect: {e}"))?;
+            .map_err(DialError::Connect)?;
         #[cfg(feature = "tls")]
         if endpoint.tls {
             let name = rustls::pki_types::ServerName::try_from(endpoint.host.clone())
-                .map_err(|e| format!("bad host name: {e}"))?;
-            let stream = self
-                .tls
-                .connect(name, tcp)
-                .await
-                .map_err(|e| format!("TLS: {e}"))?;
-            return roundtrip(TokioIo::new(stream), request).await;
+                .map_err(|e| DialError::HostName(e.to_string()))?;
+            let stream = self.tls.connect(name, tcp).await.map_err(DialError::Tls)?;
+            return Ok(Box::new(stream));
         }
         #[cfg(not(feature = "tls"))]
         if endpoint.tls {
-            return Err("this build has no TLS support (feature `tls`); use an http:// URL".into());
+            return Err(DialError::NoTls);
         }
-        roundtrip(TokioIo::new(tcp), request).await
+        Ok(Box::new(tcp))
+    }
+}
+
+/// A byte stream a connection runs over: plain TCP or TLS on top of it.
+pub trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+
+/// Why [`Connector::dial`] failed.
+#[derive(Debug)]
+pub enum DialError {
+    /// The TCP connection could not be made.
+    Connect(std::io::Error),
+    /// The host name is not one TLS can check.
+    HostName(String),
+    /// The TLS handshake failed.
+    Tls(std::io::Error),
+    /// `https://` in a build without the `tls` feature.
+    NoTls,
+}
+
+impl std::fmt::Display for DialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect(e) => write!(f, "connect: {e}"),
+            Self::HostName(e) => write!(f, "bad host name: {e}"),
+            Self::Tls(e) => write!(f, "TLS: {e}"),
+            Self::NoTls => {
+                f.write_str("this build has no TLS support (feature `tls`); use an http:// URL")
+            }
+        }
     }
 }
 
@@ -385,6 +439,31 @@ mod tests {
             tools: vec![],
             max_tokens: 50,
         }
+    }
+
+    #[test]
+    fn requests_carry_the_headers_every_client_sends() {
+        let ep = Endpoint::parse("http://hub.local:8123/api").unwrap();
+        let r = ep
+            .request_builder(Method::PUT, "/api/x", "agent/1")
+            .body(())
+            .unwrap();
+        assert_eq!((r.method(), r.uri().path()), (&Method::PUT, "/api/x"));
+        let h = r.headers();
+        assert_eq!(h["host"], "hub.local:8123");
+        assert_eq!(h["connection"], "close");
+        assert_eq!(h["user-agent"], "agent/1");
+    }
+
+    #[tokio::test]
+    async fn dialing_a_closed_port_says_the_connection_failed() {
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let ep = Endpoint::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let e = Connector::new().unwrap().dial(&ep).await.err().unwrap();
+        assert!(matches!(e, DialError::Connect(_)), "{e}");
+        assert!(e.to_string().starts_with("connect: "), "{e}");
     }
 
     /// Serve exactly one canned response and report the request that arrived.

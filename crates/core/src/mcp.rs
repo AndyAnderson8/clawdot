@@ -20,8 +20,8 @@ use crate::llm::ToolSpec;
 use crate::session::{Risk, Tier, ToolHost};
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::{Method, Request};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -128,6 +128,18 @@ pub struct McpTool {
     pub schema: Value,
     /// How risky the tool is: the administrator's tier over a baseline of costly. Never read from the server.
     pub risk: Risk,
+}
+
+/// The bearer token of a server, read from the variable its definition names.
+fn server_secret(
+    d: &ServerDef,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    crate::env::named_secret(
+        d.auth_env.as_deref(),
+        &format!("mcp server `{}`", d.name),
+        env,
+    )
 }
 
 struct Server {
@@ -341,15 +353,7 @@ impl McpClient {
             if defs[..i].iter().any(|o| o.name == d.name) {
                 return Err(format!("mcp server `{}` is listed twice", d.name));
             }
-            let secret = match &d.auth_env {
-                Some(var) => Some(env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
-                    format!(
-                        "mcp server `{}`: environment variable {var} is not set",
-                        d.name
-                    )
-                })?),
-                None => None,
-            };
+            let secret = server_secret(d, &env)?;
             servers.push(Arc::new(Server {
                 endpoint: Endpoint::parse(&d.url)?,
                 def: d.clone(),
@@ -406,17 +410,9 @@ impl McpClient {
         match result {
             Ok(mut tools) => {
                 self.errors[i] = None;
-                tools.retain(|t| {
-                    let clash = reserved.contains(&t.exposed)
-                        || self.tools.iter().any(|o| o.exposed == t.exposed);
-                    if clash {
-                        warnings.push(format!(
-                            "mcp tool `{}` clashes with an existing tool and was skipped",
-                            t.exposed
-                        ));
-                    }
-                    !clash
-                });
+                let (kept, said) = self.admit(tools, reserved);
+                tools = kept;
+                warnings.extend(said);
                 for t in &mut tools {
                     t.server = i;
                 }
@@ -429,6 +425,29 @@ impl McpClient {
             }
         }
         warnings
+    }
+
+    /// The tools that may be offered, in order, and a warning for each one left out. A tool is left out when its
+    /// exposed name is reserved, is already on offer, or was already taken earlier in `tools`: names are made
+    /// lowercase and stripped of odd characters (`Foo` and `foo`, `a.b` and `a_b`), so a server can list two tools
+    /// that end up with one name, and only the first could ever be called. The first one listed stays.
+    fn admit(&self, tools: Vec<McpTool>, reserved: &[String]) -> (Vec<McpTool>, Vec<String>) {
+        let mut kept: Vec<McpTool> = Vec::with_capacity(tools.len());
+        let mut warnings = Vec::new();
+        for t in tools {
+            let clash = reserved.contains(&t.exposed)
+                || self.tools.iter().any(|o| o.exposed == t.exposed)
+                || kept.iter().any(|o| o.exposed == t.exposed);
+            if clash {
+                warnings.push(format!(
+                    "mcp tool `{}` clashes with an existing tool and was skipped",
+                    t.exposed
+                ));
+            } else {
+                kept.push(t);
+            }
+        }
+        (kept, warnings)
     }
 
     /// Whether this server was declared and has not yet reported (see [`McpClient::declare`]).
@@ -452,18 +471,16 @@ impl McpClient {
         if let Some(id) = id {
             msg["id"] = json!(id);
         }
-        let mut req = Request::builder()
-            .method(Method::POST)
-            .uri(if s.endpoint.base.is_empty() {
-                "/".to_owned()
-            } else {
-                s.endpoint.base.clone()
-            })
-            .header("host", s.endpoint.host_header())
+        let path = if s.endpoint.base.is_empty() {
+            "/"
+        } else {
+            s.endpoint.base.as_str()
+        };
+        let mut req = s
+            .endpoint
+            .request_builder(Method::POST, path, "clawdot")
             .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .header("connection", "close")
-            .header("user-agent", "clawdot");
+            .header("accept", "application/json, text/event-stream");
         if method != "initialize" {
             req = req.header("mcp-protocol-version", PROTOCOL_REVISION);
         }
@@ -660,15 +677,7 @@ impl McpClient {
         if self.has_server(&def.name) {
             return Err(format!("mcp server `{}` is listed twice", def.name));
         }
-        let secret = match &def.auth_env {
-            Some(var) => Some(env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
-                format!(
-                    "mcp server `{}`: environment variable {var} is not set",
-                    def.name
-                )
-            })?),
-            None => None,
-        };
+        let secret = server_secret(&def, &env)?;
         let server = Arc::new(Server {
             endpoint: Endpoint::parse(&def.url)?,
             def,
@@ -698,9 +707,11 @@ impl McpClient {
         self.errors.push(None);
         self.connecting.push(false);
         let i = self.servers.len() - 1;
-        tools.retain(|t| {
-            !reserved.contains(&t.exposed) && !self.tools.iter().any(|o| o.exposed == t.exposed)
-        });
+        let (kept, said) = self.admit(tools, reserved);
+        tools = kept;
+        for w in said {
+            crate::diag::warn(&w);
+        }
         for t in &mut tools {
             t.server = i;
         }
@@ -1009,6 +1020,56 @@ mod tests {
     }
 
     // REQ-CFG-033
+    fn listed(remote: &str) -> McpTool {
+        McpTool {
+            server: 0,
+            remote: remote.to_owned(),
+            exposed: format!("home__{}", sanitize(remote)),
+            description: String::new(),
+            schema: json!({"type": "object"}),
+            risk: Risk::set(Tier::Costly, Tier::Costly),
+        }
+    }
+
+    // Names that sanitise alike (`Foo`, `foo`, `f.o`/`f_o`) must not both be offered: only the first could be called.
+    #[test]
+    fn tools_whose_names_sanitise_alike_are_offered_once_and_the_rest_warned_about() {
+        let tools = || {
+            vec![
+                listed("Foo"),
+                listed("bar"),
+                listed("foo"),
+                listed("a.b"),
+                listed("a_b"),
+            ]
+        };
+        let (mut c, _) = McpClient::declare(vec![def(1)], |_| None).unwrap();
+        let warnings = c.settle("home", Ok(tools()), &[]);
+        let offered: Vec<(&str, &str)> = c
+            .tools()
+            .iter()
+            .map(|t| (t.exposed.as_str(), t.remote.as_str()))
+            .collect();
+        assert_eq!(
+            offered,
+            vec![
+                ("home__foo", "Foo"),
+                ("home__bar", "bar"),
+                ("home__a_b", "a.b")
+            ]
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings.iter().all(|w| w.contains("skipped")),
+            "{warnings:?}"
+        );
+
+        // The portal's add path keeps the same ones.
+        let (mut again, _) = McpClient::declare(Vec::new(), |_| None).unwrap();
+        let p = again.prepare_server(def(1), |_| None).unwrap();
+        assert_eq!(again.install_server(&p, tools(), &[]), Ok(3));
+    }
+
     #[tokio::test]
     async fn servers_can_be_added_and_removed_while_running() {
         let (port, _seen, _srv) = fake_server(OK).await;

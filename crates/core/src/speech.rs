@@ -15,8 +15,8 @@ use crate::secrets::Secrets;
 use crate::transport::{Connector, Endpoint};
 use crate::voice::{Synthesizer, Transcriber};
 use http_body_util::{BodyExt, Full};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::{Method, Request};
 use serde_json::{Value, json};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -454,6 +454,27 @@ impl Client {
         self.send(Method::POST, path, content_type, body).await
     }
 
+    /// POST the speech as a multipart form: the text `fields`, then the audio as a WAV file named `file`.
+    async fn post_wav_form(
+        &self,
+        path: &str,
+        fields: &[(&str, &str)],
+        pcm: &[i16],
+    ) -> Result<Vec<u8>, ProviderError> {
+        // The boundary only needs to be absent from the data; WAV bytes could contain anything, so mix in the length.
+        let boundary = format!(
+            "clawdot-boundary-{:016x}",
+            pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
+        );
+        let body = multipart(&boundary, fields, &wav(pcm));
+        self.post(
+            path,
+            &format!("multipart/form-data; boundary={boundary}"),
+            body,
+        )
+        .await
+    }
+
     async fn get(&self, path: &str) -> Result<Vec<u8>, ProviderError> {
         self.send(Method::GET, path, "application/json", Vec::new())
             .await
@@ -473,13 +494,10 @@ impl Client {
         } else {
             base.strip_suffix("/v1").unwrap_or(base)
         };
-        let mut req = Request::builder()
-            .method(method)
-            .uri(format!("{base}{path}"))
-            .header("host", self.endpoint.host_header())
-            .header("content-type", content_type)
-            .header("connection", "close")
-            .header("user-agent", "clawdot");
+        let mut req = self
+            .endpoint
+            .request_builder(method, &format!("{base}{path}"), "clawdot")
+            .header("content-type", content_type);
         let key = self.current_key();
         if key.is_empty() && self.dialect.needs_key() {
             return Err(ProviderError::NoKey(format!(
@@ -593,24 +611,15 @@ impl HttpTranscriber {
         pcm: &[i16],
         language: Option<&str>,
     ) -> Result<String, String> {
-        let boundary = format!(
-            "clawdot-boundary-{:016x}",
-            pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
-        );
         let mut fields = vec![("model_id", self.model.as_str())];
         // ElevenLabs takes ISO 639 codes, so `pt-BR` is sent as `pt`.
         let code = language.map(|l| l.split('-').next().unwrap_or(l).to_owned());
         if let Some(c) = &code {
             fields.push(("language_code", c.as_str()));
         }
-        let body = multipart(&boundary, &fields, &wav(pcm));
         let raw = self
             .client
-            .post(
-                "/v1/speech-to-text",
-                &format!("multipart/form-data; boundary={boundary}"),
-                body,
-            )
+            .post_wav_form("/v1/speech-to-text", &fields, pcm)
             .await?;
         text_of(&raw, |v| v["text"].as_str())
     }
@@ -659,30 +668,15 @@ impl Transcriber for HttpTranscriber {
             }
             Dialect::Deepgram => return self.transcribe_deepgram(pcm, language.as_deref()).await,
         }
-        // The boundary only needs to be absent from the data; WAV bytes could contain anything, so mix in the length.
-        let boundary = format!(
-            "clawdot-boundary-{:016x}",
-            pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
-        );
         let mut fields = vec![("model", self.model.as_str()), ("response_format", "json")];
         if let Some(l) = &language {
             fields.push(("language", l.as_str()));
         }
-        let body = multipart(&boundary, &fields, &wav(pcm));
         let raw = self
             .client
-            .post(
-                "/audio/transcriptions",
-                &format!("multipart/form-data; boundary={boundary}"),
-                body,
-            )
+            .post_wav_form("/audio/transcriptions", &fields, pcm)
             .await?;
-        let v: Value = serde_json::from_slice(&raw)
-            .map_err(|_| "the provider returned something that is not JSON".to_owned())?;
-        v["text"]
-            .as_str()
-            .map(|t| t.trim().to_owned())
-            .ok_or_else(|| "the response has no `text`".into())
+        text_of(&raw, |v| v["text"].as_str())
     }
 }
 
@@ -763,19 +757,25 @@ impl HttpSynthesizer {
 
 impl Synthesizer for HttpSynthesizer {
     async fn synthesize(&self, text: &str) -> Result<Vec<i16>, String> {
-        let text: String = text.chars().take(MAX_TEXT).collect();
         let voice = self
             .voice
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        self.synthesize_voice(text, &voice).await
+    }
+
+    /// Speak with `voice` for this one call. The voice every other line uses (the shared handle) is not read or
+    /// changed, so a preview can overlap a normal reply. All three dialects take the voice per request.
+    async fn synthesize_voice(&self, text: &str, voice: &str) -> Result<Vec<i16>, String> {
+        let text: String = text.chars().take(MAX_TEXT).collect();
         let (path, body) = match self.client.dialect {
             Dialect::OpenAi => (
                 "/audio/speech".to_owned(),
                 json!({ "model": self.model, "voice": voice, "input": text, "response_format": "pcm" }),
             ),
             Dialect::ElevenLabs => {
-                plain_id("The voice", &voice)?;
+                plain_id("The voice", voice)?;
                 (
                     format!(
                         "/v1/text-to-speech/{voice}?output_format=pcm_{}",
@@ -786,7 +786,7 @@ impl Synthesizer for HttpSynthesizer {
             }
             Dialect::Deepgram => {
                 // The voice is the model: `aura-2-thalia-en`.
-                plain_id("The voice", &voice)?;
+                plain_id("The voice", voice)?;
                 (
                     format!(
                         "/v1/speak?model={voice}&encoding=linear16&container=none&sample_rate={}",

@@ -9,9 +9,9 @@
 
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full, Limited};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::header::{ACCEPT, HOST, LOCATION, USER_AGENT};
-use hyper::{Method, Request};
+use hyper::header::{ACCEPT, LOCATION};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -281,13 +281,45 @@ impl UpdateConfig {
     }
 }
 
+/// Where an install is. The status JSON carries [`Phase::as_str`], so these names are part of the API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Phase {
+    #[default]
+    Idle,
+    Downloading,
+    Verifying,
+    Installing,
+    Installed,
+    Restarting,
+    Failed,
+}
+
+impl Phase {
+    /// The wire name; empty when idle.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "",
+            Self::Downloading => "downloading",
+            Self::Verifying => "verifying",
+            Self::Installing => "installing",
+            Self::Installed => "installed",
+            Self::Restarting => "restarting",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Whether a new install may start: nothing is running (a failed one may be retried).
+    const fn can_start(self) -> bool {
+        matches!(self, Self::Idle | Self::Failed)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct State {
     last_checked: Option<u64>,
     latest: Option<Release>,
     error: Option<String>,
-    /// `downloading`, `verifying`, `installing`, `installed`, `restarting`, `failed`; empty when idle.
-    phase: String,
+    phase: Phase,
     apply_error: Option<String>,
     installed: Option<String>,
 }
@@ -410,17 +442,13 @@ impl Updater {
             if !ep.tls && !is_loopback(&ep.host) {
                 return Err("updates are only fetched over https".into());
             }
-            let host = ep.host_header();
             let path = if ep.base.is_empty() {
                 "/"
             } else {
                 ep.base.as_str()
             };
-            let req = Request::builder()
-                .method(Method::GET)
-                .uri(path)
-                .header(HOST, host)
-                .header(USER_AGENT, format!("clawdot/{CURRENT}"))
+            let req = ep
+                .request_builder(Method::GET, path, &format!("clawdot/{CURRENT}"))
                 .header(ACCEPT, accept)
                 .body(Full::new(Bytes::new()))
                 .map_err(|e| format!("bad request: {e}"))?;
@@ -548,7 +576,7 @@ impl Updater {
             "can_apply": can_apply,
             "cannot_apply_because": why_not,
             "supervised": self.cfg.supervised,
-            "phase": s.phase,
+            "phase": s.phase.as_str(),
             "apply_error": s.apply_error,
             "installed": s.installed,
         })
@@ -580,30 +608,30 @@ impl Updater {
     /// # Errors
     /// A plain reason why nothing was started.
     pub fn start_apply(self: &Arc<Self>, version: &str) -> Result<(), String> {
+        // Check and claim under one lock, so two requests cannot both start an install.
         let release = {
-            let s = self.lock();
-            if !s.phase.is_empty() && s.phase != "failed" {
+            let mut s = self.lock();
+            if !s.phase.can_start() {
                 return Err("An update is already being installed.".into());
             }
-            s.latest
+            let release = s
+                .latest
                 .clone()
-                .ok_or("No update has been found yet. Check for updates first.")?
-        };
-        if release.version != version.trim_start_matches(['v', 'V'])
-            || !is_newer(CURRENT, &release.version)
-        {
-            return Err(
-                "That version is not a newer one than this. Check for updates again.".into(),
-            );
-        }
-        if let (false, Some(why)) = self.can_apply(&release) {
-            return Err(why);
-        }
-        {
-            let mut s = self.lock();
-            s.phase = "downloading".into();
+                .ok_or("No update has been found yet. Check for updates first.")?;
+            if release.version != version.trim_start_matches(['v', 'V'])
+                || !is_newer(CURRENT, &release.version)
+            {
+                return Err(
+                    "That version is not a newer one than this. Check for updates again.".into(),
+                );
+            }
+            if let (false, Some(why)) = self.can_apply(&release) {
+                return Err(why);
+            }
+            s.phase = Phase::Downloading;
             s.apply_error = None;
-        }
+            release
+        };
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let r = tokio::time::timeout(APPLY_DEADLINE, this.apply(&release)).await;
@@ -612,11 +640,11 @@ impl Updater {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     crate::diag::error(&format!("update to {} failed: {e}", release.version));
-                    s.phase = "failed".into();
+                    s.phase = Phase::Failed;
                     s.apply_error = Some(format!("The update was not installed: {e}"));
                 }
                 Err(_) => {
-                    s.phase = "failed".into();
+                    s.phase = Phase::Failed;
                     s.apply_error = Some(
                         "The update took too long and was stopped. Nothing was changed.".into(),
                     );
@@ -626,8 +654,8 @@ impl Updater {
         Ok(())
     }
 
-    fn set_phase(&self, p: &str) {
-        self.lock().phase = p.to_owned();
+    fn set_phase(&self, p: Phase) {
+        self.lock().phase = p;
     }
 
     async fn apply(&self, r: &Release) -> Result<(), String> {
@@ -646,14 +674,14 @@ impl Updater {
         let sig_text = self
             .fetch(&sig.url, MAX_SMALL, "application/octet-stream", small)
             .await?;
-        self.set_phase("verifying");
+        self.set_phase(Phase::Verifying);
         if !verify_signature(&key, &sums_bytes, &String::from_utf8_lossy(&sig_text)) {
             return Err("the list of file hashes is not signed by the project's key".into());
         }
         let expected = parse_sums(&String::from_utf8_lossy(&sums_bytes))
             .remove(&bin.name)
             .ok_or_else(|| format!("the signed list has no hash for {}", bin.name))?;
-        self.set_phase("downloading");
+        self.set_phase(Phase::Downloading);
         let data = self
             .fetch(
                 &bin.url,
@@ -662,13 +690,13 @@ impl Updater {
                 Duration::from_secs(10 * 60),
             )
             .await?;
-        self.set_phase("verifying");
+        self.set_phase(Phase::Verifying);
         if sha256_hex(&data) != expected {
             return Err("the downloaded file does not match its signed hash".into());
         }
-        self.set_phase("installing");
+        self.set_phase(Phase::Installing);
         self.install(&data, &r.version)?;
-        self.set_phase("installed");
+        self.set_phase(Phase::Installed);
         {
             let mut s = self.lock();
             s.installed = Some(r.version.clone());
@@ -678,7 +706,7 @@ impl Updater {
             r.version
         ));
         if self.exit_after && self.cfg.supervised {
-            self.set_phase("restarting");
+            self.set_phase(Phase::Restarting);
             tokio::time::sleep(Duration::from_millis(1500)).await;
             std::process::exit(0);
         }

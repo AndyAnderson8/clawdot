@@ -28,6 +28,7 @@ use crate::session::{
     Conversation, HeldOutcome, ToolHost, TurnConfig, TurnEnd, TurnInputs, answer_held_action,
     is_no, is_yes, run_proposed_calls, tools_for,
 };
+use crate::transport::DialError;
 use crate::usage::{LimitReached, UsageTracker};
 use serde_json::{Value, json};
 use std::fmt;
@@ -391,8 +392,7 @@ impl<H> fmt::Debug for Env<'_, H> {
 }
 
 /// Anything a WebSocket can run over.
-pub trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
+pub use crate::transport::Io as Duplex;
 
 /// Open the connection: TCP, TLS for `wss://`, then the WebSocket upgrade.
 ///
@@ -426,21 +426,18 @@ pub async fn connect<D: Dialect>(
         .collect();
     let host = ep.host_header();
     let opened = async {
-        let tcp = tokio::net::TcpStream::connect((ep.host.as_str(), ep.port))
+        let io = crate::transport::Connector::new()
+            .map_err(RealtimeError::Config)?
+            .dial(&ep)
             .await
-            .map_err(|e| RealtimeError::Unreachable(e.kind().to_string()))?;
-        let io: Box<dyn Duplex> = if ep.tls {
-            let name = rustls::pki_types::ServerName::try_from(ep.host.clone())
-                .map_err(|_| RealtimeError::Config("the host name is not valid".into()))?;
-            let tls = crate::transport::tls_connector().map_err(RealtimeError::Config)?;
-            Box::new(
-                tls.connect(name, tcp)
-                    .await
-                    .map_err(|e| RealtimeError::Unreachable(format!("TLS: {}", e.kind())))?,
-            )
-        } else {
-            Box::new(tcp)
-        };
+            .map_err(|e| match e {
+                DialError::Connect(e) => RealtimeError::Unreachable(e.kind().to_string()),
+                DialError::Tls(e) => RealtimeError::Unreachable(format!("TLS: {}", e.kind())),
+                DialError::HostName(_) => {
+                    RealtimeError::Config("the host name is not valid".into())
+                }
+                DialError::NoTls => RealtimeError::Config(e.to_string()),
+            })?;
         ws::connect(io, &host, &path, &hdrs)
             .await
             .map_err(RealtimeError::from)

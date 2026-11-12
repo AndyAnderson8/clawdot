@@ -52,19 +52,55 @@ pub struct Peer {
 #[derive(Debug, Default)]
 pub struct Peers {
     map: BTreeMap<String, Peer>,
+    conflicts: u64,
 }
 
 impl Peers {
-    /// Add or refresh a peer. Returns false when the table is full and `p` is new.
+    /// How many times a packet from another address claimed (or said goodbye for) an id that is already known.
+    /// Anyone on the network can send any id; the address that announced first keeps it until its record runs out.
+    #[cfg(test)]
+    fn conflicts(&self) -> u64 {
+        self.conflicts
+    }
+
+    fn conflict(&mut self, id: &str, known: IpAddr, from: IpAddr) {
+        self.conflicts += 1;
+        if self.conflicts == 1 {
+            // Once, so a flood of forged packets cannot flood the log.
+            crate::diag::warn(&format!(
+                "hive: {from} claimed the speaker id {} that {known} announced first; keeping {known}. Further claims are only counted.",
+                id.get(..12).unwrap_or(id)
+            ));
+        }
+    }
+
+    /// Add or refresh a peer. Returns false when the table is full and `p` is new, or when a live record for the
+    /// same id came from a different address (the first one is kept until it expires).
     fn upsert(&mut self, p: Peer) -> bool {
-        if !self.map.contains_key(&p.id) && self.map.len() >= MAX_PEERS {
-            return false;
+        match self.map.get(&p.id) {
+            Some(known) if known.address != p.address && known.expires > p.last_seen => {
+                let known = known.address;
+                self.conflict(&p.id.clone(), known, p.address);
+                return false;
+            }
+            None if self.map.len() >= MAX_PEERS => return false,
+            _ => {}
         }
         self.map.insert(p.id.clone(), p);
         true
     }
 
-    fn remove_instance(&mut self, instance: &str) {
+    /// A goodbye for `instance` from `from`. Only the address that announced it can withdraw it.
+    fn remove_instance(&mut self, instance: &str, from: IpAddr) {
+        let foreign = self
+            .map
+            .values()
+            .find(|p| p.instance == instance && p.address != from)
+            .map(|p| (p.id.clone(), p.address));
+        if let Some((id, known)) = foreign {
+            self.conflict(&id, known, from);
+            return;
+        }
         self.map.retain(|_, p| p.instance != instance);
     }
 
@@ -93,7 +129,7 @@ fn apply_response(
             continue;
         };
         if rec.ttl == 0 {
-            peers.remove_instance(inst);
+            peers.remove_instance(inst, src);
             continue;
         }
         let find = |want: fn(&Rdata) -> bool| {
@@ -369,6 +405,32 @@ mod tests {
         let bye = dns::parse(&ad.response(0).unwrap()).unwrap();
         apply_response(&mut peers, &bye, src, None, t0);
         assert!(peers.live(t0).is_empty());
+    }
+
+    #[test]
+    fn a_known_id_claimed_from_another_address_keeps_the_first_until_it_expires() {
+        let (ad, _) = advert(5, 3335, Some("Kitchen"));
+        let t0 = Instant::now();
+        let mut peers = Peers::default();
+        let (first, other) = (IpAddr::from([192, 0, 2, 20]), IpAddr::from([192, 0, 2, 66]));
+        let msg = dns::parse(&ad.response(60).unwrap()).unwrap();
+        apply_response(&mut peers, &msg, first, None, t0);
+        // Someone else claims the same id: the address stays, the attempt is counted.
+        apply_response(&mut peers, &msg, other, None, t0 + Duration::from_secs(10));
+        assert_eq!(peers.live(t0 + Duration::from_secs(10))[0].address, first);
+        assert_eq!(peers.conflicts(), 1);
+        // Nor can a goodbye from there remove it.
+        let bye = dns::parse(&ad.response(0).unwrap()).unwrap();
+        apply_response(&mut peers, &bye, other, None, t0 + Duration::from_secs(11));
+        assert_eq!(peers.live(t0 + Duration::from_secs(11)).len(), 1);
+        assert_eq!(peers.conflicts(), 2);
+        // The real one refreshing from the same address is not a conflict.
+        apply_response(&mut peers, &msg, first, None, t0 + Duration::from_secs(20));
+        assert_eq!(peers.conflicts(), 2);
+        // Once the record has run out the id is free to move.
+        apply_response(&mut peers, &msg, other, None, t0 + Duration::from_secs(200));
+        assert_eq!(peers.live(t0 + Duration::from_secs(200))[0].address, other);
+        assert_eq!(peers.conflicts(), 2);
     }
 
     #[test]
