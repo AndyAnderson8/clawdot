@@ -6,6 +6,7 @@ use crate::app::Core;
 use crate::assistant::Assistant;
 use crate::audit::{AuditConfig, AuditLog};
 use crate::cli::Args;
+use crate::connects::Connects;
 use crate::extensions::Extensions;
 use crate::httptools::HttpTools;
 use crate::mcp::McpClient;
@@ -37,6 +38,7 @@ fn fail(code: u8, message: String) -> Failure {
 
 /// Open the stores and build the [`Brain`] and the per-speaker conversation [`Hub`] (REQ-AST-026) from the
 /// effective settings in `args` and the live values. Moves the tools, MCP servers and stations out of `args`.
+/// Each step fails with its own message and exit code.
 pub async fn build_brain(
     args: &mut Args,
     live: &serde_json::Map<String, serde_json::Value>,
@@ -63,6 +65,43 @@ pub async fn build_brain(
     )
     .map_err(|e| fail(2, e))?;
     let persona = args.persona.clone();
+    let (audit, notes) = open_records(args, core)?;
+    let assistant = open_assistant(args, zone, clock, core)?;
+    let tools = declare_tools(args, core, &assistant)?;
+    let hub = make_hub(&persona, audit, notes);
+
+    let ext_view = Arc::new(tools.ext.snapshot());
+    let brain = Brain {
+        assistant,
+        llm,
+        usage,
+        usage_store,
+        http_tools: Arc::new(tools.http_tools),
+        mcp: Arc::new(tools.mcp),
+        clock: clock.clone(),
+        ext: tools.ext,
+        ext_view,
+        builtin: tools.builtin,
+        persona,
+        agent: args.agent.clone(),
+        voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
+        rt: Realtime::with_env_and_secrets(
+            RtSettings::from_live(live),
+            core.env().lookup(),
+            core.secrets().clone(),
+        ),
+        connects: tools.connects,
+    };
+    if brain.rt.settings().enabled && !RtSettings::built() {
+        brain.rt.set_error(Some(
+            "Realtime voice is turned on, but this build of ClawDot does not include it.".into(),
+        ));
+    }
+    Ok((brain, hub))
+}
+
+/// Open the audit log and the notes, hand them to the core, and return the handles every conversation shares.
+fn open_records(args: &Args, core: &Core) -> Result<(Arc<AuditLog>, Arc<NoteStore>), Failure> {
     // Every action is recorded in the data directory and held to the daily caps (REQ-SEC-014..016).
     let audit = AuditLog::open(
         &args.data_dir,
@@ -98,20 +137,42 @@ pub async fn build_brain(
     if args.actions.dry_run {
         eprintln!("clawdot: dry-run mode: actions are described and recorded, not run");
     }
+    Ok((audit_for_conv, notes_for_conv))
+}
 
+/// Load the timers and build the assistant with its built-in tools. Takes the stations out of `args`.
+fn open_assistant(
+    args: &mut Args,
+    zone: Box<dyn Zone + Send + Sync>,
+    clock: &Arc<dyn Clock + Send + Sync>,
+    core: &Arc<Core>,
+) -> Result<Assistant, Failure> {
     let sched_store = JsonStore::new(args.data_dir.join("timers.json"), crate::sched::SCHEMA);
     let sched = Scheduler::load(&sched_store, 64)
         .map_err(|e| fail(1, format!("cannot load timers: {e}")))?;
-    let assistant = Assistant::new(
+    Ok(Assistant::new(
         clock.clone(),
         zone,
         sched,
         Some(sched_store),
         Some(Arc::clone(core)),
     )
-    .with_stations(std::mem::take(&mut args.stations));
+    .with_stations(std::mem::take(&mut args.stations)))
+}
 
-    let builtin: Vec<String> = ToolHost::tool_specs(&assistant)
+/// The tools beyond the built-in ones, and the MCP connections to make.
+struct Tools {
+    builtin: Vec<String>,
+    ext: Extensions,
+    http_tools: HttpTools,
+    mcp: McpClient,
+    connects: Connects,
+}
+
+/// Load the portal's saved tools and skills, define the HTTP tools, and declare the MCP sources. Takes the
+/// tool and server definitions out of `args`.
+fn declare_tools(args: &mut Args, core: &Core, assistant: &Assistant) -> Result<Tools, Failure> {
+    let builtin: Vec<String> = ToolHost::tool_specs(assistant)
         .into_iter()
         .map(|t| t.name)
         .collect();
@@ -140,50 +201,29 @@ pub async fn build_brain(
     // stop start-up.
     let (mcp, pending) =
         McpClient::declare(server_defs, |v| core.env().get(v)).map_err(|e| fail(1, e))?;
-    let mut connects = crate::connects::Connects::new();
+    let mut connects = Connects::new();
     for p in pending {
         connects.start_saved(p);
     }
-
-    // One conversation for each speaker, made on first use (REQ-AST-026): its own history, its own held
-    // confirmation, the same audit log and notes.
-    let hub = Hub::new({
-        let persona = persona.clone();
-        move || {
-            let mut c = Conversation::standard(persona.clone());
-            c.set_audit(Arc::clone(&audit_for_conv));
-            c.set_notes(Arc::clone(&notes_for_conv));
-            c
-        }
-    });
-    let ext_view = Arc::new(ext.snapshot());
-    let brain = Brain {
-        assistant,
-        llm,
-        usage,
-        usage_store,
-        http_tools: Arc::new(http_tools),
-        mcp: Arc::new(mcp),
-        clock: clock.clone(),
-        ext,
-        ext_view,
+    Ok(Tools {
         builtin,
-        persona,
-        agent: args.agent.clone(),
-        voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
-        rt: Realtime::with_env_and_secrets(
-            RtSettings::from_live(live),
-            core.env().lookup(),
-            core.secrets().clone(),
-        ),
+        ext,
+        http_tools,
+        mcp,
         connects,
-    };
-    if brain.rt.settings().enabled && !RtSettings::built() {
-        brain.rt.set_error(Some(
-            "Realtime voice is turned on, but this build of ClawDot does not include it.".into(),
-        ));
-    }
-    Ok((brain, hub))
+    })
+}
+
+/// One conversation for each speaker, made on first use (REQ-AST-026): its own history, its own held
+/// confirmation, the same audit log and notes.
+fn make_hub(persona: &str, audit: Arc<AuditLog>, notes: Arc<NoteStore>) -> Hub {
+    let persona = persona.to_owned();
+    Hub::new(move || {
+        let mut c = Conversation::standard(persona.clone());
+        c.set_audit(Arc::clone(&audit));
+        c.set_notes(Arc::clone(&notes));
+        c
+    })
 }
 
 /// Start the optional update check (`tls` builds only); a failure is reported and the speaker carries on.
