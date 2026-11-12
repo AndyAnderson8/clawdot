@@ -465,6 +465,11 @@ pub(crate) async fn next_message<R: AsyncRead + Unpin>(
 
 /// Run one satellite connection to completion.
 ///
+/// The session is a handshake followed by one event loop. The loop waits for the next event (a message from the
+/// satellite, a finished turn, a realtime event, a progress phrase, a stop check, an announcement or the
+/// keepalive tick), hands it to the function for that phase, and then runs the phases that follow every event:
+/// wake handling, progress speech, delivery of a finished turn, and the dialog's steps.
+///
 /// # Errors
 /// A message when the session ended abnormally: a framing violation, a timeout, or a write failure. A satellite
 /// that is simply refused (bad token or version) ends with `Ok`.
@@ -483,23 +488,214 @@ where
     let (mut rd, mut wr) = tokio::io::split(io);
     let mut dec = Decoder::new(Limits::default());
 
-    // ---- handshake (REQ-SAT-002) ----
-    let first = tokio::time::timeout(settings.hello_timeout, next_message(&mut rd, &mut dec))
+    let Some(accepted) = handshake(&mut rd, &mut wr, &mut dec, &settings).await? else {
+        return Ok(());
+    };
+    let mut st = SessionState::new(&settings);
+    let env = Env {
+        settings,
+        stt,
+        tts,
+        asks,
+        speaker_id: accepted.speaker_id,
+        media_url: accepted.media_url,
+        started: Instant::now(),
+    };
+
+    loop {
+        let mut pending = Pending::default();
+        tokio::select! {
+            msg = next_message(&mut rd, &mut dec) => {
+                st.last_heard = Instant::now();
+                let Some(msg) = msg? else { return Ok(()) };
+                env.on_message(&mut st, &mut wr, msg, &mut pending).await?;
+            }
+            (outcome, effects, asked) = poll_work(&mut st.work), if st.work.is_some() => {
+                st.on_turn_finished(outcome, effects, asked);
+            }
+            ev = rt_next(&mut st.rt), if st.rt.is_some() => {
+                env.on_rt_event(&mut st, &mut wr, ev).await?;
+            }
+            p = recv_progress(&mut st.progress_rx), if st.progress_rx.is_some() => {
+                match p {
+                    Some(p) => st.progress_q.push_back(p),
+                    None => st.progress_rx = None,
+                }
+            }
+            stop = poll_stop(&mut st.stop_check), if st.stop_check.is_some() => {
+                st.stop_check = None;
+                if stop {
+                    stop_turn(&mut st, &mut wr).await?;
+                }
+            }
+            Some(a) = st.announce_rx.recv() => {
+                env.on_announce(&mut st, &mut wr, a).await?;
+            }
+            _ = st.tick.tick() => {
+                env.on_tick(&mut st, &mut wr, &mut pending).await?;
+            }
+        }
+
+        if pending.woke {
+            env.on_wake(&mut st, &mut wr, &mut pending).await?;
+        }
+        // Muting must really stop the microphone, so it ends a session.
+        if st.dialog.is_muted()
+            && let Some(r) = st.rt.as_mut()
+        {
+            r.mic = None;
+        }
+        env.play_progress(&mut st, &mut wr).await?;
+        env.deliver_ready(&mut st, &mut wr, &mut pending).await?;
+        env.run_steps(&mut st, &mut wr, pending.steps).await?;
+    }
+}
+
+/// Everything about a session that does not change once the handshake is done.
+struct Env<S, T> {
+    settings: Settings,
+    stt: Arc<S>,
+    tts: Arc<T>,
+    asks: mpsc::Sender<Ask>,
+    /// The connection's own identifier for the conversation and any held confirmation in the core.
+    speaker_id: String,
+    /// The satellite declared it can play URLs.
+    media_url: bool,
+    started: Instant,
+}
+
+/// What the handshake learned about an accepted satellite.
+struct Accepted {
+    speaker_id: String,
+    media_url: bool,
+}
+
+/// What one pass of the event loop asks the phases after it to do.
+#[derive(Default)]
+struct Pending {
+    /// What the dialog asked for during this pass.
+    steps: Vec<Step>,
+    /// The wake word or the action button was pressed while no turn was running.
+    woke: bool,
+}
+
+/// The state one session shares across its phases.
+struct SessionState {
+    _registration: Registration,
+    announce_rx: mpsc::Receiver<Announce>,
+    dialog: Dialog,
+    tick: tokio::time::Interval,
+    last_heard: Instant,
+    last_ping: Instant,
+    volume: u8,
+    /// Audio is on the speaker (a reply, progress speech, an announcement or a realtime reply).
+    playing: bool,
+    /// Music is playing on the satellite.
+    music: bool,
+    /// Music was paused for speech and is to be resumed afterwards.
+    ducked: bool,
+    /// Stream commands that wait for the speech to finish, so music never covers a reply.
+    after: Vec<Message>,
+    work: Option<Work>,
+    /// The running turn's cancel signal and the phrases it speaks while it works (REQ-AST-020, REQ-AST-022).
+    turn_cancel: Option<CancelToken>,
+    progress_rx: Option<mpsc::UnboundedReceiver<String>>,
+    progress_q: VecDeque<String>,
+    progress_playing: bool,
+    /// A finished turn waits here while its progress speech is still playing.
+    ready: Option<(VoiceOutcome, Vec<Effect>, bool)>,
+    stop_check: Option<StopCheck>,
+    /// The optional realtime session and what goes with it (REQ-RTV-009, REQ-RTV-010).
+    rt: Option<RtLive>,
+    /// Audio from a session is on the speaker, so its playback-done must not open the follow-up window.
+    rt_audio: bool,
+    rt_blocked_until: Option<Instant>,
+    warned_format: bool,
+    /// A reset request is honoured from the device itself (loopback) or from a satellite that proved a token.
+    reset_trusted: bool,
+    last_reset_ask: Option<Instant>,
+}
+
+impl SessionState {
+    fn new(settings: &Settings) -> Self {
+        let (registration, announce_rx) = settings.announcer.register();
+        Self {
+            _registration: registration,
+            announce_rx,
+            dialog: Dialog::new(settings.dialog),
+            tick: tokio::time::interval(
+                settings
+                    .keepalive
+                    .min(Duration::from_secs(1))
+                    .max(Duration::from_millis(10)),
+            ),
+            last_heard: Instant::now(),
+            last_ping: Instant::now(),
+            volume: 50,
+            playing: false,
+            music: false,
+            ducked: false,
+            after: Vec::new(),
+            work: None,
+            turn_cancel: None,
+            progress_rx: None,
+            progress_q: VecDeque::new(),
+            progress_playing: false,
+            ready: None,
+            stop_check: None,
+            rt: None,
+            rt_audio: false,
+            rt_blocked_until: None,
+            warned_format: false,
+            reset_trusted: settings.peer_loopback || !settings.token_hashes.is_empty(),
+            last_reset_ask: None,
+        }
+    }
+
+    /// Nothing is happening that a new wake word or announcement would interrupt.
+    fn is_quiet(&self) -> bool {
+        self.dialog.phase() == Phase::Idle
+            && !self.dialog.is_muted()
+            && self.work.is_none()
+            && self.ready.is_none()
+            && !self.playing
+    }
+
+    /// A turn finished: what it said while it worked comes before the answer.
+    fn on_turn_finished(&mut self, outcome: VoiceOutcome, effects: Vec<Effect>, asked: bool) {
+        self.work = None;
+        self.turn_cancel = None;
+        if let Some(mut rx) = self.progress_rx.take() {
+            while let Ok(p) = rx.try_recv() {
+                self.progress_q.push_back(p);
+            }
+        }
+        self.ready = Some((outcome, effects, asked));
+    }
+}
+
+/// The hello exchange (REQ-SAT-002): the first message must be a compatible, authorised hello, answered with
+/// the welcome. `None` means the satellite was refused (or hung up) and the session is over.
+async fn handshake<R, W>(
+    rd: &mut R,
+    wr: &mut W,
+    dec: &mut Decoder,
+    settings: &Settings,
+) -> Result<Option<Accepted>, String>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let first = tokio::time::timeout(settings.hello_timeout, next_message(rd, dec))
         .await
         .map_err(|_| "no hello within the allowed time".to_owned())??;
     let hello = match first {
         Some(Message::Hello(h)) => h,
         Some(_) => {
-            send(
-                &mut wr,
-                &Message::Reject(Reject {
-                    reason: "the first message must be hello".into(),
-                }),
-            )
-            .await?;
-            return Ok(());
+            reject(wr, "the first message must be hello".into()).await?;
+            return Ok(None);
         }
-        None => return Ok(()),
+        None => return Ok(None),
     };
     if !PROTOCOL_VERSION.compatible_with(hello.protocol) {
         let reason = format!(
@@ -509,8 +705,8 @@ where
             PROTOCOL_VERSION.major,
             PROTOCOL_VERSION.minor
         );
-        send(&mut wr, &Message::Reject(Reject { reason })).await?;
-        return Ok(());
+        reject(wr, reason).await?;
+        return Ok(None);
     }
     if !settings.token_hashes.is_empty() {
         let ok = hello
@@ -518,21 +714,15 @@ where
             .as_deref()
             .is_some_and(|t| settings.token_hashes.iter().any(|h| verify_token(t, h)));
         if !ok {
-            send(
-                &mut wr,
-                &Message::Reject(Reject {
-                    reason: "unauthorized".into(),
-                }),
-            )
-            .await?;
-            return Ok(());
+            reject(wr, "unauthorized".into()).await?;
+            return Ok(None);
         }
     }
     // The connection's own random identifier. It names this speaker's conversation and held confirmation in the
     // core, so one speaker's "yes" can never answer another's question; a new connection starts fresh.
     let speaker_id = format!("sat:{}", new_session_id());
     send(
-        &mut wr,
+        wr,
         &Message::Welcome(Welcome {
             protocol: PROTOCOL_VERSION,
             session_id: new_session_id(),
@@ -540,456 +730,546 @@ where
         }),
     )
     .await?;
+    Ok(Some(Accepted {
+        speaker_id,
+        media_url: hello.capabilities.media_url,
+    }))
+}
 
-    // ---- conversation ----
-    let (_registration, mut announce_rx) = settings.announcer.register();
-    let started = Instant::now();
-    let now_ms = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let mut dialog = Dialog::new(settings.dialog);
-    let mut last_heard = Instant::now();
-    let mut volume: u8 = 50;
-    let mut playing = false;
-    let media_url = hello.capabilities.media_url;
-    let mut music = false;
-    let mut ducked = false;
-    let mut after: Vec<Message> = Vec::new();
-    let mut work: Option<Work> = None;
-    // The running turn's cancel signal and the phrases it speaks while it works (REQ-AST-020, REQ-AST-022).
-    let mut turn_cancel: Option<CancelToken> = None;
-    let mut progress_rx: Option<mpsc::UnboundedReceiver<String>> = None;
-    let mut progress_q: VecDeque<String> = VecDeque::new();
-    let mut progress_playing = false;
-    // A finished turn waits here while its progress speech is still playing.
-    let mut ready: Option<(VoiceOutcome, Vec<Effect>, bool)> = None;
-    let mut stop_check: Option<StopCheck> = None;
-    // The optional realtime session and what goes with it (REQ-RTV-009, REQ-RTV-010).
-    let mut rt: Option<RtLive> = None;
-    // Audio from a session is on the speaker, so its playback-done must not open the follow-up window.
-    let mut rt_audio = false;
-    let mut rt_blocked_until: Option<Instant> = None;
-    let mut warned_format = false;
-    let mut tick = tokio::time::interval(
-        settings
-            .keepalive
-            .min(Duration::from_secs(1))
-            .max(Duration::from_millis(10)),
-    );
-    let mut last_ping = Instant::now();
-    // A reset request is honoured from the device itself (loopback) or from a satellite that proved a token.
-    let reset_trusted = settings.peer_loopback || !settings.token_hashes.is_empty();
-    let mut last_reset_ask: Option<Instant> = None;
+async fn reject<W: AsyncWrite + Unpin>(w: &mut W, reason: String) -> Result<(), String> {
+    send(w, &Message::Reject(Reject { reason })).await
+}
 
-    loop {
-        // What the previous step asked us to do.
-        let mut steps: Vec<Step> = Vec::new();
-        // The wake word or the action button was pressed while no turn was running.
-        let mut woke = false;
-        tokio::select! {
-            msg = next_message(&mut rd, &mut dec) => {
-                last_heard = Instant::now();
-                let Some(msg) = msg? else { return Ok(()) };
-                match msg {
-                    Message::Ping => send(&mut wr, &Message::Pong).await?,
-                    Message::Wake(_) => woke = true,
-                    Message::Button(b) if b.name == "action" && rt.is_some() => {
-                        // The action button ends a realtime session.
-                        rt_flush(&mut wr, rt.as_mut(), &mut playing, &mut rt_audio).await?;
-                        if let Some(r) = rt.as_mut() {
-                            r.mic = None;
-                        }
+/// The answer to an administrator-reset request: the seconds the window stays open, or a reason it did not.
+fn reset_answer(settings: &Settings, trusted: bool, slow: bool) -> (u32, Option<String>) {
+    match (&settings.admin_reset, trusted, slow) {
+        (_, _, true) => (0, Some("Too many requests. Wait a few seconds.".to_owned())),
+        (Some(hook), true, false) => match (hook.0)() {
+            Ok(s) => (s, None),
+            Err(why) => (0, Some(why)),
+        },
+        (Some(_), false, false) => (
+            0,
+            Some("This speaker is not trusted to open the reset window.".to_owned()),
+        ),
+        (None, _, _) => (0, Some("Not available.".to_owned())),
+    }
+}
+
+/// Stop the running turn and the progress speech that is playing for it (REQ-VOI-020).
+async fn stop_turn<W: AsyncWrite + Unpin>(st: &mut SessionState, wr: &mut W) -> Result<(), String> {
+    if let Some(t) = &st.turn_cancel {
+        t.cancel();
+        st.progress_q.clear();
+        if st.progress_playing {
+            send(wr, &Message::StopPlayback).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Resume music that was paused for speech (unless a stream command is waiting), then send the waiting commands.
+async fn finish_speech<W: AsyncWrite + Unpin>(
+    st: &mut SessionState,
+    wr: &mut W,
+) -> Result<(), String> {
+    if st.ducked {
+        st.ducked = false;
+        if st.after.is_empty() {
+            send(wr, &Message::MediaControl(MediaAction::Resume)).await?;
+            st.music = true;
+        }
+    }
+    flush_media(wr, &mut st.after, &mut st.music).await
+}
+
+/// The satellite finished playing what it was sent. Which kind of audio it was decides what happens next.
+async fn on_playback_done<W: AsyncWrite + Unpin>(
+    st: &mut SessionState,
+    wr: &mut W,
+    pending: &mut Pending,
+) -> Result<(), String> {
+    if !st.playing {
+        return Ok(());
+    }
+    if st.rt_audio {
+        // A reply from the session ended. The session itself goes on listening.
+        st.playing = false;
+        st.rt_audio = false;
+        if st.rt.is_some() {
+            send(wr, &Message::SetIndicator(Indicator::Listening)).await?;
+        }
+    } else if st.progress_playing {
+        // Progress speech ended; the turn is still running, so the dialog does not move on.
+        st.playing = false;
+        st.progress_playing = false;
+        st.dialog.set_output_playing(false);
+    } else {
+        st.playing = false;
+        finish_speech(st, wr).await?;
+        pending.steps.push(st.dialog.on_playback_done());
+    }
+    Ok(())
+}
+
+/// Volume and stop take effect now; stream commands wait until the satellite has finished speaking, so music
+/// never covers the reply.
+async fn apply_effects<W: AsyncWrite + Unpin>(
+    st: &mut SessionState,
+    wr: &mut W,
+    media_url: bool,
+    effects: &[Effect],
+) -> Result<(), String> {
+    for e in effects {
+        match e {
+            Effect::StopPlayback => {
+                send(wr, &Message::StopPlayback).await?;
+                st.music = false;
+                st.after.clear();
+            }
+            Effect::VolumeSet(l) => {
+                st.volume = (*l).min(100);
+                send(wr, &Message::SetVolume { level: st.volume }).await?;
+            }
+            Effect::VolumeUp => {
+                st.volume = st.volume.saturating_add(VOLUME_STEP).min(100);
+                send(wr, &Message::SetVolume { level: st.volume }).await?;
+            }
+            Effect::VolumeDown => {
+                st.volume = st.volume.saturating_sub(VOLUME_STEP);
+                send(wr, &Message::SetVolume { level: st.volume }).await?;
+            }
+            Effect::PlayStream { url, title } if media_url => {
+                st.after.push(Message::PlayUrl {
+                    url: url.clone(),
+                    title: title.clone(),
+                });
+            }
+            Effect::PlayStream { .. } => {
+                send(
+                    wr,
+                    &Message::Error(clawdot_protocol::message::ErrorReport {
+                        text: "this satellite did not declare media_url, so it cannot play streams"
+                            .into(),
+                        code: Some("media-unsupported".into()),
+                    }),
+                )
+                .await?;
+            }
+            Effect::Media(MediaCmd::Pause) if media_url => {
+                st.after.push(Message::MediaControl(MediaAction::Pause));
+            }
+            Effect::Media(MediaCmd::Resume) if media_url => {
+                st.after.push(Message::MediaControl(MediaAction::Resume));
+            }
+            Effect::Media(_) => {}
+        }
+    }
+    Ok(())
+}
+
+impl<S, T> Env<S, T>
+where
+    S: Transcriber + Send + Sync + 'static,
+    T: Synthesizer + Send + Sync + 'static,
+{
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Phase: a message from the satellite.
+    async fn on_message<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        msg: Message,
+        pending: &mut Pending,
+    ) -> Result<(), String> {
+        match msg {
+            Message::Ping => send(wr, &Message::Pong).await?,
+            Message::Wake(_) => pending.woke = true,
+            Message::Button(b) if b.name == "action" => {
+                if st.rt.is_some() {
+                    // The action button ends a realtime session.
+                    rt_flush(wr, st.rt.as_mut(), &mut st.playing, &mut st.rt_audio).await?;
+                    if let Some(r) = st.rt.as_mut() {
+                        r.mic = None;
                     }
-                    Message::Button(b) if b.name == "action" => {
-                        // While a turn is running the action button stops it (REQ-VOI-020).
-                        match turn_cancel.as_ref().filter(|_| dialog.phase() == Phase::Thinking) {
-                            Some(t) => {
-                                t.cancel();
-                                progress_q.clear();
-                                if progress_playing {
-                                    send(&mut wr, &Message::StopPlayback).await?;
-                                }
-                            }
-                            None => woke = true,
-                        }
-                    }
-                    Message::Button(b) if b.name == "mute" => {
-                        let muted = !dialog.is_muted();
-                        steps.push(dialog.set_muted(muted));
-                        send(&mut wr, &Message::SetMute { muted }).await?;
-                    }
-                    Message::MuteChanged { muted } => steps.push(dialog.set_muted(muted)),
-                    Message::AdminReset => {
-                        let slow = last_reset_ask.is_some_and(|t| t.elapsed() < RESET_ASK_EVERY);
-                        last_reset_ask = Some(Instant::now());
-                        let (open_secs, reason) = match (&settings.admin_reset, reset_trusted, slow) {
-                            (_, _, true) => (0, Some("Too many requests. Wait a few seconds.".to_owned())),
-                            (Some(hook), true, false) => match (hook.0)() {
-                                Ok(s) => (s, None),
-                                Err(why) => (0, Some(why)),
-                            },
-                            (Some(_), false, false) => (
-                                0,
-                                Some("This speaker is not trusted to open the reset window.".to_owned()),
-                            ),
-                            (None, _, _) => (0, Some("Not available.".to_owned())),
-                        };
-                        send(&mut wr, &Message::AdminResetWindow { open_secs, reason }).await?;
-                    }
-                    Message::AudioChunk { format, payload, .. } => {
-                        if format != AudioFormat::PCM_16K_MONO {
-                            if !warned_format {
-                                warned_format = true;
-                                send(&mut wr, &Message::Error(clawdot_protocol::message::ErrorReport {
-                                    text: "uplink audio must be 16 kHz 16-bit mono".into(),
-                                    code: Some("bad-audio-format".into()),
-                                })).await?;
-                            }
-                        } else if let Some(r) = rt.as_mut() {
-                            rt_mic(r, &payload);
-                        } else {
-                            steps.push(dialog.on_audio(now_ms(), &decode_pcm16(&payload)));
-                        }
-                    }
-                    Message::PlaybackDone { .. } if playing && rt_audio => {
-                        // A reply from the session ended. The session itself goes on listening.
-                        playing = false;
-                        rt_audio = false;
-                        if rt.is_some() {
-                            send(&mut wr, &Message::SetIndicator(Indicator::Listening)).await?;
-                        }
-                    }
-                    Message::PlaybackDone { .. } if playing && progress_playing => {
-                        // Progress speech ended; the turn is still running, so the dialog does not move on.
-                        playing = false;
-                        progress_playing = false;
-                        dialog.set_output_playing(false);
-                    }
-                    Message::PlaybackDone { .. } if playing => {
-                        playing = false;
-                        if ducked {
-                            ducked = false;
-                            if after.is_empty() {
-                                send(&mut wr, &Message::MediaControl(MediaAction::Resume)).await?;
-                                music = true;
-                            }
-                        }
-                        flush_media(&mut wr, &mut after, &mut music).await?;
-                        steps.push(dialog.on_playback_done());
-                    }
-                    // Pong, button names we do not use, errors, unknown events, and anything that only
-                    // the core should send are all ignored, so newer satellites keep working (REQ-SAT-009).
-                    _ => {}
+                } else if st.turn_cancel.is_some() && st.dialog.phase() == Phase::Thinking {
+                    // While a turn is running the action button stops it (REQ-VOI-020).
+                    stop_turn(st, wr).await?;
+                } else {
+                    pending.woke = true;
                 }
             }
-            (outcome, effects, asked) = poll_work(&mut work), if work.is_some() => {
-                work = None;
-                turn_cancel = None;
-                // Whatever it said while it worked comes before the answer.
-                if let Some(mut rx) = progress_rx.take() {
-                    while let Ok(p) = rx.try_recv() {
-                        progress_q.push_back(p);
-                    }
-                }
-                ready = Some((outcome, effects, asked));
+            Message::Button(b) if b.name == "mute" => {
+                let muted = !st.dialog.is_muted();
+                pending.steps.push(st.dialog.set_muted(muted));
+                send(wr, &Message::SetMute { muted }).await?;
             }
-            ev = rt_next(&mut rt), if rt.is_some() => match ev {
-                RtEv::Out(Speaker::Audio(bytes)) => {
-                    if let Some(r) = rt.as_mut() {
-                        rt_play(&mut wr, r, &bytes, &mut playing, &mut rt_audio, &mut music, &mut ducked).await?;
-                    }
-                }
-                RtEv::Out(Speaker::Flush) => {
-                    rt_flush(&mut wr, rt.as_mut(), &mut playing, &mut rt_audio).await?;
-                }
-                RtEv::SpeakerClosed => {}
-                RtEv::Gap => {
-                    if let Some(r) = rt.as_mut() {
-                        r.streaming = false;
-                    }
-                    send(&mut wr, &Message::AudioStop).await?;
-                }
-                RtEv::Done(done) => {
-                    if let Some(mut r) = rt.take() {
-                        // Whatever the model said before it ended still gets played.
-                        while let Ok(Speaker::Audio(bytes)) = r.speaker.try_recv() {
-                            rt_play(&mut wr, &mut r, &bytes, &mut playing, &mut rt_audio, &mut music, &mut ducked).await?;
-                        }
-                        if r.streaming {
-                            send(&mut wr, &Message::AudioStop).await?;
-                        }
-                    }
-                    send(&mut wr, &Message::StreamStop).await?;
-                    let done = done.unwrap_or(Done {
-                        speak: Some("I couldn't run the realtime voice.".into()),
-                        failed: true,
-                        effects: Vec::new(),
-                    });
-                    if done.failed {
-                        // Use the normal path for a while, so a broken service is not tried on every wake.
-                        rt_blocked_until = Some(Instant::now() + settings.rt_cooldown);
-                    }
-                    // The end of a session is delivered like a finished turn: after any audio still playing,
-                    // with its effects, and then either silence or the explanation in the normal voice.
-                    let mut outcome = VoiceOutcome {
-                        transcript: Some(String::new()),
-                        ..VoiceOutcome::default()
-                    };
-                    if let Some(text) = done.speak {
-                        let mut problems = Vec::new();
-                        outcome.audio = speak_text(&*tts, &text, &mut problems).await;
-                        outcome.transcript = None;
-                        outcome.reply = text;
-                    }
-                    ready = Some((outcome, done.effects, false));
-                }
-            },
-            p = recv_progress(&mut progress_rx), if progress_rx.is_some() => {
-                match p {
-                    Some(p) => progress_q.push_back(p),
-                    None => progress_rx = None,
+            Message::MuteChanged { muted } => pending.steps.push(st.dialog.set_muted(muted)),
+            Message::AdminReset => {
+                let slow = st
+                    .last_reset_ask
+                    .is_some_and(|t| t.elapsed() < RESET_ASK_EVERY);
+                st.last_reset_ask = Some(Instant::now());
+                let (open_secs, reason) = reset_answer(&self.settings, st.reset_trusted, slow);
+                send(wr, &Message::AdminResetWindow { open_secs, reason }).await?;
+            }
+            Message::AudioChunk {
+                format, payload, ..
+            } => {
+                self.on_uplink_audio(st, wr, format, &payload, pending)
+                    .await?
+            }
+            Message::PlaybackDone { .. } => on_playback_done(st, wr, pending).await?,
+            // Pong, button names we do not use, errors, unknown events, and anything that only
+            // the core should send are all ignored, so newer satellites keep working (REQ-SAT-009).
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Microphone audio goes to the realtime session if there is one, else to the dialog's endpointer.
+    async fn on_uplink_audio<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        format: AudioFormat,
+        payload: &[u8],
+        pending: &mut Pending,
+    ) -> Result<(), String> {
+        if format != AudioFormat::PCM_16K_MONO {
+            if !st.warned_format {
+                st.warned_format = true;
+                send(
+                    wr,
+                    &Message::Error(clawdot_protocol::message::ErrorReport {
+                        text: "uplink audio must be 16 kHz 16-bit mono".into(),
+                        code: Some("bad-audio-format".into()),
+                    }),
+                )
+                .await?;
+            }
+        } else if let Some(r) = st.rt.as_mut() {
+            rt_mic(r, payload);
+        } else {
+            pending
+                .steps
+                .push(st.dialog.on_audio(self.now_ms(), &decode_pcm16(payload)));
+        }
+        Ok(())
+    }
+
+    /// Phase: an event from the realtime session.
+    async fn on_rt_event<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        ev: RtEv,
+    ) -> Result<(), String> {
+        match ev {
+            RtEv::Out(Speaker::Audio(bytes)) => {
+                if let Some(r) = st.rt.as_mut() {
+                    rt_play(
+                        wr,
+                        r,
+                        &bytes,
+                        &mut st.playing,
+                        &mut st.rt_audio,
+                        &mut st.music,
+                        &mut st.ducked,
+                    )
+                    .await?;
                 }
             }
-            stop = poll_stop(&mut stop_check), if stop_check.is_some() => {
-                stop_check = None;
-                if stop {
-                    if let Some(t) = &turn_cancel {
-                        t.cancel();
-                        progress_q.clear();
-                        if progress_playing {
-                            send(&mut wr, &Message::StopPlayback).await?;
-                        }
-                    }
-                }
+            RtEv::Out(Speaker::Flush) => {
+                rt_flush(wr, st.rt.as_mut(), &mut st.playing, &mut st.rt_audio).await?;
             }
-            Some(a) = announce_rx.recv() => {
-                let idle = dialog.phase() == Phase::Idle
-                    && !dialog.is_muted()
-                    && work.is_none()
-                    && ready.is_none()
-                    && rt.is_none()
-                    && !playing;
-                let accepted = match a.request {
-                    Request::Probe => idle,
-                    Request::Speak(text) if idle => {
-                        let mut problems = Vec::new();
-                        let audio = speak_text(&*tts, &text, &mut problems).await;
-                        if audio.is_empty() {
-                            false
-                        } else {
-                            dialog.on_reply_started();
-                            duck(&mut wr, &mut music, &mut ducked).await?;
-                            play_audio(&mut wr, &audio).await?;
-                            playing = true;
-                            true
-                        }
-                    }
-                    Request::Speak(_) => false,
-                };
-                let _ = a.answer.send(accepted);
+            RtEv::SpeakerClosed => {}
+            RtEv::Gap => {
+                if let Some(r) = st.rt.as_mut() {
+                    r.streaming = false;
+                }
+                send(wr, &Message::AudioStop).await?;
             }
-            _ = tick.tick() => {
-                if last_heard.elapsed() >= settings.dead_after {
-                    return Err("the satellite stopped responding".into());
-                }
-                if last_ping.elapsed() >= settings.keepalive {
-                    last_ping = Instant::now();
-                    send(&mut wr, &Message::Ping).await?;
-                }
-                steps.push(dialog.tick(now_ms()));
-                // A session nobody is talking in ends, so the microphone does not stream (and cost) for nothing.
-                if let Some(r) = rt.as_mut()
-                    && !playing
-                    && !r.streaming
-                    && r.last_activity.elapsed() >= settings.rt_idle
-                {
-                    r.mic = None;
-                }
+            RtEv::Done(done) => self.on_rt_done(st, wr, done).await?,
+        }
+        Ok(())
+    }
+
+    /// The realtime session ended: play what is left, then deliver its end like a finished turn.
+    async fn on_rt_done<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        done: Option<Done>,
+    ) -> Result<(), String> {
+        if let Some(mut r) = st.rt.take() {
+            // Whatever the model said before it ended still gets played.
+            while let Ok(Speaker::Audio(bytes)) = r.speaker.try_recv() {
+                rt_play(
+                    wr,
+                    &mut r,
+                    &bytes,
+                    &mut st.playing,
+                    &mut st.rt_audio,
+                    &mut st.music,
+                    &mut st.ducked,
+                )
+                .await?;
+            }
+            if r.streaming {
+                send(wr, &Message::AudioStop).await?;
             }
         }
+        send(wr, &Message::StreamStop).await?;
+        let done = done.unwrap_or(Done {
+            speak: Some("I couldn't run the realtime voice.".into()),
+            failed: true,
+            effects: Vec::new(),
+        });
+        if done.failed {
+            // Use the normal path for a while, so a broken service is not tried on every wake.
+            st.rt_blocked_until = Some(Instant::now() + self.settings.rt_cooldown);
+        }
+        // The end of a session is delivered like a finished turn: after any audio still playing,
+        // with its effects, and then either silence or the explanation in the normal voice.
+        let mut outcome = VoiceOutcome {
+            transcript: Some(String::new()),
+            ..VoiceOutcome::default()
+        };
+        if let Some(text) = done.speak {
+            let mut problems = Vec::new();
+            outcome.audio = speak_text(&*self.tts, &text, &mut problems).await;
+            outcome.transcript = None;
+            outcome.reply = text;
+        }
+        st.ready = Some((outcome, done.effects, false));
+        Ok(())
+    }
 
-        if woke {
-            if rt.is_some() {
-                // The wake word during a session is the user cutting in.
-                rt_flush(&mut wr, rt.as_mut(), &mut playing, &mut rt_audio).await?;
-            } else {
-                let quiet = dialog.phase() == Phase::Idle
-                    && !dialog.is_muted()
-                    && work.is_none()
-                    && ready.is_none()
-                    && !playing;
-                match rt_start(&settings, &speaker_id, quiet, rt_blocked_until) {
-                    Some(live) => {
-                        send(&mut wr, &Message::SetIndicator(Indicator::Listening)).await?;
-                        send(&mut wr, &Message::StreamStart).await?;
-                        rt = Some(live);
-                    }
-                    None => steps.push(dialog.on_wake()),
+    /// Phase: someone elsewhere in the program wants this speaker to say something.
+    async fn on_announce<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        a: Announce,
+    ) -> Result<(), String> {
+        let idle = st.is_quiet() && st.rt.is_none();
+        let accepted = match a.request {
+            Request::Probe => idle,
+            Request::Speak(text) if idle => {
+                let mut problems = Vec::new();
+                let audio = speak_text(&*self.tts, &text, &mut problems).await;
+                if audio.is_empty() {
+                    false
+                } else {
+                    st.dialog.on_reply_started();
+                    duck(wr, &mut st.music, &mut st.ducked).await?;
+                    play_audio(wr, &audio).await?;
+                    st.playing = true;
+                    true
                 }
             }
-        }
+            Request::Speak(_) => false,
+        };
+        let _ = a.answer.send(accepted);
+        Ok(())
+    }
 
-        // Muting must really stop the microphone, so it ends a session.
-        if dialog.is_muted()
-            && let Some(r) = rt.as_mut()
+    /// Phase: the keepalive tick (liveness, ping, dialog timers, idle realtime sessions).
+    async fn on_tick<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        pending: &mut Pending,
+    ) -> Result<(), String> {
+        if st.last_heard.elapsed() >= self.settings.dead_after {
+            return Err("the satellite stopped responding".into());
+        }
+        if st.last_ping.elapsed() >= self.settings.keepalive {
+            st.last_ping = Instant::now();
+            send(wr, &Message::Ping).await?;
+        }
+        pending.steps.push(st.dialog.tick(self.now_ms()));
+        // A session nobody is talking in ends, so the microphone does not stream (and cost) for nothing.
+        if let Some(r) = st.rt.as_mut()
+            && !st.playing
+            && !r.streaming
+            && r.last_activity.elapsed() >= self.settings.rt_idle
         {
             r.mic = None;
         }
+        Ok(())
+    }
 
-        // Progress speech is played one phrase at a time while the turn goes on (REQ-AST-020).
-        if !playing && (work.is_some() || ready.is_some()) && !dialog.is_muted() {
-            if let Some(text) = progress_q.pop_front() {
+    /// Phase: the wake word (or the action button) while no turn runs. Starts a realtime session when one is
+    /// available, else the normal dialog.
+    async fn on_wake<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        pending: &mut Pending,
+    ) -> Result<(), String> {
+        if st.rt.is_some() {
+            // The wake word during a session is the user cutting in.
+            rt_flush(wr, st.rt.as_mut(), &mut st.playing, &mut st.rt_audio).await?;
+        } else {
+            let quiet = st.is_quiet();
+            match rt_start(&self.settings, &self.speaker_id, quiet, st.rt_blocked_until) {
+                Some(live) => {
+                    send(wr, &Message::SetIndicator(Indicator::Listening)).await?;
+                    send(wr, &Message::StreamStart).await?;
+                    st.rt = Some(live);
+                }
+                None => pending.steps.push(st.dialog.on_wake()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Phase: progress speech is played one phrase at a time while the turn goes on (REQ-AST-020).
+    async fn play_progress<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+    ) -> Result<(), String> {
+        if !st.playing && (st.work.is_some() || st.ready.is_some()) && !st.dialog.is_muted() {
+            if let Some(text) = st.progress_q.pop_front() {
                 let mut problems = Vec::new();
-                let audio = speak_text(&*tts, &text, &mut problems).await;
+                let audio = speak_text(&*self.tts, &text, &mut problems).await;
                 if !audio.is_empty() {
-                    dialog.set_output_playing(true);
-                    duck(&mut wr, &mut music, &mut ducked).await?;
-                    play_audio(&mut wr, &audio).await?;
-                    playing = true;
-                    progress_playing = true;
+                    st.dialog.set_output_playing(true);
+                    duck(wr, &mut st.music, &mut st.ducked).await?;
+                    play_audio(wr, &audio).await?;
+                    st.playing = true;
+                    st.progress_playing = true;
                 }
             }
         }
-        // The finished turn is delivered once nothing it said earlier is still playing.
-        if let Some((outcome, effects, asked)) =
-            ready.take_if(|_| !playing && progress_q.is_empty())
-        {
-            if dialog.is_interrupting() {
-                send(&mut wr, &Message::StreamStop).await?;
-            }
-            // Volume and stop take effect now; stream commands wait until the satellite has finished
-            // speaking, so music never covers the reply.
-            for e in &effects {
-                match e {
-                    Effect::StopPlayback => {
-                        send(&mut wr, &Message::StopPlayback).await?;
-                        music = false;
-                        after.clear();
-                    }
-                    Effect::VolumeSet(l) => {
-                        volume = (*l).min(100);
-                        send(&mut wr, &Message::SetVolume { level: volume }).await?;
-                    }
-                    Effect::VolumeUp => {
-                        volume = volume.saturating_add(VOLUME_STEP).min(100);
-                        send(&mut wr, &Message::SetVolume { level: volume }).await?;
-                    }
-                    Effect::VolumeDown => {
-                        volume = volume.saturating_sub(VOLUME_STEP);
-                        send(&mut wr, &Message::SetVolume { level: volume }).await?;
-                    }
-                    Effect::PlayStream { url, title } if media_url => {
-                        after.push(Message::PlayUrl {
-                            url: url.clone(),
-                            title: title.clone(),
-                        });
-                    }
-                    Effect::PlayStream { .. } => {
-                        send(&mut wr, &Message::Error(clawdot_protocol::message::ErrorReport {
-                                text: "this satellite did not declare media_url, so it cannot play streams".into(),
-                                code: Some("media-unsupported".into()),
-                            })).await?;
-                    }
-                    Effect::Media(MediaCmd::Pause) if media_url => {
-                        after.push(Message::MediaControl(MediaAction::Pause))
-                    }
-                    Effect::Media(MediaCmd::Resume) if media_url => {
-                        after.push(Message::MediaControl(MediaAction::Resume))
-                    }
-                    Effect::Media(_) => {}
-                }
-            }
-            if !outcome.audio.is_empty() {
-                if asked {
-                    dialog.expect_answer();
-                }
-                dialog.on_reply_started();
-                duck(&mut wr, &mut music, &mut ducked).await?;
-                play_audio(&mut wr, &outcome.audio).await?;
-                playing = true;
-            } else if outcome.transcript.is_some() && outcome.reply.is_empty() {
-                // A command with nothing to say ("pause", "volume up"): do it now and go quiet. Music that a
-                // realtime session paused comes back (nothing is playing now, or this would not run).
-                if ducked {
-                    ducked = false;
-                    if after.is_empty() {
-                        send(&mut wr, &Message::MediaControl(MediaAction::Resume)).await?;
-                        music = true;
-                    }
-                }
-                flush_media(&mut wr, &mut after, &mut music).await?;
-                if !dialog.is_muted() {
-                    send(&mut wr, &Message::SetIndicator(Indicator::Idle)).await?;
-                }
-                steps.push(dialog.on_reply_silent());
-            } else {
-                steps.push(dialog.on_reply_failed());
-            }
-        }
+        Ok(())
+    }
 
+    /// Phase: the finished turn is delivered once nothing it said earlier is still playing.
+    async fn deliver_ready<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        pending: &mut Pending,
+    ) -> Result<(), String> {
+        let (playing, progress_empty) = (st.playing, st.progress_q.is_empty());
+        let Some((outcome, effects, asked)) = st.ready.take_if(|_| !playing && progress_empty)
+        else {
+            return Ok(());
+        };
+        if st.dialog.is_interrupting() {
+            send(wr, &Message::StreamStop).await?;
+        }
+        apply_effects(st, wr, self.media_url, &effects).await?;
+        if !outcome.audio.is_empty() {
+            if asked {
+                st.dialog.expect_answer();
+            }
+            st.dialog.on_reply_started();
+            duck(wr, &mut st.music, &mut st.ducked).await?;
+            play_audio(wr, &outcome.audio).await?;
+            st.playing = true;
+        } else if outcome.transcript.is_some() && outcome.reply.is_empty() {
+            // A command with nothing to say ("pause", "volume up"): do it now and go quiet. Music that a
+            // realtime session paused comes back (nothing is playing now, or this would not run).
+            finish_speech(st, wr).await?;
+            if !st.dialog.is_muted() {
+                send(wr, &Message::SetIndicator(Indicator::Idle)).await?;
+            }
+            pending.steps.push(st.dialog.on_reply_silent());
+        } else {
+            pending.steps.push(st.dialog.on_reply_failed());
+        }
+        Ok(())
+    }
+
+    /// Phase: carry out what the dialog asked for (cues, the interrupt check, starting a turn).
+    async fn run_steps<W: AsyncWrite + Unpin>(
+        &self,
+        st: &mut SessionState,
+        wr: &mut W,
+        steps: Vec<Step>,
+    ) -> Result<(), String> {
         for step in steps {
             match step {
                 Step::Nothing => {}
-                Step::Cue(cue) => cue_to_wire(cue, &mut wr).await?,
+                Step::Cue(cue) => cue_to_wire(cue, wr).await?,
                 Step::Interrupt(pcm) => {
                     // The capture opened by a wake word while the turn runs: close it, and check what was
                     // said against the stop phrases only (REQ-VOI-020).
-                    send(&mut wr, &Message::StreamStop).await?;
-                    send(&mut wr, &Message::SetIndicator(Indicator::Thinking)).await?;
-                    if !pcm.is_empty() && stop_check.is_none() {
-                        let stt = Arc::clone(&stt);
-                        stop_check = Some(Box::pin(async move {
+                    send(wr, &Message::StreamStop).await?;
+                    send(wr, &Message::SetIndicator(Indicator::Thinking)).await?;
+                    if !pcm.is_empty() && st.stop_check.is_none() {
+                        let stt = Arc::clone(&self.stt);
+                        st.stop_check = Some(Box::pin(async move {
                             stt.transcribe(&pcm).await.is_ok_and(|t| is_cancel(&t))
                         }));
                     }
                 }
                 Step::Utterance(pcm) => {
-                    send(&mut wr, &Message::StreamStop).await?;
-                    send(&mut wr, &Message::SetIndicator(Indicator::Thinking)).await?;
-                    let (stt, tts, asks) = (Arc::clone(&stt), Arc::clone(&tts), asks.clone());
-                    let speaker = speaker_id.clone();
-                    let cancel = CancelToken::new();
-                    turn_cancel = Some(cancel.clone());
-                    let (progress_tx, rx) = mpsc::unbounded_channel();
-                    progress_rx = Some(rx);
-                    work = Some(Box::pin(async move {
-                        let effects = Arc::new(Mutex::new(Vec::new()));
-                        let sink = Arc::clone(&effects);
-                        let asked = Arc::new(AtomicBool::new(false));
-                        let asked_sink = Arc::clone(&asked);
-                        let outcome = voice_turn(&*stt, &*tts, &pcm, move |text| async move {
-                            let (tx, rx) = oneshot::channel();
-                            if asks
-                                .send(Ask {
-                                    speaker,
-                                    text,
-                                    reply: tx,
-                                    progress: Some(progress_tx),
-                                    cancel,
-                                })
-                                .await
-                                .is_err()
-                            {
-                                return "Sorry, I can't answer right now.".to_owned();
-                            }
-                            match rx.await {
-                                Ok(a) => {
-                                    sink.lock()
-                                        .unwrap_or_else(PoisonError::into_inner)
-                                        .extend(a.effects);
-                                    asked_sink.store(a.expects_reply, Ordering::Relaxed);
-                                    a.say
-                                }
-                                Err(_) => "Sorry, I can't answer right now.".to_owned(),
-                            }
-                        })
-                        .await;
-                        let effects = std::mem::take(
-                            &mut *effects.lock().unwrap_or_else(PoisonError::into_inner),
-                        );
-                        (outcome, effects, asked.load(Ordering::Relaxed))
-                    }));
+                    send(wr, &Message::StreamStop).await?;
+                    send(wr, &Message::SetIndicator(Indicator::Thinking)).await?;
+                    self.start_turn(st, pcm);
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Start a turn on a captured utterance: transcribe, ask the assistant, synthesize the reply.
+    fn start_turn(&self, st: &mut SessionState, pcm: Vec<i16>) {
+        let (stt, tts, asks) = (
+            Arc::clone(&self.stt),
+            Arc::clone(&self.tts),
+            self.asks.clone(),
+        );
+        let speaker = self.speaker_id.clone();
+        let cancel = CancelToken::new();
+        st.turn_cancel = Some(cancel.clone());
+        let (progress_tx, rx) = mpsc::unbounded_channel();
+        st.progress_rx = Some(rx);
+        st.work = Some(Box::pin(async move {
+            let effects = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&effects);
+            let asked = Arc::new(AtomicBool::new(false));
+            let asked_sink = Arc::clone(&asked);
+            let outcome = voice_turn(&*stt, &*tts, &pcm, move |text| async move {
+                let (tx, rx) = oneshot::channel();
+                if asks
+                    .send(Ask {
+                        speaker,
+                        text,
+                        reply: tx,
+                        progress: Some(progress_tx),
+                        cancel,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return "Sorry, I can't answer right now.".to_owned();
+                }
+                match rx.await {
+                    Ok(a) => {
+                        sink.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .extend(a.effects);
+                        asked_sink.store(a.expects_reply, Ordering::Relaxed);
+                        a.say
+                    }
+                    Err(_) => "Sorry, I can't answer right now.".to_owned(),
+                }
+            })
+            .await;
+            let effects =
+                std::mem::take(&mut *effects.lock().unwrap_or_else(PoisonError::into_inner));
+            (outcome, effects, asked.load(Ordering::Relaxed))
+        }));
     }
 }
 
@@ -2266,5 +2546,208 @@ mod tests {
         }
         assert_eq!(answers, [300, 0, 0, 0, 0]);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// The session phases, each exercised alone against an in-memory writer (REQ-SAT-002, REQ-MUS-004, REQ-SAT-020).
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    use crate::inbox::endpoint::hash_token;
+    use clawdot_protocol::message::{Capabilities, Hello, Version};
+
+    /// Everything written to `bytes`, decoded.
+    fn decode_all(bytes: &[u8]) -> Vec<Message> {
+        let mut dec = Decoder::new(Limits::default());
+        dec.push(bytes);
+        let mut out = Vec::new();
+        while let Some(f) = dec.next_frame().unwrap() {
+            out.push(Message::from_frame(f).unwrap());
+        }
+        out
+    }
+
+    fn hello_bytes(token: Option<&str>, protocol: Version, media_url: bool) -> Vec<u8> {
+        encode(
+            &Message::Hello(Hello {
+                protocol,
+                device_id: "d".into(),
+                name: None,
+                token: token.map(str::to_owned),
+                capabilities: Capabilities {
+                    media_url,
+                    ..Capabilities::default()
+                },
+            })
+            .to_frame(),
+        )
+        .unwrap()
+    }
+
+    async fn shake(
+        input: &[u8],
+        settings: &Settings,
+    ) -> (Result<Option<Accepted>, String>, Vec<Message>) {
+        let mut rd = input;
+        let mut out = Vec::new();
+        let mut dec = Decoder::new(Limits::default());
+        let r = handshake(&mut rd, &mut out, &mut dec, settings).await;
+        (r, decode_all(&out))
+    }
+
+    #[tokio::test]
+    async fn the_handshake_welcomes_a_good_hello_and_records_its_capabilities() {
+        let (r, sent) = shake(
+            &hello_bytes(None, PROTOCOL_VERSION, true),
+            &Settings::default(),
+        )
+        .await;
+        let accepted = r.unwrap().expect("accepted");
+        assert!(accepted.media_url);
+        assert!(accepted.speaker_id.starts_with("sat:"));
+        assert!(matches!(sent.as_slice(), [Message::Welcome(_)]));
+    }
+
+    #[tokio::test]
+    async fn the_handshake_refuses_without_a_welcome() {
+        let s = Settings {
+            token_hashes: vec![hash_token("secret")],
+            ..Settings::default()
+        };
+        let cases = [
+            (
+                hello_bytes(Some("nope"), PROTOCOL_VERSION, false),
+                "unauthorized",
+            ),
+            (hello_bytes(None, PROTOCOL_VERSION, false), "unauthorized"),
+            (
+                hello_bytes(Some("secret"), Version { major: 0, minor: 9 }, false),
+                "not supported",
+            ),
+            (encode(&Message::Ping.to_frame()).unwrap(), "must be hello"),
+        ];
+        for (input, needle) in cases {
+            let (r, sent) = shake(&input, &s).await;
+            assert!(r.unwrap().is_none(), "{needle}");
+            let [Message::Reject(rej)] = sent.as_slice() else {
+                panic!("expected one reject, got {sent:?}")
+            };
+            assert!(rej.reason.contains(needle), "{}", rej.reason);
+        }
+        // A peer that hangs up before saying anything is simply done.
+        let (r, sent) = shake(&[], &s).await;
+        assert!(r.unwrap().is_none() && sent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn effects_set_the_volume_within_bounds_and_hold_stream_commands_until_speech_ends() {
+        let mut st = SessionState::new(&Settings::default());
+        st.music = true;
+        let mut out = Vec::new();
+        let play = Effect::PlayStream {
+            url: "http://x/y".into(),
+            title: "Y".into(),
+        };
+        let effects = [
+            Effect::VolumeUp,
+            Effect::VolumeSet(250),
+            Effect::VolumeDown,
+            play.clone(),
+            Effect::Media(MediaCmd::Pause),
+        ];
+        apply_effects(&mut st, &mut out, true, &effects)
+            .await
+            .unwrap();
+        let levels: Vec<u8> = decode_all(&out)
+            .into_iter()
+            .map(|m| match m {
+                Message::SetVolume { level } => level,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(levels, [60, 100, 90]);
+        assert_eq!(st.after.len(), 2, "stream commands wait");
+        assert!(st.music, "nothing was started or stopped yet");
+
+        // Without the media_url capability the stream is refused once, in words, and nothing is queued.
+        let mut st = SessionState::new(&Settings::default());
+        let mut out = Vec::new();
+        apply_effects(&mut st, &mut out, false, &[play])
+            .await
+            .unwrap();
+        assert!(st.after.is_empty());
+        let sent = decode_all(&out);
+        assert!(matches!(
+            sent.as_slice(),
+            [Message::Error(e)] if e.code.as_deref() == Some("media-unsupported")
+        ));
+
+        // A stop clears what was waiting and marks the music as stopped.
+        st.after.push(Message::MediaControl(MediaAction::Resume));
+        st.music = true;
+        let mut out = Vec::new();
+        apply_effects(&mut st, &mut out, true, &[Effect::StopPlayback])
+            .await
+            .unwrap();
+        assert!(st.after.is_empty() && !st.music);
+        assert_eq!(decode_all(&out), [Message::StopPlayback]);
+    }
+
+    #[tokio::test]
+    async fn playback_done_resumes_ducked_music_and_progress_speech_does_not_move_the_dialog_on() {
+        let mut st = SessionState::new(&Settings::default());
+        let mut pending = Pending::default();
+        let mut out = Vec::new();
+
+        // Nothing playing: the message is ignored.
+        on_playback_done(&mut st, &mut out, &mut pending)
+            .await
+            .unwrap();
+        assert!(out.is_empty() && pending.steps.is_empty());
+
+        // Progress speech ended while the turn runs: no step for the dialog, music stays ducked.
+        st.playing = true;
+        st.progress_playing = true;
+        st.ducked = true;
+        on_playback_done(&mut st, &mut out, &mut pending)
+            .await
+            .unwrap();
+        assert!(!st.playing && !st.progress_playing && st.ducked);
+        assert!(out.is_empty() && pending.steps.is_empty());
+
+        // A reply ended: ducked music resumes and the dialog is told.
+        st.playing = true;
+        on_playback_done(&mut st, &mut out, &mut pending)
+            .await
+            .unwrap();
+        assert!(!st.playing && !st.ducked && st.music);
+        assert_eq!(
+            decode_all(&out),
+            [Message::MediaControl(MediaAction::Resume)]
+        );
+        assert_eq!(pending.steps.len(), 1);
+    }
+
+    #[test]
+    fn a_reset_request_is_rate_limited_trusted_and_needs_a_hook() {
+        let mut s = Settings::default();
+        assert_eq!(
+            reset_answer(&s, true, false).1.as_deref(),
+            Some("Not available.")
+        );
+        s.admin_reset = Some(AdminResetHook::new(|| Ok(30)));
+        assert_eq!(reset_answer(&s, true, false), (30, None));
+        assert!(
+            reset_answer(&s, false, false)
+                .1
+                .is_some_and(|r| r.contains("not trusted"))
+        );
+        assert!(
+            reset_answer(&s, true, true)
+                .1
+                .is_some_and(|r| r.contains("Too many"))
+        );
+        s.admin_reset = Some(AdminResetHook::new(|| Err("busy".into())));
+        assert_eq!(reset_answer(&s, true, false), (0, Some("busy".into())));
     }
 }
