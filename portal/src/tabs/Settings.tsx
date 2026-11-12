@@ -92,14 +92,6 @@ function Control(props: {
   if (sp.kind === "area") {
     return <textarea id={id} rows={7} maxLength={4000} value={v} onInput={input} />;
   }
-  if (sp.kind === "board") {
-    return (
-      <select id={id} value={v} onChange={input}>
-        <option value="none">None</option>
-        <option value="auto">Detect automatically</option>
-      </select>
-    );
-  }
   if (sp.kind === "choice") {
     return (
       <select id={id} value={v} disabled={sp.off} onChange={input}>

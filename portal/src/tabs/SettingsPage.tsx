@@ -88,18 +88,6 @@ function General(props: { s: SettingsData }): JSX.Element {
         ]}
       />
       <HardwareCard />
-      <Group
-        title="Hardware support"
-        settings={props.s}
-        intro="How ClawDot reaches this device's own parts, such as its lights."
-        specs={[
-          {
-            key: "board",
-            kind: "board",
-            hint: "Not used yet: the hardware layer is not built. The choice is saved for when it is. Choose None for a device ClawDot does not know.",
-          },
-        ]}
-      />
     </>
   );
 }
@@ -802,8 +790,8 @@ export function SettingsPage(props: { sub: string }): JSX.Element {
               <h4>Restart needed</h4>
               <p>These saved values are not running yet: {restartText(need)}.</p>
               <p>
-                ClawDot cannot restart itself safely from this page. Restart it on the device: for example run sudo
-                systemctl restart clawdot if it runs as a service, or stop the program and start it again.
+                ClawDot cannot restart itself safely from this page. Restart it on the device the way you start it: with
+                whatever runs it (a service manager or a supervisor script), or stop the program and start it again.
               </p>
             </div>
           ) : null}

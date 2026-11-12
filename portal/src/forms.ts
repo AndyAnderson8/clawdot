@@ -137,7 +137,6 @@ export const LABEL: Record<string, string> = {
   daily_spend_usd: "Most to spend per day",
   llm_usd_per_mtok_in: "Price of a million tokens sent",
   llm_usd_per_mtok_out: "Price of a million tokens received",
-  board: "Board",
   agent_max_rounds: "Rounds per request",
   agent_max_tool_calls: "Tool calls per request",
   agent_deadline_secs: "Seconds per request",
@@ -159,7 +158,7 @@ export const FROM: Record<string, string> = {
 };
 
 export type SettingKind =
-  "text" | "zone" | "area" | "board" | "number" | "money" | "choice" | "bool" | "time" | "language" | "voice" | "model";
+  "text" | "zone" | "area" | "number" | "money" | "choice" | "bool" | "time" | "language" | "voice" | "model";
 export interface SettingSpec {
   key: string;
   kind: SettingKind;
