@@ -6,7 +6,118 @@ use crate::cli::Args;
 use crate::config::{AgentConfig, Config};
 use crate::env::Env;
 use crate::inbox::endpoint::QuietHours;
-use crate::settings::{self, SettingsState, Sources};
+use crate::settings::{self, Layer, SettingsState, Sources};
+
+/// Where one setting comes from in the configuration file: the setting's key (a row of [`settings::FIELDS`]) and
+/// the JSON pointer to its value in the file's settings sections, as [`settings_view`] lays them out.
+#[derive(Debug, Clone, Copy)]
+struct FileKey {
+    setting: &'static str,
+    path: &'static str,
+    /// A whole number above the setting's ceiling is shown at the ceiling it will be held to (REQ-CFG-062).
+    clamp: bool,
+}
+
+const fn key(setting: &'static str, path: &'static str) -> FileKey {
+    FileKey {
+        setting,
+        path,
+        clamp: false,
+    }
+}
+
+const fn clamped(setting: &'static str, path: &'static str) -> FileKey {
+    FileKey {
+        setting,
+        path,
+        clamp: true,
+    }
+}
+
+/// Every setting whose value can come from the configuration file, and where in the file it comes from. A setting
+/// the file cannot set (the persona text comes from a file of its own, the price per token and the quiet hours
+/// only from the portal) has no row. A test requires that every field of the file's settings sections has a row
+/// here or is named in `NOT_SETTINGS`, and that every row names a setting and a field that exist.
+const FILE_KEYS: &[FileKey] = &[
+    key("device_name", "/name"),
+    key("zone", "/zone"),
+    key("listen", "/listen"),
+    key("public_url", "/public_url"),
+    key("llm_url", "/llm/url"),
+    key("llm_model", "/llm/model"),
+    key("llm_key_env", "/llm/key_env"),
+    key("daily_spend_usd", "/limits/daily_spend_usd"),
+    key("voice", "/speech/voice"),
+    key("speech_provider", "/speech/provider"),
+    key("speech_language", "/speech/language"),
+    clamped("agent_max_rounds", "/agent/max_rounds"),
+    clamped("agent_max_tool_calls", "/agent/max_tool_calls"),
+    clamped("agent_deadline_secs", "/agent/deadline_secs"),
+    clamped("agent_tool_timeout_secs", "/agent/tool_timeout_secs"),
+    key("plan_speech", "/agent/plan_speech"),
+    key("progress_speech", "/agent/progress_speech"),
+    key("notes", "/agent/notes"),
+    key("update_check", "/updates/check"),
+    key("max_actions_per_day", "/limits/max_actions_per_day"),
+    key("max_costly_per_day", "/limits/max_costly_per_day"),
+    key("dry_run", "/limits/dry_run"),
+    key("realtime_enabled", "/voice/realtime/enabled"),
+    key("realtime_url", "/voice/realtime/url"),
+    key("realtime_model", "/voice/realtime/model"),
+    key("realtime_voice", "/voice/realtime/voice"),
+    key("realtime_key_env", "/voice/realtime/key_env"),
+    key(
+        "realtime_transcription_model",
+        "/voice/realtime/transcription_model",
+    ),
+    key("realtime_usd_per_min_in", "/voice/realtime/usd_per_min_in"),
+    key(
+        "realtime_usd_per_min_out",
+        "/voice/realtime/usd_per_min_out",
+    ),
+    key(
+        "realtime_max_session_secs",
+        "/voice/realtime/max_session_secs",
+    ),
+];
+
+/// The settings sections of `c` as one JSON object, so a row of [`FILE_KEYS`] can find its value by pointer. An
+/// unset field is `null`.
+fn settings_view(c: &Config) -> serde_json::Value {
+    serde_json::json!({
+        "name": c.name,
+        "zone": c.zone,
+        "listen": c.listen,
+        "public_url": c.public_url,
+        "llm": c.llm,
+        "limits": c.limits,
+        "agent": c.agent,
+        "speech": c.speech,
+        "updates": c.updates,
+        "voice": c.voice,
+    })
+}
+
+/// The settings layer for the configuration file: the value of every setting the file sets, and nothing else, so
+/// the defaults show through for the rest.
+pub fn file_layer(c: &Config) -> Layer {
+    let view = settings_view(c);
+    FILE_KEYS
+        .iter()
+        .filter_map(|k| {
+            let v = view.pointer(k.path).filter(|v| !v.is_null())?;
+            let v = match v.as_u64() {
+                // The range is the one on the setting's table row, so the two cannot drift apart.
+                Some(n) if k.clamp => {
+                    let (lo, hi) = settings::whole_range(k.setting).unwrap_or((0, u64::MAX));
+                    serde_json::Value::from(n.clamp(lo, hi))
+                }
+                _ => v.clone(),
+            };
+            Some((k.setting.to_owned(), v))
+        })
+        .collect()
+}
 
 pub fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     if let Some(d) = &c.data_dir {
@@ -26,83 +137,8 @@ pub fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     #[cfg(feature = "esphome-satellite")]
     a.esphome.clone_from(&c.esphome);
     a.create.extend(c.endpoints.iter().cloned());
-    let mut put = |k: &str, v: Option<serde_json::Value>| {
-        if let Some(v) = v {
-            a.file_layer.insert(k.to_owned(), v);
-        }
-    };
-    put("device_name", c.name.clone().map(Into::into));
-    put("zone", c.zone.clone().map(Into::into));
-    put("listen", c.listen.clone().map(Into::into));
-    put("public_url", c.public_url.clone().map(Into::into));
-    put("llm_url", c.llm.url.clone().map(Into::into));
-    put("llm_model", c.llm.model.clone().map(Into::into));
-    put("llm_key_env", c.llm.key_env.clone().map(Into::into));
-    put("daily_spend_usd", c.limits.daily_spend_usd.map(Into::into));
-    put("voice", c.speech.voice.clone().map(Into::into));
-    put("speech_provider", c.speech.provider.clone().map(Into::into));
-    put("speech_language", c.speech.language.clone().map(Into::into));
     a.agent = c.agent.clone();
-    // The agent and limit settings join the layers so the portal can show and change them (REQ-CFG-062).
-    // A value above its ceiling is shown at the ceiling it will be held to.
-    // The range is the one on the setting's table row, so the two cannot drift apart.
-    let ceil = |key: &str, v: Option<u64>| {
-        v.map(|n| {
-            let (lo, hi) = settings::whole_range(key).unwrap_or((0, u64::MAX));
-            serde_json::Value::from(n.clamp(lo, hi))
-        })
-    };
-    put(
-        "agent_max_rounds",
-        ceil("agent_max_rounds", c.agent.max_rounds.map(|n| n as u64)),
-    );
-    put(
-        "agent_max_tool_calls",
-        ceil(
-            "agent_max_tool_calls",
-            c.agent.max_tool_calls.map(|n| n as u64),
-        ),
-    );
-    put(
-        "agent_deadline_secs",
-        ceil("agent_deadline_secs", c.agent.deadline_secs),
-    );
-    put(
-        "agent_tool_timeout_secs",
-        ceil("agent_tool_timeout_secs", c.agent.tool_timeout_secs),
-    );
-    put("plan_speech", c.agent.plan_speech.map(Into::into));
-    put("progress_speech", c.agent.progress_speech.map(Into::into));
-    put("notes", c.agent.notes.map(Into::into));
-    put("update_check", c.updates.check.map(Into::into));
-    put(
-        "max_actions_per_day",
-        c.limits.max_actions_per_day.map(Into::into),
-    );
-    put(
-        "max_costly_per_day",
-        c.limits.max_costly_per_day.map(Into::into),
-    );
-    put("dry_run", c.limits.dry_run.map(Into::into));
-    let r = &c.voice.realtime;
-    put("realtime_enabled", r.enabled.map(Into::into));
-    put("realtime_url", r.url.clone().map(Into::into));
-    put("realtime_model", r.model.clone().map(Into::into));
-    put("realtime_voice", r.voice.clone().map(Into::into));
-    put("realtime_key_env", r.key_env.clone().map(Into::into));
-    put(
-        "realtime_transcription_model",
-        r.transcription_model.clone().map(Into::into),
-    );
-    put("realtime_usd_per_min_in", r.usd_per_min_in.map(Into::into));
-    put(
-        "realtime_usd_per_min_out",
-        r.usd_per_min_out.map(Into::into),
-    );
-    put(
-        "realtime_max_session_secs",
-        r.max_session_secs.map(Into::into),
-    );
+    a.file_layer.extend(file_layer(c));
     Ok(())
 }
 
@@ -315,6 +351,147 @@ mod tests {
             Some((1, 120))
         );
         assert_eq!(settings::whole_range("zone"), None);
+    }
+
+    /// Top-level keys of the file that are not settings: the program reads them straight from the parsed file.
+    /// (`speech` and `updates` have rows in `FILE_KEYS` for the few of their fields that are settings; the rest of
+    /// those two sections is read directly too.)
+    const READ_DIRECTLY: &[&str] = &[
+        "data_dir",
+        "persona_file",
+        "endpoints",
+        "tools",
+        "mcp",
+        "stations",
+        "speech",
+        "satellite",
+        "device",
+        "updates",
+        "esphome",
+    ];
+
+    /// Fields of the settings sections that are not settings and are not mapped: three were removed and are
+    /// accepted but ignored (see `settings::RETIRED`), `summarize_over_chars` is read from the parsed file, and
+    /// the realtime `provider` has one possible value.
+    const NOT_SETTINGS: &[&str] = &[
+        "/llm/fallback_model",
+        "/llm/summary_model",
+        "/limits/max_requests_per_day",
+        "/agent/summarize_over_chars",
+        "/voice/realtime/provider",
+    ];
+
+    /// The top-level keys of the file, as serde lists them in the error for an unknown key.
+    fn file_keys() -> Vec<String> {
+        let e = serde_json::from_str::<Config>(r#"{"__no_such_key": 0}"#)
+            .unwrap_err()
+            .to_string();
+        let listed = e.split("expected").nth(1).unwrap();
+        listed
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The pointer to every field in `v`, down to the ones that are not objects.
+    fn leaves(v: &serde_json::Value, at: &str, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, x) in m {
+                    leaves(x, &format!("{at}/{k}"), out);
+                }
+            }
+            _ => out.push(at.to_owned()),
+        }
+    }
+
+    // REQ-CFG-038, REQ-CFG-062: a setting that can come from the file says where, in one place.
+    #[test]
+    fn every_row_of_the_file_table_names_a_setting_and_a_field_that_exist() {
+        let mut leaf = Vec::new();
+        leaves(&settings_view(&Config::default()), "", &mut leaf);
+        let mut seen = std::collections::BTreeSet::new();
+        for k in FILE_KEYS {
+            assert!(settings::field(k.setting).is_some(), "{}", k.setting);
+            assert!(leaf.iter().any(|l| l == k.path), "{}", k.path);
+            assert!(seen.insert(k.setting), "{} appears twice", k.setting);
+            assert!(
+                !k.clamp || settings::whole_range(k.setting).is_some(),
+                "{} is clamped but is not a whole number",
+                k.setting
+            );
+        }
+        let paths: std::collections::BTreeSet<_> = FILE_KEYS.iter().map(|k| k.path).collect();
+        assert_eq!(paths.len(), FILE_KEYS.len(), "a path is mapped twice");
+    }
+
+    // A field added to the file's settings sections without a row fails here until it has one (or is named as not
+    // a setting).
+    #[test]
+    fn every_field_of_the_settings_sections_has_a_row_or_is_named_as_not_a_setting() {
+        let top = file_keys();
+        for k in READ_DIRECTLY {
+            assert!(top.iter().any(|t| t == k), "`{k}` is not a key of the file");
+        }
+        for t in &top {
+            let mapped = FILE_KEYS
+                .iter()
+                .any(|k| k.path.split('/').nth(1) == Some(t.as_str()));
+            assert!(
+                mapped || READ_DIRECTLY.contains(&t.as_str()),
+                "`{t}` is a key of the file with no row in FILE_KEYS; add one, or add it to READ_DIRECTLY"
+            );
+        }
+        let mut leaf = Vec::new();
+        leaves(&settings_view(&Config::default()), "", &mut leaf);
+        for l in &leaf {
+            let section = l.split('/').nth(1).unwrap();
+            if READ_DIRECTLY.contains(&section) {
+                continue;
+            }
+            let mapped = FILE_KEYS.iter().any(|k| k.path == l);
+            assert!(
+                mapped != NOT_SETTINGS.contains(&l.as_str()),
+                "`{l}` must have a row in FILE_KEYS or be listed in NOT_SETTINGS, and not both"
+            );
+        }
+        for n in NOT_SETTINGS {
+            assert!(leaf.iter().any(|l| l == n), "{n} is not a field");
+        }
+    }
+
+    // Each row delivers the field it names: a file that sets only that field puts only that setting in the layer.
+    #[test]
+    fn each_row_carries_its_field_into_the_layer() {
+        use serde_json::json;
+        for k in FILE_KEYS {
+            let delivered = [json!("x"), json!(true), json!(7), json!(1.5)]
+                .into_iter()
+                .find_map(|probe| {
+                    let mut file = probe.clone();
+                    for part in k
+                        .path
+                        .split('/')
+                        .skip(1)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                    {
+                        file = json!({ part: file });
+                    }
+                    let c: Config = serde_json::from_value(file).ok()?;
+                    Some(file_layer(&c)).filter(|l| !l.is_empty())
+                })
+                .unwrap_or_else(|| panic!("{} did not reach the layer", k.path));
+            assert_eq!(
+                delivered.keys().map(String::as_str).collect::<Vec<_>>(),
+                [k.setting],
+                "{}",
+                k.path
+            );
+        }
     }
 
     #[test]
