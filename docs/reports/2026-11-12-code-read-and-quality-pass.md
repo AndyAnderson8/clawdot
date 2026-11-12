@@ -120,3 +120,69 @@ The README, the architecture overview, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTIN
 | `main.rs` | 41 lines in `main` |
 | Functions over 70 lines in the core | 26 (the longest is a protocol decoder) |
 | Spec version | 0.53 |
+
+## Second pass, later the same day
+
+The reading continued through the rest of the core's own logic, the agent bridge and the satellite protocol. Everything in this section is on `dev`, each landed after the whole workspace test suite passed. As before, none of it has run on a device. The product spec stands at version 0.54 and the ESPHome spec at 0.3.
+
+### What was read in this pass
+
+- **Core:** the fast path (`fastpath.rs`), the dispatcher and built-in tools (`assistant.rs`, `assistant/tools.rs`), the inbox queue, events and reply queue (`inbox/queue.rs`, `event.rs`, `reply.rs`), configuration, flags, seeding and start-up (`config.rs`, `cli.rs`, `seed.rs`, `startup.rs`, `commands.rs`), the settings validators, the speaker task and speech set-up (`speaker.rs`, `speechio.rs`), `media.rs`, `say.rs`, `skillfolder.rs`, `stopwatch.rs`, `vad.rs`, the ESPHome configuration, client and file server (`esphome_cfg.rs`, `esphome/client.rs`, `esphome/media.rs`), and the hive's entry point.
+- **New code from the three structural changes below**, before each landed: the speech providers and shared client, the application loop's files and the live-settings table, the streamed ESPHome reply.
+- **Other crates:** the agent bridge (`crates/bridge`, all of it) and the satellite protocol's messages (`crates/protocol`).
+- **Portal:** only a search for unsafe rendering of outside data. None was found: no raw HTML, links from the update feed are checked by the core, and the session token lives in the tab's session storage.
+
+**Still not read:** the ESPHome wire format and Noise code (`esphome/proto.rs`, `frame.rs`, `noise.rs`), hive discovery and DNS, the unread parts of `mcp.rs`, `update.rs`, `audit.rs`, `llm.rs`, `satellite.rs` and `sched.rs`, the reference satellite, the device daemon, the wake-word runtime, the evaluation and end-to-end crates, and most of the portal's TypeScript.
+
+### Problems found and fixed
+
+| Problem | Fix |
+|---|---|
+| A spoken reply went to the event that **arrived** last, not the one **spoken** last. An urgent event is spoken before an older one and a snoozed one comes back later, so "tell it to carry on" could reach a different agent than the one just heard. | Each event records the order it was last spoken in, and a reply goes to the one spoken most recently (REQ-INB-008). |
+| With no speaker connected (the speaker off, or its link down), every waiting agent event was still summarised by the model, at a cost, and marked as announced. Nobody heard it. | When a satellite is configured and nobody is at the terminal, an event waits until one is connected (REQ-INB-006). |
+| The agent bridge remembered handled replies by number alone. A speaker whose data was reset numbers its replies from one again, so the bridge acknowledged new spoken instructions as already handled and never ran them. | A reply is known by its number and the time it was queued. |
+| A `SKILL.md` at the top of an upload made every Markdown file beside it both a helper file and a second skill. | A file below a skill folder is that skill's helper only. |
+| In the new streamed ESPHome reply, a sentence that arrived after a pause was sent to the device all at once, which a small device buffer may drop. | Pacing restarts from when the sentence arrives. |
+| When a speaker spoke twice quickly and the second request could be answered at once, its answer came out before the answer to the first. | The finished turn's reply is delivered first. |
+| The start-up warning still said timers do not ring before the clock is set; the `--name` help named the wrong default; two checks asked whether the speech provider was "the OpenAI style" by name where the question is whether it has its own address. | Corrected. |
+
+### Structure
+
+- **Speech is one file per provider** behind a `Provider` trait (`speech/openai.rs`, `elevenlabs.rs`, `deepgram.rs`); the provider is matched in one place, where it was matched in about seventeen. The shared HTTP client (`apiclient.rs`), the audio helpers (`audio.rs`) and the plain-http rule (`netpolicy.rs`) are their own modules, and the language model's list of models moved to the language-model client.
+- **The application loop's behaviour is all on `App`**, in `app_loop/turns.rs`, `portal.rs` and `connections.rs`. `runtime.rs` went from 1,631 lines to 489. The live settings are a table of appliers, with a test that every live setting has exactly one. Ten large inline test modules moved to their own files. The built-in webhook adapters are a list of embedded files, so no product is named in that code.
+- **ESPHome devices can play a reply from its first sentence.** A per-device setting, `reply`, is `whole` (the default, as before) or `streamed`. `streamed` rests on device behaviour the repository has no record of (a pause between sentences in API audio; a WAV with no declared length over a chunked response), so it is off until tried on a device.
+- **The bridge uses its `Harness` trait**, which existed but was bypassed for the one concrete harness.
+- One end-to-end test that timed out under load is now held open by a gate instead of a fixed delay.
+
+### In progress
+
+- **Binding a spoken instruction to its agent.** Today the read-back says "I will send this to the agent" without saying which, and the destination is looked up when the held call finally runs. An event announced between the read-back and the "yes" would receive the confirmed text. The change binds the call to the event at read-back time and names the origin.
+- **Language as data.** Confirmation words, memory commands, the fast path's number words and grammar, sentence abbreviations and date words are English lists inside the functions that use them, and the fast path's intents are strings. They are moving into one language module and a typed intent, with no change in behaviour. A second language stays out of scope.
+
+### Found and not yet changed
+
+- **Endpointer tuning is fixed in code** (`vad.rs`: level, noise ratio, silence length). A microphone with a different gain cannot be tuned without rebuilding. This belongs in the device's preset or the satellite's configuration.
+- **A timer that rings while no speaker is connected is not heard** and is not repeated; the line is dropped. Agent events now wait; rung timers do not.
+- **Devices connected through ESPHome have no local password reset.** The reset by a long button press exists only in the native satellite protocol.
+- **Start-up arguments are one mutable bag** (`cli::Args`) that holds the flags, the configuration file's sections and the settings resolved from them, and `seed.rs` maps configuration keys to setting keys by hand, so a new setting is added in three places.
+- **`commands.rs` still names one adapter in code** when it prints the set-up snippet for a new endpoint; the snippet should come from the adapter's own file.
+- **The realtime address is not checked against the plain-http rule when it is saved**, only when it connects, so a refused address is reported late.
+- **The bridge reads lines and headers of any length** from the speaker, and does not parse an IPv6 address in `--url`.
+- **The fast path's grammar names one product** ("tell claude to ..."). It becomes data with the language work; whether it stays is a wording decision.
+
+### Decisions needed, added to the list above
+
+8. **Try `reply: streamed` on the Echo Dot.** It needs the current build on the device and one line in its configuration. What to listen for is in [esphome-satellite.md](../architecture/esphome-satellite.md).
+9. **The assumed name `clawdot.local`.** With no public address set and a listen address of `0.0.0.0`, printed snippets use `clawdot.local` (REQ-CFG-009, REQ-CFG-016) whatever the machine is called. The core already reads the machine's name for the Host check and could use it here.
+10. **Languages.** After the language work the core can take a second language as a data file, but the spoken sentences are still English text in code. Whether English only is acceptable for the first release decides how far that goes.
+11. **A rung timer with no speaker connected:** drop it (today), repeat it when a speaker returns, or sound it only if the speaker returns within a short time.
+
+### Numbers after this pass
+
+| Measure | Value |
+|---|---|
+| Core unit tests, all features | 926 |
+| `runtime.rs` | 489 lines (was 1,631) |
+| Functions over 70 lines in the core | 25 |
+| Product spec | 0.54 |
+| ESPHome spec | 0.3 |
