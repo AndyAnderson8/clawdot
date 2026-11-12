@@ -478,12 +478,8 @@ impl AuditLog {
             return None;
         }
         line.push('\n');
-        if let Err(e) = s.write(&line) {
-            s.write_errors = s.write_errors.saturating_add(1);
-            crate::diag::error(&format!("could not write the audit log: {e}"));
-            return None;
-        }
-        s.next_id = id.saturating_add(1);
+        // The daily caps count what ran, whether or not the record could be written: a full or read-only disk
+        // must not turn the caps off (REQ-SEC-016).
         let counted = a.decision == decision::RAN || a.decision == decision::APPROVED;
         if counted && a.tier.is_some_and(|t| t != Tier::ReadOnly) {
             s.load_counts(day);
@@ -492,6 +488,12 @@ impl AuditLog {
                 s.counts.costly = s.counts.costly.saturating_add(1);
             }
         }
+        if let Err(e) = s.write(&line) {
+            s.write_errors = s.write_errors.saturating_add(1);
+            crate::diag::error(&format!("could not write the audit log: {e}"));
+            return None;
+        }
+        s.next_id = id.saturating_add(1);
         Some(id)
     }
 
@@ -1818,5 +1820,40 @@ mod tests {
         assert_eq!(page.records[0].tier, "unknown");
         assert!(!page.records[0].tool.contains('\n'));
         assert_eq!(log.health().corrupt_lines, 0);
+    }
+
+    // REQ-SEC-016: the caps must hold when the log cannot be written (a full or read-only disk).
+    #[test]
+    fn an_action_counts_toward_the_caps_even_when_its_record_cannot_be_written() {
+        let dir = TempDir::new("audit-unwritable");
+        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+        let act = |tool: &'static str| Act {
+            tool,
+            tier: Some(Tier::Costly),
+            args: &Value::Null,
+            decision: decision::RAN,
+            held_id: None,
+            outcome: Some(Ok("ok")),
+            note: None,
+        };
+        assert!(
+            log.record(100, 1, 1, "voice", None, &act("first"))
+                .is_some()
+        );
+        assert_eq!(log.today(1), (1, 1));
+        // Put a directory where the log file is, so the next append fails.
+        for entry in std::fs::read_dir(&dir.0).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            }
+        }
+        assert!(
+            log.record(101, 1, 1, "voice", None, &act("second"))
+                .is_none()
+        );
+        assert_eq!(log.today(1), (2, 2), "the action ran, so it counts");
+        assert!(log.health().write_errors >= 1);
     }
 }
