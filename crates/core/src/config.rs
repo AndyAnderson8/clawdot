@@ -440,8 +440,7 @@ impl Config {
             let addr: SocketAddr = l.parse().map_err(|e| {
                 format!("config: `satellite.listen` is not an address like 0.0.0.0:10400: {e}")
             })?;
-            if self.speech.url.is_none() && self.speech.dialect() == crate::speech::Dialect::OpenAi
-            {
+            if self.speech.url.is_none() && self.speech.dialect().default_url().is_none() {
                 return Err("config: `satellite.listen` needs the `speech` section".into());
             }
             if !addr.ip().is_loopback() && self.satellite.token_env.is_none() {
@@ -457,7 +456,7 @@ impl Config {
             self.esphome.validate()?;
             if !self.esphome.is_empty()
                 && self.speech.url.is_none()
-                && self.speech.dialect() == crate::speech::Dialect::OpenAi
+                && self.speech.dialect().default_url().is_none()
             {
                 return Err("config: `esphome` needs the `speech` section".into());
             }
@@ -486,8 +485,8 @@ impl Config {
                 crate::speech::Dialect::parse,
             )
             .map_err(|e| format!("config: `speech.provider`: {e}"))?;
-        if dialect != crate::speech::Dialect::OpenAi {
-            // The other services have their own address, models and voice; none of the rest is required.
+        if dialect.default_url().is_some() {
+            // A service with its own address has its own models and voice too; none of the rest is required.
         } else if sp.url.is_some() {
             for (key, v) in [
                 ("stt_model", &sp.stt_model),
