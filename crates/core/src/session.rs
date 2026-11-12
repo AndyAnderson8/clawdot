@@ -1312,7 +1312,7 @@ async fn run_turn_from<B: ChatBackend, H: ToolHost>(
         return r;
     }
 
-    if t.by_user {
+    if t.by_user() {
         // A question the assistant asked is answered by this turn; "never mind" drops it.
         let asked = t
             .conv

@@ -9,19 +9,20 @@
 
 use super::*;
 
-/// One turn in progress: the pieces the gate needs, with the host's bookkeeping.
+/// One turn in progress: the pieces the gate needs, with the host's bookkeeping. The fields only the gate
+/// reads are private; the rest are the state the model loop in `run_turn_from` works on between rounds.
 pub(super) struct Turn<'a, H> {
-    pub(super) ctl: &'a TurnCtl,
+    ctl: &'a TurnCtl,
     pub(super) host: &'a mut H,
     pub(super) conv: &'a mut Conversation,
     pub(super) usage: &'a mut UsageTracker,
     pub(super) cfg: TurnConfig,
-    pub(super) turn: Option<TurnLog>,
+    turn: Option<TurnLog>,
     pub(super) st: TurnState,
     pub(super) result: TurnResult,
-    pub(super) by_user: bool,
-    pub(super) day: i64,
-    pub(super) now: Ts,
+    by_user: bool,
+    day: i64,
+    now: Ts,
 }
 
 /// An audit record for a call that was refused before it had a tier or arguments worth recording.
@@ -157,6 +158,11 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             day,
             now,
         }
+    }
+
+    /// Whether the user's own voice started this turn (an event did not).
+    pub(super) fn by_user(&self) -> bool {
+        self.by_user
     }
 
     /// End the turn because the user cancelled it: discard what was held, record it, and say what was and was
