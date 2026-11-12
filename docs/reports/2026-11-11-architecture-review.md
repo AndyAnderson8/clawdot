@@ -100,6 +100,35 @@ Priority 1 is worth doing before the next feature. Priority 2 is debt that slows
 
 Everything else in the tables can be done alongside, when a change touches the same file.
 
+## Status at the end of 2026-11-11
+
+What was done about each finding the same day. "Done" means landed on `dev` with CI green; it does not mean run on the Dot, which still has the morning build.
+
+| Finding | Status |
+|---|---|
+| C1, C2, C9 | Done. Turns, realtime sessions and speech are tasks beside the loop; a conversation and a held confirmation per speaker; one gate (ADR-0021). A portal MCP connect and the start-up connects of saved sources are tasks too. Checked on the real binary on a PC: a 4 s timer rang on time during a 10 s model reply. |
+| C3 | Done on the Rust side: one row per setting. The portal still keeps its own labels, kinds and limits. |
+| C4 | Done: every HTTP route is a table row with an auth class, and the OpenAPI check reads the tables. The token check itself still runs inside each handler. |
+| C5 | Done: `main.rs` went from 2,056 lines to about 310. |
+| C6 | Done, except the log ring, the hardware probe and a clock origin, which stay global on purpose. A test runs two cores in one process. |
+| C7 | Done: `run_turn_from` is about 160 lines, `run_session` about 75, `main` is thin. `session/gate.rs` `dispatch` (about 340 lines) is the longest left. |
+| C8 | Done where a caller branches: `ProviderError` and the MCP client's `RpcError`. No production code matches on error text now. Other errors stay strings. |
+| C10 | Done: `env.rs` reads the environment once. |
+| C11 | Left, as the review said. |
+| C12 | Part done: `--version` and `/api/about` carry the git commit. The version is still `0.0.0`. |
+| D1 | Done: CI builds both armv7 binaries and fails over 8 MiB. The full build was 3,398,652 bytes at the end of the day. |
+| D2, D3, D4 | Open. D2 needs the maintainer's decision. |
+| P1 | Done. |
+| P5 | Done: one confirm dialog. |
+| P2, P3, P4, P6 | Open. |
+| R1 | Part done (see the proving pass report). Realtime, ElevenLabs and Deepgram are still unproven against the real services. |
+| R2 | Open by choice: the gate mode is the maintainer's call (ADR-0018). CI runs on every push and was checked after each landing. |
+| R3 | Done: about 24 s inside WSL. |
+| R4, R5 | Open. |
+| R6 | Done, and build caches of finished worktrees are now removed with them: they had filled the disk. |
+
+Found along the way and fixed: the core crate failed eight of its own tests when built alone without default features (CI now tests it alone), and a server error whose text contained "401" was reported as a bad key.
+
 ## What this review did not do
 
 It read the code and measured it; it did not profile memory or latency on the device, audit the cryptography in the Noise or hive code line by line, or review the wake-word and device crates in depth.
