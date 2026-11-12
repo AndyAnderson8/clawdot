@@ -115,6 +115,22 @@ impl ToolReq {
     pub async fn serve(self, assistant: &mut Assistant) {
         let result = assistant.call_tool(&self.name, &self.args).await;
         let effects = assistant.take_effects();
+        let saved = assistant.unconfirmed();
+        // A model told "timer set" says so at once (a realtime session speaks it as it arrives), so the result
+        // is held back until the change is on disk. That wait is in its own task: the loop does not stand
+        // still for flash.
+        match saved {
+            Some(saved) => {
+                tokio::spawn(async move {
+                    saved.wait().await;
+                    self.answer(result, effects);
+                });
+            }
+            None => self.answer(result, effects),
+        }
+    }
+
+    fn answer(self, result: Result<String, String>, effects: Vec<Effect>) {
         // The tool has run; if the turn that asked is gone, its result and effects have nowhere to go. Say so
         // once (the tool name only, never its arguments) so a timer that rang for nobody can be traced.
         if self.reply.send(ToolAnswer { result, effects }).is_err() {
@@ -1129,5 +1145,51 @@ mod tests {
             lines.iter().all(|l| !l.text.contains("zq-secret-label")),
             "arguments were logged"
         );
+    }
+
+    /// REQ-TMR-003: the model (or a realtime session) hears "timer set" only once the timer is on disk, and the
+    /// loop that serves the call is not held while it waits.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_timer_tool_result_waits_for_the_disk_without_holding_the_loop() {
+        use crate::app::{Adapters, Core, Limits, Stores};
+        use crate::store::{JsonStore, testutil::TempDir};
+        let dir = TempDir::new("tool-durable");
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(crate::sched::SystemClock);
+        let core = Arc::new(
+            Core::open(
+                clock.clone(),
+                Adapters::builtin(),
+                Limits::default(),
+                Stores::in_dir(&dir.0),
+            )
+            .unwrap(),
+        );
+        let store = JsonStore::new(dir.0.join("timers.json"), crate::sched::SCHEMA);
+        let mut assistant = Assistant::new(
+            clock,
+            Box::new(FixedOffset(0)),
+            Scheduler::new(8),
+            Some(store.clone()),
+            Some(Arc::clone(&core)),
+        );
+        let writer = core.writer().unwrap();
+        writer.pause();
+        let (reply, mut answer) = oneshot::channel();
+        let req = ToolReq {
+            name: "set_timer".into(),
+            args: serde_json::json!({"seconds": 600, "label": "tea"}),
+            reply,
+        };
+        req.serve(&mut assistant).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(answer.try_recv().is_err(), "answered before the save");
+        assert!(!store.path().exists());
+        writer.resume();
+        let a = answer.await.unwrap();
+        assert!(a.result.is_ok(), "{:?}", a.result);
+        let saved: Scheduler = Scheduler::load(&store, 8).unwrap();
+        assert_eq!(saved.list().len(), 1);
     }
 }

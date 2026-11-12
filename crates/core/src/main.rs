@@ -15,8 +15,8 @@ use clawdot_core::commands::{
 use clawdot_core::diag;
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::runtime::{
-    SpeakerView, deliver, dispatch, drain, mcp_connected, on_hub_event, portal_op, settings_extra,
-    zone_for,
+    SpeakerView, deliver_confirmed, dispatch, drain, mcp_connected, on_hub_event, portal_op,
+    settings_extra, zone_for,
 };
 use clawdot_core::satellite::{self, Ask};
 use clawdot_core::sched::{Clock, SystemClock};
@@ -267,10 +267,16 @@ async fn main() -> ExitCode {
             line = line_rx.recv(), if args.console => {
                 let Some(line) = line else {
                     drain(&mut brain, &mut hub, &core).await;
+                    brain.save_usage();
+                    core.flush_blocking();
                     return ExitCode::SUCCESS;
                 };
                 if line.is_empty() { continue; }
-                if is_quit(&line) { return ExitCode::SUCCESS; }
+                if is_quit(&line) {
+                    brain.save_usage();
+                    core.flush_blocking();
+                    return ExitCode::SUCCESS;
+                }
                 let req = Request {
                     speaker: "console".into(),
                     line,
@@ -278,7 +284,7 @@ async fn main() -> ExitCode {
                     origin: Origin::Console,
                 };
                 if let Some((origin, reply)) = dispatch(&mut brain, &mut hub, req) {
-                    deliver(origin, reply);
+                    deliver_confirmed(&brain, origin, reply);
                 }
             }
             Some(job) = rt_rx.recv() => {
@@ -297,7 +303,7 @@ async fn main() -> ExitCode {
                     origin: Origin::Ask(ask.reply),
                 };
                 if let Some((origin, reply)) = dispatch(&mut brain, &mut hub, req) {
-                    deliver(origin, reply);
+                    deliver_confirmed(&brain, origin, reply);
                 }
             }
             ev = hub.next() => {

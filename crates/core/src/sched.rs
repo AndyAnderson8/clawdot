@@ -297,6 +297,14 @@ impl Scheduler {
         store.save(&self.state)
     }
 
+    /// The bytes [`Scheduler::save`] would write, for handing to the background writer.
+    ///
+    /// # Errors
+    /// A state that cannot be serialised.
+    pub fn encode(&self, store: &JsonStore) -> Result<Vec<u8>, StoreError> {
+        store.encode(&self.state)
+    }
+
     fn insert(&mut self, mut item: Item) -> Result<u64, SchedError> {
         if self.state.items.len() >= self.max_items {
             return Err(SchedError::TooMany);
@@ -492,16 +500,6 @@ impl Scheduler {
         let mut v: Vec<&Item> = self.state.items.iter().collect();
         v.sort_by_key(|i| (i.fire_at, i.id));
         v
-    }
-
-    /// Seconds until the soonest item, for sleeping the event loop; `None` when empty.
-    #[must_use]
-    pub fn next_due_in(&self, now: Ts) -> Option<i64> {
-        self.state
-            .items
-            .iter()
-            .map(|i| (i.fire_at - now).max(0))
-            .min()
     }
 
     /// Seconds left on a timer (or time until any item).
@@ -765,17 +763,6 @@ mod tests {
         assert_eq!(s.list()[0].fire_at, utc(2026, 11, 7, 7, 9));
         assert_eq!(s.list()[0].label, "wake");
         assert!(s.snooze(clock.now(), &fired, 5).is_err());
-    }
-
-    #[test]
-    fn next_due_in_drives_the_event_loop_sleep() {
-        let mut s = Scheduler::new(8);
-        assert_eq!(s.next_due_in(100), None);
-        let t0 = utc(2026, 11, 7, 12, 0);
-        s.set_timer(t0, 30, "a").unwrap();
-        s.set_timer(t0, 90, "b").unwrap();
-        assert_eq!(s.next_due_in(t0), Some(30));
-        assert_eq!(s.next_due_in(t0 + 1000), Some(0));
     }
 
     #[test]

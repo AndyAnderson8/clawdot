@@ -130,6 +130,8 @@ No raw audio is ever stored.
 
 The endpoint, inbox and reply files are compact JSON, and a change rewrites only the file it changed (an acknowledgement from a bridge touches `replies.json` alone). The core serialises under its lock and a small writer thread does the writes, coalescing several changes to one file into one write, so neither the lock nor the async runtime waits for flash. The HTTP layer awaits that thread before it answers, so a webhook, announcement or acknowledgement that was reported as accepted is on disk (REQ-INB-004).
 
+The timers file and the usage counters use the same writer, so the main loop never waits for flash on them either. A reply that tells the user a timer, alarm or reminder is set is held back (in its own task, not in the loop) until that change is on disk, so a crash right after "Timer set" cannot lose it (REQ-TMR-003). The usage counters are not waited for: they can lag by the write in flight, are queued after every model turn, and are flushed when the console closes or `quit` is typed. A SIGTERM ends the process at once, as for any program without a handler, and drops writes still queued.
+
 ## 8. Cross-cutting concerns
 
 - **Errors:** typed errors with context; user-facing failures are spoken in plain language.
