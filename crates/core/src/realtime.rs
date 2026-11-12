@@ -772,6 +772,12 @@ where
     H: ToolHost,
 {
     let (day, now) = (env.clock)();
+    // The user's words that led to these calls, or empty when the calls did not follow any new words. A held
+    // action that is still waiting for its answer is answered by the user's own words only (`on_transcript`).
+    // Reaching this point with one still held means the model issued a new call before the user answered; the
+    // gate then reads the empty text as "not a yes", so the held action is discarded and never run, as for "a
+    // different tool" in REQ-SEC-011. Dropping is the safe direction. Whether the model should be able to
+    // cancel a pending confirmation this way is a question for the maintainer (docs/open-questions.md).
     let user_text = st.last_user.take().unwrap_or_default();
     let script: Vec<ToolCall> = calls
         .iter()

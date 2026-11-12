@@ -410,6 +410,39 @@ async fn without_a_yes_a_held_action_never_runs() {
     }
 }
 
+// REQ-SEC-011 ("a different tool ... discards it"): while a question waits for the user's answer, a new call
+// from the model discards the held action. Dropping is the safe direction: the action is never run without
+// the user's own yes, and a later yes finds nothing to release. Whether the model should be able to cancel a
+// pending confirmation this way is an open question for the maintainer (docs/open-questions.md).
+#[tokio::test(flavor = "current_thread")]
+async fn a_new_call_from_the_model_discards_a_held_action_and_a_later_yes_runs_nothing() {
+    let r = session(
+        cfg(),
+        UsageLimits::default(),
+        vec![],
+        false,
+        |mut s| async move {
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, calls_done(&[("c1", "send_money", "{}")])).await;
+            next(&mut s).await;
+            next(&mut s).await;
+            // Before the user answers, the model calls something else.
+            put(&mut s, calls_done(&[("c2", "get_time", "{}")])).await;
+            let out = next(&mut s).await;
+            assert_eq!(out["item"]["output"], "get_time ok");
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, said("yes")).await;
+            s.send_close().await.unwrap();
+        },
+    )
+    .await;
+    assert_eq!(r.result, Ok(SessionEnd::Closed));
+    let names: Vec<&str> = r.host.ran.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["get_time"], "the held send_money must never run");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_and_withheld_tools_are_errors_the_model_sees() {
     let r = session(
