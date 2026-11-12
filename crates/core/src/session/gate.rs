@@ -449,6 +449,16 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 }
             );
         }
+        if call.name == ASK_USER && !self.by_user {
+            // A question aloud opens the microphone. Outside text must not be able to make the speaker do
+            // that, so only a turn the user started may ask (REQ-SEC-012).
+            self.note_act(&invalid(
+                &call.name,
+                "turn not started by the user, so it may not ask aloud",
+            ));
+            return "Not run: this turn was started by outside text, not by the user, so you cannot ask the user a question aloud. Put your question in your final reply instead."
+                .to_owned();
+        }
         if call.name == ASK_USER {
             return match serde_json::from_str::<Value>(&call.arguments)
                 .ok()

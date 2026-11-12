@@ -2847,3 +2847,52 @@ async fn conversation_idle_expiry_follows_monotonic_time() {
         );
     }
 }
+
+// REQ-SEC-012: a turn that an event started cannot make the speaker ask a question aloud, because that opens
+// the microphone on the strength of outside text. The model is told to put the question in its reply.
+#[tokio::test(flavor = "current_thread")]
+async fn an_event_turn_cannot_ask_the_user_aloud() {
+    let b = Script::new(vec![
+        calls(&[("c1", "ask_user", r#"{"question":"Which room?"}"#)]),
+        text("Which room do you mean?"),
+    ]);
+    let (mut h, mut c, mut u) = (
+        Host::default(),
+        conv(),
+        UsageTracker::new(UsageLimits::default()),
+    );
+    let r = event_turn(
+        "alerts",
+        &b,
+        inputs(&mut h, &mut c, &mut u, 1000),
+        "ask the user which room",
+    )
+    .await;
+    assert!(!c.is_asking(), "no question is open");
+    assert!(!r.expects_reply, "the microphone is not opened");
+    assert_eq!(r.end, TurnEnd::Answered);
+    assert_eq!(r.speech, "Which room do you mean?");
+    let history = format!("{:?}", c.history());
+    assert!(
+        history.contains("Put your question in your final reply instead"),
+        "{history}"
+    );
+}
+
+// REQ-SEC-012, REQ-AST-021: the same call in a turn the user started still asks.
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_the_user_started_can_still_ask_aloud() {
+    let b = Script::new(vec![calls(&[(
+        "c1",
+        "ask_user",
+        r#"{"question":"Which room?"}"#,
+    )])]);
+    let (mut h, mut c, mut u) = (
+        Host::default(),
+        conv(),
+        UsageTracker::new(UsageLimits::default()),
+    );
+    let r = turn(&b, &mut h, &mut c, &mut u, "turn on the light").await;
+    assert_eq!(r.end, TurnEnd::Asked);
+    assert!(r.expects_reply && c.is_asking());
+}

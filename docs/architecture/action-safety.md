@@ -46,8 +46,9 @@ Who said yes is unknown: ClawDot does not identify speakers, so a guest or a tel
 - The trigger's text is shown to the model fenced in `<event_text>` and labelled untrusted, with angle brackets removed so it cannot close the fence. It is never read as an answer: an event cannot release a held action, however it is worded.
 - Only `read_only` tools run. A call to anything else is not run and is not refused outright: it is saved as a proposal (the same pending action as above) and the host speaks it as "Suggested action: ... Say yes if you want that, or no to drop it." The user's own later turn decides, within 120 seconds, exactly as for a normal held action.
 - The turn counts as holding untrusted text (see below).
+- `ask_user` is refused. A question aloud makes the speaker talk and opens the microphone, which outside text must not be able to cause. The gate checks the trigger itself (`admit` in `session/gate.rs`, `!by_user`), so it holds for any event-started turn, whatever the model is offered. The model is told "Not run: this turn was started by outside text ... Put your question in your final reply instead", and the call is recorded as `blocked:invalid`. The reply is spoken once, with no window left open for an answer. A turn the user started keeps `ask_user` unchanged.
 
-Nothing in the product starts an LLM turn from an event yet (announcements are spoken without the model); this is the gate that any such feature, and the rules of agentic-scope UC9, must go through.
+Nothing in the product starts an LLM turn from an event yet (announcements are spoken without the model; the only callers of `run_event_turn_with` are the evaluation harness and tests). So the `ask_user` rule is enforced at the gate but no production path reaches it today; it is there so that a future source cannot bypass it. This is the gate that any such feature, and the rules of agentic-scope UC9, must go through.
 
 ## Untrusted text in the turn (REQ-SEC-012)
 
