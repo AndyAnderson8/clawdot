@@ -699,7 +699,7 @@ fn saved_llm_key(core: &Core) -> String {
 
 /// Ask a language-model service for its models with `key`, and say in plain words why it could not.
 async fn fetch_models(url: &str, key: &str) -> Resp {
-    match crate::speech::list_models(url, key).await {
+    match crate::transport::list_models(url, key).await {
         Ok(models) => json_reply(StatusCode::OK, &json!({ "models": models })),
         Err(e) if e.is_unauthorized() => error(
             StatusCode::UNAUTHORIZED,

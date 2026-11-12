@@ -75,8 +75,9 @@ impl App {
         match ev {
             HubEvent::Tool(req) => req.serve(&mut self.brain.assistant).await,
             HubEvent::Turn(f) => {
-                let (origin, reply) = self.finish_turn(*f);
+                let (origin, reply, next) = self.finish_turn(*f);
                 self.deliver_confirmed(origin, reply);
+                self.start_next(next);
             }
             HubEvent::Other(_) => {
                 // A realtime session ended: its audio cost is in the counters; show how it went.
@@ -88,30 +89,32 @@ impl App {
                 // The satellite waiting for this answer sees its channel close and says it cannot answer.
                 crate::diag::error("a turn ended without an answer");
                 let now = self.brain.mono();
-                if let Some(next) = self.hub.lost(&speaker, now)
-                    && let Some((origin, reply)) = self.dispatch(next)
-                {
-                    self.deliver_confirmed(origin, reply);
-                }
+                let next = self.hub.lost(&speaker, now);
+                self.start_next(next);
             }
         }
     }
 
-    /// A turn is over: put the speaker's conversation back, save the counters, start what was waiting for the
-    /// same speaker, and return the reply to deliver.
-    fn finish_turn(&mut self, f: turns::Finished) -> (Origin, Reply) {
+    /// A turn is over: put the speaker's conversation back and save the counters. Returns the reply to deliver
+    /// and what the same speaker said meanwhile. The caller delivers the reply first and then starts the next
+    /// request ([`App::start_next`]), so that when the next request is answered at once (the fast path) its
+    /// answer does not come out ahead of the one before it.
+    fn finish_turn(&mut self, f: turns::Finished) -> (Origin, Reply, Option<Request>) {
         self.brain.save_usage();
         if let Some(e) = &f.failed {
             crate::diag::error(&format!("language model error: {e}"));
         }
         let now = self.brain.mono();
-        let (origin, reply, next) = self.hub.finish(f, now);
+        self.hub.finish(f, now)
+    }
+
+    /// Start what a speaker said while their last turn was running, if anything.
+    fn start_next(&mut self, next: Option<Request>) {
         if let Some(next) = next
-            && let Some((o, r)) = self.dispatch(next)
+            && let Some((origin, reply)) = self.dispatch(next)
         {
-            self.deliver_confirmed(o, r);
+            self.deliver_confirmed(origin, reply);
         }
-        (origin, reply)
     }
 
     /// Let the turns that are running finish and show their replies (the console was closed).
@@ -174,8 +177,10 @@ impl App {
             match self.hub.next().await {
                 HubEvent::Tool(req) => req.serve(&mut self.brain.assistant).await,
                 HubEvent::Turn(f) => {
-                    let reply = self.finish_turn(*f).1;
-                    return self.confirmed(reply).await;
+                    let (_, reply, next) = self.finish_turn(*f);
+                    let reply = self.confirmed(reply).await;
+                    self.start_next(next);
+                    return reply;
                 }
                 HubEvent::Lost(_) => {
                     return Reply {

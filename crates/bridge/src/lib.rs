@@ -12,12 +12,12 @@ pub mod state;
 
 use clawdot_protocol::bridge::Reply;
 use client::{Flow, Url};
-use harness::{ClaudeCode, CommandSpec, Skip};
+use harness::{CommandSpec, Harness, Skip};
 use std::io;
 use std::time::Duration;
 
 /// Everything the bridge needs to run.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Config {
     /// The device.
     pub url: Url,
@@ -27,8 +27,8 @@ pub struct Config {
     pub token: String,
     /// How long to wait for any bytes (heartbeat is every 15 s).
     pub read_timeout: Duration,
-    /// The Claude Code harness settings.
-    pub claude: ClaudeCode,
+    /// How a reply resumes the agent.
+    pub harness: Box<dyn Harness>,
 }
 
 /// Runs a command. Swapped for a fake in tests and for a printer with `--dry-run`.
@@ -83,7 +83,7 @@ pub enum Handling {
 /// the next connection; a command that ran (whatever its exit code) is recorded and acknowledged, so an
 /// instruction is never executed twice.
 pub fn handle_reply(
-    harness: &ClaudeCode,
+    harness: &dyn Harness,
     handled: &mut state::Handled,
     runner: &mut dyn Runner,
     reply: &Reply,
@@ -97,13 +97,14 @@ pub fn handle_reply(
             );
         }
     };
-    if handled.contains(reply.id) {
+    let key = state::Key::of(reply);
+    if handled.contains(key) {
         confirm(ack);
         return Handling::Duplicate;
     }
     match harness.plan(reply) {
         Err(skip) => {
-            if let Err(e) = handled.insert(reply.id) {
+            if let Err(e) = handled.insert(key) {
                 eprintln!("clawdot-bridge: could not save state: {e}");
             }
             confirm(ack);
@@ -111,7 +112,7 @@ pub fn handle_reply(
         }
         Ok(spec) => {
             // Record before running: if the bridge dies mid-run, the instruction is not repeated.
-            if let Err(e) = handled.insert(reply.id) {
+            if let Err(e) = handled.insert(key) {
                 eprintln!("clawdot-bridge: could not save state: {e}");
             }
             match runner.run(&spec) {
@@ -125,7 +126,7 @@ pub fn handle_reply(
                 Err(e) => {
                     eprintln!("clawdot-bridge: could not start {}: {e}", spec.program);
                     // Nothing ran, so forget the id: the unacknowledged reply comes back on reconnect.
-                    if let Err(e) = handled.remove(reply.id) {
+                    if let Err(e) = handled.remove(key) {
                         eprintln!("clawdot-bridge: could not save state: {e}");
                     }
                     Handling::CouldNotStart
@@ -156,7 +157,7 @@ pub fn stream_once(
         cfg.read_timeout,
         &mut |reply| {
             let mut ack = |id: u64| client::ack(&url, &endpoint, &token, id);
-            let result = handle_reply(&cfg.claude, handled, runner, &reply, &mut ack);
+            let result = handle_reply(&*cfg.harness, handled, runner, &reply, &mut ack);
             println!("clawdot-bridge: reply {} -> {result:?}", reply.id);
             count += 1;
             if max.is_some_and(|m| count >= m) {
@@ -173,6 +174,7 @@ pub fn stream_once(
 mod tests {
     use super::*;
     use clawdot_protocol::bridge::ReplyKind;
+    use harness::ClaudeCode;
 
     struct FakeRunner {
         ran: Vec<CommandSpec>,
@@ -251,6 +253,22 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_from_a_speaker_that_was_reset_runs_although_its_number_was_seen_before() {
+        let (mut h, mut run) = (state::Handled::in_memory(), FakeRunner::ok(0));
+        handle(
+            &reply(1, ReplyKind::Instruct, Some("s1"), "add tests"),
+            &mut h,
+            &mut run,
+        );
+        // The speaker's data was reset, so it numbers its replies from one again.
+        let mut fresh = reply(1, ReplyKind::Instruct, Some("s2"), "ship it");
+        fresh.created_at = 500;
+        let (out, acked) = handle(&fresh, &mut h, &mut run);
+        assert_eq!((out, acked), (Handling::Ran(0), vec![1]));
+        assert_eq!(run.ran.len(), 2);
+    }
+
+    #[test]
     fn an_acknowledgement_runs_nothing_but_is_confirmed() {
         let (mut h, mut run) = (state::Handled::in_memory(), FakeRunner::ok(0));
         let (out, acked) = handle(&reply(2, ReplyKind::Ack, Some("s1"), ""), &mut h, &mut run);
@@ -268,7 +286,10 @@ mod tests {
             (Handling::CouldNotStart, true),
             "not acknowledged"
         );
-        assert!(!h.contains(3), "a start failure must stay retryable");
+        assert!(
+            !h.contains(state::Key::of(&r)),
+            "a start failure must stay retryable"
+        );
         // When the problem is fixed, the redelivered reply runs.
         let mut fixed = FakeRunner::ok(0);
         let (out, acked) = handle(&r, &mut h, &mut fixed);

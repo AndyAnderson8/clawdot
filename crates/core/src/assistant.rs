@@ -469,7 +469,7 @@ impl Assistant {
             "reminder.set_at" => self.reminder_set_at(&m, now),
             "time.query" => self.time_query(now),
             "date.query" => self.date_query(now),
-            other if other.starts_with("inbox.") => self.inbox(&m, now),
+            other if other.starts_with("inbox.") => self.inbox(&m),
             _ => None,
         }
     }
@@ -661,7 +661,7 @@ impl Assistant {
         }
     }
 
-    fn inbox(&mut self, m: &Match, now: Ts) -> Option<Outcome> {
+    fn inbox(&mut self, m: &Match) -> Option<Outcome> {
         let core = self.core.clone()?;
         match m.intent.as_str() {
             "inbox.status" => Outcome::say(status_sentence(&core.status())),
@@ -702,10 +702,7 @@ impl Assistant {
                     }
                 }
             }
-            _ => {
-                let _ = now;
-                None
-            }
+            _ => None,
         }
     }
 }

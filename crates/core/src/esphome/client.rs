@@ -8,8 +8,9 @@
 //! exactly the ones every other satellite gets.
 
 use super::frame::Link;
-use super::media::{MAX_BYTES, MediaStore, wav_from_pcm};
+use super::media::{LiveWriter, MAX_BYTES, MediaStore, wav_from_pcm};
 use super::proto::{Msg, event, flags, media as player};
+use crate::esphome_cfg::ReplyMode;
 use crate::satellite::{self, Ask, Settings};
 use crate::voice::{Synthesizer, Transcriber};
 use clawdot_protocol::frame::{Decoder, Limits, encode};
@@ -34,6 +35,8 @@ const API_MAJOR: u32 = 1;
 const API_MINOR: u32 = 10;
 /// Media-player entities read during setup before the list is considered finished.
 const MAX_MEDIA_PLAYERS: usize = 16;
+/// A reply that is being relayed while it is made is ended when no audio has come for this long.
+const STREAM_IDLE: Duration = Duration::from_secs(60);
 
 /// Timeouts and intervals, in one place so tests can shorten them.
 #[derive(Debug, Clone, Copy)]
@@ -133,12 +136,27 @@ pub async fn run_device<S, T>(
     S: Transcriber + Send + Sync + 'static,
     T: Synthesizer + Send + Sync + 'static,
 {
+    run_device_with(dev, media, pipeline, timing, ReplyMode::Whole, shutdown).await;
+}
+
+/// Like [`run_device`], with the way spoken replies reach the device chosen (`esphome.devices[].reply`).
+pub async fn run_device_with<S, T>(
+    dev: Device,
+    media: Option<MediaStore>,
+    pipeline: Pipeline<S, T>,
+    timing: Timing,
+    reply: ReplyMode,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) where
+    S: Transcriber + Send + Sync + 'static,
+    T: Synthesizer + Send + Sync + 'static,
+{
     tokio::pin!(shutdown);
     let mut backoff = timing.backoff_min;
     let mut last = String::new();
     loop {
         let started = Instant::now();
-        let attempt = connect_once(&dev, &media, &pipeline, &timing);
+        let attempt = connect_once(&dev, &media, &pipeline, &timing, reply);
         let result = tokio::select! {
             r = attempt => r,
             () = &mut shutdown => return,
@@ -198,6 +216,7 @@ async fn connect_once<S, T>(
     media: &Option<MediaStore>,
     pipeline: &Pipeline<S, T>,
     t: &Timing,
+    reply_mode: ReplyMode,
 ) -> Result<(), String>
 where
     S: Transcriber + Send + Sync + 'static,
@@ -237,11 +256,13 @@ where
         t: *t,
         follow_up: pipeline.settings.dialog.follow_up_secs > 0,
         media: media.clone(),
+        reply_mode,
         run: None,
         listening: false,
         thinking: false,
         discard: false,
         rec: None,
+        live: None,
         out: None,
         done_at: None,
         announce_by: None,
@@ -406,13 +427,38 @@ struct Run {
     stage: Stage,
 }
 
-/// A reply being streamed to the device.
+/// A reply being streamed to the device over the API.
 struct Out {
     pcm: Vec<u8>,
     pos: usize,
-    started: Instant,
     next: Instant,
     burst: u32,
+    /// When the audio sent so far will have played out, counting any gap where the device ran dry.
+    plays_until: Instant,
+}
+
+/// Where a reply that is relayed while the pipeline makes it goes.
+enum Sink {
+    /// Into [`Out`], which paces it to the device in API messages.
+    Api,
+    /// Into a live file on the media server, which the device fetches.
+    Url(LiveWriter),
+}
+
+/// A reply being relayed to the device while the pipeline is still making it (`reply: "streamed"`).
+struct Live {
+    sink: Sink,
+    /// Bytes accepted so far (bounded by `MAX_BYTES`).
+    bytes: usize,
+    /// When audio last arrived.
+    last: Instant,
+    /// For a URL: when the audio written so far will have played out.
+    plays_until: Instant,
+}
+
+/// The playing time of `len` bytes of 16 kHz 16-bit mono audio.
+fn playing_time(len: usize) -> Duration {
+    Duration::from_micros(len as u64 * 1_000_000 / BYTES_PER_SEC)
 }
 
 struct Bridge<IO> {
@@ -422,6 +468,7 @@ struct Bridge<IO> {
     info: Info,
     follow_up: bool,
     media: Option<MediaStore>,
+    reply_mode: ReplyMode,
     /// A voice run the device started.
     run: Option<Run>,
     /// The pipeline wants microphone audio.
@@ -432,6 +479,8 @@ struct Bridge<IO> {
     discard: bool,
     /// Reply audio arriving from the pipeline.
     rec: Option<Vec<u8>>,
+    /// A reply relayed to the device as it arrives, from its first sentence to `audio-stop`.
+    live: Option<Live>,
     /// Reply audio going to the device.
     out: Option<Out>,
     /// When a spoken reply counts as played.
@@ -508,7 +557,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
                 at = at.min(t);
             }
         };
-        soon(self.out.as_ref().map(|o| o.next));
+        // An open stream that has sent everything it has waits for the pipeline, not for the clock.
+        let open = self.live.is_some();
+        soon(
+            self.out
+                .as_ref()
+                .filter(|o| o.pos < o.pcm.len() || !open)
+                .map(|o| o.next),
+        );
+        soon(self.live.as_ref().map(|l| l.last + STREAM_IDLE));
         soon(self.done_at);
         soon(self.announce_by);
         if let Some(Run {
@@ -609,7 +666,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
         } else if run.stage == Stage::Thinking {
             self.discard = true;
         }
-        if self.out.take().is_some() || self.done_at.take().is_some() {
+        // A reply being relayed ends with the run: dropping the live file closes the device's download.
+        let relaying = self.live.take().is_some();
+        if self.out.take().is_some() || self.done_at.take().is_some() || relaying {
             self.sat_send(&Message::PlaybackDone { id: None }).await?;
         }
         Ok(())
@@ -676,11 +735,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
             Message::StreamStop => self.listening = false,
             Message::SetIndicator(i) => self.indicator(i).await?,
             Message::AudioStart(_) => {
-                self.rec = Some(Vec::new());
                 self.thinking = false;
+                self.live = None;
+                self.rec = if self.begin_live().await? {
+                    None
+                } else {
+                    Some(Vec::new())
+                };
             }
             Message::AudioChunk { payload, .. } => {
-                if let Some(r) = &mut self.rec {
+                if self.live.is_some() {
+                    self.live_chunk(&payload);
+                } else if let Some(r) = &mut self.rec {
                     if r.len() + payload.len() <= MAX_BYTES {
                         r.extend_from_slice(&payload);
                     }
@@ -691,7 +757,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
                 self.command(None, Some(f32::from(level) / 100.0), None)
                     .await?;
             }
-            Message::StopPlayback => self.command(Some(player::STOP), None, None).await?,
+            Message::StopPlayback => {
+                self.stop_live().await?;
+                self.command(Some(player::STOP), None, None).await?;
+            }
             Message::PlayUrl { url, .. } => {
                 self.command(Some(player::PLAY), None, Some(url)).await?
             }
@@ -776,8 +845,124 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
         Duration::from_millis(pcm.len() as u64 * 1000 / BYTES_PER_SEC)
     }
 
+    /// The events that open a spoken reply to a run: it counts as answered, and speech begins.
+    async fn open_reply(&mut self) -> Result<(), String> {
+        if let Some(run) = &mut self.run {
+            run.stage = Stage::Speaking;
+        }
+        let cont: &[(&str, &str)] = if self.follow_up {
+            &[("continue_conversation", "1")]
+        } else {
+            &[]
+        };
+        self.ev(event::INTENT_END, cont).await?;
+        self.ev(event::TTS_START, &[]).await
+    }
+
+    /// A reply starts arriving (`audio-start`). In `streamed` mode, a reply to a run the device started is
+    /// relayed from its first sentence: returns true when it is, false when it is to be collected and delivered
+    /// at `audio-stop` (the `whole` mode, announcements, an abandoned run, no media server for a URL).
+    async fn begin_live(&mut self) -> Result<bool, String> {
+        if self.reply_mode != ReplyMode::Streamed || self.discard || self.run.is_none() {
+            return Ok(false);
+        }
+        let now = Instant::now();
+        let sink = if self.info.flags & flags::SPEAKER != 0 {
+            self.open_reply().await?;
+            self.ev(event::TTS_STREAM_START, &[]).await?;
+            self.out = Some(Out {
+                pcm: Vec::new(),
+                pos: 0,
+                next: now,
+                burst: AUDIO_BURST,
+                plays_until: now,
+            });
+            Sink::Api
+        } else if let Some((url, writer)) = self.media.as_ref().and_then(MediaStore::begin_live) {
+            self.open_reply().await?;
+            self.ev(event::TTS_END, &[("url", &url)]).await?;
+            Sink::Url(writer)
+        } else {
+            return Ok(false);
+        };
+        self.live = Some(Live {
+            sink,
+            bytes: 0,
+            last: now,
+            plays_until: now,
+        });
+        Ok(true)
+    }
+
+    /// Audio of a reply being relayed.
+    fn live_chunk(&mut self, payload: &[u8]) {
+        let Some(l) = &mut self.live else { return };
+        if l.bytes + payload.len() > MAX_BYTES {
+            return;
+        }
+        let now = Instant::now();
+        l.bytes += payload.len();
+        l.last = now;
+        match &l.sink {
+            Sink::Api => {
+                if let Some(o) = &mut self.out {
+                    if o.pos >= o.pcm.len() {
+                        // The sender had run dry while this sentence was made. Pace from now: its schedule is
+                        // as old as the gap, and following it would send the whole sentence at once.
+                        o.next = o.next.max(now);
+                    }
+                    o.pcm.extend_from_slice(payload);
+                }
+            }
+            Sink::Url(w) => {
+                l.plays_until = l.plays_until.max(now) + playing_time(payload.len());
+                w.push(payload);
+            }
+        }
+    }
+
+    /// The pipeline has sent the last sentence of a relayed reply. Over the API the paced sender finishes it
+    /// after the last byte; for a URL the file is closed and the reply counts as played once the audio written
+    /// has had time to play.
+    fn end_live(&mut self) {
+        let Some(l) = self.live.take() else { return };
+        if let Sink::Url(w) = l.sink {
+            w.finish();
+            self.done_at = Some((l.plays_until + self.t.url_margin).max(Instant::now()));
+        }
+    }
+
+    /// The listener stopped the reply: what the device has not been given is dropped, the stream is closed, and
+    /// the run ends.
+    async fn stop_live(&mut self) -> Result<(), String> {
+        let Some(l) = self.live.take() else {
+            return Ok(());
+        };
+        if matches!(l.sink, Sink::Api) {
+            self.out = None;
+            self.link
+                .send(&Msg::VoiceAudio {
+                    data: Vec::new(),
+                    end: true,
+                })
+                .await?;
+            self.ev(event::TTS_STREAM_END, &[]).await?;
+            self.ev(event::TTS_END, &[]).await?;
+        }
+        // For a URL, dropping the writer ends the download cleanly.
+        drop(l);
+        if self.run.take().is_some() {
+            self.ev(event::RUN_END, &[]).await?;
+        }
+        self.sat_send(&Message::PlaybackDone { id: None }).await
+    }
+
     /// The pipeline finished sending a spoken reply.
     async fn reply_ready(&mut self) -> Result<(), String> {
+        if self.live.is_some() {
+            self.end_live();
+            return Ok(());
+        }
         let Some(pcm) = self.rec.take() else {
             return Ok(());
         };
@@ -794,17 +979,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
 
     /// A reply to a run the device started (REQ-ESP-008).
     async fn speak_turn(&mut self, pcm: Vec<u8>) -> Result<(), String> {
-        if let Some(run) = &mut self.run {
-            run.stage = Stage::Speaking;
-        }
         let dur = Self::duration_of(&pcm);
-        let cont: &[(&str, &str)] = if self.follow_up {
-            &[("continue_conversation", "1")]
-        } else {
-            &[]
-        };
-        self.ev(event::INTENT_END, cont).await?;
-        self.ev(event::TTS_START, &[]).await?;
+        self.open_reply().await?;
         let api = self.info.flags & flags::SPEAKER != 0;
         if api {
             self.ev(event::TTS_STREAM_START, &[]).await?;
@@ -812,9 +988,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
             self.out = Some(Out {
                 pcm,
                 pos: 0,
-                started: now,
                 next: now,
                 burst: AUDIO_BURST,
+                plays_until: now,
             });
         } else if let Some(url) = self.media.as_ref().and_then(|m| m.put(wav_from_pcm(&pcm))) {
             self.ev(event::TTS_END, &[("url", &url)]).await?;
@@ -836,6 +1012,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
     /// Send the next paced audio messages (REQ-ESP-008).
     async fn pump_out(&mut self) -> Result<(), String> {
         for _ in 0..8 {
+            let open = self.live.is_some();
             let Some(o) = &mut self.out else {
                 return Ok(());
             };
@@ -844,8 +1021,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
                 return Ok(());
             }
             if o.pos >= o.pcm.len() {
-                let total = Self::duration_of(&o.pcm);
-                let play_end = o.started + total + self.t.api_margin;
+                if open {
+                    // Everything made so far is sent; the next sentence is still being synthesised. A gap
+                    // here is not the end of the reply.
+                    return Ok(());
+                }
+                let play_end = o.plays_until + self.t.api_margin;
                 self.out = None;
                 self.link
                     .send(&Msg::VoiceAudio {
@@ -861,6 +1042,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
             let end = (o.pos + AUDIO_CHUNK).min(o.pcm.len());
             let data = o.pcm[o.pos..end].to_vec();
             o.pos = end;
+            o.plays_until = o.plays_until.max(now) + playing_time(data.len());
             if o.burst > 0 {
                 o.burst -= 1;
             } else {
@@ -936,6 +1118,19 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
                 self.ev(event::RUN_END, &[]).await?;
             }
             _ => {}
+        }
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|l| now.duration_since(l.last) >= STREAM_IDLE)
+        {
+            // The pipeline went quiet in the middle of a reply: end what was sent rather than hold the device.
+            eprintln!(
+                "clawdot: esphome {}: no audio for {} s in the middle of a reply; ending it",
+                clean(&self.info.friendly),
+                STREAM_IDLE.as_secs()
+            );
+            self.end_live();
         }
         self.pump_out().await?;
         if self.done_at.is_some_and(|d| now >= d) && self.out.is_none() {

@@ -420,6 +420,75 @@ fn the_device_wide_window_holds_back_everything_but_urgent_and_can_be_cleared() 
 }
 
 #[test]
+fn a_reply_goes_to_the_event_spoken_last_not_the_one_that_arrived_last() {
+    // REQ-INB-008: an older event spoken after a newer urgent one is what the person is answering.
+    let (mut inbox, eps) = setup();
+    let e = ep(&eps);
+    let Ingest::Accepted(old) = inbox.ingest(
+        1,
+        &e,
+        mapped(EventKind::Done, Priority::Normal, "old", Some("a")),
+    ) else {
+        panic!("accepted")
+    };
+    let Ingest::Accepted(urgent) = inbox.ingest(
+        2,
+        &e,
+        mapped(EventKind::Question, Priority::Urgent, "urgent", Some("b")),
+    ) else {
+        panic!("accepted")
+    };
+    assert_eq!(inbox.plan(3, true, 0, &eps).unwrap().lead, urgent);
+    inbox.mark_announced(&[urgent]);
+    assert_eq!(inbox.reply_target().unwrap().id, urgent);
+    inbox.mark_announced(&[old]);
+    assert_eq!(
+        inbox.reply_target().unwrap().id,
+        old,
+        "the older event was spoken last"
+    );
+    // Speaking the urgent one again (its details, a repeat) makes it the target again.
+    inbox.mark_announced(&[urgent]);
+    assert_eq!(inbox.reply_target().unwrap().id, urgent);
+    // Once it is answered, the reply target is the one spoken before it.
+    inbox.acknowledge(urgent);
+    assert_eq!(inbox.reply_target().unwrap().id, old);
+    // A snoozed event that comes back is the target when it is spoken again.
+    let Ingest::Accepted(newer) = inbox.ingest(
+        4,
+        &e,
+        mapped(EventKind::Done, Priority::Normal, "newer", Some("c")),
+    ) else {
+        panic!("accepted")
+    };
+    inbox.snooze(old, 10);
+    inbox.mark_announced(&[newer]);
+    inbox.mark_announced(&[old]);
+    assert_eq!(inbox.reply_target().unwrap().id, old);
+}
+
+#[test]
+fn an_inbox_saved_before_the_spoken_order_falls_back_to_arrival_order() {
+    let old = r#"{"next_id":2,"events":[
+        {"id":1,"endpoint":"cc","source":"s","kind":"done","title":"a","text":"x","priority":"normal",
+         "received_at":1,"state":{"state":"announced"}},
+        {"id":2,"endpoint":"cc","source":"s","kind":"done","title":"b","text":"x","priority":"normal",
+         "received_at":2,"state":{"state":"announced"}}]}"#;
+    let state: InboxState = serde_json::from_str(old).unwrap();
+    let inbox = Inbox {
+        state,
+        limits: InboxLimits::default(),
+        quiet: None,
+    };
+    assert_eq!(inbox.reply_target().unwrap().id, 2);
+    assert!(
+        !serde_json::to_string(&inbox.state.events[0])
+            .unwrap()
+            .contains("spoken_seq")
+    );
+}
+
+#[test]
 fn announcing_acknowledging_dismissing_and_snoozing() {
     let (mut inbox, eps) = setup();
     let e = ep(&eps);

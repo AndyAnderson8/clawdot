@@ -14,9 +14,11 @@
 
 pub mod admin;
 mod announce_api;
+pub mod apiclient;
 pub mod app;
 pub mod app_loop;
 pub mod assistant;
+pub mod audio;
 pub mod audit;
 pub mod cancel;
 pub mod cli;
@@ -43,6 +45,7 @@ pub mod llm;
 pub mod mcp;
 mod mcp_server;
 pub mod media;
+pub mod netpolicy;
 pub mod notes;
 #[cfg(feature = "realtime")]
 pub mod realtime;

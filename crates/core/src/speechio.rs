@@ -2,10 +2,11 @@
 //! the registry that lets a change of voice or language in the portal reach them while running.
 
 use crate::app_loop::App;
+use crate::audio::{parse_wav, wav};
 use crate::config::SpeechConfig;
 use crate::env::Env;
 use crate::secrets::Secrets;
-use crate::speech::{HttpSynthesizer, HttpTranscriber, parse_wav, wav};
+use crate::speech::{HttpSynthesizer, HttpTranscriber};
 use crate::voice::voice_turn;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;

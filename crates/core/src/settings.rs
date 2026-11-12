@@ -756,11 +756,12 @@ fn check(
             "Realtime voice needs an address and a model name before it can be turned on.".into(),
         );
     }
-    // ElevenLabs and Deepgram need no `speech` section: they have their own address (REQ-VOI-021).
+    // A provider with its own address (ElevenLabs, Deepgram) needs no `speech` section (REQ-VOI-021).
     let own_service = eff
         .get("speech_provider")
         .and_then(|(v, _)| v.as_str())
-        .is_some_and(|p| p != "openai");
+        .and_then(|p| crate::speech::Dialect::parse(p).ok())
+        .is_some_and(|d| d.default_url().is_some());
     if (has("voice") || has("speech_language")) && !speech_configured && !own_service {
         return Err(
             "A voice needs a speech provider. Add a `speech` section to the configuration file (see docs/architecture/voice-pipeline.md) and restart, or clear the voice.".into(),

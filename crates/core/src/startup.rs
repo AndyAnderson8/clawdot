@@ -159,12 +159,13 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
     Ok(Started::Run(Box::new(app)))
 }
 
-/// Warn when the wall clock is not set; timers cannot fire until it is (REQ-TMR-006).
+/// Warn when the wall clock is not set: alarms and reminders wait until it is (REQ-TMR-006); a countdown timer
+/// does not need it (REQ-TMR-009).
 fn check_clock() -> Arc<dyn Clock + Send + Sync> {
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
     if !clock.wall_clock_valid() {
         eprintln!(
-            "clawdot: warning: the system clock is not set (no network time yet). Timers, alarms, and reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006)."
+            "clawdot: warning: the system clock is not set (no network time yet). Timers still count down and ring; alarms and reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006, REQ-TMR-009)."
         );
     }
     clock

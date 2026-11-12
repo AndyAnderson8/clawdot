@@ -56,6 +56,9 @@ pub enum Ingest {
 pub struct InboxState {
     next_id: u64,
     events: Vec<Event>,
+    /// The last value given to an event's `spoken_seq`.
+    #[serde(default)]
+    spoken_seq: u64,
 }
 
 /// What to announce next: the most important event, and how many others are waiting.
@@ -210,6 +213,7 @@ impl Inbox {
             expires_at: mapped.ttl_secs.map(|t| now.saturating_add(t)),
             received_at: now,
             state: EventState::New,
+            spoken_seq: 0,
         });
         self.enforce_limits(id);
         Ingest::Accepted(id)
@@ -372,13 +376,20 @@ impl Inbox {
         })
     }
 
-    /// Mark events as spoken to the user.
+    /// Mark events as spoken to the user, in the order given. An event spoken again (a repeat, its details)
+    /// becomes the most recently spoken one.
     pub fn mark_announced(&mut self, ids: &[u64]) {
         for id in ids {
-            if let Some(e) = self.get_mut(*id) {
-                if matches!(e.state, EventState::New | EventState::Snoozed { .. }) {
-                    e.state = EventState::Announced;
-                }
+            let seq = self.state.spoken_seq + 1;
+            let Some(e) = self.state.events.iter_mut().find(|e| e.id == *id) else {
+                continue;
+            };
+            if matches!(e.state, EventState::New | EventState::Snoozed { .. }) {
+                e.state = EventState::Announced;
+            }
+            if e.state == EventState::Announced {
+                e.spoken_seq = seq;
+                self.state.spoken_seq = seq;
             }
         }
     }
@@ -408,16 +419,20 @@ impl Inbox {
         }
     }
 
-    /// The event a spoken reply should go to: the most recently announced one still open. A one-way
-    /// announcement is never a target, and it does not hand the reply to an older event either, so an
-    /// answer meant for a doorbell message cannot land on a coding agent (REQ-INB-023).
+    /// The event a spoken reply should go to: the one spoken most recently that is still open, which is not
+    /// always the one that arrived last (an urgent event is spoken before an older one; a snoozed one comes
+    /// back later). A one-way announcement is never a target, and it does not hand the reply to an older
+    /// event either, so an answer meant for a doorbell message cannot land on a coding agent (REQ-INB-023).
     #[must_use]
     pub fn reply_target(&self) -> Option<&Event> {
         self.state
             .events
             .iter()
-            .rev()
-            .find(|e| e.state == EventState::Announced)
+            .enumerate()
+            .filter(|(_, e)| e.state == EventState::Announced)
+            // Events saved before the order was recorded all have zero, and fall back to arrival order.
+            .max_by_key(|(i, e)| (e.spoken_seq, *i))
+            .map(|(_, e)| e)
             .filter(|e| !e.no_reply)
     }
 
