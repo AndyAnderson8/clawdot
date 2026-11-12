@@ -4,7 +4,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 const STOP: &str = r#"{"session_id":"s1","cwd":"/home/dev/clawdot","hook_event_name":"Stop","last_assistant_message":"Done."}"#;
@@ -43,6 +44,54 @@ fn free_port() -> u16 {
     }
 }
 
+/// A scratch directory with a name no other run can have (process id, a counter, and the clock), removed when
+/// dropped, also after a failed assertion. A directory left by a crashed run can therefore never be reused.
+/// Declare it before the [`Server`] that uses it: the server is dropped (killed) first.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        Self(std::env::temp_dir().join(format!(
+            "clawdot-{tag}-{}-{n}-{nanos:x}",
+            std::process::id()
+        )))
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for TempDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn scratch_directories_are_unique_and_removed_on_drop() {
+    let (a, b) = (TempDir::new("t"), TempDir::new("t"));
+    assert_ne!(a.0, b.0);
+    std::fs::create_dir_all(a.join("x")).unwrap();
+    let path = a.0.clone();
+    drop(a);
+    assert!(!path.exists());
+}
+
 // A machine that is compiling something else can take a long time to start a process, so these limits are
 // ceilings for a failure, not expected waits: every wait ends the moment its line arrives or the process exits.
 /// From spawning the binary to a line it prints once the listeners are up.
@@ -74,6 +123,10 @@ struct Server {
     child: Child,
     stdin: Option<ChildStdin>,
     rx: mpsc::Receiver<String>,
+    /// What the binary printed on stderr, read on another thread so the pipe never fills.
+    err: Arc<Mutex<String>>,
+    /// Set once a "listening on" line has been printed.
+    listening: Arc<AtomicBool>,
 }
 
 impl Server {
@@ -87,18 +140,75 @@ impl Server {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let (tx, rx) = mpsc::channel::<String>();
+        let listening = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&listening);
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if line.contains("listening on") {
+                    flag.store(true, Ordering::SeqCst);
+                }
                 let _ = tx.send(line);
             }
         });
-        Self { child, stdin, rx }
+        let err = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&err);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut s = sink.lock().unwrap();
+                s.push_str(&line);
+                s.push('\n');
+            }
+        });
+        Self {
+            child,
+            stdin,
+            rx,
+            err,
+            listening,
+        }
+    }
+
+    /// Start the binary on a free port. Every `{port}` in `args` is replaced by the port. The port is only
+    /// known to be free until the child binds it, so when the child exits saying the port is taken, another
+    /// port is picked and it is started again (a few times). Returns the server and the port it listens on.
+    fn start_free(args: &[&str], console: bool) -> (Self, u16) {
+        const TRIES: usize = 5;
+        for attempt in 1..=TRIES {
+            let port = free_port();
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| a.replace("{port}", &port.to_string()))
+                .collect();
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let mut server = Self::start(&args, console);
+            let end = Instant::now() + START;
+            loop {
+                if server.listening.load(Ordering::SeqCst) {
+                    return (server, port);
+                }
+                if server.child.try_wait().unwrap().is_some() {
+                    // Let the stderr thread finish reading what the child printed.
+                    std::thread::sleep(Duration::from_millis(100));
+                    let taken = server.err.lock().unwrap().contains("is using port");
+                    if taken && attempt < TRIES {
+                        break;
+                    }
+                    return (server, port);
+                }
+                if Instant::now() >= end {
+                    return (server, port);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        unreachable!("the last attempt returns")
     }
 
     /// Wait for a printed line that `matches` accepts, within `within`, and return it. Fails at once, naming
@@ -237,15 +347,14 @@ fn create_endpoint(data_dir: &std::path::Path) -> String {
 
 #[test]
 fn the_binary_serves_hooks_and_announces_them() {
-    let port = free_port();
-    let dir = std::env::temp_dir().join(format!("clawdot-bin-test-{}", std::process::id()));
+    let dir = TempDir::new("bin-test");
     let token = create_endpoint(&dir);
-    let mut server = Server::start(
+    let (mut server, port) = Server::start_free(
         &[
             "--no-console",
             "--echo-speech",
             "--listen",
-            &format!("127.0.0.1:{port}"),
+            "127.0.0.1:{port}",
             "--data-dir",
             dir.to_str().unwrap(),
         ],
@@ -259,7 +368,6 @@ fn the_binary_serves_hooks_and_announces_them() {
         l.starts_with("speaker> ") && l.contains("clawdot finished")
     });
     server.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     // Without an LLM the announcement is the headline only, never the agent's raw text.
     assert!(!spoken.contains("Done."), "{spoken}");
 }
@@ -325,11 +433,11 @@ fn a_question_the_fast_path_cannot_answer_goes_through_the_model_and_its_tools()
         r#"{"choices":[{"delta":{"content":"Your agents are quiet."},"finish_reason":"stop"}]}"#,
     ]);
     let (llm_port, llm) = fake_llm(vec![tool_call, answer]);
-    let dir = std::env::temp_dir().join(format!("clawdot-llm-test-{}", std::process::id()));
-    let mut server = Server::start(
+    let dir = TempDir::new("llm-test");
+    let (mut server, _) = Server::start_free(
         &[
             "--listen",
-            &format!("127.0.0.1:{}", free_port()),
+            "127.0.0.1:{port}",
             "--data-dir",
             dir.to_str().unwrap(),
             "--llm-url",
@@ -345,7 +453,6 @@ fn a_question_the_fast_path_cannot_answer_goes_through_the_model_and_its_tools()
     server.type_line("tell me what you think about owls");
     let spoken = server.next_speech();
     server.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 
     let spoken = spoken.expect("the assistant should answer");
     assert!(spoken.contains("Your agents are quiet."), "got: {spoken}");
@@ -362,7 +469,9 @@ fn a_question_the_fast_path_cannot_answer_goes_through_the_model_and_its_tools()
 
 #[test]
 fn a_bad_config_file_stops_startup_and_names_the_problem() {
-    let path = std::env::temp_dir().join(format!("clawdot-bad-config-{}.json", std::process::id()));
+    let dir = TempDir::new("bad-config");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
     std::fs::write(&path, r#"{"listn": "127.0.0.1:1"}"#).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
@@ -374,7 +483,6 @@ fn a_bad_config_file_stops_startup_and_names_the_problem() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    let _ = std::fs::remove_file(&path);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("listn"), "got: {err}");
@@ -419,7 +527,7 @@ fn a_configured_http_tool_runs_only_after_the_user_confirms() {
         ]),
     ]);
 
-    let dir = std::env::temp_dir().join(format!("clawdot-tool-test-{}", std::process::id()));
+    let dir = TempDir::new("tool-test");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.json");
     std::fs::write(
@@ -432,12 +540,12 @@ fn a_configured_http_tool_runs_only_after_the_user_confirms() {
         ),
     )
     .unwrap();
-    let mut server = Server::start(
+    let (mut server, _) = Server::start_free(
         &[
             "--config",
             cfg.to_str().unwrap(),
             "--listen",
-            &format!("127.0.0.1:{}", free_port()),
+            "127.0.0.1:{port}",
             "--data-dir",
             dir.join("state").to_str().unwrap(),
         ],
@@ -464,7 +572,6 @@ fn a_configured_http_tool_runs_only_after_the_user_confirms() {
     let request = device_thread.join().unwrap();
     assert!(request.starts_with("POST /light "), "{request}");
     assert!(request.ends_with(r#"{"room":"den"}"#), "{request}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -525,7 +632,7 @@ fn a_recorded_utterance_is_transcribed_answered_and_spoken_back() {
         paths
     });
 
-    let dir = std::env::temp_dir().join(format!("clawdot-voice-test-{}", std::process::id()));
+    let dir = TempDir::new("voice-test");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.json");
     std::fs::write(
@@ -576,12 +683,11 @@ fn a_recorded_utterance_is_transcribed_answered_and_spoken_back() {
         1600,
         "0.1 s of 24 kHz audio becomes 1600 samples at 16 kHz"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn voice_mode_explains_a_missing_speech_setup() {
-    let dir = std::env::temp_dir().join(format!("clawdot-voice-missing-{}", std::process::id()));
+    let dir = TempDir::new("voice-missing");
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.wav");
     std::fs::write(&input, clawdot_core::speech::wav(&[0i16; 100])).unwrap();
@@ -595,7 +701,6 @@ fn voice_mode_explains_a_missing_speech_setup() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("speech.url is not configured"));
 }
@@ -666,7 +771,7 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
 
     let speech_port = fake_speech_provider("set a timer for ten minutes");
     let sat_port = free_port();
-    let dir = std::env::temp_dir().join(format!("clawdot-sat-test-{}", std::process::id()));
+    let dir = TempDir::new("sat-test");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.json");
     std::fs::write(
@@ -677,14 +782,14 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
         ),
     )
     .unwrap();
-    let mut server = Server::start(
+    let (mut server, _) = Server::start_free(
         &[
             "--no-console",
             "--echo-speech",
             "--config",
             cfg.to_str().unwrap(),
             "--listen",
-            &format!("127.0.0.1:{}", free_port()),
+            "127.0.0.1:{port}",
             "--data-dir",
             dir.join("state").to_str().unwrap(),
         ],
@@ -770,7 +875,6 @@ fn a_satellite_can_hold_a_whole_conversation_over_tcp() {
         }
     }
     server.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(speaking, "the satellite is told to show the speaking state");
     assert_eq!(
         got_audio, 1600,
@@ -817,8 +921,8 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
     use clawdot_protocol::{Decoder, Limits};
 
     let speech_port = fake_speech_provider("keep going and add tests");
-    let (http_port, sat_port) = (free_port(), free_port());
-    let dir = std::env::temp_dir().join(format!("clawdot-headline-{}", std::process::id()));
+    let sat_port = free_port();
+    let dir = TempDir::new("headline");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.json");
     std::fs::write(
@@ -830,14 +934,14 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
     )
     .unwrap();
     let token = create_endpoint(&dir.join("state"));
-    let mut server = Server::start(
+    let (mut server, http_port) = Server::start_free(
         &[
             "--no-console",
             "--echo-speech",
             "--config",
             cfg.to_str().unwrap(),
             "--listen",
-            &format!("127.0.0.1:{http_port}"),
+            "127.0.0.1:{port}",
             "--data-dir",
             dir.join("state").to_str().unwrap(),
         ],
@@ -934,7 +1038,6 @@ fn an_agent_event_is_spoken_on_the_satellite_and_a_spoken_reply_reaches_the_brid
         }
     }
     server.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         got.contains("add tests"),
         "the spoken instruction should reach the bridge: {got}"
@@ -1020,7 +1123,7 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
             r#"{"choices":[{"delta":{"content":"Done, the den light is on."},"finish_reason":"stop"}]}"#,
         ]),
     ]);
-    let dir = std::env::temp_dir().join(format!("clawdot-mcp-test-{}", std::process::id()));
+    let dir = TempDir::new("mcp-test");
     std::fs::create_dir_all(&dir).unwrap();
     let cfg = dir.join("config.json");
     std::fs::write(
@@ -1031,12 +1134,12 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
         ),
     )
     .unwrap();
-    let mut server = Server::start(
+    let (mut server, _) = Server::start_free(
         &[
             "--config",
             cfg.to_str().unwrap(),
             "--listen",
-            &format!("127.0.0.1:{}", free_port()),
+            "127.0.0.1:{port}",
             "--data-dir",
             dir.join("state").to_str().unwrap(),
         ],
@@ -1055,7 +1158,6 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
     server.type_line("yes");
     let spoken = server.next_speech();
     server.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(spoken.expect("an answer").contains("the den light is on"));
     let bodies = llm.join().unwrap();
     assert!(
@@ -1104,14 +1206,13 @@ fn http(port: u16, method: &str, path: &str, token: &str, body: &str) -> (u16, S
 
 #[test]
 fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
-    let port = free_port();
-    let dir = std::env::temp_dir().join(format!("clawdot-ui-test-{}", std::process::id()));
-    let mut server = Server::start(
+    let dir = TempDir::new("ui-test");
+    let (mut server, port) = Server::start_free(
         &[
             "--no-console",
             "--echo-speech",
             "--listen",
-            &format!("127.0.0.1:{port}"),
+            "127.0.0.1:{port}",
             "--data-dir",
             dir.to_str().unwrap(),
         ],
@@ -1174,7 +1275,6 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
         l == "speaker> testing one two"
     });
     server.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Saved settings sit between the configuration file and flags, and a live change reaches the running
@@ -1183,19 +1283,18 @@ fn the_web_ui_api_shows_status_and_makes_the_speaker_talk() {
 #[cfg(feature = "tz")]
 #[test]
 fn saved_settings_layer_under_flags_and_apply_live() {
-    let port = free_port();
-    let dir = std::env::temp_dir().join(format!("clawdot-settings-test-{}", std::process::id()));
+    let dir = TempDir::new("settings-test");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("settings.json"),
         r#"{"schema":1,"data":{"zone":"Europe/Berlin","device_name":"Den"}}"#,
     )
     .unwrap();
-    let mut server = Server::start(
+    let (mut server, port) = Server::start_free(
         &[
             "--no-console",
             "--listen",
-            &format!("127.0.0.1:{port}"),
+            "127.0.0.1:{port}",
             "--zone",
             "America/Chicago",
             "--data-dir",
@@ -1265,7 +1364,6 @@ fn saved_settings_layer_under_flags_and_apply_live() {
     }
     let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
     server.stop();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(seen, "the new limit should reach the running assistant");
     assert!(
         saved.contains("daily_spend_usd") && saved.contains("Den"),
@@ -1277,14 +1375,13 @@ fn saved_settings_layer_under_flags_and_apply_live() {
 /// without a restart: the daily caps show in the audit policy, and a bad value changes nothing (REQ-CFG-062).
 #[test]
 fn agent_settings_are_layered_validated_and_applied_live() {
-    let port = free_port();
-    let dir = std::env::temp_dir().join(format!("clawdot-agent-settings-{}", std::process::id()));
+    let dir = TempDir::new("agent-settings");
     std::fs::create_dir_all(&dir).unwrap();
-    let (mut server, _) = start_and_read(&[
+    let (mut server, _, port) = start_free_and_read(&[
         "--no-console",
         "--dry-run",
         "--listen",
-        &format!("127.0.0.1:{port}"),
+        "127.0.0.1:{port}",
         "--data-dir",
         dir.to_str().unwrap(),
     ]);
@@ -1360,7 +1457,6 @@ fn agent_settings_are_layered_validated_and_applied_live() {
     assert_eq!(get("/api/audit")["policy"]["max_actions_per_day"], 3);
     server.stop();
     let saved = std::fs::read_to_string(dir.join("settings.json")).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         saved.contains("quiet_start") && !saved.contains("\"agent_max_rounds\":99"),
         "{saved}"
@@ -1373,7 +1469,7 @@ fn agent_settings_are_layered_validated_and_applied_live() {
 fn a_taken_port_fails_without_revealing_a_token() {
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port();
-    let dir = std::env::temp_dir().join(format!("clawdot-bind-{}", std::process::id()));
+    let dir = TempDir::new("bind");
     let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--no-console",
@@ -1398,7 +1494,6 @@ fn a_taken_port_fails_without_revealing_a_token() {
     );
     assert!(!dir.join("admin-token.hash").exists());
     assert!(!dir.join("admin.json").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Start the binary, wait for the "listening" line, and return it with everything printed so far.
@@ -1412,15 +1507,24 @@ fn start_and_read(args: &[&str]) -> (Server, String) {
     (server, seen)
 }
 
+/// [`start_and_read`] on a free port: `{port}` in `args` is replaced (see [`Server::start_free`]), and the port
+/// is returned.
+fn start_free_and_read(args: &[&str]) -> (Server, String, u16) {
+    let mut all = vec!["--no-console", "--echo-speech"];
+    all.extend_from_slice(args);
+    let (server, port) = Server::start_free(&all, false);
+    let seen = server.wait_listening();
+    (server, seen, port)
+}
+
 /// No setup code is printed, whatever the listen address: the device may have no visible console
 /// (REQ-CFG-021). The URL and the first-visitor warning are, and setup completes without a code.
 #[test]
 fn setup_prints_the_url_and_a_warning_but_no_code() {
-    let dir = std::env::temp_dir().join(format!("clawdot-code-{}", std::process::id()));
-    let port = free_port();
-    let (mut server, seen) = start_and_read(&[
+    let dir = TempDir::new("code");
+    let (mut server, seen, port) = start_free_and_read(&[
         "--listen",
-        &format!("0.0.0.0:{port}"),
+        "0.0.0.0:{port}",
         "--data-dir",
         dir.to_str().unwrap(),
     ]);
@@ -1434,14 +1538,13 @@ fn setup_prints_the_url_and_a_warning_but_no_code() {
     let body = r#"{"mode":"password","password":"correct horse battery"}"#;
     assert_eq!(http(port, "POST", "/api/setup", "", body).0, 200);
     server.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An old admin-token.hash is converted and its token still signs in (REQ-CFG-023); --reset-admin clears
 /// only the administrator setting, then setup shows again (REQ-CFG-022).
 #[test]
 fn legacy_token_migration_and_reset_admin() {
-    let dir = std::env::temp_dir().join(format!("clawdot-reset-{}", std::process::id()));
+    let dir = TempDir::new("reset");
     std::fs::create_dir_all(&dir).unwrap();
     let old = "cdt_oldtokenoldtokenoldtokenoldtokenoldtoken1";
     std::fs::write(
@@ -1449,15 +1552,9 @@ fn legacy_token_migration_and_reset_admin() {
         clawdot_core::inbox::endpoint::hash_token(old),
     )
     .unwrap();
-    let port = free_port();
-    let args = [
-        "--listen".to_owned(),
-        format!("127.0.0.1:{port}"),
-        "--data-dir".to_owned(),
-        dir.to_str().unwrap().to_owned(),
-    ];
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (mut server, seen) = start_and_read(&args);
+    let data = dir.to_str().unwrap();
+    let (mut server, seen, port) =
+        start_free_and_read(&["--listen", "127.0.0.1:{port}", "--data-dir", data]);
     assert!(
         seen.contains("old administrator token still works"),
         "{seen}"
@@ -1483,7 +1580,8 @@ fn legacy_token_migration_and_reset_admin() {
     assert!(!dir.join("admin.json").exists());
     assert!(dir.join("other.json").exists());
     assert!(reset().contains("no administrator setting"));
-    let (mut server, _) = start_and_read(&args);
+    let (mut server, _) =
+        start_and_read(&["--listen", &format!("127.0.0.1:{port}"), "--data-dir", data]);
     assert_eq!(
         http(port, "GET", "/api/status", "", "").0,
         403,
@@ -1498,14 +1596,13 @@ fn legacy_token_migration_and_reset_admin() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--reset-admin"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Printed snippets use the listen address when `--public-url` is absent (REQ-CFG-016), and the
 /// command exits after printing (REQ-CFG-015).
 #[test]
 fn snippets_follow_the_listen_address() {
-    let dir = std::env::temp_dir().join(format!("clawdot-snippet-{}", std::process::id()));
+    let dir = TempDir::new("snippet");
     let run = |n: u8, listen: &str, extra: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
             .args([
@@ -1541,18 +1638,16 @@ fn snippets_follow_the_listen_address() {
         explicit.contains("http://dot:1/hook/claude-code"),
         "{explicit}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Typing `quit` leaves the console (REQ-CFG-017).
 #[test]
 fn quit_leaves_the_console() {
-    let port = free_port();
-    let dir = std::env::temp_dir().join(format!("clawdot-quit-{}", std::process::id()));
-    let mut server = Server::start(
+    let dir = TempDir::new("quit");
+    let (mut server, _) = Server::start_free(
         &[
             "--listen",
-            &format!("127.0.0.1:{port}"),
+            "127.0.0.1:{port}",
             "--data-dir",
             dir.to_str().unwrap(),
         ],
@@ -1571,6 +1666,5 @@ fn quit_leaves_the_console() {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(status.expect("`quit` should end the program").success());
 }

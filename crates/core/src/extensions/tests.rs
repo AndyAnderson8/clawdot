@@ -112,7 +112,7 @@ async fn bad_tools_say_what_to_fix_and_secrets_are_names_only() {
         ),
         "a secret field is refused, not stored"
     );
-    assert!(http.defs().is_empty());
+    assert!(http.defs().next().is_none());
     ext.apply(ExtOp::ToolAdd(light()), &mut http, &mut mcp, &builtin, env)
         .await
         .unwrap();

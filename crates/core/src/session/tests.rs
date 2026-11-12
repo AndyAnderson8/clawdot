@@ -273,6 +273,80 @@ async fn a_risky_call_is_held_and_the_host_asks_then_runs_it_after_a_later_yes()
     );
 }
 
+/// REQ-SEC-011: each released action gets its own tool-call id, nine ASCII letters and digits, and its result
+/// carries the same id; an id the model made earlier in the history is never reused.
+#[tokio::test(flavor = "current_thread")]
+async fn released_actions_get_unique_nine_character_call_ids() {
+    let (mut h, mut c, mut u) = fresh();
+    // The model's own call already uses the id the counter would give first.
+    let b = Script::new(vec![
+        calls(&[("host00000", "set_timer", r#"{"seconds":1}"#)]),
+        text("ok"),
+    ]);
+    turn(&b, &mut h, &mut c, &mut u, "timer").await;
+    for _ in 0..2 {
+        let ask = Script::new(vec![calls(&[("c1", "send_money", r#"{"amount":5}"#)])]);
+        turn(&ask, &mut h, &mut c, &mut u, "pay").await;
+        let done = Script::new(vec![text("Sent.")]);
+        turn(&done, &mut h, &mut c, &mut u, "yes").await;
+    }
+    let ids: Vec<String> = c
+        .history()
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .filter_map(|m| m.tool_call_id.clone())
+        .filter(|id| id.starts_with("host") && id != "host00000")
+        .collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert_ne!(ids[0], ids[1]);
+    for id in &ids {
+        assert!(
+            id.len() == 9 && id.bytes().all(|b| b.is_ascii_alphanumeric()),
+            "bad id {id}"
+        );
+        assert_ne!(id, "host00000", "collided with the model's id");
+    }
+    let released: Vec<_> = c
+        .history()
+        .iter()
+        .flat_map(|m| m.tool_calls.iter())
+        .filter(|t| t.name == "send_money" && t.id.starts_with("host"))
+        .map(|t| t.id.clone())
+        .collect();
+    assert_eq!(released, ids, "each result carries its call's id");
+}
+
+/// REQ-SEC-011: the user says yes, but the tool is no longer offered: nothing runs, the audit log says why,
+/// and the model is told in the same words.
+#[tokio::test(flavor = "current_thread")]
+async fn a_yes_for_a_tool_that_is_no_longer_offered_runs_nothing() {
+    let (log, mut c) = audited(ActionPolicy::default());
+    let mut h = Host {
+        confirm: vec!["gizmo"],
+        extra: vec!["gizmo"],
+        ..Host::default()
+    };
+    let mut u = UsageTracker::new(UsageLimits::default());
+    let ask = Script::new(vec![calls(&[("c1", "gizmo", "{}")])]);
+    turn(&ask, &mut h, &mut c, &mut u, "use the gizmo").await;
+    assert_eq!(c.pending().map(PendingAction::tool), Some("gizmo"));
+    h.extra.clear();
+    let done = Script::new(vec![text("It is gone.")]);
+    turn(&done, &mut h, &mut c, &mut u, "yes").await;
+    assert!(h.ran.is_empty(), "nothing ran: {:?}", h.ran);
+    let seen = done.requests()[0].messages.last().unwrap().clone();
+    assert_eq!(
+        (seen.role, seen.content.as_str()),
+        (Role::Tool, "Error: that tool is no longer available.")
+    );
+    let r = rows(&log);
+    let last = r.last().unwrap();
+    assert_eq!(
+        (last.decision.as_str(), last.note.as_deref()),
+        ("blocked:invalid", Some("tool no longer offered"))
+    );
+}
+
 /// REQ-SEC-011, REQ-SEC-014: the spoken read-back hides secret-looking values and shortens long ones,
 /// while the stored action keeps the exact arguments and runs them after a yes.
 #[tokio::test(flavor = "current_thread")]

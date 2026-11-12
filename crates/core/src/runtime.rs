@@ -342,7 +342,8 @@ impl Brain {
         env: &crate::env::Env,
     ) -> Result<serde_json::Value, crate::app::Fail> {
         // A turn that is running holds its own copies of the clients; `make_mut` gives this loop a private
-        // one to change, and the turn keeps what it began with.
+        // one to change, and the turn keeps what it began with. The copy is of pointers only: the tool
+        // definitions, MCP tools and credentials inside are `Arc`s shared with the turn's copy.
         let applied = self
             .ext
             .apply(

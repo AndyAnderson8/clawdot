@@ -19,6 +19,7 @@ use hyper::{Method, Request};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -274,13 +275,29 @@ fn check_args(def: &ToolDef, args: &Value) -> Result<Map<String, Value>, String>
     Ok(out)
 }
 
-/// The HTTP tools that are configured, with the means to call them.
+/// One tool and its resolved credential, read once. Kept together and shared by `Arc`, so a copy of the
+/// client copies pointers: a definition and its API key exist once in memory however many turns and
+/// realtime sessions hold a clone.
+struct Entry {
+    def: ToolDef,
+    secret: Option<String>,
+}
+
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entry")
+            .field("def", &self.def)
+            .field("secret", &self.secret.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+/// The HTTP tools that are configured, with the means to call them. Cloning copies pointers, not definitions
+/// or credentials.
 #[derive(Debug, Clone)]
 pub struct HttpTools {
-    defs: Vec<ToolDef>,
+    tools: Vec<Arc<Entry>>,
     connector: Connector,
-    /// Resolved credentials by tool name, read once at startup.
-    secrets: BTreeMap<String, String>,
 }
 
 impl HttpTools {
@@ -293,23 +310,28 @@ impl HttpTools {
         reserved: &[String],
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
-        let mut secrets = BTreeMap::new();
+        let mut tools = Vec::with_capacity(defs.len());
         for (i, d) in defs.iter().enumerate() {
             d.validate()?;
             if reserved.contains(&d.name) || defs[..i].iter().any(|o| o.name == d.name) {
                 return Err(format!("tool `{}`: the name is already taken", d.name));
             }
-            if let Some(var) = &d.auth_env {
+            let secret = if let Some(var) = &d.auth_env {
                 let v = env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
                     format!("tool `{}`: environment variable {var} is not set", d.name)
                 })?;
-                secrets.insert(d.name.clone(), v);
-            }
+                Some(v)
+            } else {
+                None
+            };
+            tools.push(Arc::new(Entry {
+                def: d.clone(),
+                secret,
+            }));
         }
         Ok(Self {
-            defs,
+            tools,
             connector: Connector::new()?,
-            secrets,
         })
     }
 
@@ -328,56 +350,56 @@ impl HttpTools {
         if reserved.contains(&def.name) || self.owns(&def.name) {
             return Err(format!("tool `{}`: the name is already taken", def.name));
         }
-        if let Some(var) = &def.auth_env {
+        let secret = if let Some(var) = &def.auth_env {
             let v = env(var).filter(|v| !v.is_empty()).ok_or_else(|| {
                 format!("tool `{}`: environment variable {var} is not set", def.name)
             })?;
-            self.secrets.insert(def.name.clone(), v);
-        }
-        self.defs.push(def);
+            Some(v)
+        } else {
+            None
+        };
+        self.tools.push(Arc::new(Entry { def, secret }));
         Ok(())
     }
 
     /// Remove a tool by name; false if there is none.
     pub fn remove(&mut self, name: &str) -> bool {
-        let before = self.defs.len();
-        self.defs.retain(|d| d.name != name);
-        self.secrets.remove(name);
-        self.defs.len() != before
+        let before = self.tools.len();
+        self.tools.retain(|t| t.def.name != name);
+        self.tools.len() != before
     }
 
     /// The definitions, as written (no credentials).
-    #[must_use]
-    pub fn defs(&self) -> &[ToolDef] {
-        &self.defs
+    pub fn defs(&self) -> impl Iterator<Item = &ToolDef> {
+        self.tools.iter().map(|t| &t.def)
     }
 
     /// Whether any tools are configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.defs.is_empty()
+        self.tools.is_empty()
     }
 
     /// Whether `name` is one of these tools.
     #[must_use]
     pub fn owns(&self, name: &str) -> bool {
-        self.defs.iter().any(|d| d.name == name)
+        self.tools.iter().any(|t| t.def.name == name)
     }
 
     /// Specs to offer the model.
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.defs.iter().map(ToolDef::spec).collect()
+        self.tools.iter().map(|t| t.def.spec()).collect()
     }
 
     /// The risk of a tool: the administrator's tier, over a conservative baseline of costly. An unknown
     /// name is costly.
     #[must_use]
     pub fn risk(&self, name: &str) -> Risk {
-        self.defs
+        self.tools
             .iter()
-            .find(|d| d.name == name)
-            .map_or(Risk::fixed(Tier::Costly), ToolDef::risk)
+            .find(|t| t.def.name == name)
+            .map_or(Risk::fixed(Tier::Costly), |t| t.def.risk())
     }
 
     /// Call a tool.
@@ -385,11 +407,12 @@ impl HttpTools {
     /// # Errors
     /// A message for the model: bad arguments, transport failure, or a non-success status.
     pub async fn call(&self, name: &str, args: &Value) -> Result<String, String> {
-        let def = self
-            .defs
+        let entry = self
+            .tools
             .iter()
-            .find(|d| d.name == name)
+            .find(|t| t.def.name == name)
             .ok_or("unknown tool")?;
+        let def = &entry.def;
         let args = check_args(def, args)?;
         let (url, body) = build(def, &args)?;
         let endpoint = Endpoint::parse(&url)?;
@@ -408,7 +431,7 @@ impl HttpTools {
         for (k, v) in &def.headers {
             req = req.header(k, v);
         }
-        if let Some(secret) = self.secrets.get(&def.name) {
+        if let Some(secret) = &entry.secret {
             req = req.header("authorization", format!("Bearer {secret}"));
         }
         let body_bytes = match &body {
@@ -838,5 +861,28 @@ mod tests {
         .unwrap();
         let out = t.call("set_light", &json!({"room":"den"})).await.unwrap();
         assert!(out.chars().count() < 1_100, "{}", out.len());
+    }
+
+    /// A copy of the client that is then changed copies pointers: the tools it did not touch, with their
+    /// credentials, stay one allocation in both copies.
+    #[test]
+    fn a_changed_copy_shares_the_other_tools_and_their_credentials() {
+        let keyed = |name: &str| {
+            def(&format!(
+                r#"{{"name":"{name}","description":"d","url":"http://h/","auth_env":"K_{name}"}}"#
+            ))
+        };
+        let env = |v: &str| Some(format!("secret-of-{v}"));
+        let a = HttpTools::new(vec![keyed("one"), keyed("two")], &[], env).unwrap();
+        let mut b = a.clone();
+        assert!(b.remove("two"));
+        b.add(keyed("three"), &[], env).unwrap();
+        assert!(Arc::ptr_eq(&a.tools[0], &b.tools[0]), "tool one was copied");
+        assert_eq!(a.tools.len(), 2);
+        assert_eq!(a.tools[0].secret.as_deref(), Some("secret-of-K_one"));
+        assert!(
+            !format!("{a:?}").contains("secret-of"),
+            "Debug must not print credentials"
+        );
     }
 }

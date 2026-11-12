@@ -64,17 +64,7 @@ struct Call<'a> {
 
 /// Take the result out of a turn that is ending, leaving a blank one behind.
 fn take(result: &mut TurnResult) -> TurnResult {
-    std::mem::replace(
-        result,
-        TurnResult {
-            speech: String::new(),
-            end: TurnEnd::Answered,
-            tool_calls: 0,
-            model_requests: 0,
-            early: Vec::new(),
-            expects_reply: false,
-        },
-    )
+    std::mem::take(result)
 }
 
 /// A model that is never asked: the gate needs a backend type only for the summaries of long results, and a
@@ -148,14 +138,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             cfg,
             turn,
             st: TurnState::new(ctl.now()),
-            result: TurnResult {
-                speech: String::new(),
-                end: TurnEnd::Answered,
-                tool_calls: 0,
-                model_requests: 0,
-                early: Vec::new(),
-                expects_reply: false,
-            },
+            result: TurnResult::default(),
             by_user,
             day,
             now,
@@ -330,8 +313,9 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             "Error: that tool is no longer available.".to_owned()
         };
         self.result.tool_calls += 1;
+        let id = self.conv.host_call_id();
         let call = ToolCall {
-            id: "host_confirmed".to_owned(),
+            id: id.clone(),
             name: held.tool.clone(),
             arguments: held.args.to_string(),
         };
@@ -340,7 +324,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             .push(Message::assistant_calls(String::new(), vec![call]));
         self.conv
             .history
-            .push(Message::tool_result("host_confirmed", clip(&outcome)));
+            .push(Message::tool_result(id, clip(&outcome)));
         if self.ctl.cancel.is_cancelled() {
             let sent = (held.tier >= Tier::Costly).then_some(held.tool.as_str());
             return Some(self.cancelled(&[], sent));
