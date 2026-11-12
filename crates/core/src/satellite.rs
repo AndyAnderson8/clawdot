@@ -29,6 +29,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -487,6 +488,78 @@ async fn rt_flush<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// The write half of a session, with a bound on how long a write may make no progress. A satellite that stops
+/// reading fills the pipe, and a plain write then waits for room forever; the loop is stuck inside it, so the
+/// keepalive tick that would notice a dead peer never runs. With this wrapper a write that moves no byte for the
+/// dead-peer time fails like a write to a closed connection, and the session ends. Progress of any size restarts
+/// the clock, so a slow but live peer is not cut off.
+struct TimedWrite<W> {
+    inner: W,
+    limit: Duration,
+    stall: Pin<Box<tokio::time::Sleep>>,
+    /// Whether `stall` is running for the write now waiting.
+    waiting: bool,
+}
+
+impl<W> TimedWrite<W> {
+    fn new(inner: W, limit: Duration) -> Self {
+        Self {
+            inner,
+            limit,
+            stall: Box::pin(tokio::time::sleep(limit)),
+            waiting: false,
+        }
+    }
+
+    /// Turn the result of one poll of the inner writer into the result for the caller: any answer ends the wait,
+    /// and a wait that has gone on for the limit is an error.
+    fn bounded<T>(
+        &mut self,
+        cx: &mut Context<'_>,
+        polled: Poll<std::io::Result<T>>,
+    ) -> Poll<std::io::Result<T>> {
+        if polled.is_ready() {
+            self.waiting = false;
+            return polled;
+        }
+        if !self.waiting {
+            self.waiting = true;
+            self.stall
+                .as_mut()
+                .reset(tokio::time::Instant::now() + self.limit);
+        }
+        if self.stall.as_mut().poll(cx).is_ready() {
+            self.waiting = false;
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the peer is not reading",
+            )));
+        }
+        Poll::Pending
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for TimedWrite<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let polled = Pin::new(&mut self.inner).poll_write(cx, buf);
+        self.bounded(cx, polled)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let polled = Pin::new(&mut self.inner).poll_flush(cx);
+        self.bounded(cx, polled)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let polled = Pin::new(&mut self.inner).poll_shutdown(cx);
+        self.bounded(cx, polled)
+    }
+}
+
 async fn send<W: AsyncWrite + Unpin>(w: &mut W, m: &Message) -> Result<(), String> {
     let bytes = encode(&m.to_frame()).map_err(|e| e.to_string())?;
     w.write_all(&bytes).await.map_err(|e| format!("write: {e}"))
@@ -541,7 +614,8 @@ where
     S: Transcriber + Send + Sync + 'static,
     T: Synthesizer + Send + Sync + 'static,
 {
-    let (mut rd, mut wr) = tokio::io::split(io);
+    let (mut rd, wr) = tokio::io::split(io);
+    let mut wr = TimedWrite::new(wr, settings.dead_after);
     let mut dec = Decoder::new(Limits::default());
 
     let Some(accepted) = handshake(&mut rd, &mut wr, &mut dec, &settings).await? else {

@@ -31,12 +31,23 @@ pub struct Line {
 // handed a core, and the lines are redacted before they get here. It holds no secret and no per-core state.
 static RING: Mutex<VecDeque<Line>> = Mutex::new(VecDeque::new());
 
+/// The console line and the text kept in the ring for a message. Both are redacted: the console is the journal on a
+/// speaker with no screen, which is read and copied into bug reports, so a secret in a message must not reach it
+/// either. Only the ring's text is clipped.
+fn prepare(msg: &str) -> (String, String) {
+    let redacted = crate::audit::redact_text(msg);
+    let console = format!("clawdot: {redacted}");
+    let ring = if redacted.chars().count() > MAX_CHARS {
+        redacted.chars().take(MAX_CHARS - 1).collect::<String>() + "…"
+    } else {
+        redacted
+    };
+    (console, ring)
+}
+
 fn push(level: &'static str, msg: &str) {
-    eprintln!("clawdot: {msg}");
-    let mut text = crate::audit::redact_text(msg);
-    if text.chars().count() > MAX_CHARS {
-        text = text.chars().take(MAX_CHARS - 1).collect::<String>() + "…";
-    }
+    let (console, text) = prepare(msg);
+    eprintln!("{console}");
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
@@ -148,6 +159,19 @@ mod tests {
         let l = &recent(1)[0];
         assert_eq!((l.level, l.text.chars().count()), ("error", MAX_CHARS));
         assert!(l.ts > 1_600_000_000);
+    }
+
+    // REQ-CFG-064
+    #[test]
+    fn the_console_line_is_redacted_like_the_ring() {
+        let (console, ring) =
+            prepare("call failed: Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456");
+        assert!(
+            !console.contains("abcdefghijklmnopqrstuvwxyz123456"),
+            "{console}"
+        );
+        assert!(!ring.contains("abcdefghijklmnopqrstuvwxyz123456"), "{ring}");
+        assert!(console.starts_with("clawdot: call failed"), "{console}");
     }
 
     // REQ-CFG-066

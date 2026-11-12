@@ -196,7 +196,7 @@ impl std::fmt::Display for AdminError {
 impl std::error::Error for AdminError {}
 
 /// What `admin.json` holds.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum Setting {
     /// Nothing chosen yet: setup is shown.
@@ -210,6 +210,17 @@ pub enum Setting {
         hash: String,
         // Files written by older versions may carry a `recovery` hash; it is ignored on load and dropped on save.
     },
+}
+
+/// Written by hand so that no `{:?}` of an [`Admin`] (or of anything holding one) can put the password hash in a log.
+impl std::fmt::Debug for Setting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unset => f.write_str("Unset"),
+            Self::Open => f.write_str("Open"),
+            Self::Password { .. } => f.write_str("Password { hash: <hidden> }"),
+        }
+    }
 }
 
 /// The state of the administrator setting, for the UI.
@@ -581,6 +592,18 @@ mod tests {
             hex(&pbkdf2(b"password", b"salt", 4096)),
             "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
         );
+    }
+
+    // REQ-CFG-019
+    #[test]
+    fn the_password_hash_never_appears_in_debug_output() {
+        let hash = hash_password("correct horse").unwrap();
+        let setting = Setting::Password { hash: hash.clone() };
+        assert!(!format!("{setting:?}").contains(&hash));
+        let mut admin = Admin::new();
+        admin.setting = setting;
+        assert!(!format!("{admin:?}").contains(&hash));
+        assert!(format!("{:?}", Setting::Open).contains("Open"));
     }
 
     // REQ-CFG-019

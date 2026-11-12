@@ -22,7 +22,7 @@ use crate::routes::{Auth, Row, find, path_row};
 use http_body_util::{BodyExt, Full, Limited, combinators::BoxBody};
 use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::header::{
-    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER,
+    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderValue, ORIGIN, RETRY_AFTER,
     WWW_AUTHENTICATE,
 };
 use hyper::server::conn::http1;
@@ -60,6 +60,9 @@ pub struct ServeOptions {
     pub heartbeat: Duration,
 }
 
+/// How long to wait after a failed accept before trying again.
+const ACCEPT_RETRY: Duration = Duration::from_millis(200);
+
 /// How long the web UI waits for a request body.
 pub const BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -89,7 +92,8 @@ pub(crate) async fn read_body(body: Incoming, max: usize, wait: Duration) -> Opt
 /// Serve until `shutdown` completes.
 ///
 /// # Errors
-/// Fails if accepting connections fails.
+/// None today: a connection that cannot be accepted is logged and tried again. The `Result` stays so that callers
+/// need not change if a failure that cannot be survived is ever added.
 pub async fn serve(
     listener: TcpListener,
     core: Arc<Core>,
@@ -102,7 +106,17 @@ pub async fn serve(
     tokio::pin!(shutdown);
     loop {
         let (stream, peer) = tokio::select! {
-            accepted = listener.accept() => accepted?,
+            accepted = listener.accept() => match accepted {
+                Ok(a) => a,
+                Err(e) => {
+                    // Running out of file descriptors, or a connection reset before it was accepted, is not a
+                    // reason to stop answering for good: a flood of connections would then switch the portal and
+                    // the webhooks off until the next restart. Wait a moment and try again.
+                    crate::diag::warn(&format!("could not accept a connection: {e}"));
+                    tokio::time::sleep(ACCEPT_RETRY).await;
+                    continue;
+                }
+            },
             () = &mut shutdown => return Ok(()),
         };
         // Shed load instead of queueing it: a flood must not grow memory (REQ-NFR-110), and one
@@ -133,16 +147,12 @@ pub async fn serve(
     }
 }
 
-fn text(status: StatusCode, body: &'static str) -> Resp {
+fn json(status: StatusCode, body: &'static str) -> Resp {
     let mut r = Response::new(Full::new(Bytes::from_static(body.as_bytes())).boxed());
     *r.status_mut() = status;
     r.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     r
-}
-
-fn json(status: StatusCode, body: &'static str) -> Resp {
-    text(status, body)
 }
 
 pub(crate) fn token_from(headers: &HeaderMap) -> Option<String> {
@@ -249,6 +259,36 @@ pub fn documented_routes() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+/// Whether this is a request that changes something under `/api`, sent by a web page from another site.
+///
+/// In open mode (REQ-CFG-005) the only credential is the caller's address, and a browser on the private network
+/// lends its address to any page it shows. Such a page can send a "simple" cross-site POST with no preflight, and
+/// the body is parsed whatever its content type. A browser always names the page's origin on a request that
+/// changes something, so a request whose `Origin` is not the authority it was sent to is refused. A script sends no
+/// `Origin` and is not affected; reads are left to the browser's same-origin rule.
+fn cross_site_write(method: &hyper::Method, segs: &[&str], headers: &HeaderMap) -> bool {
+    if matches!(
+        *method,
+        hyper::Method::GET | hyper::Method::HEAD | hyper::Method::OPTIONS
+    ) || segs.first() != Some(&"api")
+    {
+        return false;
+    }
+    let Some(origin) = headers.get(ORIGIN) else {
+        return false;
+    };
+    let origin_authority = origin
+        .to_str()
+        .ok()
+        .and_then(|o| o.split_once("://"))
+        .map(|(_, rest)| rest);
+    let host = headers.get(HOST).and_then(|h| h.to_str().ok());
+    match (origin_authority, host) {
+        (Some(o), Some(h)) => !o.eq_ignore_ascii_case(h),
+        _ => true,
+    }
+}
+
 async fn route(
     core: Arc<Core>,
     streams: Arc<AtomicUsize>,
@@ -260,6 +300,12 @@ async fn route(
     let path = parts.uri.path().to_owned();
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
     let headers = &parts.headers;
+    if cross_site_write(&parts.method, &segs, headers) {
+        return Ok(json(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"cross-site request refused"}"#,
+        ));
+    }
     // First decide whether the path names a real resource (invalid endpoint names are simply 404),
     // then whether the method is allowed on it (405).
     let resp = match find(ROUTES, parts.method.as_str(), &segs) {

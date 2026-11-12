@@ -125,8 +125,26 @@ impl JsonStore {
             f.sync_all()?;
         }
         fs::rename(&tmp, &self.path)?;
+        // Without this the rename itself can be lost when the power goes, and the old file comes back.
+        sync_dir(self.path.parent());
         Ok(())
     }
+}
+
+/// Flush a directory's entries to disk, so a rename in it survives a power cut. Best effort: the data is already
+/// in the file, and not every platform lets a directory be opened.
+fn sync_dir(dir: Option<&Path>) {
+    #[cfg(unix)]
+    {
+        let dir = dir
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// Create `dir` and any missing parents readable only by the service user (0700 on Unix). A directory
