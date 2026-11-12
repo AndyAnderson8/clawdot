@@ -6,12 +6,18 @@
 //! new file starts, so the disk holds at most twice the cap. Start-up tolerates a crash: a half-written last
 //! line or any damaged line is skipped, never an error.
 //!
+//! The day's counts of actions are also kept in their own small file, `audit-counts.json`, because the log
+//! forgets: it keeps only the current file and one rotated file, so on a busy day a restart that recounted from
+//! the log alone would undercount and loosen the caps. At start the larger of the two counts is used.
+//!
 //! The log is written from the session loop with text that may come from outside (a tool result, a model's
 //! arguments). So everything is made safe on the way in: secrets and tokens are replaced, each value is
 //! clipped, control characters are removed, and nothing the user said or any audio is ever written.
 
+use crate::app::persist::Writer;
 use crate::sched::Ts;
 use crate::session::Tier;
+use crate::store::JsonStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
@@ -219,6 +225,17 @@ struct Counts {
     costly: u32,
 }
 
+/// What `audit-counts.json` holds: the counts for one local day.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+struct SavedCounts {
+    day: i64,
+    actions: u32,
+    costly: u32,
+}
+
+/// The counts file's schema version.
+const COUNTS_SCHEMA: u32 = 1;
+
 #[derive(Debug)]
 enum Sink {
     Disk {
@@ -242,6 +259,10 @@ struct State {
     next_id: u64,
     next_turn: u64,
     counts: Counts,
+    /// Where the day's counts are kept besides the log (`None` for the in-memory log).
+    counts_store: Option<JsonStore>,
+    /// The background writer, when the core has one; without it the counts file is written in place.
+    writer: Option<Arc<Writer>>,
     /// Damaged lines seen when the log was last read.
     corrupt_lines: u64,
     /// Records that could not be written.
@@ -314,6 +335,8 @@ impl AuditLog {
                 next_id: 1,
                 next_turn: 1,
                 counts: Counts::default(),
+                counts_store: None,
+                writer: None,
                 corrupt_lines: 0,
                 write_errors: 0,
             }),
@@ -367,10 +390,18 @@ impl AuditLog {
                 next_id: max_id.saturating_add(1),
                 next_turn: max_turn.saturating_add(1),
                 counts: Counts::default(),
+                counts_store: Some(JsonStore::new(dir.join("audit-counts.json"), COUNTS_SCHEMA)),
+                writer: None,
                 corrupt_lines: corrupt,
                 write_errors: 0,
             }),
         })
+    }
+
+    /// Hand the counts file to the background writer, so recording an action does not wait for a second write
+    /// to flash. Without one the file is written in place.
+    pub fn set_writer(&self, writer: Option<Arc<Writer>>) {
+        lock(&self.state).writer = writer;
     }
 
     /// The caps and the dry-run switch in force.
@@ -487,6 +518,7 @@ impl AuditLog {
             if a.tier >= Some(Tier::Costly) {
                 s.counts.costly = s.counts.costly.saturating_add(1);
             }
+            s.save_counts();
         }
         if let Err(e) = s.write(&line) {
             s.write_errors = s.write_errors.saturating_add(1);
@@ -733,7 +765,36 @@ impl State {
                 }
             }
         });
+        // The log may have rotated away some of the day; the counts file has not forgotten them. Take the larger.
+        // A missing or unreadable file changes nothing: the recount stands.
+        if let Some(saved) = self
+            .counts_store
+            .as_ref()
+            .and_then(|st| st.load::<SavedCounts>().ok())
+            .filter(|saved| saved.day == day)
+        {
+            c.actions = c.actions.max(saved.actions);
+            c.costly = c.costly.max(saved.costly);
+        }
         self.counts = c;
+    }
+
+    /// Write the day's counts to their own file. A failure is reported, never fatal: the counts in memory still
+    /// hold, so a full or read-only disk does not turn the caps off (REQ-SEC-016).
+    fn save_counts(&self) {
+        let Some(store) = &self.counts_store else {
+            return;
+        };
+        let saved = SavedCounts {
+            day: self.counts.day,
+            actions: self.counts.actions,
+            costly: self.counts.costly,
+        };
+        if let Some(w) = &self.writer {
+            w.submit_with(store, || store.encode(&saved));
+        } else if let Err(e) = store.save(&saved) {
+            crate::diag::error(&format!("could not save the action counts: {e}"));
+        }
     }
 }
 

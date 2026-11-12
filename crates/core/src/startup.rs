@@ -426,6 +426,7 @@ fn open_records(args: &Args, core: &Core) -> Result<(Arc<AuditLog>, Arc<NoteStor
             ),
         )
     })?;
+    audit.set_writer(core.writer());
     let audit_for_conv = Arc::clone(&audit);
     core.set_audit(audit);
     core.set_quiet_hours(args.quiet);
