@@ -16,7 +16,10 @@ export interface AuthState {
 export type SpeakerState = "idle" | "listening" | "thinking" | "speaking" | "muted";
 /** What the device is and which parts it has, found by looking at it (the core's hardware module). */
 export interface HardwareInfo {
+  /** The identifier from the configuration file's `device.board`, or `unknown`. */
   board: string;
+  /** What `device.label` says to call it; empty when not configured. */
+  label: string;
   model: string;
   cpu: string;
   cores: number;
@@ -24,6 +27,8 @@ export interface HardwareInfo {
   arch: string;
   os: string;
   parts: { leds: boolean; bluetooth: boolean; wifi: boolean; screen: boolean; usb_serial: boolean };
+  /** The parts whose value comes from the configuration file rather than from looking at the device. */
+  configured_parts: string[];
 }
 
 export interface Status {

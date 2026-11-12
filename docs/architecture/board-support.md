@@ -163,13 +163,26 @@ Notes carried over from the draft (JSON has no comments): `volume_down` is also 
 
 A note on format: board files are JSON, like the rest of ClawDot's configuration ([configuration](configuration.md)). The maintainer chose this over TOML, which would have needed an extra parsing dependency; the cost is no comments in the file, so the `verify` notes live in the prose.
 
+## What the core knows about the device (REQ-CFG-083)
+
+The core never names a device, and never reads a board file. It reports what the portal needs to show the device and to leave out settings the device cannot use (`hardware` in the status snapshot, `crates/core/src/hardware.rs`):
+
+| Field | Comes from |
+|---|---|
+| `model`, `cpu`, `cores`, `ram_mb`, `arch`, `os` | What the operating system shows: the device tree or firmware (DMI) model string, `/proc/cpuinfo`, `/proc/meminfo`, the build target |
+| `parts.leds`, `bluetooth`, `wifi`, `screen`, `usb_serial` | The kernel's own classes under `/sys`: any LED class device; a Bluetooth controller; an interface the kernel marks wireless (`wireless` or `phy80211`, not a name such as `wlan0`); a framebuffer or a display connector reporting a screen; a tty whose device sits under a USB bus node |
+| `board`, `label` | The `device` section of the configuration file. `board` is `unknown` when it is not set; it is never guessed from the model string |
+| `parts.*` overrides, `configured_parts` | `device.parts` (`true` declares a part the system cannot show, for example a light ring another service drives; `false` rules out a detected part). The parts that came from here are listed in `configured_parts` so the portal can say "set in configuration" instead of "found" |
+
+A device preset is therefore data: the Echo Dot 2 one is [`examples/devices/echo-dot2.json`](../../examples/devices/echo-dot2.json), whose `board` is the `board` value of [`boards/echo-dot2.json`](../../boards/echo-dot2.json) (a test keeps the two in step). The core does not read the board file itself: it holds audio devices, key codes, LED drivers and takeover paths, which belong to the device daemon, and one file serving both would pull those concepts, and their schema, into the core. The `board` identifier is the only thing the two share. The former `board` setting (`auto` or `none`) is retired; see [configuration](configuration.md).
+
 ## Build and selection
 
 | Step | Mechanism |
 |---|---|
 | Build for the Dot | `scripts/build-dot2.sh` runs the repository's cargo wrapper with `--profile dot2 --target armv7-unknown-linux-musleabihf --features board-dot2`, checks the binary against the size gate, and stages `clawdot` and `echo-dot2.json` |
 | Profile | `[profile.dot2]` inherits `release` (size optimisation, LTO, `panic = "abort"`, stripped); it exists so the Dot build has its own name in CI and reports |
-| Run | `board = "echo-dot2"` (or `auto`) in the configuration; `board_file` to override the shipped data |
+| Run | The device daemon reads the board file; the core reads only the `device` section of its configuration (see above). The `board` / `board_file` configuration keys in this draft were never built |
 | Default build | No features: `NullBoard` only |
 
 CI matrix: `default`, `desktop`, and `dot2` (cross build plus the budget gate). The `dot2` feature compiles on any host; its tests run against fake files and sockets, so only the final device checks need hardware.

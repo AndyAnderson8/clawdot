@@ -50,7 +50,7 @@ fn is_port(s: &str) -> bool {
     !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The host of a URL such as `http://dot.local:3335`; `None` for an empty or unparseable value.
+/// The host of a URL such as `http://speaker.local:3335`; `None` for an empty or unparseable value.
 #[must_use]
 pub(crate) fn host_of_url(url: &str) -> Option<String> {
     let rest = url.trim().split_once("://")?.1;

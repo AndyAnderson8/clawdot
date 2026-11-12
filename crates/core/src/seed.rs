@@ -22,6 +22,7 @@ pub fn seed_from_config(a: &mut Args, c: &Config) -> Result<(), String> {
     a.speech.clone_from(&c.speech);
     a.satellite.clone_from(&c.satellite);
     a.updates.clone_from(&c.updates);
+    a.device.clone_from(&c.device);
     #[cfg(feature = "esphome-satellite")]
     a.esphome.clone_from(&c.esphome);
     a.create.extend(c.endpoints.iter().cloned());
@@ -218,6 +219,24 @@ mod tests {
 
     fn blank_args() -> Args {
         cli::parse(&[]).unwrap()
+    }
+
+    // REQ-CFG-083
+    #[test]
+    fn the_device_section_reaches_the_arguments() {
+        let mut a = blank_args();
+        assert_eq!(a.device, crate::config::DeviceConfig::default());
+        let c = Config::parse(
+            r#"{"device": {"board": "kitchen-1", "label": "Kitchen", "parts": {"leds": true}}}"#,
+        )
+        .unwrap();
+        seed_from_config(&mut a, &c).unwrap();
+        let h = crate::hardware::Hardware::default().with_device(&a.device);
+        assert_eq!(
+            (h.board.as_str(), h.label.as_str()),
+            ("kitchen-1", "Kitchen")
+        );
+        assert!(h.parts.leds);
     }
 
     // REQ-CFG-038, REQ-CFG-062

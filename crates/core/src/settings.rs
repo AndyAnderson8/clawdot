@@ -310,15 +310,6 @@ pub const FIELDS: &[Field] = &[
     // 0: unset means "price it with the built-in prices", 0 means "free" (usage.rs).
     Field::live("llm_usd_per_mtok_in", TOKEN_PRICE, Initial::None),
     Field::live("llm_usd_per_mtok_out", TOKEN_PRICE, Initial::None),
-    Field::restart(
-        "board",
-        Check::Choice {
-            what: "The board",
-            options: &["auto", "none"],
-            err: "The board setting must be `auto` or `none`.",
-        },
-        Initial::Str("none"),
-    ),
     Field::live(
         "agent_max_rounds",
         count("Rounds per request", 1, 20),
@@ -503,9 +494,12 @@ pub fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
     }
 }
 
-/// Settings that were removed. A file saved by an older version may still hold one, and it is skipped quietly.
-pub const RETIRED: [&str; 3] = [
+/// Settings that were removed. A file saved by an older version, or an export taken from one, may still hold one,
+/// and it is skipped quietly. (`board` was a choice of `auto` or `none` that nothing ever read; what a device is
+/// called and which parts it has now come from the `device` section of the configuration file.)
+pub const RETIRED: [&str; 4] = [
     "max_requests_per_day",
+    "board",
     "llm_fallback_model",
     "summary_model",
 ];
@@ -641,7 +635,7 @@ fn key_env_name(v: &Value, env: EnvRef<'_>, what: &str, pasted: bool) -> Result<
     }
     if !pasted && env(&n).is_none_or(|v| v.is_empty()) {
         return Err(format!(
-            "The environment variable {n} is not set where ClawDot runs. Set it there (for example in the service's environment file), restart ClawDot, then save this again."
+            "The environment variable {n} is not set where ClawDot runs. Set it there (in the environment ClawDot is started with, for example its service or supervisor's environment file), restart ClawDot, then save this again."
         ));
     }
     Ok(json!(n))
@@ -708,7 +702,7 @@ fn public_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     let u = string(v, "The public address", 200)?;
     if u.contains(char::is_whitespace) || !(u.starts_with("http://") || u.starts_with("https://")) {
         return Err(
-            "The public address must start with http:// or https:// and have no spaces, for example http://dot.local:3335.".into(),
+            "The public address must start with http:// or https:// and have no spaces, for example http://clawdot.local:3335.".into(),
         );
     }
     Ok(json!(u.trim_end_matches('/')))
@@ -953,6 +947,10 @@ impl SettingsState {
         };
         let mut saved = self.saved.clone();
         for (k, v) in patch {
+            // An export from an older version may carry a removed setting; it is dropped, not an error.
+            if RETIRED.contains(&k.as_str()) {
+                continue;
+            }
             if field(k).is_none() {
                 return Err(format!("`{k}` is not a setting."));
             }
@@ -1108,7 +1106,6 @@ mod tests {
             ("zone", json!("UTC")),
             ("listen", json!(DEFAULT_LISTEN)),
             ("llm_key_env", json!("OPENROUTER_API_KEY")),
-            ("board", json!("none")),
         ])
     }
 
@@ -1162,11 +1159,8 @@ mod tests {
     #[test]
     fn the_table_keeps_the_old_live_restart_default_and_group_answers() {
         let restart: Vec<_> = FIELDS.iter().filter(|f| !f.live).map(|f| f.key).collect();
-        assert_eq!(
-            restart,
-            ["speech_provider", "listen", "public_url", "board"]
-        );
-        assert_eq!(FIELDS.len(), 37);
+        assert_eq!(restart, ["speech_provider", "listen", "public_url"]);
+        assert_eq!(FIELDS.len(), 36);
         let mut defaults: Vec<_> = built_in_defaults().into_keys().collect();
         defaults.sort();
         let mut want = vec![
@@ -1176,7 +1170,6 @@ mod tests {
             "listen",
             "llm_key_env",
             "speech_provider",
-            "board",
             "agent_max_rounds",
             "agent_max_tool_calls",
             "agent_deadline_secs",
@@ -1295,11 +1288,22 @@ mod tests {
         let dir = TempDir::new("retired");
         std::fs::write(
             dir.0.join("settings.json"),
-            r#"{"schema":1,"data":{"max_requests_per_day":40,"zone":"Europe/Berlin"}}"#,
+            r#"{"schema":1,"data":{"max_requests_per_day":40,"board":"auto","zone":"Europe/Berlin"}}"#,
         )
         .unwrap();
-        let st = open_in(&dir.0, Layer::new(), Layer::new());
+        let mut st = open_in(&dir.0, Layer::new(), Layer::new());
         assert_eq!(st.get("zone"), "Europe/Berlin");
+        assert!(field("board").is_none(), "the board setting is gone");
+        // An export taken from an older version can still be sent back as it is.
+        st.change(&json!({"board": "none", "device_name": "Den"}))
+            .unwrap();
+        assert_eq!(st.get("device_name"), "Den");
+        assert!(
+            !st.json()["fields"]
+                .as_object()
+                .unwrap()
+                .contains_key("board")
+        );
     }
 
     // REQ-CFG-038
@@ -1408,7 +1412,6 @@ mod tests {
             (json!({"listen": "everywhere"}), "127.0.0.1:3335"),
             (json!({"public_url": "dot.local"}), "http://"),
             (json!({"daily_spend_usd": -1}), "zero or more"),
-            (json!({"board": "rpi"}), "auto"),
             (json!({"device_name": "a\nb"}), "control"),
             (json!({"llm_url": "ftp://x"}), "https://"),
             (
@@ -1477,20 +1480,17 @@ mod tests {
         let dir = TempDir::new("restart");
         let mut st = open_in(&dir.0, Layer::new(), Layer::new());
         assert_eq!(st.json()["restart_needed"], json!([]));
-        st.change(&json!({"zone": "Europe/Berlin", "listen": "0.0.0.0:4000", "board": "auto"}))
+        st.change(&json!({"zone": "Europe/Berlin", "listen": "0.0.0.0:4000"}))
             .unwrap();
         let j = st.json();
-        assert_eq!(
-            j["restart_needed"],
-            json!(["listen", "public_url", "board"])
-        );
+        assert_eq!(j["restart_needed"], json!(["listen", "public_url"]));
         assert_eq!(j["fields"]["zone"]["live"], true);
         assert_eq!(j["fields"]["listen"]["live"], false);
         let live = st.live_values();
         assert_eq!(live["zone"], "Europe/Berlin");
-        assert!(!live.contains_key("listen") && !live.contains_key("board"));
+        assert!(!live.contains_key("listen"));
         // Going back to the running value needs no restart.
-        st.change(&json!({"listen": null, "board": null})).unwrap();
+        st.change(&json!({"listen": null})).unwrap();
         assert_eq!(st.json()["restart_needed"], json!([]));
     }
 

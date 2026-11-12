@@ -13,7 +13,18 @@ export async function settingsGeneral(c: Ctx): Promise<void> {
         ["Device", "This device"],
         "it is the second card of General",
       );
-      await eq(`T.text('#hwboard')`, "Echo Dot class speaker", "the kind of device");
+      await eq(`T.text('#hwboard')`, "Test Speaker", "the configured label names the device");
+      await eq(`T.q('#hwunknown') === null`, true, "a configured device has no 'no preset' note");
+      await eq(
+        `T.all('#hwparts li')[0].querySelector('.badge').textContent`,
+        "Set in configuration",
+        "a part the configuration declared says so",
+      );
+      await eq(
+        `T.all('#hwparts li')[2].querySelector('.badge').textContent`,
+        "Found",
+        "a part that was looked at says found",
+      );
       await eq(`T.text('#hardwarecard').includes('486 MB')`, true, "its memory");
       await eq(
         `T.all('#hwparts li').map((l) => l.textContent.slice(0, 5) + ' ' + (l.querySelector('.badge')?.textContent ?? '')).length`,
@@ -25,6 +36,15 @@ export async function settingsGeneral(c: Ctx): Promise<void> {
         true,
         "a device with lights lists the Lights page",
       );
+      // a device with no configured preset is called by the model it gives itself, and the page says no preset is set
+      mock.state["hwNoLabel"] = true;
+      await b.goto(mock.url + "/api/auth");
+      await b.goto(mock.url + "/#/settings/general");
+      await b.ev(HELPERS);
+      await b.until(`!!T.q('#hardwarecard dd')`, "the device card");
+      await eq(`T.text('#hwboard')`, "Test Model 9", "no label: the model string");
+      await eq(`!!T.q('#hwunknown')`, true, "no preset: it says so");
+      mock.state["hwNoLabel"] = false;
       // a device with no lights does not list them, unless asked
       mock.state["hwLeds"] = false;
       await b.goto(mock.url + "/api/auth");

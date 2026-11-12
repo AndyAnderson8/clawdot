@@ -249,6 +249,8 @@ pub struct Brain {
     pub(crate) persona: String,
     /// Turn limits, speech while working and notes.
     pub(crate) agent: AgentConfig,
+    /// What this device is: what the system shows, with the configured name and parts (the `device` section).
+    pub(crate) hardware: crate::hardware::Hardware,
     /// A speech provider (address and speech model) is configured, so a speaker has a voice (REQ-CFG-070).
     pub(crate) voice_configured: bool,
     /// The optional realtime voice: its settings, status and the way sessions reach this loop.
@@ -436,7 +438,7 @@ impl Brain {
                 "llm_usd_per_mtok_in": limits.llm_usd_per_mtok_in,
                 "llm_usd_per_mtok_out": limits.llm_usd_per_mtok_out,
             },
-            "hardware": crate::hardware::detected(),
+            "hardware": &self.hardware,
             "clock_valid": self.clock.wall_clock_valid(),
             "satellites": satellites,
             "speaker": who,
@@ -1331,6 +1333,36 @@ mod tests {
         assert_eq!(s["stations"][0], "Jazz");
         assert_eq!(s["satellites"], 0);
         assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    // REQ-CFG-083
+    #[tokio::test]
+    async fn the_status_names_the_device_only_from_the_configured_preset() {
+        let view = SpeakerView {
+            available: false,
+            console: true,
+            quiet: None,
+        };
+        let none = TempDir::new("status-hw-none");
+        let (brain, _core, _live) = started(&none, &[]).await;
+        let hw = brain.status_json(0, &view, &[], &serde_json::json!({}))["hardware"].clone();
+        assert_eq!(hw["board"], "unknown");
+        assert_eq!(hw["label"], "");
+        assert_eq!(hw["configured_parts"], serde_json::json!([]));
+
+        let dir = TempDir::new("status-hw-set");
+        let file = dir.0.join("c.json");
+        std::fs::write(
+            &file,
+            r#"{"device": {"board": "my-board", "label": "Den speaker", "parts": {"leds": true}}}"#,
+        )
+        .unwrap();
+        let (brain, _core, _live) = started(&dir, &["--config", &file.display().to_string()]).await;
+        let hw = brain.status_json(0, &view, &[], &serde_json::json!({}))["hardware"].clone();
+        assert_eq!(hw["board"], "my-board");
+        assert_eq!(hw["label"], "Den speaker");
+        assert_eq!(hw["parts"]["leds"], true);
+        assert_eq!(hw["configured_parts"], serde_json::json!(["leds"]));
     }
 
     // REQ-AST-011: the model prices follow the settings (unset stays unset, 0 stays 0) and the status says

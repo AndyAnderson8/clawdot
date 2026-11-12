@@ -42,6 +42,16 @@ scripts/dev/dot-push.sh HOST path/to/clawdot
 
 The script streams the file through `ssh` (the image has no `scp` or `sftp`), checks its SHA-256 on the device, runs `--version` there, keeps the old binary as `clawdot.prev`, stops the running copy, and waits for the portal to answer. If the new build crashes three times at start, the supervisor ([`dot-run.sh`](../../scripts/dev/dot-run.sh)) puts `clawdot.prev` back.
 
+## Telling ClawDot what the device is
+
+ClawDot's core knows no device by name. It looks at what the operating system shows (model string, processor, memory, the lights, radios, screen and USB serial adapters the kernel lists) and takes the rest from the `device` section of the configuration file. The Dot's light ring is driven by another service and the kernel lists no LED for it, so the Dot's `clawdot.json` (next to `run.sh`) carries the preset in [`examples/devices/echo-dot2.json`](../../examples/devices/echo-dot2.json):
+
+```json
+{ "device": { "board": "echo-dot2", "label": "Echo Dot (2nd generation)", "parts": { "leds": true } } }
+```
+
+Add that `device` object to the existing `clawdot.json` and restart ClawDot. `board` is the `board` value of the file in `boards/` that the device daemon uses; `label` is what the portal shows. `run.sh` writes a line to `clawdot.log` when the section is missing.
+
 ## What this does not do
 
 - **No password login, ever.** Dropbear runs with `-s`.

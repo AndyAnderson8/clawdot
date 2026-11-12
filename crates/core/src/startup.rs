@@ -88,6 +88,9 @@ pub async fn build_brain(
         builtin: tools.builtin,
         persona,
         agent: args.agent.clone(),
+        hardware: crate::hardware::detected()
+            .clone()
+            .with_device(&args.device),
         voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
         rt: Realtime::with_env_and_secrets(
             RtSettings::from_live(live),

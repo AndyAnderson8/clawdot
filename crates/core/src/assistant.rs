@@ -830,7 +830,7 @@ mod tests {
 
     #[test]
     fn an_unset_clock_is_admitted_not_read_out_as_the_time() {
-        // REQ-TMR-009: a Dot with no RTC and no network boots at 2010-01-01.
+        // REQ-TMR-009: a device with no battery-backed clock and no network boots at 2010-01-01.
         let (mut a, clock, _) = setup(false);
         clock.0.store(utc(2010, 1, 1, 0, 3), Ordering::Relaxed);
         for u in [

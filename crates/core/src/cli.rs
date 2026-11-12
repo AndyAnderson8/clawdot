@@ -5,7 +5,9 @@
 
 use crate::assistant::DEFAULT_PERSONA;
 use crate::audit::ActionPolicy;
-use crate::config::{AgentConfig, Config, SatelliteConfig, SpeechConfig, UpdatesConfig};
+use crate::config::{
+    AgentConfig, Config, DeviceConfig, SatelliteConfig, SpeechConfig, UpdatesConfig,
+};
 #[cfg(feature = "esphome-satellite")]
 use crate::esphome_cfg::EsphomeConfig;
 use crate::httptools::ToolDef;
@@ -88,6 +90,8 @@ pub struct Args {
     pub speech: SpeechConfig,
     pub satellite: SatelliteConfig,
     pub updates: UpdatesConfig,
+    /// What the device is called and which parts it has that cannot be seen (the `device` section).
+    pub device: DeviceConfig,
     #[cfg(feature = "esphome-satellite")]
     pub esphome: EsphomeConfig,
     /// Hive discovery mode (`--hive-discovery`); `None` leaves the hive unstarted.
@@ -136,6 +140,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         speech: SpeechConfig::default(),
         satellite: SatelliteConfig::default(),
         updates: UpdatesConfig::default(),
+        device: DeviceConfig::default(),
         #[cfg(feature = "esphome-satellite")]
         esphome: EsphomeConfig::default(),
         #[cfg(feature = "hive")]
