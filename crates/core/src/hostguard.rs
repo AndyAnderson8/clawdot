@@ -80,9 +80,11 @@ pub(crate) fn host_is_ours(host_header: &str, public_url: &str, machine: Option<
     host == machine || host == first || host == format!("{first}.local")
 }
 
-/// The machine's host name, read from the system (`None` when it cannot be, so only the other forms match).
+/// The machine's host name, from the system's host name files and then the start-up `env` snapshot (`None` when it
+/// cannot be found, so only the other forms match). Called once at start-up (`Core::with_env`); the request path uses
+/// the kept value and does no file or environment access.
 #[must_use]
-pub(crate) fn machine_name() -> Option<String> {
+pub(crate) fn machine_name(env: &crate::env::Env) -> Option<String> {
     #[cfg(unix)]
     {
         for path in ["/proc/sys/kernel/hostname", "/etc/hostname"] {
@@ -94,9 +96,14 @@ pub(crate) fn machine_name() -> Option<String> {
             }
         }
     }
+    name_from_env(env)
+}
+
+/// The host name a start-up environment snapshot gives (`HOSTNAME`, then `COMPUTERNAME`).
+fn name_from_env(env: &crate::env::Env) -> Option<String> {
     ["HOSTNAME", "COMPUTERNAME"]
         .iter()
-        .find_map(|k| std::env::var(k).ok())
+        .find_map(|k| env.get(k))
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
 }
@@ -168,6 +175,20 @@ mod tests {
             host_of_url("http://user:pw@Dot.Local:3335/x?y#z").as_deref(),
             Some("dot.local")
         );
+    }
+
+    #[test]
+    fn the_environment_part_of_the_name_comes_from_the_snapshot() {
+        use crate::env::Env;
+        assert_eq!(
+            name_from_env(&Env::from_pairs([("COMPUTERNAME", " BOX ")])).as_deref(),
+            Some("BOX")
+        );
+        assert_eq!(
+            name_from_env(&Env::from_pairs([("HOSTNAME", "a"), ("COMPUTERNAME", "b")])).as_deref(),
+            Some("a")
+        );
+        assert_eq!(name_from_env(&Env::empty()), None);
     }
 
     #[test]

@@ -320,11 +320,7 @@ fn host_is_ours(core: &Core, headers: &HeaderMap) -> bool {
         return false;
     };
     let public = core.setting("public_url");
-    crate::hostguard::host_is_ours(
-        host,
-        public.as_str().unwrap_or(""),
-        crate::hostguard::machine_name().as_deref(),
-    )
+    crate::hostguard::host_is_ours(host, public.as_str().unwrap_or(""), core.machine_name())
 }
 
 async fn route(

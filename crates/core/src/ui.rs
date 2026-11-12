@@ -47,6 +47,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 #[cfg(test)]
+mod csp_tests;
+#[cfg(test)]
+mod openai_host_tests;
+#[cfg(test)]
+mod rekey_tests;
+#[cfg(test)]
 mod tests;
 
 type Resp = Response<BoxBody<Bytes, Infallible>>;
@@ -58,11 +64,12 @@ const PAGE: &str = include_str!(concat!(env!("OUT_DIR"), "/ui-page.html"));
 const PAGE_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui-page.html.gz"));
 /// The release notes, shown on the About card (REQ-CFG-013, 025).
 const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
-/// Only the page's own inline script and style, and only calls back to this origin. Pictures are the one thing it may
-/// load from elsewhere, and only when a person gives an image address for the picture of their device (or has one saved
-/// in the page as data); nothing else on the page asks another site for anything.
-const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data: https: http:; \
-                   base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+/// Only the page's own inline script and style, allowed by their SHA-256 (computed from the page by `build.rs`, so
+/// there is no `'unsafe-inline'` and an injected inline script or style is refused), and only calls back to this
+/// origin. Pictures are the one thing it may load from elsewhere, and only when a person gives an image address for
+/// the picture of their device (or has one saved in the page as data); nothing else on the page asks another site
+/// for anything.
+const CSP: &str = include_str!(concat!(env!("OUT_DIR"), "/ui-csp.txt"));
 /// API bodies are tiny; refuse anything larger.
 const MAX_BODY: usize = 4096;
 /// A tool description with its parameters, and a skills file.
@@ -747,7 +754,7 @@ async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
     if let Err(m) = core.secrets().set(crate::secrets::LLM_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
     }
-    rekeyed(core).await
+    rekeyed(core, "saved").await
 }
 
 /// `DELETE /api/llm/key`: forget the stored key.
@@ -755,16 +762,27 @@ async fn llm_key_clear(core: &Core) -> Resp {
     if let Err(m) = core.secrets().clear(crate::secrets::LLM_KEY) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
-    rekeyed(core).await
+    rekeyed(core, "removed").await
 }
 
-/// Tell the running assistant about the new key and answer with what the page may know of it: the masked hint.
-async fn rekeyed(core: &Core) -> Resp {
-    let _ = core.portal_call(Op::Rekey).await;
-    json_reply(
-        StatusCode::OK,
-        &json!({ "hint": core.secrets().hint(crate::secrets::LLM_KEY) }),
-    )
+/// Tell the running assistant about the changed key and answer with what the page may know of it: the masked hint.
+/// `done` is "saved" or "removed". When the main loop cannot take the request, the change is on disk but the running
+/// model client still has the old key, so the answer is a 503 that says so (the page shows an error's message as
+/// written); the hint is included so it can still be read.
+async fn rekeyed(core: &Core, done: &str) -> Resp {
+    let hint = core.secrets().hint(crate::secrets::LLM_KEY);
+    match core.portal_call(Op::Rekey).await {
+        Ok(_) => json_reply(StatusCode::OK, &json!({ "hint": hint })),
+        Err(_) => json_reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!({
+                "error": format!(
+                    "The key is {done}, but the assistant could not switch to it just now. It will be used after a restart, or when the assistant is free."
+                ),
+                "hint": hint,
+            }),
+        ),
+    }
 }
 
 /// `PUT /api/speech/key`: keep the speech-service key pasted on the page. It is read on every request, so it applies at
@@ -828,6 +846,13 @@ const OPENAI_VOICES: [&str; 11] = [
     "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
 ];
 
+/// Whether `url` is OpenAI's own service. The host is compared, not the text: a server whose path or query merely
+/// mentions `api.openai.com`, or whose name only starts with it, is not OpenAI.
+fn is_openai(url: &str) -> bool {
+    crate::transport::Endpoint::parse(url)
+        .is_ok_and(|e| e.host.eq_ignore_ascii_case("api.openai.com"))
+}
+
 /// `GET /api/voices`: the voices the speech server offers (REQ-CFG-081): its own list when it has one, OpenAI's fixed
 /// set for OpenAI, otherwise a plain statement that the voice has to be typed.
 async fn voices(core: &Core) -> Resp {
@@ -852,7 +877,7 @@ async fn voices(core: &Core) -> Resp {
                 &json!({ "voices": ids, "details": details, "source": source }),
             )
         }
-        Err(_) if url.contains("api.openai.com") => json_reply(
+        Err(_) if is_openai(url) => json_reply(
             StatusCode::OK,
             &json!({
                 "voices": OPENAI_VOICES,

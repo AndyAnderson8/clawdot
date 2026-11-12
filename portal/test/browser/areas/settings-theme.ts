@@ -77,6 +77,6 @@ export async function settingsTheme(c: Ctx): Promise<void> {
     await T(`click('#owntheme summary')`);
     await T(`click('#themeremove')`);
     await eq(`document.documentElement.dataset.theme`, "light", "removing it goes back to light");
-    await eq(`document.getElementById('customtheme') === null`, true, "and its style is gone");
+    await eq(`document.adoptedStyleSheets.length`, 0, "and its style sheet is gone");
   });
 }

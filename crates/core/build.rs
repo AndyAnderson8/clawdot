@@ -48,6 +48,57 @@ fn stamp_commit() {
     println!("cargo:rustc-env=CLAWDOT_BUILD_DIRTY={}", u8::from(dirty));
 }
 
+/// Base64 (standard alphabet, padded).
+fn base64(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(c.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(c.get(2).copied().unwrap_or(0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(A[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The CSP hash sources (`'sha256-...'`, space separated) of every inline `<tag>...</tag>` block of the page, with the
+/// exact bytes between the tags. A tag with attributes is refused: the policy would not cover it.
+fn inline_hashes(page: &str, tag: &str) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    if page.matches(&format!("<{tag}")).count() != page.matches(&open).count() {
+        return Err(format!(
+            "src/ui.html has a <{tag}> with attributes; the policy only covers plain inline blocks"
+        ));
+    }
+    let mut hashes: Vec<String> = Vec::new();
+    let mut rest = page;
+    while let Some(i) = rest.find(&open) {
+        let body = &rest[i + open.len()..];
+        let end = body
+            .find(&close)
+            .ok_or_else(|| format!("an unclosed <{tag}> in src/ui.html"))?;
+        let h = format!(
+            "'sha256-{}'",
+            base64(&Sha256::digest(&body.as_bytes()[..end]))
+        );
+        if !hashes.contains(&h) {
+            hashes.push(h);
+        }
+        rest = &body[end + close.len()..];
+    }
+    if hashes.is_empty() {
+        return Err(format!("src/ui.html has no inline <{tag}>"));
+    }
+    Ok(hashes.join(" "))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     stamp_commit();
     println!("cargo:rerun-if-changed=src/ui.html");
@@ -61,6 +112,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let out = PathBuf::from(std::env::var("OUT_DIR")?);
     std::fs::write(out.join("ui-page.html"), &page)?;
+    // The page's content-security policy: its own inline script and style by hash, no 'unsafe-inline'. Pictures are
+    // the one thing it may load from elsewhere (a person's image address for their device).
+    let csp = format!(
+        "default-src 'none'; script-src {}; style-src {}; connect-src 'self'; img-src data: https: http:; \
+         base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        inline_hashes(&page, "script")?,
+        inline_hashes(&page, "style")?
+    );
+    std::fs::write(out.join("ui-csp.txt"), csp)?;
     let mut gz = GzEncoder::new(Vec::new(), Compression::best());
     gz.write_all(page.as_bytes())?;
     std::fs::write(out.join("ui-page.html.gz"), gz.finish()?)?;
