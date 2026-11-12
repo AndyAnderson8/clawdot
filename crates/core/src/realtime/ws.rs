@@ -169,6 +169,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WebSocket<S> {
                 return Err(WsError::Protocol("reserved bits set"));
             }
             let op = b[0] & 0x0f;
+            // Control frames (close, ping, pong) are never fragmented and carry at most 125 bytes (RFC 6455
+            // section 5.5). Refused from the header alone, before waiting for a payload that should not exist.
+            if op & 0x8 != 0 {
+                if !fin {
+                    return Err(WsError::Protocol("a control frame was fragmented"));
+                }
+                if b[1] & 0x7f > 125 {
+                    return Err(WsError::Protocol("a control frame was too long"));
+                }
+            }
             let masked = b[1] & 0x80 != 0;
             let (len, mut at) = match b[1] & 0x7f {
                 126 => {
@@ -492,6 +502,35 @@ mod tests {
         ws.fragment = Fragment::Text;
         ws.buf = vec![0x80, 2, b'b', b'c'];
         assert_eq!(ws.parse(), Err(WsError::TooLarge));
+    }
+
+    // RFC 6455 section 5.5
+    #[test]
+    fn control_frames_must_be_whole_and_at_most_125_bytes() {
+        for op in [0x8_u8, 0x9, 0xa] {
+            // Not final.
+            assert_eq!(
+                holding(&[op, 0]).parse(),
+                Err(WsError::Protocol("a control frame was fragmented")),
+                "op {op:x}"
+            );
+            // A 16-bit or 64-bit length form means more than 125 bytes: refused at once, payload or not.
+            for head in [
+                vec![0x80 | op, 126, 0, 126],
+                vec![0x80 | op, 127, 0, 0, 0, 0, 0, 0, 0, 126],
+            ] {
+                assert_eq!(
+                    holding(&head).parse(),
+                    Err(WsError::Protocol("a control frame was too long")),
+                    "op {op:x}"
+                );
+            }
+        }
+        // The longest allowed one is still read.
+        let mut ping = vec![0x89, 125];
+        ping.extend([7u8; 125]);
+        assert_eq!(holding(&ping).parse(), Ok(Some(Msg::Ping(vec![7; 125]))));
+        assert_eq!(holding(&[0x88, 0]).parse(), Ok(Some(Msg::Close)));
     }
 
     #[test]
