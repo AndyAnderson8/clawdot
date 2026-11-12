@@ -26,7 +26,8 @@
 //!   turn at once ([`UsageTracker`]).
 
 use crate::assistant::{
-    Assistant, Effect, builtin_describe_action, builtin_returns_untrusted_text, builtin_risk,
+    Assistant, Effect, builtin_clean_args, builtin_describe_action, builtin_pins_args,
+    builtin_returns_untrusted_text, builtin_risk,
 };
 use crate::extensions::{Extensions, WithPolicy};
 use crate::httptools::{HttpTools, WithHttp};
@@ -101,6 +102,9 @@ pub struct Request {
 pub struct ToolReq {
     name: String,
     args: Value,
+    /// Not a call: the host fixes the arguments of a call about to be held (`ToolHost::pin_args`) and the
+    /// answer carries them back as JSON text.
+    pin: bool,
     reply: oneshot::Sender<ToolAnswer>,
 }
 
@@ -113,6 +117,11 @@ struct ToolAnswer {
 impl ToolReq {
     /// Run the call on the assistant, which only the loop holds, and answer the turn that asked.
     pub async fn serve(self, assistant: &mut Assistant) {
+        if self.pin {
+            let pinned = assistant.pin_builtin_args(&self.name, self.args.clone());
+            self.answer(Ok(pinned.to_string()), Vec::new());
+            return;
+        }
         let result = assistant.call_tool(&self.name, &self.args).await;
         let effects = assistant.take_effects();
         let saved = assistant.take_save();
@@ -190,11 +199,40 @@ impl ToolHost for BuiltinLink {
         builtin_describe_action(name, args)
     }
 
+    fn clean_args(&self, name: &str, args: &mut Value) {
+        builtin_clean_args(name, args);
+    }
+
+    /// The loop owns the inbox, so a built-in that pins its arguments (`inbox_reply`) asks it. If the loop is
+    /// gone the arguments come back unpinned, and the call then fails when it is released (it never sends).
+    async fn pin_args(&mut self, name: &str, args: Value) -> Value {
+        if !builtin_pins_args(name) {
+            return args;
+        }
+        let (reply, answer) = oneshot::channel();
+        let req = ToolReq {
+            name: name.to_owned(),
+            args: args.clone(),
+            pin: true,
+            reply,
+        };
+        if self.tx.send(req).await.is_err() {
+            return args;
+        }
+        match answer.await {
+            Ok(ToolAnswer {
+                result: Ok(text), ..
+            }) => serde_json::from_str(&text).unwrap_or(args),
+            _ => args,
+        }
+    }
+
     async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let (reply, answer) = oneshot::channel();
         let req = ToolReq {
             name: name.to_owned(),
             args: args.clone(),
+            pin: false,
             reply,
         };
         if self.tx.send(req).await.is_err() {

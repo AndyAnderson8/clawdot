@@ -146,6 +146,7 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
         &running.core,
         announcer,
         args.console || args.echo_speech,
+        has_satellites(&args) && !args.console,
     );
     let app = App::new(
         running.brain,
@@ -295,12 +296,22 @@ fn spawn_server(core: &Arc<Core>, listener: TcpListener) {
     });
 }
 
+/// Whether the configuration names a satellite: a listener for them, or ESPHome devices to dial.
+fn has_satellites(args: &Args) -> bool {
+    #[cfg(feature = "esphome-satellite")]
+    if !args.esphome.is_empty() {
+        return true;
+    }
+    args.satellite.listen.is_some()
+}
+
 /// Start the speaker task and return the loop's side of it.
 fn spawn_speaker(
     brain: &Brain,
     core: &Arc<Core>,
     announcer: satellite::Announcer,
     console: bool,
+    waits_for_satellite: bool,
 ) -> SpeakerHandle {
     let (usage, usage_store) = brain.usage_handles();
     let voice = Arc::new(Voice {
@@ -309,6 +320,7 @@ fn spawn_speaker(
         usage,
         usage_store,
         echo: console,
+        waits_for_satellite,
         available: AtomicBool::new(false),
         polling: AtomicBool::new(false),
     });

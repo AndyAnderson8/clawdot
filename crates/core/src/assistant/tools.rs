@@ -123,6 +123,10 @@ struct Tool {
     /// What the host says when it holds or proposes a call (and in dry-run). The generic read-back names each
     /// argument; `inbox_reply` reads its text word for word.
     describe: fn(&str, &Value) -> String,
+    /// Argument names only the host may set. They are removed from whatever the model wrote.
+    reserved: &'static [&'static str],
+    /// Fixes arguments from the host's own state when a call is held (`ToolHost::pin_args`).
+    pin: Option<fn(&Assistant, &mut Value)>,
     run: Run,
 }
 
@@ -146,6 +150,8 @@ impl Tool {
             untrusted: false,
             needs_clock: false,
             describe: crate::session::describe_generic,
+            reserved: &[],
+            pin: None,
             run,
         }
     }
@@ -172,6 +178,18 @@ impl Tool {
 
     const fn describing(mut self, describe: fn(&str, &Value) -> String) -> Self {
         self.describe = describe;
+        self
+    }
+
+    /// Arguments only the host sets, and how it sets them when the call is held. They are not in the schema the
+    /// model sees.
+    const fn pinning(
+        mut self,
+        reserved: &'static [&'static str],
+        pin: fn(&Assistant, &mut Value),
+    ) -> Self {
+        self.reserved = reserved;
+        self.pin = Some(pin);
         self
     }
 
@@ -218,10 +236,37 @@ fn inbox_reply_tier(args: &Value) -> Tier {
     }
 }
 
+/// Set by the host when an `inbox_reply` is held: the id of the event the reply is bound to.
+const PIN_EVENT: &str = "pinned_event_id";
+/// Set by the host with it: the spoken name of the endpoint that event came from, for the read-back.
+const PIN_ORIGIN: &str = "pinned_origin";
+
+/// Bind a reply to the event that is the reply target now (REQ-SEC-011, REQ-INB-023). Both fields are
+/// overwritten from the core's state; with no target they are absent, and the reply then sends nothing.
+fn pin_inbox_reply(a: &Assistant, args: &mut Value) {
+    let Some(map) = args.as_object_mut() else {
+        return;
+    };
+    map.remove(PIN_EVENT);
+    map.remove(PIN_ORIGIN);
+    if let Some(ev) = a.core.as_ref().and_then(|c| c.reply_target()) {
+        map.insert(PIN_EVENT.to_owned(), json!(ev.id));
+        map.insert(PIN_ORIGIN.to_owned(), json!(ev.origin_name()));
+    }
+}
+
 fn describe_inbox_reply(name: &str, args: &Value) -> String {
     match opt_text(args, "kind") {
-        "instruct" => crate::session::describe_agent_text(opt_text(args, "text")),
-        "ack" => "I will tell the agent that you will handle this yourself".to_owned(),
+        "instruct" => {
+            let origin = Some(opt_text(args, PIN_ORIGIN)).filter(|o| !o.is_empty());
+            crate::session::describe_agent_text(origin, opt_text(args, "text"))
+        }
+        "ack" => format!(
+            "I will tell {} that you will handle this yourself",
+            Some(opt_text(args, PIN_ORIGIN))
+                .filter(|o| !o.is_empty())
+                .unwrap_or("the agent")
+        ),
         _ => crate::session::describe_generic(name, args),
     }
 }
@@ -352,6 +397,7 @@ static TOOLS: &[Tool] = &[
     )
     .tier(Rule::FromArgs(inbox_reply_tier))
     .describing(describe_inbox_reply)
+    .pinning(&[PIN_EVENT, PIN_ORIGIN], pin_inbox_reply)
     .offered(Offer::WithInbox),
     Tool::new(
         "inbox_snooze",
@@ -392,6 +438,14 @@ impl ToolHost for Assistant {
         builtin_describe_action(name, args)
     }
 
+    fn clean_args(&self, name: &str, args: &mut Value) {
+        builtin_clean_args(name, args);
+    }
+
+    async fn pin_args(&mut self, name: &str, args: Value) -> Value {
+        self.pin_builtin_args(name, args)
+    }
+
     async fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         self.run_tool(name, args)
     }
@@ -423,7 +477,33 @@ pub fn builtin_describe_action(name: &str, args: &Value) -> String {
     describe(name, args)
 }
 
+/// Remove the arguments of a built-in that only the host may set, from what the model wrote. Pure, so a turn
+/// task can call it without the `Assistant`.
+pub fn builtin_clean_args(name: &str, args: &mut Value) {
+    if let (Some(t), Some(map)) = (find(name), args.as_object_mut()) {
+        for key in t.reserved {
+            map.remove(*key);
+        }
+    }
+}
+
+/// Whether a built-in has arguments the host fixes when it holds the call, which takes a round trip to the loop.
+#[must_use]
+pub fn builtin_pins_args(name: &str) -> bool {
+    find(name).is_some_and(|t| t.pin.is_some())
+}
+
 impl Assistant {
+    /// Fix a held built-in call's arguments from the core's state (the loop calls this; see `ToolReq::serve`).
+    #[must_use]
+    pub fn pin_builtin_args(&self, name: &str, mut args: Value) -> Value {
+        if let Some(pin) = find(name).and_then(|t| t.pin) {
+            builtin_clean_args(name, &mut args);
+            pin(self, &mut args);
+        }
+        args
+    }
+
     /// Queue a media action for the satellite and describe it to the model.
     fn run_media(&mut self, r: Result<MediaAction, MediaError>) -> Result<String, String> {
         match r {
@@ -627,30 +707,42 @@ impl Assistant {
     }
 
     fn run_inbox_reply(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
+        const GONE: &str = "that agent event is no longer waiting for a reply, so nothing was sent";
         let core = self.inbox_core()?;
         let kind = match opt_text(args, "kind") {
             "ack" => ReplyKind::Ack,
             "instruct" => ReplyKind::Instruct,
             other => return Err(format!("`kind` must be ack or instruct, not `{other}`")),
         };
-        // Only the session host reaches here for an instruct, and only with the exact text the
-        // user heard read back and answered yes to (REQ-SEC-011).
-        let body = if kind == ReplyKind::Instruct {
-            if core.current_event().is_none() {
+        // The host wrote the event id when it held or proposed the call (never the model: `clean_args` removes
+        // that field from the model's arguments). An instruct goes to that event or to none: it has the exact
+        // text the user heard read back and said yes to, and must not follow a later announcement elsewhere
+        // (REQ-SEC-011). An acknowledgement that was not held has no id and takes the current target.
+        let pinned = args.get(PIN_EVENT).and_then(Value::as_u64);
+        let (id, body) = if kind == ReplyKind::Instruct {
+            let Some(id) = pinned else {
                 return Err("no agent event is waiting for a reply".into());
-            }
-            text(args, "text")
-                .map_err(|_| "nothing to send: give the text to send".to_owned())?
-                .to_owned()
+            };
+            let body = text(args, "text")
+                .map_err(|_| "nothing to send: give the text to send".to_owned())?;
+            (id, body.to_owned())
         } else {
-            String::new()
+            let id = match pinned {
+                Some(id) => id,
+                None => core
+                    .reply_target()
+                    .map(|e| e.id)
+                    .ok_or("no agent event is waiting for a reply")?,
+            };
+            (id, String::new())
         };
-        core.reply(kind, &body)
+        core.reply_to(id, kind, &body)
             .map(|r| format!("Sent to {}.", r.origin))
             .map_err(|e| match e {
                 crate::app::ReplyError::NothingToReplyTo => {
                     "no agent event is waiting for a reply".to_owned()
                 }
+                crate::app::ReplyError::NoLongerWaiting => GONE.to_owned(),
                 crate::app::ReplyError::QueueFull => {
                     "too many replies are waiting for the agent bridge".to_owned()
                 }

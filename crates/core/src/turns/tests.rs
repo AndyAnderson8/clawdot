@@ -509,6 +509,7 @@ async fn a_result_for_a_dead_turn_is_logged_by_tool_name_only() {
     let req = ToolReq {
         name: "set_timer".into(),
         args: serde_json::json!({"seconds": 600, "label": "zq-secret-label"}),
+        pin: false,
         reply,
     };
     req.serve(&mut lab.assistant).await;
@@ -557,6 +558,7 @@ async fn a_timer_tool_result_waits_for_the_disk_without_holding_the_loop() {
     let req = ToolReq {
         name: "set_timer".into(),
         args: serde_json::json!({"seconds": 600, "label": "tea"}),
+        pin: false,
         reply,
     };
     req.serve(&mut assistant).await;
@@ -605,6 +607,7 @@ async fn a_timer_tool_result_says_when_the_save_failed() {
         let req = ToolReq {
             name: "set_timer".into(),
             args,
+            pin: false,
             reply,
         };
         req.serve(assistant).await;
@@ -637,4 +640,64 @@ async fn a_timer_tool_result_says_when_the_save_failed() {
             .len(),
         2
     );
+}
+
+/// REQ-SEC-011, REQ-INB-023: a turn that runs beside the loop pins a held reply through the loop too. The
+/// read-back names the agent, and the yes sends to that event after another one was announced.
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_task_binds_a_held_reply_to_its_event_through_the_loop() {
+    use crate::app::{Adapters, Core, LOCALHOST_PEER, Limits};
+    let mut lab = Lab::new(10).await;
+    let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FastClock(Instant::now()));
+    let core = Arc::new(Core::in_memory(
+        Arc::clone(&clock),
+        Adapters::builtin(),
+        Limits::default(),
+    ));
+    lab.assistant = Assistant::new(
+        crate::lang::DEFAULT,
+        clock,
+        Box::new(FixedOffset(0)),
+        Scheduler::new(16),
+        None,
+        Some(Arc::clone(&core)),
+    );
+    let announce = |name: &str, spoken: &str| {
+        let (_, token) = core.create_endpoint(name, "claude-code").unwrap();
+        core.set_endpoint_spoken_name(name, spoken).unwrap();
+        let hook = serde_json::json!({"session_id":"s","cwd":"/a/p","hook_event_name":"Stop","last_assistant_message":"Done."});
+        core.ingest_hook(name, &token, LOCALHOST_PEER, hook.to_string().as_bytes())
+            .unwrap();
+        let id = core.next_announcement(true, 0).unwrap().event.id;
+        core.mark_announced(&[id]);
+        token
+    };
+    let first = announce("build", "Build Server");
+
+    lab.say(
+        "console",
+        r#"call inbox_reply {"kind":"instruct","text":"add tests","pinned_event_id":99,"pinned_origin":"Your Bank"}"#,
+    );
+    lab.run_until(1).await;
+    let ask = lab.say_of("console")[0].clone();
+    assert!(
+        ask.contains("I will send this to Build Server, word for word"),
+        "{ask}"
+    );
+    assert!(!ask.contains("Your Bank"), "{ask}");
+
+    let second = announce("mailer", "Mail Robot");
+    lab.say("console", "yes");
+    lab.run_until(2).await;
+    let sent = |name: &str, token: &str| {
+        core.bridge_pending(name, token, LOCALHOST_PEER, 0)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        sent("build", &first),
+        1,
+        "went to the event it was read back for"
+    );
+    assert_eq!(sent("mailer", &second), 0);
 }
