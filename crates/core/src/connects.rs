@@ -309,6 +309,80 @@ pub(crate) mod testutil {
     use tokio::net::TcpListener;
     use tokio::sync::watch;
 
+    /// A loopback MCP server whose tool list the test can change while it runs: `tools` is the JSON array it
+    /// answers `tools/list` with. `tools/call` answers `called <name>`. Returns the port.
+    pub(crate) async fn listing_server(
+        tools: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
+    ) -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else {
+                    return;
+                };
+                let tools = std::sync::Arc::clone(&tools);
+                tokio::spawn(async move {
+                    let mut raw = Vec::new();
+                    let mut buf = [0u8; 8192];
+                    let body = loop {
+                        let Ok(n) = c.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        raw.extend_from_slice(&buf[..n]);
+                        if let Some(p) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&raw[..p]).to_ascii_lowercase();
+                            let want: usize = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.strip_prefix("content-length:")?.trim().parse().ok()
+                                })
+                                .unwrap_or(0);
+                            if raw.len() >= p + 4 + want {
+                                break raw[p + 4..p + 4 + want].to_vec();
+                            }
+                        }
+                    };
+                    let msg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let id = msg["id"].clone();
+                    let (status, extra, payload) = match msg["method"].as_str().unwrap_or("") {
+                        "initialize" => (
+                            "200 OK",
+                            "Mcp-Session-Id: s\r\n",
+                            json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":crate::mcp::PROTOCOL_REVISION,"capabilities":{"tools":{}}}}).to_string(),
+                        ),
+                        "tools/list" => {
+                            let list = tools.lock().unwrap().clone();
+                            (
+                                "200 OK",
+                                "",
+                                json!({"jsonrpc":"2.0","id":id,"result":{"tools":list}}).to_string(),
+                            )
+                        }
+                        "tools/call" => {
+                            let name = msg["params"]["name"].as_str().unwrap_or("").to_owned();
+                            (
+                                "200 OK",
+                                "",
+                                json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("called {name}")}]}}).to_string(),
+                            )
+                        }
+                        _ => ("202 Accepted", "", String::new()),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = c.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
     /// Starts the server. Requests are read at once, but no reply is sent until `open` holds true. Returns
     /// the port. The one tool it lists is `ping`.
     pub(crate) async fn gated_server(open: watch::Receiver<bool>) -> u16 {
@@ -482,9 +556,9 @@ mod tests {
         assert!(client.tools().is_empty());
 
         let up = pending[0].load().await;
-        assert!(client.settle("up", up, &[]).is_empty());
+        assert!(client.settle("up", up, &[], None).is_empty());
         let down = pending[1].load().await;
-        let warnings = client.settle("down", down, &[]);
+        let warnings = client.settle("down", down, &[], None);
         assert!(
             warnings[0].contains("`down` is unavailable"),
             "{warnings:?}"
@@ -502,9 +576,9 @@ mod tests {
         assert!(r[1]["error"].is_string());
         assert!(client.owns("up__ping") && !client.owns("down__ping"));
         // A name that is gone is ignored; a clash with a reserved name is skipped with a warning.
-        assert!(client.settle("gone", Ok(Vec::new()), &[]).is_empty());
+        assert!(client.settle("gone", Ok(Vec::new()), &[], None).is_empty());
         let (mut other, p) = McpClient::declare(vec![def("up", port)], |_| None).unwrap();
-        let warnings = other.settle("up", p[0].load().await, &["up__ping".to_owned()]);
+        let warnings = other.settle("up", p[0].load().await, &["up__ping".to_owned()], None);
         assert!(warnings[0].contains("clashes"), "{warnings:?}");
         assert!(other.tools().is_empty());
     }

@@ -7,7 +7,7 @@
 use crate::app::Fail;
 use crate::httptools::{HttpTools, ToolDef};
 use crate::llm::ToolSpec;
-use crate::mcp::{McpClient, McpTool, PendingServer, ServerDef};
+use crate::mcp::{McpClient, McpTool, PendingServer, Pins, ServerDef};
 use crate::session::{Risk, Tier, ToolHost};
 use crate::skillfolder::{self, SkillFile};
 use crate::store::JsonStore;
@@ -88,6 +88,13 @@ struct ConnFile {
     disabled_servers: BTreeSet<String>,
     #[serde(default)]
     disabled_tools: BTreeSet<String>,
+    /// The tools the administrator approved as shown, by server name and then by the server's own tool name:
+    /// a fingerprint of each description and argument schema (REQ-EXT-019). A server with no entry has not been
+    /// approved yet (a file saved before this existed); its tools are taken as found at its next connect and
+    /// recorded then. An entry, even an empty one, means every tool not listed in it, or differing from it,
+    /// waits for review.
+    #[serde(default)]
+    approved: BTreeMap<String, Pins>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -113,6 +120,10 @@ pub enum ExtOp {
     McpDelete(String),
     /// Turn an MCP server on or off.
     McpEnable(String, bool),
+    /// The administrator accepts what a server now offers: all its tools waiting for review, or only the one
+    /// named (its name as the model sees it). The fingerprints are recorded and the tools are offered
+    /// (REQ-EXT-019).
+    McpAccept(String, Option<String>),
     /// Add a skill.
     SkillAdd(Value),
     /// Replace the skill with this name.
@@ -519,6 +530,9 @@ impl Extensions {
             ExtOp::McpAdd(v) => self.mcp_add(&v, http, mcp, builtin, env).await,
             ExtOp::McpDelete(name) => self.mcp_delete(&name, mcp),
             ExtOp::McpEnable(name, on) => self.mcp_enable(&name, on, mcp),
+            ExtOp::McpAccept(name, tool) => {
+                self.mcp_accept(&name, tool.as_deref(), http, mcp, builtin)
+            }
             ExtOp::SkillAdd(v) => self.skill_add(&v),
             ExtOp::SkillEdit(name, v) => self.skill_edit(&name, &v),
             ExtOp::SkillDelete(name) => self.skill_delete(&name),
@@ -617,6 +631,7 @@ impl Extensions {
         // Two files change. Both are put back when either save fails; the live connection is dropped last.
         let (tools_before, conns_before) = (self.tools.clone(), self.conns.clone());
         self.conns.servers.remove(pos);
+        self.conns.approved.remove(name);
         self.conns.disabled_servers.remove(name);
         let had_tiers = tool_names.iter().any(|t| self.tools.tiers.contains_key(t));
         for t in &tool_names {
@@ -650,6 +665,70 @@ impl Extensions {
             }
             Ok(())
         })
+    }
+
+    /// What was approved for a server, or `None` when nothing was yet (see [`ConnFile::approved`]).
+    #[must_use]
+    pub fn approved_tools(&self, server: &str) -> Option<Pins> {
+        self.conns.approved.get(server).cloned()
+    }
+
+    /// First connect of a server that was never approved (saved before approvals existed, or defined in the
+    /// configuration file): take what it listed as approved and record it. This is trust on first use, once per
+    /// server; every later connect is compared with it. Returns whether anything was recorded. A server that
+    /// did not answer, or one already approved, is left alone.
+    ///
+    /// # Errors
+    /// [`Fail::Unavailable`] when saving fails; nothing is recorded then, and the next start tries again.
+    pub fn pin_first_connect(&mut self, server: &str, mcp: &McpClient) -> Result<bool, Fail> {
+        if self.conns.approved.contains_key(server) || !mcp.is_connected(server) {
+            return Ok(false);
+        }
+        let pins = mcp.pins_of(server);
+        transact(&mut self.conns, self.conn_store.as_ref(), |c| {
+            c.approved.insert(server.to_owned(), pins);
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    /// The administrator accepts the tools of `server` that wait for review (only `tool`, by its exposed name,
+    /// when given): what they are now is recorded, saved, and only then are they offered, so the file and the
+    /// running state cannot disagree.
+    fn mcp_accept(
+        &mut self,
+        server: &str,
+        tool: Option<&str>,
+        http: &HttpTools,
+        mcp: &mut McpClient,
+        builtin: &[String],
+    ) -> Result<(), Fail> {
+        if !mcp.has_server(server) {
+            return Err(Fail::NotFound("There is no such connection.".into()));
+        }
+        let waiting = mcp.held_pins(server, tool);
+        if waiting.is_empty() {
+            return if tool.is_some() {
+                Err(Fail::NotFound(
+                    "That tool is not waiting for review.".into(),
+                ))
+            } else {
+                Ok(())
+            };
+        }
+        transact(&mut self.conns, self.conn_store.as_ref(), |c| {
+            let known = c.approved.entry(server.to_owned()).or_default();
+            for (remote, pin) in waiting {
+                known.insert(remote, pin);
+            }
+            Ok(())
+        })?;
+        let mut reserved = builtin.to_vec();
+        reserved.extend(http.specs().into_iter().map(|t| t.name));
+        for w in mcp.release(server, tool, &reserved) {
+            crate::diag::warn(&format!("mcp tool `{w}` was accepted and is on offer"));
+        }
+        Ok(())
     }
 
     fn skill_add(&mut self, v: &Value) -> Result<(), Fail> {
@@ -902,9 +981,14 @@ impl Extensions {
         mcp.install_server(pending, tools, &reserved)
             .map_err(friendly_env)?;
         let def = pending.def().clone();
+        // Adding the connection approves the tools it listed, as shown.
         self.conns.servers.push(def.clone());
+        self.conns
+            .approved
+            .insert(def.name.clone(), mcp.pins_of(&def.name));
         if let Err(e) = self.save_conns() {
             self.conns.servers.pop();
+            self.conns.approved.remove(&def.name);
             mcp.remove_server(&def.name);
             return Err(e);
         }
@@ -1002,7 +1086,7 @@ impl Extensions {
             servers.push(json!({
                 "name": name, "url": s["url"], "connected": s["connected"], "error": s["error"],
                 "confirm": s["confirm"], "token_env": s["token_env"], "tools": listed,
-                "connecting": s["connecting"], "enabled": server_on, "deletable": !config, "origin": if config { "config" } else { "portal" },
+                "connecting": s["connecting"], "needs_review": s["needs_review"], "enabled": server_on, "deletable": !config, "origin": if config { "config" } else { "portal" },
             }));
         }
         let problems: Vec<Value> = self
