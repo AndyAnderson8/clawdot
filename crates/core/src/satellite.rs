@@ -195,6 +195,32 @@ impl Drop for Registration {
     }
 }
 
+#[cfg(test)]
+impl Announcer {
+    /// Connect a stand-in satellite for a test. It takes a line when `free` is true and refuses it (busy or
+    /// muted) when false; every line it takes is sent on the returned channel. It disconnects when the channel
+    /// is dropped and the task ends with the runtime.
+    pub(crate) fn connect_fake(&self, free: Arc<AtomicBool>) -> mpsc::UnboundedReceiver<String> {
+        let (registration, mut rx) = self.register();
+        let (spoken, heard) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let _registration = registration;
+            while let Some(Announce { request, answer }) = rx.recv().await {
+                let idle = free.load(Ordering::Relaxed);
+                let _ = match request {
+                    Request::Probe => answer.send(idle),
+                    Request::Speak { text, .. } if idle => {
+                        let _ = spoken.send(text);
+                        answer.send(true)
+                    }
+                    Request::Speak { .. } => answer.send(false),
+                };
+            }
+        });
+        heard
+    }
+}
+
 impl Announcer {
     fn register(&self) -> (Registration, mpsc::Receiver<Announce>) {
         let (tx, rx) = mpsc::channel(4);

@@ -475,6 +475,13 @@ impl Core {
         self.clock.now()
     }
 
+    /// Whole seconds on the monotonic clock, for measuring how long something has waited
+    /// ([`Clock::monotonic_secs`]).
+    #[must_use]
+    pub fn monotonic_secs(&self) -> i64 {
+        self.clock.monotonic_secs()
+    }
+
     /// Whether an adapter with this name exists.
     #[must_use]
     pub fn has_adapter(&self, name: &str) -> bool {
