@@ -280,6 +280,38 @@ fn cross_site_write(method: &hyper::Method, segs: &[&str], headers: &HeaderMap) 
     }
 }
 
+/// Whether this request would be answered on the strength of the caller's address alone: the page and the portal's
+/// `/api` routes, and an announcement with no token. Routes that carry their own token are not (a page that was
+/// rebound to this device does not have the token), nor is the health check.
+fn answers_without_a_token(method: &hyper::Method, segs: &[&str], headers: &HeaderMap) -> bool {
+    match find(ROUTES, method.as_str(), segs) {
+        Some((row, _)) => match row.auth {
+            Page => true,
+            EndpointOrAdmin => token_from(headers).is_none(),
+            _ => false,
+        },
+        // A wrong method on a path of this table is a plain 405; any other path is the portal's.
+        None => path_row(ROUTES, segs).is_none_or(|row| row.auth == Page),
+    }
+}
+
+/// Whether the `Host` header names this device (see [`crate::hostguard`]). A request without one is not from a
+/// browser, which always sends it, so it is let through.
+fn host_is_ours(core: &Core, headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(HOST) else {
+        return true;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    let public = core.setting("public_url");
+    crate::hostguard::host_is_ours(
+        host,
+        public.as_str().unwrap_or(""),
+        crate::hostguard::machine_name().as_deref(),
+    )
+}
+
 async fn route(
     core: Arc<Core>,
     streams: Arc<AtomicUsize>,
@@ -295,6 +327,12 @@ async fn route(
         return Ok(json(
             StatusCode::FORBIDDEN,
             r#"{"error":"cross-site request refused"}"#,
+        ));
+    }
+    if answers_without_a_token(&parts.method, &segs, headers) && !host_is_ours(&core, headers) {
+        return Ok(json(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"this name does not belong to the device: open the portal by its IP address, localhost, its .local name, or set the public address in the settings"}"#,
         ));
     }
     // First decide whether the path names a real resource (invalid endpoint names are simply 404),

@@ -63,7 +63,7 @@ async fn http(
 ) -> (u16, String) {
     let mut s = TcpStream::connect(addr).await.unwrap();
     let mut req = format!(
-        "{method} /mcp HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     for (k, v) in headers {

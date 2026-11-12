@@ -31,6 +31,7 @@ pub mod fastpath;
 pub mod hardware;
 #[cfg(feature = "hive")]
 pub mod hive;
+mod hostguard;
 pub mod http;
 pub mod httptools;
 pub mod inbox;
