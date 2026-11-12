@@ -373,11 +373,19 @@ struct PartialCall {
     arguments: String,
 }
 
+/// The most reply text plus tool-call arguments one streamed response may accumulate. A non-streamed body is
+/// capped at the same size in the transport; a stream has no length of its own, only the call deadline.
+const MAX_STREAMED: usize = 1024 * 1024;
+/// The most distinct tool calls one streamed response may open.
+const MAX_STREAMED_CALLS: usize = 32;
+
 /// Accumulates a streamed (SSE) response line by line.
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     text: String,
     calls: BTreeMap<usize, PartialCall>,
+    /// Bytes of text, names and arguments kept so far, against [`MAX_STREAMED`].
+    kept: usize,
     finish_reason: Option<String>,
     usage: Option<Usage>,
 }
@@ -412,6 +420,7 @@ impl StreamAccumulator {
             let delta = choice.get("delta").unwrap_or(&Value::Null);
             if let Some(t) = delta.get("content").and_then(Value::as_str) {
                 if !t.is_empty() {
+                    self.keep(t.len())?;
                     self.text.push_str(t);
                     events.push(StreamEvent::Text(t.to_owned()));
                 }
@@ -423,24 +432,43 @@ impl StreamAccumulator {
                         .and_then(Value::as_u64)
                         .and_then(|i| usize::try_from(i).ok())
                         .unwrap_or(0);
-                    let p = self.calls.entry(index).or_default();
-                    if let Some(id) = c
+                    if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
+                        return Err(LlmError::Malformed("too many tool calls".into()));
+                    }
+                    let id = c
                         .get("id")
                         .and_then(Value::as_str)
-                        .filter(|i| !i.is_empty())
-                    {
+                        .filter(|i| !i.is_empty());
+                    let name = c.pointer("/function/name").and_then(Value::as_str);
+                    let args = c.pointer("/function/arguments").and_then(Value::as_str);
+                    self.keep(
+                        id.map_or(0, str::len)
+                            + name.map_or(0, str::len)
+                            + args.map_or(0, str::len),
+                    )?;
+                    let p = self.calls.entry(index).or_default();
+                    if let Some(id) = id {
                         p.id = id.to_owned();
                     }
-                    if let Some(name) = c.pointer("/function/name").and_then(Value::as_str) {
+                    if let Some(name) = name {
                         p.name.push_str(name);
                     }
-                    if let Some(args) = c.pointer("/function/arguments").and_then(Value::as_str) {
+                    if let Some(args) = args {
                         p.arguments.push_str(args);
                     }
                 }
             }
         }
         Ok(events)
+    }
+
+    /// Count `n` more bytes kept, failing once a response is larger than any sane reply.
+    fn keep(&mut self, n: usize) -> Result<(), LlmError> {
+        self.kept = self.kept.saturating_add(n);
+        if self.kept > MAX_STREAMED {
+            return Err(LlmError::Malformed("response too large".into()));
+        }
+        Ok(())
     }
 
     /// The finished response.
@@ -859,5 +887,28 @@ mod tests {
         acc.feed_line(r#"data: {"choices":[],"usage":null}"#)
             .unwrap();
         assert_eq!(acc.finish().usage.map(|u| u.prompt_tokens), Some(3));
+    }
+
+    #[test]
+    fn a_stream_that_never_ends_cannot_grow_the_reply_without_limit() {
+        let mut acc = StreamAccumulator::default();
+        let line = format!(
+            r#"data: {{"choices":[{{"delta":{{"content":"{}"}}}}]}}"#,
+            "x".repeat(60_000)
+        );
+        let failed = (0..100).any(|_| acc.feed_line(&line).is_err());
+        assert!(failed, "6 MB of reply text was accepted");
+    }
+
+    #[test]
+    fn a_stream_cannot_open_unbounded_tool_calls() {
+        let mut acc = StreamAccumulator::default();
+        let failed = (0..1000).any(|i| {
+            let line = format!(
+                r#"data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":{i},"function":{{"name":"a"}}}}]}}}}]}}"#
+            );
+            acc.feed_line(&line).is_err()
+        });
+        assert!(failed, "1000 tool calls were accepted");
     }
 }
