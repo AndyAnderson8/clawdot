@@ -620,10 +620,15 @@ pub fn mcp_connected(brain: &mut Brain, core: &Core, done: Done) {
         Source::Saved => {
             let mut reserved = brain.builtin.clone();
             reserved.extend(brain.http_tools.specs().into_iter().map(|t| t.name));
+            let name = done.pending.name().to_owned();
+            let listed = done.tools.as_ref().ok().map(Vec::len);
             let warnings =
                 Arc::make_mut(&mut brain.mcp).settle(done.pending.name(), done.tools, &reserved);
             for w in warnings {
                 eprintln!("clawdot: {w}");
+            }
+            if let Some(n) = listed {
+                println!("clawdot: mcp server `{name}` connected ({n} tools listed)");
             }
             core.set_ui_tools(brain.listing());
             return;

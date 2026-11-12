@@ -1039,6 +1039,15 @@ fn an_mcp_tool_runs_only_after_the_user_confirms() {
         }
     }
     assert!(ready);
+    // Saved and configured MCP servers connect after the loop starts (ADR-0021); a turn that begins earlier
+    // does not have their tools, so wait for the one this test uses.
+    let mut connected = false;
+    while Instant::now() < deadline && !connected {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            connected = line.contains("mcp server `home` connected");
+        }
+    }
+    assert!(connected, "the MCP server connects in the background");
     stdin.write_all(b"light up the den for me\n").unwrap();
     let asked = next_speech(&rx).expect("the host should ask");
     assert!(
