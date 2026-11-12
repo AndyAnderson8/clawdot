@@ -247,6 +247,67 @@ function seed(mode: string): Json {
   };
 }
 
+/**
+ * Every API route the fake device answers, written as in docs/api/openapi.yaml (`{name}` for a path parameter).
+ * Keep it next to the handlers in startMock: test/unit/mock-routes.test.ts fails when a route here is not in the
+ * description, or when a handler below matches an exact path that is not listed here.
+ */
+export const MOCK_ROUTES: readonly { method: string; path: string }[] = [
+  { method: "GET", path: "/api/auth" },
+  { method: "POST", path: "/api/setup" },
+  { method: "POST", path: "/api/login" },
+  { method: "POST", path: "/api/recover/window" },
+  { method: "POST", path: "/api/logout" },
+  { method: "GET", path: "/api/status" },
+  { method: "GET", path: "/api/overview" },
+  { method: "POST", path: "/api/speak" },
+  { method: "GET", path: "/api/about" },
+  { method: "GET", path: "/api/models" },
+  { method: "POST", path: "/api/models" },
+  { method: "PUT", path: "/api/llm/key" },
+  { method: "DELETE", path: "/api/llm/key" },
+  { method: "PUT", path: "/api/speech/key" },
+  { method: "DELETE", path: "/api/speech/key" },
+  { method: "PUT", path: "/api/realtime/key" },
+  { method: "DELETE", path: "/api/realtime/key" },
+  { method: "GET", path: "/api/hive/peers" },
+  { method: "GET", path: "/api/voices" },
+  { method: "GET", path: "/api/update" },
+  { method: "POST", path: "/api/update/check" },
+  { method: "POST", path: "/api/update/apply" },
+  { method: "GET", path: "/api/logs" },
+  { method: "GET", path: "/api/diagnostics" },
+  { method: "GET", path: "/api/settings" },
+  { method: "PUT", path: "/api/settings" },
+  { method: "GET", path: "/api/settings/export" },
+  { method: "POST", path: "/api/admin/password" },
+  { method: "GET", path: "/api/audit" },
+  { method: "GET", path: "/api/notes" },
+  { method: "POST", path: "/api/notes" },
+  { method: "DELETE", path: "/api/notes" },
+  { method: "PUT", path: "/api/notes/{id}" },
+  { method: "DELETE", path: "/api/notes/{id}" },
+  { method: "GET", path: "/api/schedule" },
+  { method: "POST", path: "/api/schedule" },
+  { method: "PUT", path: "/api/schedule/{id}" },
+  { method: "DELETE", path: "/api/schedule/{id}" },
+  { method: "POST", path: "/api/endpoints" },
+  { method: "DELETE", path: "/api/endpoints/{name}" },
+  { method: "POST", path: "/api/endpoints/{name}/rotate" },
+  { method: "GET", path: "/api/tools" },
+  { method: "POST", path: "/api/tools" },
+  { method: "DELETE", path: "/api/tools/{name}" },
+  { method: "POST", path: "/api/tools/{name}/enabled" },
+  { method: "POST", path: "/api/tools/{name}/tier" },
+  { method: "POST", path: "/api/connections" },
+  { method: "POST", path: "/api/connections/test" },
+  { method: "DELETE", path: "/api/connections/{name}" },
+  { method: "POST", path: "/api/connections/{name}/enabled" },
+  { method: "GET", path: "/api/skills" },
+  { method: "POST", path: "/api/skills" },
+  { method: "POST", path: "/api/skills/{action}" },
+];
+
 export async function startMock(initial: "setup" | "password" | "open" = "open"): Promise<Mock> {
   let st = seed(initial);
   const log: Logged[] = [];
@@ -338,18 +399,6 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         if (body.password !== st["password"] && body.password !== PASSWORD) return err(401, "Wrong password.");
         st["session"] = "sess-login";
         return send(200, { token: st["session"] });
-      }
-      const plain = (c: unknown) =>
-        String(c)
-          .replace(/[^a-z0-9]/gi, "")
-          .toUpperCase();
-      if (m === "POST" && path === "/api/recover") {
-        if (!st["recovery"] || plain(body.code) !== plain(st["recovery"]))
-          return err(401, "That recovery code was not accepted. Check it and try again.");
-        st["password"] = body.password;
-        st["session"] = "sess-recover";
-        st["recovery"] = NEXT_RECOVERY;
-        return send(200, { mode: "password", token: st["session"], recovery_code: NEXT_RECOVERY });
       }
       if (m === "POST" && path === "/api/recover/window") {
         if (!st["window"]) return err(403, "the reset window is not open");
@@ -538,10 +587,6 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         if (first) st["recovery"] = RECOVERY;
         return send(200, { mode: "password", token: st["session"], ...(first ? { recovery_code: RECOVERY } : {}) });
       }
-      if (m === "POST" && path === "/api/admin/recovery") {
-        st["recovery"] = NEXT_RECOVERY;
-        return send(200, { recovery_code: NEXT_RECOVERY });
-      }
 
       if (seg[0] === "notes") {
         const notes = st["notes"] as Json[];
@@ -658,7 +703,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
       }
 
       if (seg[0] === "tools" || seg[0] === "skills" || seg[0] === "connections") {
-        if (m === "GET") return send(200, ext());
+        if (m === "GET" && seg[0] !== "connections") return send(200, ext()); // the real device lists connections with the tools
         const tools = st["tools"] as Json[];
         if (seg[0] === "tools") {
           if (m === "POST" && seg.length === 1) {

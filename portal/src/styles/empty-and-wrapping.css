@@ -1,0 +1,43 @@
+/* ---- An empty place that says what it will do ---- */
+.blank {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-8) var(--spacing-4);
+  text-align: center;
+}
+.blank .fico {
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 50%;
+}
+.blank .fico .ico {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+.blank h3 {
+  margin: var(--spacing-2) 0 0;
+}
+.blank p {
+  margin: 0;
+  max-width: 44ch;
+}
+
+/* Every grid track may shrink below its content, and long words, addresses and tokens wrap. */
+.home > *,
+.stack > *,
+.cols > *,
+.srow > *,
+.rowhead > *,
+.fix > *,
+.row > * {
+  min-width: 0;
+}
+@media (max-width: 29.99rem) {
+  .card,
+  form.panel,
+  .soon {
+    padding: var(--spacing-4);
+  }
+}

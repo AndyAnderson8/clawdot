@@ -1,0 +1,219 @@
+/* ---- Home: the device, what needs doing, the numbers, then the chart and the latest happenings ---- */
+.home {
+  display: grid;
+  gap: var(--spacing-4);
+  grid-template-columns: minmax(0, 1fr);
+}
+.device {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-8);
+}
+.devart {
+  flex: none;
+  width: 12rem;
+  padding: var(--spacing-4);
+  border-radius: var(--radius-inner);
+  background: var(--color-background-muted);
+}
+.devtext {
+  min-width: 0;
+}
+.devtext h2 {
+  margin: 0 0 var(--spacing-2);
+  font-size: var(--font-size-2xl);
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+.devline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-3);
+  margin: 0 0 var(--spacing-2);
+  font-size: var(--font-size-lg);
+  font-weight: 650;
+}
+.devtext p {
+  max-width: 60ch;
+}
+.sdot {
+  flex: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  background: var(--color-border-control);
+}
+.sdot.live {
+  background: var(--color-live);
+  box-shadow: 0 0 0 4px var(--color-live-muted);
+}
+.look {
+  display: block;
+  width: 100%;
+  height: auto;
+  --led: var(--color-live);
+}
+.look .body {
+  fill: #2b3036;
+}
+.look .top {
+  fill: #3a4047;
+}
+.look .cap {
+  fill: #20252a;
+}
+.look .floor {
+  fill: rgb(0 0 0 / 0.1);
+}
+.look .holes {
+  fill: #5a626b;
+}
+.look .led {
+  stroke: var(--led);
+  stroke-width: 4;
+}
+.look .led.solid {
+  fill: var(--led);
+  stroke: none;
+}
+.look[data-state="listening"] {
+  --led: #2b6fd6;
+}
+.look[data-state="thinking"] {
+  --led: #c28f00;
+}
+.look[data-state="muted"] {
+  --led: #c0262c;
+}
+.look[data-state="off"] {
+  --led: #8a8a8a;
+}
+.look[data-state="listening"] .led,
+.look[data-state="thinking"] .led,
+.look[data-state="speaking"] .led {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+@keyframes breathe {
+  50% {
+    opacity: 0.35;
+  }
+}
+.alert {
+  border: 1px solid var(--color-alert-line);
+  border-left-width: 0.5rem;
+  background: var(--color-warning-muted);
+  border-radius: var(--radius-card);
+  padding: var(--spacing-4) var(--spacing-6);
+}
+.alert h3 {
+  margin: 0 0 var(--spacing-2);
+}
+.alert ul.rows {
+  margin: 0;
+}
+.alert ul.rows > li {
+  border-top-color: var(--color-alert-line);
+}
+.fix {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-4);
+}
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: var(--spacing-4);
+}
+.stat {
+  background: var(--color-background-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--radius-card);
+  padding: var(--spacing-4) var(--spacing-6);
+  min-width: 0;
+}
+.statlabel,
+.statnote {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+.statvalue {
+  margin: 2px 0;
+  font-size: 1.875rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.cols {
+  display: grid;
+  gap: var(--spacing-4);
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+@media (min-width: 64rem) {
+  .cols {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}
+.bars {
+  display: flex;
+  align-items: stretch;
+  gap: 0.375rem;
+  height: 11rem;
+}
+.cbar {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.cbar .fill {
+  background: var(--color-chart);
+  border-radius: 0.25rem 0.25rem 0 0;
+}
+.cbar.today .fill {
+  background: var(--color-live);
+}
+.cbar.none .fill {
+  background: var(--color-card-border);
+}
+.axis {
+  height: 1.25rem;
+  margin-top: 0.25rem;
+  overflow: hidden;
+  font-size: 0.6875rem;
+  line-height: 1.25rem;
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+.chartnote {
+  margin: var(--spacing-2) 0 0;
+}
+.dot {
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 50%;
+  margin-right: var(--spacing-2);
+  background: var(--color-text-warning);
+}
+.dot.ok {
+  background: var(--color-live);
+}
+@media (max-width: 40rem) {
+  .device {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--spacing-4);
+  }
+  .devart {
+    width: 9rem;
+  }
+  .fix {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

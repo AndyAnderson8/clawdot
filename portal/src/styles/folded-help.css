@@ -1,0 +1,50 @@
+/* Folded help: a visible box with an arrow; a help one also carries a question mark */
+details {
+  margin: var(--spacing-3) 0 0;
+  border-top: 1px solid var(--color-card-border);
+}
+details > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  min-height: 3rem;
+  padding: 0;
+  cursor: pointer;
+  font-weight: 650;
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+details > summary::after {
+  content: "";
+  margin-left: auto;
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 2px solid var(--color-text-secondary);
+  border-bottom: 2px solid var(--color-text-secondary);
+  transform: rotate(45deg);
+}
+details[open] > summary::after {
+  transform: rotate(-135deg);
+}
+details > summary:hover {
+  color: var(--color-live);
+}
+details > :last-child {
+  margin-bottom: var(--spacing-2);
+}
+details.help > summary::before {
+  content: "?";
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
