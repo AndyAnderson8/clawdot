@@ -200,7 +200,12 @@ impl HttpBackend {
             && refuses_usage_option(m)
         {
             self.plain_stream.store(true, Ordering::Relaxed);
-            return self.attempt(req, &mut on_text).await;
+            let second = self.attempt(req, &mut on_text).await;
+            if second.is_err() {
+                // The field was not the cause (a bare 400 can be anything): keep asking for usage.
+                self.plain_stream.store(false, Ordering::Relaxed);
+            }
+            return second;
         }
         first
     }
