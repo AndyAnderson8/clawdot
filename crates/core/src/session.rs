@@ -738,6 +738,20 @@ pub struct TurnResult {
     pub expects_reply: bool,
 }
 
+impl Default for TurnResult {
+    /// A turn that has said nothing yet: no speech, answered, no calls.
+    fn default() -> Self {
+        Self {
+            speech: String::new(),
+            end: TurnEnd::Answered,
+            tool_calls: 0,
+            model_requests: 0,
+            early: Vec::new(),
+            expects_reply: false,
+        }
+    }
+}
+
 /// What a running turn can be told, and where it can speak.
 #[derive(Clone, Default)]
 pub struct TurnCtl {

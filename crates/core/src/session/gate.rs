@@ -64,17 +64,7 @@ struct Call<'a> {
 
 /// Take the result out of a turn that is ending, leaving a blank one behind.
 fn take(result: &mut TurnResult) -> TurnResult {
-    std::mem::replace(
-        result,
-        TurnResult {
-            speech: String::new(),
-            end: TurnEnd::Answered,
-            tool_calls: 0,
-            model_requests: 0,
-            early: Vec::new(),
-            expects_reply: false,
-        },
-    )
+    std::mem::take(result)
 }
 
 /// A model that is never asked: the gate needs a backend type only for the summaries of long results, and a
@@ -148,14 +138,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             cfg,
             turn,
             st: TurnState::new(ctl.now()),
-            result: TurnResult {
-                speech: String::new(),
-                end: TurnEnd::Answered,
-                tool_calls: 0,
-                model_requests: 0,
-                early: Vec::new(),
-                expects_reply: false,
-            },
+            result: TurnResult::default(),
             by_user,
             day,
             now,
