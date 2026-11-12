@@ -254,8 +254,16 @@ const DOWNLINK_CHUNK: usize = 4096;
 /// Volume change for "louder" and "quieter", in percent.
 const VOLUME_STEP: u8 = 10;
 
-/// A running turn: what was heard and said, the satellite effects, and whether it ended with a question.
-type Work = Pin<Box<dyn Future<Output = (VoiceOutcome, Vec<Effect>, bool)> + Send>>;
+/// What a turn produced: what was heard and said, and the satellite effects.
+struct Finished {
+    outcome: VoiceOutcome,
+    effects: Vec<Effect>,
+    /// The answer ends with a question, so the follow-up window is longer (REQ-AST-021).
+    asked: bool,
+}
+
+/// A running turn.
+type Work = Pin<Box<dyn Future<Output = Finished> + Send>>;
 
 /// A short check of audio heard while a turn runs: was it a stop phrase (REQ-VOI-020)?
 type StopCheck = Pin<Box<dyn Future<Output = bool> + Send>>;
@@ -510,8 +518,8 @@ where
                 let Some(msg) = msg? else { return Ok(()) };
                 env.on_message(&mut st, &mut wr, msg, &mut pending).await?;
             }
-            (outcome, effects, asked) = poll_work(&mut st.work), if st.work.is_some() => {
-                st.on_turn_finished(outcome, effects, asked);
+            done = poll_work(&mut st.work), if st.work.is_some() => {
+                st.on_turn_finished(done);
             }
             ev = rt_next(&mut st.rt), if st.rt.is_some() => {
                 env.on_rt_event(&mut st, &mut wr, ev).await?;
@@ -546,7 +554,7 @@ where
             r.mic = None;
         }
         env.play_progress(&mut st, &mut wr).await?;
-        env.deliver_ready(&mut st, &mut wr, &mut pending).await?;
+        env.deliver_finished(&mut st, &mut wr, &mut pending).await?;
         env.run_steps(&mut st, &mut wr, pending.steps).await?;
     }
 }
@@ -575,7 +583,8 @@ struct Accepted {
 struct Pending {
     /// What the dialog asked for during this pass.
     steps: Vec<Step>,
-    /// The wake word or the action button was pressed while no turn was running.
+    /// The wake word was heard, or the action button was pressed with no realtime session or turn running. The
+    /// wake word sets it during a turn too; the dialog then turns it into an interrupt.
     woke: bool,
 }
 
@@ -602,8 +611,9 @@ struct SessionState {
     progress_rx: Option<mpsc::UnboundedReceiver<String>>,
     progress_q: VecDeque<String>,
     progress_playing: bool,
-    /// A finished turn waits here while its progress speech is still playing.
-    ready: Option<(VoiceOutcome, Vec<Effect>, bool)>,
+    /// A finished turn (or the end of a realtime session) waits here until nothing is playing and the progress
+    /// speech is spoken.
+    finished: Option<Finished>,
     stop_check: Option<StopCheck>,
     /// The optional realtime session and what goes with it (REQ-RTV-009, REQ-RTV-010).
     rt: Option<RtLive>,
@@ -641,7 +651,7 @@ impl SessionState {
             progress_rx: None,
             progress_q: VecDeque::new(),
             progress_playing: false,
-            ready: None,
+            finished: None,
             stop_check: None,
             rt: None,
             rt_audio: false,
@@ -657,12 +667,12 @@ impl SessionState {
         self.dialog.phase() == Phase::Idle
             && !self.dialog.is_muted()
             && self.work.is_none()
-            && self.ready.is_none()
+            && self.finished.is_none()
             && !self.playing
     }
 
     /// A turn finished: what it said while it worked comes before the answer.
-    fn on_turn_finished(&mut self, outcome: VoiceOutcome, effects: Vec<Effect>, asked: bool) {
+    fn on_turn_finished(&mut self, done: Finished) {
         self.work = None;
         self.turn_cancel = None;
         if let Some(mut rx) = self.progress_rx.take() {
@@ -670,7 +680,7 @@ impl SessionState {
                 self.progress_q.push_back(p);
             }
         }
-        self.ready = Some((outcome, effects, asked));
+        self.finished = Some(done);
     }
 }
 
@@ -1045,7 +1055,11 @@ where
             outcome.transcript = None;
             outcome.reply = text;
         }
-        st.ready = Some((outcome, done.effects, false));
+        st.finished = Some(Finished {
+            outcome,
+            effects: done.effects,
+            asked: false,
+        });
         Ok(())
     }
 
@@ -1104,8 +1118,8 @@ where
         Ok(())
     }
 
-    /// Phase: the wake word (or the action button) while no turn runs. Starts a realtime session when one is
-    /// available, else the normal dialog.
+    /// Phase: the wake word (or the action button). In a realtime session it cuts in; otherwise a realtime
+    /// session starts if one is available and the speaker is quiet, else the dialog handles it.
     async fn on_wake<W: AsyncWrite + Unpin>(
         &self,
         st: &mut SessionState,
@@ -1135,7 +1149,7 @@ where
         st: &mut SessionState,
         wr: &mut W,
     ) -> Result<(), String> {
-        if !st.playing && (st.work.is_some() || st.ready.is_some()) && !st.dialog.is_muted() {
+        if !st.playing && (st.work.is_some() || st.finished.is_some()) && !st.dialog.is_muted() {
             if let Some(text) = st.progress_q.pop_front() {
                 let mut problems = Vec::new();
                 let audio = speak_text(&*self.tts, &text, &mut problems).await;
@@ -1152,14 +1166,18 @@ where
     }
 
     /// Phase: the finished turn is delivered once nothing it said earlier is still playing.
-    async fn deliver_ready<W: AsyncWrite + Unpin>(
+    async fn deliver_finished<W: AsyncWrite + Unpin>(
         &self,
         st: &mut SessionState,
         wr: &mut W,
         pending: &mut Pending,
     ) -> Result<(), String> {
         let (playing, progress_empty) = (st.playing, st.progress_q.is_empty());
-        let Some((outcome, effects, asked)) = st.ready.take_if(|_| !playing && progress_empty)
+        let Some(Finished {
+            outcome,
+            effects,
+            asked,
+        }) = st.finished.take_if(|_| !playing && progress_empty)
         else {
             return Ok(());
         };
@@ -1268,7 +1286,11 @@ where
             .await;
             let effects =
                 std::mem::take(&mut *effects.lock().unwrap_or_else(PoisonError::into_inner));
-            (outcome, effects, asked.load(Ordering::Relaxed))
+            Finished {
+                outcome,
+                effects,
+                asked: asked.load(Ordering::Relaxed),
+            }
         }));
     }
 }
@@ -1325,7 +1347,7 @@ async fn flush_media<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn poll_work(work: &mut Option<Work>) -> (VoiceOutcome, Vec<Effect>, bool) {
+async fn poll_work(work: &mut Option<Work>) -> Finished {
     match work {
         Some(w) => w.await,
         None => std::future::pending().await,
