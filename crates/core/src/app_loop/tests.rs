@@ -61,6 +61,7 @@ async fn rig_with(dir: &TempDir, extra: &[&str], clock: Arc<dyn Clock + Send + S
         echo: false,
         available: AtomicBool::new(false),
         polling: AtomicBool::new(false),
+        waits_for_satellite: false,
     });
     let (tx, said) = mpsc::unbounded_channel();
     // Nothing sends on these; the loop is driven by calling its methods.
