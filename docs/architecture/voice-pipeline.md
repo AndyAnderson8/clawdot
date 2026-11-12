@@ -38,7 +38,7 @@ pure logic, tested with synthetic audio and fake providers, so they run in CI wi
 `speech::HttpTranscriber` (batch upload of a WAV to `/audio/transcriptions`) and `speech::HttpSynthesizer`
 (`/audio/speech` as raw PCM, resampled to 16 kHz) speak the OpenAI-compatible API that OpenAI, many hosted services,
 and self-hosted servers such as Whisper and Piper wrappers provide. Two other wire formats, ElevenLabs and Deepgram,
-are selected with the `speech` dialect ([speech providers](../guides/speech-providers.md)). Audio is sensitive, so plain `http://` is
+are selected with the `speech` dialect, one `Provider` file each under `speech/` ([speech providers](../guides/speech-providers.md), which also says how to add one). Audio is sensitive, so plain `http://` is
 accepted only for localhost and private-network hosts (REQ-SEC-001); anything else needs `https://`. Audio is
 never stored or logged, and errors never include it or the key. Checked against a fake server and, in the
 [proving pass](../reports/2026-11-11-proving-pass.md), against local Whisper and Piper servers. ElevenLabs and Deepgram

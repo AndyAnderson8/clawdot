@@ -643,7 +643,7 @@ fn a_recorded_utterance_is_transcribed_answered_and_spoken_back() {
     )
     .unwrap();
     let input = dir.join("in.wav");
-    std::fs::write(&input, clawdot_core::speech::wav(&vec![1000i16; 8000])).unwrap();
+    std::fs::write(&input, clawdot_core::audio::wav(&vec![1000i16; 8000])).unwrap();
     let output = dir.join("out.wav");
 
     let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
@@ -677,7 +677,7 @@ fn a_recorded_utterance_is_transcribed_answered_and_spoken_back() {
 
     let paths = provider.join().unwrap();
     assert_eq!(paths, vec!["/v1/audio/transcriptions", "/v1/audio/speech"]);
-    let spoken = clawdot_core::speech::parse_wav(&std::fs::read(&output).unwrap()).unwrap();
+    let spoken = clawdot_core::audio::parse_wav(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(
         spoken.len(),
         1600,
@@ -690,7 +690,7 @@ fn voice_mode_explains_a_missing_speech_setup() {
     let dir = TempDir::new("voice-missing");
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.wav");
-    std::fs::write(&input, clawdot_core::speech::wav(&[0i16; 100])).unwrap();
+    std::fs::write(&input, clawdot_core::audio::wav(&[0i16; 100])).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_clawdot"))
         .args([
             "--data-dir",
