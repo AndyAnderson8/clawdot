@@ -60,9 +60,6 @@ pub struct ServeOptions {
     pub heartbeat: Duration,
 }
 
-/// How long to wait after a failed accept before trying again.
-const ACCEPT_RETRY: Duration = Duration::from_millis(200);
-
 /// How long the web UI waits for a request body.
 pub const BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -106,17 +103,7 @@ pub async fn serve(
     tokio::pin!(shutdown);
     loop {
         let (stream, peer) = tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok(a) => a,
-                Err(e) => {
-                    // Running out of file descriptors, or a connection reset before it was accepted, is not a
-                    // reason to stop answering for good: a flood of connections would then switch the portal and
-                    // the webhooks off until the next restart. Wait a moment and try again.
-                    crate::diag::warn(&format!("could not accept a connection: {e}"));
-                    tokio::time::sleep(ACCEPT_RETRY).await;
-                    continue;
-                }
-            },
+            accepted = crate::limit::accept_retrying("http", crate::limit::ACCEPT_RETRY, || listener.accept()) => accepted,
             () = &mut shutdown => return Ok(()),
         };
         // Shed load instead of queueing it: a flood must not grow memory (REQ-NFR-110), and one

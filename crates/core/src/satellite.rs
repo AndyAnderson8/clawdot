@@ -1578,7 +1578,8 @@ async fn cue_to_wire<W: AsyncWrite + Unpin>(cue: Cue, w: &mut W) -> Result<(), S
 /// `settings.max_sessions`; extra connections are closed at once.
 ///
 /// # Errors
-/// Fails if accepting connections fails.
+/// None today: a connection that cannot be accepted is logged and tried again. The `Result` stays so that callers
+/// need not change if a failure that cannot be survived is ever added.
 pub async fn serve<S, T>(
     listener: TcpListener,
     stt: Arc<S>,
@@ -1596,7 +1597,7 @@ where
     tokio::pin!(shutdown);
     loop {
         let (stream, peer) = tokio::select! {
-            accepted = listener.accept() => accepted?,
+            accepted = crate::limit::accept_retrying("satellite", crate::limit::ACCEPT_RETRY, || listener.accept()) => accepted,
             () = &mut shutdown => return Ok(()),
         };
         let Some(ip_guard) = per_ip.try_acquire(peer.ip()) else {
