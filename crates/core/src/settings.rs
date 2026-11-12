@@ -28,6 +28,15 @@ pub type Layer = BTreeMap<String, Value>;
 /// How a lookup of an environment variable is done; tests replace it.
 pub use crate::env::EnvFn;
 
+/// The three layers a program has before the data directory is read, lowest first: the built-in defaults, the
+/// configuration file, and the command-line flags.
+#[derive(Debug, Default)]
+pub struct Sources {
+    pub defaults: Layer,
+    pub file: Layer,
+    pub flags: Layer,
+}
+
 /// Which layer an effective value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -792,12 +801,15 @@ impl SettingsState {
     /// warnings so a headless device still starts.
     pub fn open(
         dir: Option<&Path>,
-        defaults: Layer,
-        file: Layer,
-        flags: Layer,
+        sources: Sources,
         speech_configured: bool,
         env: EnvFn,
     ) -> Result<(Self, Vec<String>), String> {
+        let Sources {
+            defaults,
+            file,
+            flags,
+        } = sources;
         let store = dir.map(|d| JsonStore::new(d.join("settings.json"), SCHEMA));
         let mut loaded = Layer::new();
         let mut warnings = Vec::new();
@@ -1112,9 +1124,11 @@ mod tests {
     fn open_in(dir: &Path, file: Layer, flags: Layer) -> SettingsState {
         SettingsState::open(
             Some(dir),
-            defaults(),
-            file,
-            flags,
+            Sources {
+                defaults: defaults(),
+                file,
+                flags,
+            },
             false,
             env_with(&["MY_KEY"]),
         )
@@ -1343,9 +1357,10 @@ mod tests {
         let open = |dir: &Path| {
             SettingsState::open(
                 Some(dir),
-                defaults(),
-                Layer::new(),
-                Layer::new(),
+                Sources {
+                    defaults: defaults(),
+                    ..Sources::default()
+                },
                 false,
                 env_with(&[]),
             )

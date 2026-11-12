@@ -1,0 +1,242 @@
+//! The loop's events handled in process, with no binary, socket or terminal: each `on_*` method is called
+//! directly and its effects are read from the state the loop owns.
+
+use super::*;
+use crate::app::{Adapters, Limits, Stores};
+use crate::sched::{Clock, SystemClock};
+use crate::speaker::Say;
+use crate::startup::build_brain;
+use crate::store::testutil::TempDir;
+use crate::{cli, seed};
+use std::sync::atomic::AtomicBool;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::watch;
+
+/// An application over a scratch data directory, and what the speaker task would receive.
+struct Rig {
+    app: App,
+    said: mpsc::UnboundedReceiver<Say>,
+}
+
+async fn rig(dir: &TempDir, extra: &[&str]) -> Rig {
+    let mut argv = vec!["--data-dir".to_owned(), dir.0.display().to_string()];
+    argv.extend(extra.iter().map(|s| (*s).to_owned()));
+    let mut args = cli::parse(&argv).unwrap();
+    let (state, _) = seed::resolve_settings(&mut args, &crate::env::Env::empty()).unwrap();
+    let live = state.live_values();
+    let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
+    let core = Arc::new(
+        Core::open(
+            clock.clone(),
+            Adapters::builtin(),
+            Limits::default(),
+            Stores::in_dir(&args.data_dir),
+        )
+        .unwrap(),
+    );
+    let zone = crate::runtime::zone_for(None).unwrap();
+    let (brain, hub) = build_brain(&mut args, &live, zone, &clock, &core)
+        .await
+        .unwrap();
+    let (usage, usage_store) = brain.usage_handles();
+    let announcer = Announcer::default();
+    let voice = Arc::new(Voice {
+        announcer: announcer.clone(),
+        core: Arc::clone(&core),
+        usage,
+        usage_store,
+        echo: false,
+        available: AtomicBool::new(false),
+        polling: AtomicBool::new(false),
+    });
+    let (tx, said) = mpsc::unbounded_channel();
+    // Nothing sends on these; the loop is driven by calling its methods.
+    let (_p, portal) = mpsc::channel(1);
+    let (_m, mcp) = mpsc::channel(1);
+    let (_r, realtime) = mpsc::channel(1);
+    let (_a, asks) = mpsc::channel(1);
+    let (_l, lines) = mpsc::channel(1);
+    let inbox = Inbox {
+        portal,
+        mcp,
+        realtime,
+        asks,
+        lines,
+        console: true,
+    };
+    let speaker = Speaker {
+        tx,
+        voice,
+        announcer,
+        console: true,
+        lost: false,
+    };
+    let app = App::new(brain, hub, core, live, inbox, speaker);
+    Rig { app, said }
+}
+
+/// A loopback language model that answers every request with `reply`, but only once `open` says so.
+async fn gated_model(open: watch::Receiver<bool>, reply: &'static str) -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut c, _)) = l.accept().await else {
+                return;
+            };
+            let mut open = open.clone();
+            tokio::spawn(async move {
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                loop {
+                    let Ok(n) = c.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    if let Some(p) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&raw[..p]).to_ascii_lowercase();
+                        let want: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:")?.trim().parse().ok())
+                            .unwrap_or(0);
+                        if raw.len() >= p + 4 + want {
+                            break;
+                        }
+                    }
+                }
+                if open.wait_for(|v| *v).await.is_err() {
+                    return;
+                }
+                let body = serde_json::json!({
+                    "choices": [{"message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+                })
+                .to_string();
+                let _ = c
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    port
+}
+
+// REQ-AST-021: once a second the loop publishes the status for the web UI and hands what is due (a portal
+// phrase) to the speaker task, then asks it to look for an announcement.
+#[tokio::test(flavor = "current_thread")]
+async fn the_tick_publishes_the_status_and_hands_speech_to_the_speaker() {
+    let dir = TempDir::new("loop-tick");
+    let Rig { mut app, mut said } = rig(&dir, &[]).await;
+    assert!(app.core.ui_status().is_null(), "nothing is published yet");
+    assert!(app.core.queue_speech("Hello from the portal"));
+
+    app.on_tick();
+
+    let status = app.core.ui_status();
+    assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(status["speaker"]["name"], "console");
+    match said.try_recv().unwrap() {
+        Say::Phrase { text, preview } => {
+            assert_eq!((text.as_str(), preview), ("Hello from the portal", None))
+        }
+        other => panic!("expected the portal phrase first, got {other:?}"),
+    }
+    assert!(matches!(said.try_recv().unwrap(), Say::Poll { .. }));
+    assert!(said.try_recv().is_err(), "nothing else was due");
+
+    // A poll still running is not asked for again.
+    app.on_tick();
+    assert!(said.try_recv().is_err());
+}
+
+// A speaker task that is gone is reported once, and the loop carries on.
+#[tokio::test(flavor = "current_thread")]
+async fn a_lost_speaker_task_does_not_stop_the_tick() {
+    let dir = TempDir::new("loop-lost-speaker");
+    let Rig { mut app, said } = rig(&dir, &[]).await;
+    drop(said);
+    assert!(app.core.queue_speech("anyone there"));
+    app.on_tick();
+    assert!(app.speaker.lost);
+    app.on_tick();
+    assert!(!app.core.ui_status().is_null());
+}
+
+// REQ-AST-001: a line typed at the console is handled as a request: the fast path answers a timer at once;
+// an empty line is ignored and "quit" leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn a_console_line_becomes_a_request() {
+    let dir = TempDir::new("loop-console");
+    let Rig { mut app, .. } = rig(&dir, &[]).await;
+    assert!(app.brain.assistant.scheduled().is_empty());
+
+    let flow = app
+        .on_console_line(Some("set a timer for 5 minutes".into()))
+        .await;
+    assert_eq!(flow, Flow::Continue);
+    assert_eq!(app.brain.assistant.scheduled().len(), 1);
+
+    assert_eq!(
+        app.on_console_line(Some(String::new())).await,
+        Flow::Continue
+    );
+    assert_eq!(app.brain.assistant.scheduled().len(), 1);
+
+    assert_eq!(app.on_console_line(Some("quit".into())).await, Flow::Exit);
+}
+
+// A line the fast path cannot answer becomes a turn beside the loop, which the loop then finishes.
+#[tokio::test(flavor = "current_thread")]
+async fn a_console_line_for_the_model_starts_a_turn_beside_the_loop() {
+    let dir = TempDir::new("loop-turn");
+    let (open_tx, open) = watch::channel(false);
+    let port = gated_model(open, "Owls hoot.").await;
+    let url = format!("http://127.0.0.1:{port}/v1");
+    let Rig { mut app, .. } = rig(&dir, &["--llm-url", &url, "--llm-model", "m"]).await;
+
+    let flow = app
+        .on_console_line(Some("tell me about owls and their habits".into()))
+        .await;
+    assert_eq!(flow, Flow::Continue);
+    assert_eq!(app.hub.active(), 1, "the turn runs as a task");
+
+    open_tx.send_replace(true);
+    while app.hub.active() > 0 {
+        let ev = app.hub.next().await;
+        app.on_hub_event(ev).await;
+    }
+}
+
+// REQ-AST-026: closing the terminal lets the turns that are running finish and show their replies before
+// the loop leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn console_eof_drains_running_turns_before_leaving() {
+    let dir = TempDir::new("loop-eof");
+    let (open_tx, open) = watch::channel(false);
+    let port = gated_model(open, "Owls hoot.").await;
+    let url = format!("http://127.0.0.1:{port}/v1");
+    let Rig { mut app, .. } = rig(&dir, &["--llm-url", &url, "--llm-model", "m"]).await;
+
+    app.on_console_line(Some("tell me about owls and their habits".into()))
+        .await;
+    assert_eq!(app.hub.active(), 1);
+
+    open_tx.send_replace(true);
+    let flow = app.on_console_line(None).await;
+    assert_eq!(flow, Flow::Exit);
+    assert_eq!(app.hub.active(), 0, "the running turn was finished first");
+    assert!(
+        app.brain.usage.requests_today() >= 1,
+        "and its request was counted"
+    );
+}

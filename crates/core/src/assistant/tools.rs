@@ -3,23 +3,20 @@
 //!
 //! These are local, reversible actions, so none needs spoken confirmation, except an `instruct` reply that
 //! forwards text to an outside agent: the session host holds that until the user says yes (REQ-SEC-011).
+//!
+//! Each tool is defined once, in [`TOOLS`]: its name, description and parameter schema, its tier, whether its
+//! result is text someone else wrote, how the host reads it back, and the code that runs it. The listing the
+//! model sees, the tier, the trust and the read-back are all derived from that one entry, so a tool cannot
+//! exist in one view and not another. A name that is not in the table is costly and its result untrusted.
 
 use super::{Assistant, Effect, MONTHS, MediaCmd, WEEKDAYS, format_clock, format_duration};
 use crate::inbox::reply::ReplyKind;
 use crate::inbox::summary::{details_for_model, status_sentence};
 use crate::llm::ToolSpec;
 use crate::media::{Action as MediaAction, MediaError};
-use crate::sched::{Kind, civil_from_days, days, next_occurrence, weekday};
+use crate::sched::{Kind, Ts, civil_from_days, days, next_occurrence, weekday};
 use crate::session::{Risk, Tier, ToolHost};
 use serde_json::{Value, json};
-
-fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> ToolSpec {
-    ToolSpec {
-        name: name.to_owned(),
-        description: description.to_owned(),
-        parameters: json!({ "type": "object", "properties": properties, "required": required }),
-    }
-}
 
 fn int(args: &Value, key: &str) -> Result<i64, String> {
     args.get(key)
@@ -79,95 +76,310 @@ fn day_mask(names: &[Value]) -> Result<u8, String> {
     }
 }
 
+/// When a tool is on offer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Offer {
+    Always,
+    /// Only with radio stations configured.
+    WithPlayer,
+    /// Only with the agent inbox.
+    WithInbox,
+}
+
+/// How a tool's tier is decided (REQ-SEC-010).
+#[derive(Clone, Copy)]
+enum Rule {
+    Fixed(Tier),
+    /// From the arguments of the call, for a tool whose effect depends on them.
+    FromArgs(fn(&Value) -> Tier),
+}
+
+impl Rule {
+    fn tier(self, args: &Value) -> Tier {
+        match self {
+            Self::Fixed(t) => t,
+            Self::FromArgs(f) => f(args),
+        }
+    }
+}
+
+/// What a built-in tool does when the call is made. `now` is the assistant's clock, read once per call.
+type Run = fn(&mut Assistant, &Value, Ts) -> Result<String, String>;
+
+/// One built-in tool: everything that is known about it, in one place.
+struct Tool {
+    name: &'static str,
+    description: &'static str,
+    /// The `properties` of the parameter schema.
+    properties: fn() -> Value,
+    required: &'static [&'static str],
+    offer: Offer,
+    tier: Rule,
+    /// The result is text someone else wrote (the inbox reads), so the host treats it as data. The timers and the
+    /// clock return words the core made up itself.
+    untrusted: bool,
+    /// Refuses to run while the wall clock is not set (REQ-TMR-009).
+    needs_clock: bool,
+    /// What the host says when it holds or proposes a call (and in dry-run). The generic read-back names each
+    /// argument; `inbox_reply` reads its text word for word.
+    describe: fn(&str, &Value) -> String,
+    run: Run,
+}
+
+impl Tool {
+    /// A tool that is always on offer, reversible, with a trusted result, the generic read-back and no clock
+    /// need. The methods below change one of those.
+    const fn new(
+        name: &'static str,
+        description: &'static str,
+        properties: fn() -> Value,
+        required: &'static [&'static str],
+        run: Run,
+    ) -> Self {
+        Self {
+            name,
+            description,
+            properties,
+            required,
+            offer: Offer::Always,
+            tier: Rule::Fixed(Tier::Reversible),
+            untrusted: false,
+            needs_clock: false,
+            describe: crate::session::describe_generic,
+            run,
+        }
+    }
+
+    const fn tier(mut self, tier: Rule) -> Self {
+        self.tier = tier;
+        self
+    }
+
+    const fn offered(mut self, offer: Offer) -> Self {
+        self.offer = offer;
+        self
+    }
+
+    const fn untrusted(mut self) -> Self {
+        self.untrusted = true;
+        self
+    }
+
+    const fn needs_clock(mut self) -> Self {
+        self.needs_clock = true;
+        self
+    }
+
+    const fn describing(mut self, describe: fn(&str, &Value) -> String) -> Self {
+        self.describe = describe;
+        self
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.to_owned(),
+            description: self.description.to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": (self.properties)(),
+                "required": self.required,
+            }),
+        }
+    }
+
+    fn on_offer(&self, a: &Assistant) -> bool {
+        match self.offer {
+            Offer::Always => true,
+            Offer::WithPlayer => a.player.is_configured(),
+            Offer::WithInbox => a.core.is_some(),
+        }
+    }
+}
+
+fn find(name: &str) -> Option<&'static Tool> {
+    TOOLS.iter().find(|t| t.name == name)
+}
+
+fn stopwatch_tier(args: &Value) -> Tier {
+    if opt_text(args, "action") == "read" {
+        Tier::ReadOnly
+    } else {
+        Tier::Reversible
+    }
+}
+
+/// Forwarding text to an outside agent is costly, so the host holds it for the user's yes (REQ-AST-015,
+/// REQ-SEC-011); an acknowledgement is reversible.
+fn inbox_reply_tier(args: &Value) -> Tier {
+    if opt_text(args, "kind") == "instruct" {
+        Tier::Costly
+    } else {
+        Tier::Reversible
+    }
+}
+
+fn describe_inbox_reply(name: &str, args: &Value) -> String {
+    match opt_text(args, "kind") {
+        "instruct" => crate::session::describe_agent_text(opt_text(args, "text")),
+        "ack" => "I will tell the agent that you will handle this yourself".to_owned(),
+        _ => crate::session::describe_generic(name, args),
+    }
+}
+
+/// Every built-in tool, in the order the model is shown them.
+static TOOLS: &[Tool] = &[
+    Tool::new(
+        "set_timer",
+        "Start a countdown timer.",
+        || {
+            json!({ "seconds": {"type":"integer","description":"Length in seconds (1 to 604800)"},
+                    "label": {"type":"string","description":"Optional name, for example pasta"} })
+        },
+        &["seconds"],
+        Assistant::run_set_timer,
+    )
+    .needs_clock(),
+    Tool::new(
+        "list_timers",
+        "List running timers and the time left on each.",
+        || json!({}),
+        &[],
+        Assistant::run_list_timers,
+    )
+    .tier(Rule::Fixed(Tier::ReadOnly))
+    .needs_clock(),
+    Tool::new(
+        "cancel_timers",
+        "Cancel timers. With a label, only timers whose name contains it; without, all timers.",
+        || json!({ "label": {"type":"string"} }),
+        &[],
+        Assistant::run_cancel_timers,
+    ),
+    Tool::new(
+        "stopwatch",
+        "The stopwatch, which counts up. start begins it (it refuses while one is running), lap records a lap, stop ends it and gives the total, read says the time so far, reset throws it away.",
+        || json!({ "action": {"type":"string","enum":["start","lap","stop","read","reset"]} }),
+        &["action"],
+        Assistant::run_stopwatch,
+    )
+    .tier(Rule::FromArgs(stopwatch_tier)),
+    Tool::new(
+        "set_alarm",
+        "Set an alarm at a local time, once or repeating on some days.",
+        || {
+            json!({ "hour": {"type":"integer","description":"0 to 23, 24-hour clock"},
+                    "minute": {"type":"integer","description":"0 to 59"},
+                    "days": {"type":"array","items":{"type":"string"},
+                             "description":"Optional repeat: day names, or weekdays, weekend, daily. Omit for a single alarm."},
+                    "label": {"type":"string"} })
+        },
+        &["hour", "minute"],
+        Assistant::run_set_alarm,
+    )
+    .needs_clock(),
+    Tool::new(
+        "cancel_alarms",
+        "Cancel every alarm.",
+        || json!({}),
+        &[],
+        Assistant::run_cancel_alarms,
+    ),
+    Tool::new(
+        "set_reminder",
+        "Remind the user of something after a delay.",
+        || json!({ "text": {"type":"string"}, "seconds": {"type":"integer","description":"Delay in seconds"} }),
+        &["text", "seconds"],
+        Assistant::run_set_reminder,
+    )
+    .needs_clock(),
+    Tool::new(
+        "set_reminder_at",
+        "Remind the user of something at the next occurrence of a local time.",
+        || json!({ "text": {"type":"string"}, "hour": {"type":"integer"}, "minute": {"type":"integer"} }),
+        &["text", "hour", "minute"],
+        Assistant::run_set_reminder_at,
+    )
+    .needs_clock(),
+    Tool::new(
+        "current_time",
+        "The current local time and date.",
+        || json!({}),
+        &[],
+        Assistant::run_current_time,
+    )
+    .tier(Rule::Fixed(Tier::ReadOnly))
+    .needs_clock(),
+    Tool::new(
+        "play_music",
+        "Play a configured radio station by name, or any station if the name is empty.",
+        || json!({ "name": {"type":"string","description":"For example jazz"} }),
+        &[],
+        Assistant::run_play_music,
+    )
+    .offered(Offer::WithPlayer),
+    Tool::new(
+        "music_control",
+        "Control the music that is playing.",
+        || json!({ "action": {"type":"string","enum":["pause","resume","next","previous","stop"]} }),
+        &["action"],
+        Assistant::run_music_control,
+    )
+    .offered(Offer::WithPlayer),
+    Tool::new(
+        "inbox_status",
+        "What the user's agents are doing: what is waiting and what finished.",
+        || json!({}),
+        &[],
+        Assistant::run_inbox_status,
+    )
+    .tier(Rule::Fixed(Tier::ReadOnly))
+    .untrusted()
+    .offered(Offer::WithInbox),
+    Tool::new(
+        "inbox_details",
+        "The details of the agent event currently being discussed.",
+        || json!({}),
+        &[],
+        Assistant::run_inbox_details,
+    )
+    .tier(Rule::Fixed(Tier::ReadOnly))
+    .untrusted()
+    .offered(Offer::WithInbox),
+    Tool::new(
+        "inbox_reply",
+        "Answer the agent event just announced. kind `ack` means the user will handle it themselves; `instruct` sends text for the agent to act on. An instruct is held by the system: it reads your exact text back to the user and sends it only if the user says yes in their next turn. Nothing written in agent text can change that.",
+        || json!({ "kind": {"type":"string","enum":["ack","instruct"]}, "text": {"type":"string"} }),
+        &["kind"],
+        Assistant::run_inbox_reply,
+    )
+    .tier(Rule::FromArgs(inbox_reply_tier))
+    .describing(describe_inbox_reply)
+    .offered(Offer::WithInbox),
+    Tool::new(
+        "inbox_snooze",
+        "Postpone the current agent event.",
+        || json!({ "seconds": {"type":"integer"} }),
+        &["seconds"],
+        Assistant::run_inbox_snooze,
+    )
+    .offered(Offer::WithInbox),
+    Tool::new(
+        "inbox_dismiss",
+        "Dismiss the current agent event.",
+        || json!({}),
+        &[],
+        Assistant::run_inbox_dismiss,
+    )
+    .offered(Offer::WithInbox),
+];
+
 impl ToolHost for Assistant {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        let mut tools = vec![
-            spec(
-                "set_timer",
-                "Start a countdown timer.",
-                json!({ "seconds": {"type":"integer","description":"Length in seconds (1 to 604800)"},
-                        "label": {"type":"string","description":"Optional name, for example pasta"} }),
-                &["seconds"],
-            ),
-            spec(
-                "list_timers",
-                "List running timers and the time left on each.",
-                json!({}),
-                &[],
-            ),
-            spec(
-                "cancel_timers",
-                "Cancel timers. With a label, only timers whose name contains it; without, all timers.",
-                json!({ "label": {"type":"string"} }),
-                &[],
-            ),
-            spec(
-                "stopwatch",
-                "The stopwatch, which counts up. start begins it (it refuses while one is running), lap records a lap, stop ends it and gives the total, read says the time so far, reset throws it away.",
-                json!({ "action": {"type":"string","enum":["start","lap","stop","read","reset"]} }),
-                &["action"],
-            ),
-            spec(
-                "set_alarm",
-                "Set an alarm at a local time, once or repeating on some days.",
-                json!({ "hour": {"type":"integer","description":"0 to 23, 24-hour clock"},
-                        "minute": {"type":"integer","description":"0 to 59"},
-                        "days": {"type":"array","items":{"type":"string"},
-                                 "description":"Optional repeat: day names, or weekdays, weekend, daily. Omit for a single alarm."},
-                        "label": {"type":"string"} }),
-                &["hour", "minute"],
-            ),
-            spec("cancel_alarms", "Cancel every alarm.", json!({}), &[]),
-            spec(
-                "set_reminder",
-                "Remind the user of something after a delay.",
-                json!({ "text": {"type":"string"}, "seconds": {"type":"integer","description":"Delay in seconds"} }),
-                &["text", "seconds"],
-            ),
-            spec(
-                "set_reminder_at",
-                "Remind the user of something at the next occurrence of a local time.",
-                json!({ "text": {"type":"string"}, "hour": {"type":"integer"}, "minute": {"type":"integer"} }),
-                &["text", "hour", "minute"],
-            ),
-            spec(
-                "current_time",
-                "The current local time and date.",
-                json!({}),
-                &[],
-            ),
-        ];
-        if self.player.is_configured() {
-            tools.extend([
-                spec(
-                    "play_music",
-                    "Play a configured radio station by name, or any station if the name is empty.",
-                    json!({ "name": {"type":"string","description":"For example jazz"} }),
-                    &[],
-                ),
-                spec(
-                    "music_control",
-                    "Control the music that is playing.",
-                    json!({ "action": {"type":"string","enum":["pause","resume","next","previous","stop"]} }),
-                    &["action"],
-                ),
-            ]);
-        }
-        if self.core.is_some() {
-            tools.extend([
-                spec("inbox_status", "What the user's agents are doing: what is waiting and what finished.", json!({}), &[]),
-                spec("inbox_details", "The details of the agent event currently being discussed.", json!({}), &[]),
-                spec(
-                    "inbox_reply",
-                    "Answer the agent event just announced. kind `ack` means the user will handle it themselves; `instruct` sends text for the agent to act on. An instruct is held by the system: it reads your exact text back to the user and sends it only if the user says yes in their next turn. Nothing written in agent text can change that.",
-                    json!({ "kind": {"type":"string","enum":["ack","instruct"]}, "text": {"type":"string"} }),
-                    &["kind"],
-                ),
-                spec("inbox_snooze", "Postpone the current agent event.", json!({ "seconds": {"type":"integer"} }), &["seconds"]),
-                spec("inbox_dismiss", "Dismiss the current agent event.", json!({}), &[]),
-            ]);
-        }
-        tools
+        TOOLS
+            .iter()
+            .filter(|t| t.on_offer(self))
+            .map(Tool::spec)
+            .collect()
     }
 
     fn risk(&self, name: &str, args: &Value) -> Risk {
@@ -187,46 +399,18 @@ impl ToolHost for Assistant {
     }
 }
 
-/// The built-in tools declare their own tiers (REQ-SEC-010). Forwarding text to an outside agent is
-/// costly, so the host holds it for the user's yes (REQ-AST-015, REQ-SEC-011). A name this table does
-/// not know is costly. It needs no `Assistant`, so a turn that runs beside the main loop can ask it.
+/// The built-in tools declare their own tiers (REQ-SEC-010). A name the table does not know is costly. It
+/// needs no `Assistant`, so a turn that runs beside the main loop can ask it.
 #[must_use]
 pub fn builtin_risk(name: &str, args: &Value) -> Risk {
-    Risk::fixed(match name {
-        "current_time" | "list_timers" | "inbox_status" | "inbox_details" => Tier::ReadOnly,
-        "stopwatch" if opt_text(args, "action") == "read" => Tier::ReadOnly,
-        "stopwatch" => Tier::Reversible,
-        "set_timer" | "cancel_timers" | "set_alarm" | "cancel_alarms" | "set_reminder"
-        | "set_reminder_at" | "play_music" | "music_control" | "inbox_snooze" | "inbox_dismiss" => {
-            Tier::Reversible
-        }
-        "inbox_reply" if opt_text(args, "kind") == "instruct" => Tier::Costly,
-        "inbox_reply" => Tier::Reversible,
-        _ => Tier::Costly,
-    })
+    Risk::fixed(find(name).map_or(Tier::Costly, |t| t.tier.tier(args)))
 }
 
 /// Only the inbox reads return text that someone else wrote; the timers and the clock return words the
-/// core made up itself.
+/// core made up itself. A name the table does not know is untrusted.
 #[must_use]
 pub fn builtin_returns_untrusted_text(name: &str) -> bool {
-    !matches!(
-        name,
-        "set_timer"
-            | "list_timers"
-            | "cancel_timers"
-            | "stopwatch"
-            | "set_alarm"
-            | "cancel_alarms"
-            | "set_reminder"
-            | "set_reminder_at"
-            | "current_time"
-            | "play_music"
-            | "music_control"
-            | "inbox_reply"
-            | "inbox_snooze"
-            | "inbox_dismiss"
-    )
+    find(name).is_none_or(|t| t.untrusted)
 }
 
 /// What the host says when it holds or proposes a built-in call (and in dry-run): every argument that changes
@@ -234,15 +418,11 @@ pub fn builtin_returns_untrusted_text(name: &str) -> bool {
 /// ones an event turn can only propose, uses the generic read-back that names each argument.
 #[must_use]
 pub fn builtin_describe_action(name: &str, args: &Value) -> String {
-    if name == "inbox_reply" {
-        if opt_text(args, "kind") == "instruct" {
-            return crate::session::describe_agent_text(opt_text(args, "text"));
-        }
-        if opt_text(args, "kind") == "ack" {
-            return "I will tell the agent that you will handle this yourself".to_owned();
-        }
-    }
-    crate::session::describe_generic(name, args)
+    let describe = find(name).map_or(
+        crate::session::describe_generic as fn(&str, &Value) -> String,
+        |t| t.describe,
+    );
+    describe(name, args)
 }
 
 impl Assistant {
@@ -270,156 +450,154 @@ impl Assistant {
 
     fn run_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let now = self.clock.now();
-        if !self.clock.wall_clock_valid()
-            && matches!(
-                name,
-                "set_timer"
-                    | "list_timers"
-                    | "set_alarm"
-                    | "set_reminder"
-                    | "set_reminder_at"
-                    | "current_time"
-            )
-        {
+        let tool = find(name)
+            .filter(|t| t.offer != Offer::WithPlayer || self.player.is_configured())
+            .ok_or_else(|| format!("unknown tool `{name}`"));
+        if !self.clock.wall_clock_valid() && find(name).is_some_and(|t| t.needs_clock) {
             return Err(super::CLOCK_UNSET.to_owned());
         }
-        match name {
-            "stopwatch" => {
-                let action = text(args, "action")?;
-                let action = super::stopwatch::Action::parse(action).ok_or_else(|| {
-                    format!("unknown action `{action}`; use start, lap, stop, read or reset")
-                })?;
-                self.stopwatch(action)
-            }
-            "set_timer" => {
-                let secs = int(args, "seconds")?;
-                let label = opt_text(args, "label").to_owned();
-                self.sched
-                    .set_timer(now, secs, &label)
-                    .map_err(|e| e.to_string())?;
-                self.save();
-                Ok(format!("Timer set for {}.", format_duration(secs)))
-            }
-            "list_timers" => {
-                let timers = self.matching_timers(None);
-                if timers.is_empty() {
-                    return Ok("No timers running.".into());
-                }
-                Ok(timers
-                    .iter()
-                    .map(|(_, label, left)| {
-                        let who = if label.is_empty() {
-                            "timer"
-                        } else {
-                            label.as_str()
-                        };
-                        format!("{who}: {} left", format_duration(*left))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; "))
-            }
-            "cancel_timers" => {
-                let label = opt_text(args, "label");
-                let found = self.matching_timers((!label.is_empty()).then_some(label));
-                for (id, _, _) in &found {
-                    let _ = self.sched.cancel(*id);
-                }
-                self.save();
-                Ok(format!("Cancelled {} timer(s).", found.len()))
-            }
-            "set_alarm" => {
-                let (h, m) = clock_args(args)?;
-                let mask = match args.get("days") {
-                    None | Some(Value::Null) => None,
-                    Some(Value::Array(a)) => Some(day_mask(a)?),
-                    Some(_) => return Err("`days` must be a list of day names".into()),
-                };
-                let label = opt_text(args, "label").to_owned();
-                self.sched
-                    .set_alarm(now, &*self.zone, h, m, mask, &label)
-                    .map_err(|e| e.to_string())?;
-                self.save();
-                let at = next_occurrence(&*self.zone, now, mask.unwrap_or(days::ALL), h, m)
-                    .unwrap_or(now);
-                Ok(format!(
-                    "Alarm set for {} {}.",
-                    format_clock(h, m),
-                    self.day_words(now, at)
-                ))
-            }
-            "play_music" if self.player.is_configured() => {
-                let r = self.player.play(opt_text(args, "name"));
-                self.run_media(r)
-            }
-            "music_control" if self.player.is_configured() => {
-                let r = match text(args, "action")? {
-                    "pause" => self.player.pause(),
-                    "resume" => self.player.resume(),
-                    "next" => self.player.next_station(),
-                    "previous" => self.player.previous_station(),
-                    "stop" => {
-                        self.player.stop();
-                        self.effects.push(Effect::StopPlayback);
-                        return Ok("Stopped.".into());
-                    }
-                    other => return Err(format!("unknown action `{other}`")),
-                };
-                self.run_media(r)
-            }
-            "cancel_alarms" => {
-                let n = self.sched.cancel_kind(Kind::Alarm);
-                self.save();
-                Ok(format!("Cancelled {n} alarm(s)."))
-            }
-            "set_reminder" => {
-                let secs = int(args, "seconds")?;
-                let what = text(args, "text")?.to_owned();
-                self.sched
-                    .set_reminder(now, now.saturating_add(secs), &what)
-                    .map_err(|e| e.to_string())?;
-                self.save();
-                Ok(format!(
-                    "Will remind about \"{what}\" in {}.",
-                    format_duration(secs)
-                ))
-            }
-            "set_reminder_at" => {
-                let (h, m) = clock_args(args)?;
-                let what = text(args, "text")?.to_owned();
-                let at = next_occurrence(&*self.zone, now, days::ALL, h, m)
-                    .ok_or("that time does not exist")?;
-                self.sched
-                    .set_reminder(now, at, &what)
-                    .map_err(|e| e.to_string())?;
-                self.save();
-                Ok(format!(
-                    "Will remind about \"{what}\" at {} {}.",
-                    format_clock(h, m),
-                    self.day_words(now, at)
-                ))
-            }
-            "current_time" => {
-                let minute = self.zone.local_minute_of_day(now);
-                let day = self.zone.local_day(now);
-                let (_, mo, d) = civil_from_days(day);
-                Ok(format!(
-                    "It is {} on {}, {} {}.",
-                    format_clock(
-                        u8::try_from(minute / 60).unwrap_or(0),
-                        u8::try_from(minute % 60).unwrap_or(0)
-                    ),
-                    WEEKDAYS[usize::from(weekday(day))],
-                    MONTHS[usize::try_from(mo - 1).unwrap_or(0) % 12],
-                    d
-                ))
-            }
-            n if n.starts_with("inbox_") => self.call_inbox_tool(n, args, now),
-            other => Err(format!("unknown tool `{other}`")),
-        }
+        (tool?.run)(self, args, now)
     }
-}
 
-impl Assistant {
+    fn run_stopwatch(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
+        let action = text(args, "action")?;
+        let action = super::stopwatch::Action::parse(action).ok_or_else(|| {
+            format!("unknown action `{action}`; use start, lap, stop, read or reset")
+        })?;
+        self.stopwatch(action)
+    }
+
+    fn run_set_timer(&mut self, args: &Value, now: Ts) -> Result<String, String> {
+        let secs = int(args, "seconds")?;
+        let label = opt_text(args, "label").to_owned();
+        self.sched
+            .set_timer(now, secs, &label)
+            .map_err(|e| e.to_string())?;
+        self.save();
+        Ok(format!("Timer set for {}.", format_duration(secs)))
+    }
+
+    fn run_list_timers(&mut self, _args: &Value, _now: Ts) -> Result<String, String> {
+        let timers = self.matching_timers(None);
+        if timers.is_empty() {
+            return Ok("No timers running.".into());
+        }
+        Ok(timers
+            .iter()
+            .map(|(_, label, left)| {
+                let who = if label.is_empty() {
+                    "timer"
+                } else {
+                    label.as_str()
+                };
+                format!("{who}: {} left", format_duration(*left))
+            })
+            .collect::<Vec<_>>()
+            .join("; "))
+    }
+
+    fn run_cancel_timers(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
+        let label = opt_text(args, "label");
+        let found = self.matching_timers((!label.is_empty()).then_some(label));
+        for (id, _, _) in &found {
+            let _ = self.sched.cancel(*id);
+        }
+        self.save();
+        Ok(format!("Cancelled {} timer(s).", found.len()))
+    }
+
+    fn run_set_alarm(&mut self, args: &Value, now: Ts) -> Result<String, String> {
+        let (h, m) = clock_args(args)?;
+        let mask = match args.get("days") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) => Some(day_mask(a)?),
+            Some(_) => return Err("`days` must be a list of day names".into()),
+        };
+        let label = opt_text(args, "label").to_owned();
+        self.sched
+            .set_alarm(now, &*self.zone, h, m, mask, &label)
+            .map_err(|e| e.to_string())?;
+        self.save();
+        let at = next_occurrence(&*self.zone, now, mask.unwrap_or(days::ALL), h, m).unwrap_or(now);
+        Ok(format!(
+            "Alarm set for {} {}.",
+            format_clock(h, m),
+            self.day_words(now, at)
+        ))
+    }
+
+    fn run_play_music(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
+        let r = self.player.play(opt_text(args, "name"));
+        self.run_media(r)
+    }
+
+    fn run_music_control(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
+        let r = match text(args, "action")? {
+            "pause" => self.player.pause(),
+            "resume" => self.player.resume(),
+            "next" => self.player.next_station(),
+            "previous" => self.player.previous_station(),
+            "stop" => {
+                self.player.stop();
+                self.effects.push(Effect::StopPlayback);
+                return Ok("Stopped.".into());
+            }
+            other => return Err(format!("unknown action `{other}`")),
+        };
+        self.run_media(r)
+    }
+
+    fn run_cancel_alarms(&mut self, _args: &Value, _now: Ts) -> Result<String, String> {
+        let n = self.sched.cancel_kind(Kind::Alarm);
+        self.save();
+        Ok(format!("Cancelled {n} alarm(s)."))
+    }
+
+    fn run_set_reminder(&mut self, args: &Value, now: Ts) -> Result<String, String> {
+        let secs = int(args, "seconds")?;
+        let what = text(args, "text")?.to_owned();
+        self.sched
+            .set_reminder(now, now.saturating_add(secs), &what)
+            .map_err(|e| e.to_string())?;
+        self.save();
+        Ok(format!(
+            "Will remind about \"{what}\" in {}.",
+            format_duration(secs)
+        ))
+    }
+
+    fn run_set_reminder_at(&mut self, args: &Value, now: Ts) -> Result<String, String> {
+        let (h, m) = clock_args(args)?;
+        let what = text(args, "text")?.to_owned();
+        let at =
+            next_occurrence(&*self.zone, now, days::ALL, h, m).ok_or("that time does not exist")?;
+        self.sched
+            .set_reminder(now, at, &what)
+            .map_err(|e| e.to_string())?;
+        self.save();
+        Ok(format!(
+            "Will remind about \"{what}\" at {} {}.",
+            format_clock(h, m),
+            self.day_words(now, at)
+        ))
+    }
+
+    fn run_current_time(&mut self, _args: &Value, now: Ts) -> Result<String, String> {
+        let minute = self.zone.local_minute_of_day(now);
+        let day = self.zone.local_day(now);
+        let (_, mo, d) = civil_from_days(day);
+        Ok(format!(
+            "It is {} on {}, {} {}.",
+            format_clock(
+                u8::try_from(minute / 60).unwrap_or(0),
+                u8::try_from(minute % 60).unwrap_or(0)
+            ),
+            WEEKDAYS[usize::from(weekday(day))],
+            MONTHS[usize::try_from(mo - 1).unwrap_or(0) % 12],
+            d
+        ))
+    }
+
     fn day_words(&self, now: i64, at: i64) -> &'static str {
         match self.zone.local_day(at) - self.zone.local_day(now) {
             0 => "today",
@@ -428,66 +606,73 @@ impl Assistant {
         }
     }
 
-    fn call_inbox_tool(&mut self, name: &str, args: &Value, now: i64) -> Result<String, String> {
-        let core = self
-            .core
+    /// The core behind the agent inbox, or why there is none.
+    fn inbox_core(&self) -> Result<std::sync::Arc<crate::app::Core>, String> {
+        self.core
             .clone()
-            .ok_or("the agent inbox is not available")?;
-        match name {
-            "inbox_status" => Ok(status_sentence(&core.status())),
-            "inbox_details" => core
-                .current_event()
-                .map(|e| details_for_model(&e))
-                .ok_or_else(|| "no agent event is being discussed".to_owned()),
-            "inbox_reply" => {
-                let kind = match opt_text(args, "kind") {
-                    "ack" => ReplyKind::Ack,
-                    "instruct" => ReplyKind::Instruct,
-                    other => return Err(format!("`kind` must be ack or instruct, not `{other}`")),
-                };
-                // Only the session host reaches here for an instruct, and only with the exact text the
-                // user heard read back and answered yes to (REQ-SEC-011).
-                let body = if kind == ReplyKind::Instruct {
-                    if core.current_event().is_none() {
-                        return Err("no agent event is waiting for a reply".into());
-                    }
-                    text(args, "text")
-                        .map_err(|_| "nothing to send: give the text to send".to_owned())?
-                        .to_owned()
-                } else {
-                    String::new()
-                };
-                core.reply(kind, &body)
-                    .map(|r| format!("Sent to {}.", r.origin))
-                    .map_err(|e| match e {
-                        crate::app::ReplyError::NothingToReplyTo => {
-                            "no agent event is waiting for a reply".to_owned()
-                        }
-                        crate::app::ReplyError::QueueFull => {
-                            "too many replies are waiting for the agent bridge".to_owned()
-                        }
-                    })
+            .ok_or_else(|| "the agent inbox is not available".to_owned())
+    }
+
+    fn run_inbox_status(&mut self, _args: &Value, _now: Ts) -> Result<String, String> {
+        Ok(status_sentence(&self.inbox_core()?.status()))
+    }
+
+    fn run_inbox_details(&mut self, _args: &Value, _now: Ts) -> Result<String, String> {
+        self.inbox_core()?
+            .current_event()
+            .map(|e| details_for_model(&e))
+            .ok_or_else(|| "no agent event is being discussed".to_owned())
+    }
+
+    fn run_inbox_reply(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
+        let core = self.inbox_core()?;
+        let kind = match opt_text(args, "kind") {
+            "ack" => ReplyKind::Ack,
+            "instruct" => ReplyKind::Instruct,
+            other => return Err(format!("`kind` must be ack or instruct, not `{other}`")),
+        };
+        // Only the session host reaches here for an instruct, and only with the exact text the
+        // user heard read back and answered yes to (REQ-SEC-011).
+        let body = if kind == ReplyKind::Instruct {
+            if core.current_event().is_none() {
+                return Err("no agent event is waiting for a reply".into());
             }
-            "inbox_snooze" => {
-                let secs = int(args, "seconds")?;
-                if !(60..=86_400).contains(&secs) {
-                    return Err("`seconds` must be between 60 and 86400".into());
+            text(args, "text")
+                .map_err(|_| "nothing to send: give the text to send".to_owned())?
+                .to_owned()
+        } else {
+            String::new()
+        };
+        core.reply(kind, &body)
+            .map(|r| format!("Sent to {}.", r.origin))
+            .map_err(|e| match e {
+                crate::app::ReplyError::NothingToReplyTo => {
+                    "no agent event is waiting for a reply".to_owned()
                 }
-                let _ = now;
-                if core.snooze_current(secs) {
-                    Ok(format!("Snoozed for {}.", format_duration(secs)))
-                } else {
-                    Err("no agent event is being discussed".into())
+                crate::app::ReplyError::QueueFull => {
+                    "too many replies are waiting for the agent bridge".to_owned()
                 }
-            }
-            "inbox_dismiss" => {
-                if core.dismiss_current() {
-                    Ok("Dismissed.".into())
-                } else {
-                    Err("no agent event is being discussed".into())
-                }
-            }
-            other => Err(format!("unknown tool `{other}`")),
+            })
+    }
+
+    fn run_inbox_snooze(&mut self, args: &Value, _now: Ts) -> Result<String, String> {
+        let core = self.inbox_core()?;
+        let secs = int(args, "seconds")?;
+        if !(60..=86_400).contains(&secs) {
+            return Err("`seconds` must be between 60 and 86400".into());
+        }
+        if core.snooze_current(secs) {
+            Ok(format!("Snoozed for {}.", format_duration(secs)))
+        } else {
+            Err("no agent event is being discussed".into())
+        }
+    }
+
+    fn run_inbox_dismiss(&mut self, _args: &Value, _now: Ts) -> Result<String, String> {
+        if self.inbox_core()?.dismiss_current() {
+            Ok("Dismissed.".into())
+        } else {
+            Err("no agent event is being discussed".into())
         }
     }
 }
@@ -949,5 +1134,74 @@ mod tests {
         assert!(matches!(&fx[0], Effect::PlayStream { title, .. } if title == "jazz"));
         assert_eq!(fx[1], Effect::Media(MediaCmd::Pause));
         assert!(a.take_effects().is_empty(), "effects are handed over once");
+    }
+
+    // REQ-SEC-010: the tier and the trust of every built-in tool, pinned. Each tool is one entry in `TOOLS`, so
+    // the listing, the tier, the trust, the read-back and the runner cannot disagree; this pins their values.
+    #[test]
+    fn the_tier_and_trust_of_every_builtin_are_pinned() {
+        use Tier::{Costly, ReadOnly, Reversible};
+        let pinned: [(&str, Value, Tier, bool); 19] = [
+            ("current_time", json!({}), ReadOnly, false),
+            ("list_timers", json!({}), ReadOnly, false),
+            ("inbox_status", json!({}), ReadOnly, true),
+            ("inbox_details", json!({}), ReadOnly, true),
+            ("stopwatch", json!({"action": "read"}), ReadOnly, false),
+            ("stopwatch", json!({"action": "start"}), Reversible, false),
+            ("stopwatch", json!({}), Reversible, false),
+            ("set_timer", json!({}), Reversible, false),
+            ("cancel_timers", json!({}), Reversible, false),
+            ("set_alarm", json!({}), Reversible, false),
+            ("cancel_alarms", json!({}), Reversible, false),
+            ("set_reminder", json!({}), Reversible, false),
+            ("set_reminder_at", json!({}), Reversible, false),
+            ("play_music", json!({}), Reversible, false),
+            ("music_control", json!({}), Reversible, false),
+            ("inbox_snooze", json!({}), Reversible, false),
+            ("inbox_dismiss", json!({}), Reversible, false),
+            ("inbox_reply", json!({"kind": "ack"}), Reversible, false),
+            ("inbox_reply", json!({"kind": "instruct"}), Costly, false),
+        ];
+        for (name, args, tier, untrusted) in pinned.iter().cloned() {
+            assert_eq!(builtin_risk(name, &args).tier, tier, "{name} {args}");
+            assert_eq!(builtin_returns_untrusted_text(name), untrusted, "{name}");
+        }
+        // Every tool in the table is covered above.
+        let mut names: Vec<&str> = TOOLS.iter().map(|t| t.name).collect();
+        let mut covered: Vec<&str> = pinned.iter().map(|p| p.0).collect();
+        names.sort_unstable();
+        covered.sort_unstable();
+        covered.dedup();
+        assert_eq!(names, covered);
+    }
+
+    // An unknown name is never trusted: costly, untrusted, read back generically, and refused when run.
+    #[test]
+    fn a_name_not_in_the_table_gets_the_safe_defaults() {
+        let (mut a, _, _) = setup(true);
+        assert_eq!(builtin_risk("some_new_tool", &json!({})).tier, Tier::Costly);
+        assert!(builtin_returns_untrusted_text("some_new_tool"));
+        assert_eq!(
+            builtin_describe_action("some_new_tool", &json!({"a": 1})),
+            crate::session::describe_generic("some_new_tool", &json!({"a": 1}))
+        );
+        assert_eq!(
+            call(&mut a, "some_new_tool", json!({})).unwrap_err(),
+            "unknown tool `some_new_tool`"
+        );
+    }
+
+    // Everything the model is offered can be run, and every view of a tool answers for it by name.
+    #[test]
+    fn every_offered_tool_is_runnable_and_known_to_each_view() {
+        let (mut a, _, _) = setup(true);
+        for s in a.tool_specs() {
+            let t = find(&s.name).expect("an offered tool is in the table");
+            assert_eq!(t.description, s.description);
+            if let Err(e) = call(&mut a, &s.name, json!({})) {
+                assert!(!e.starts_with("unknown tool"), "{}: {e}", s.name);
+            }
+            assert_eq!(a.risk(&s.name, &json!({})).tier, t.tier.tier(&json!({})));
+        }
     }
 }
