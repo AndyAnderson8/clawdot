@@ -632,7 +632,7 @@ impl Assistant {
                 }
             }
             "inbox.ack" => match core.reply(ReplyKind::Ack, "") {
-                Ok(r) => Outcome::say(format!("Okay. I'll let {} know you've got it.", r.source)),
+                Ok(r) => Outcome::say(format!("Okay. I'll let {} know you've got it.", r.origin)),
                 Err(ReplyError::NothingToReplyTo) => None,
                 Err(ReplyError::QueueFull) => {
                     Outcome::say("I couldn't pass that on; too many replies are waiting.")
@@ -641,7 +641,7 @@ impl Assistant {
             "inbox.instruct" => {
                 let text = m.text("text").unwrap_or("continue").to_owned();
                 match core.reply(ReplyKind::Instruct, &text) {
-                    Ok(r) => Outcome::say(format!("Okay, sending that to {}.", r.source)),
+                    Ok(r) => Outcome::say(format!("Okay, sending that to {}.", r.origin)),
                     Err(ReplyError::NothingToReplyTo) => None,
                     Err(ReplyError::QueueFull) => {
                         Outcome::say("I couldn't pass that on; too many replies are waiting.")
@@ -889,7 +889,7 @@ mod tests {
 
         core.ingest_hook("claude-code", &token, STOP_PAYLOAD.as_bytes())
             .unwrap();
-        assert_eq!(say(&mut a, "any updates"), "Claude Code: 1 finished.");
+        assert_eq!(say(&mut a, "any updates"), "claude-code: 1 finished.");
 
         let id = core.next_announcement(true, 0).unwrap().event.id;
         core.mark_announced(&[id]);
@@ -899,7 +899,7 @@ mod tests {
         );
         assert_eq!(
             say(&mut a, "tell it to also add unit tests"),
-            "Okay, sending that to Claude Code."
+            "Okay, sending that to claude-code."
         );
         let pending = core.bridge_pending("claude-code", &token, 0).unwrap();
         assert_eq!(
@@ -919,7 +919,7 @@ mod tests {
         core.mark_announced(&[id]);
         assert_eq!(
             say(&mut a, "thanks I'll handle it"),
-            "Okay. I'll let Claude Code know you've got it."
+            "Okay. I'll let claude-code know you've got it."
         );
         assert_eq!(
             core.bridge_pending("claude-code", &token, 0).unwrap()[0].kind,

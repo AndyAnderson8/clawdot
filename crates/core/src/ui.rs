@@ -11,6 +11,7 @@
 //! * `POST /api/recover/window`                `{"password":..}`; during the local reset window (REQ-CFG-069)
 //! * `GET  /api/overview`                      endpoints and recent agent events
 //! * `GET  /api/schedule`, `POST /api/schedule`, `PUT|DELETE /api/schedule/{id}`   timers, alarms, reminders
+//! * `POST /api/connections/{name}/accept`   body `{}` or `{"tool":..}`; approves what a server now offers (REQ-EXT-019)
 //! * `POST /api/tools/{name}/tier`            body `{"tier":..|null}`; the administrator's risk tier for a tool (REQ-SEC-030)
 //! * `GET  /api/tools`, `/api/settings`, `/api/about`   what the Tools, Connections, Settings tabs show
 //! * `PUT  /api/settings`                      body `{key: value|null, ..}`; saves some settings (admin only)
@@ -19,7 +20,8 @@
 //! * `GET  /api/status`                      what the assistant is doing (model, satellites, tools, usage, schedule)
 //! * `POST /api/speak`                         body `{"text":..}`; the speaker says it ("test speak"). `202 {"ok":true}`
 //!   when queued; otherwise `{"ok":false,"reason":"no_voice|no_speaker|muted|busy|quiet_hours","message":..}` (REQ-CFG-070)
-//! * `POST /api/endpoints`                     body `{"name":..,"adapter":..}`; the token is returned once
+//! * `POST /api/endpoints`                     body `{"name":..,"adapter":..,"spoken_name"?:..}`; the token is returned once
+//! * `PUT  /api/endpoints/{name}`              body `{"spoken_name": text|null}`; the words the speaker names as the origin
 //! * `POST /api/endpoints/{name}/rotate`       a new token, returned once
 //! * `DELETE /api/endpoints/{name}`
 //!
@@ -180,7 +182,7 @@ fn endpoint_error(e: &EndpointError) -> Resp {
     let status = match e {
         EndpointError::Exists => StatusCode::CONFLICT,
         EndpointError::NotFound => StatusCode::NOT_FOUND,
-        EndpointError::InvalidName => StatusCode::BAD_REQUEST,
+        EndpointError::InvalidName | EndpointError::InvalidSpokenName => StatusCode::BAD_REQUEST,
         EndpointError::NoRandomness => StatusCode::INTERNAL_SERVER_ERROR,
     };
     error(status, &e.to_string())
@@ -206,12 +208,16 @@ fn state_label(s: &crate::inbox::event::EventState) -> &'static str {
     }
 }
 
+/// An endpoint as the portal lists it. `spoken_name` is `null` when none is set (the speaker then says `name`).
+fn endpoint_json(e: &crate::inbox::endpoint::Endpoint) -> Value {
+    json!({
+        "name": e.name, "adapter": e.adapter, "enabled": e.enabled, "created_at": e.created_at,
+        "spoken_name": e.spoken_name,
+    })
+}
+
 fn overview(core: &Core) -> Resp {
-    let endpoints: Vec<Value> = core
-        .endpoints()
-        .iter()
-        .map(|e| json!({ "name": e.name, "adapter": e.adapter, "enabled": e.enabled, "created_at": e.created_at }))
-        .collect();
+    let endpoints: Vec<Value> = core.endpoints().iter().map(endpoint_json).collect();
     let mut events = core.events();
     events.sort_by_key(|e| std::cmp::Reverse(e.id));
     let events: Vec<Value> = events
@@ -219,7 +225,8 @@ fn overview(core: &Core) -> Resp {
         .take(MAX_EVENTS)
         .map(|e| {
             json!({
-                "id": e.id, "endpoint": e.endpoint, "source": e.source, "title": clip(&e.title),
+                "id": e.id, "endpoint": e.endpoint, "source": e.source, "origin": e.origin_name(),
+                "title": clip(&e.title),
                 "text": clip(&e.text), "state": state_label(&e.state), "received_at": e.received_at,
             })
         })
@@ -255,6 +262,21 @@ fn hive_peers(core: &Core) -> Resp {
 struct NewEndpoint {
     name: String,
     adapter: String,
+    #[serde(default)]
+    spoken_name: Option<String>,
+}
+
+/// Deserialises a field that must be present, even when it is `null` (a plain `Option` would accept its absence).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(d)
+}
+
+/// `PUT /api/endpoints/{name}`: `spoken_name` is text, or `null` (or blank) to clear it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointUpdate {
+    #[serde(deserialize_with = "present")]
+    spoken_name: Option<String>,
 }
 
 /// What a route does. The dispatch in `handle` matches on this with no catch-all arm, so a handler without a route,
@@ -270,6 +292,7 @@ enum Id {
     Status,
     Speak,
     EndpointCreate,
+    EndpointUpdate,
     EndpointRotate,
     EndpointDelete,
     AdminPassword,
@@ -282,6 +305,7 @@ enum Id {
     ConnectionAdd,
     ConnectionDelete,
     ConnectionEnable,
+    ConnectionAccept,
     SkillAction,
     SkillAdd,
     SettingsGet,
@@ -345,6 +369,7 @@ const ROUTES: &[Route] = &[
         SignedIn,
         Id::EndpointRotate,
     ),
+    r("PUT", "/api/endpoints/{name}", SignedIn, Id::EndpointUpdate),
     r(
         "DELETE",
         "/api/endpoints/{name}",
@@ -381,6 +406,12 @@ const ROUTES: &[Route] = &[
         "/api/connections/{name}/enabled",
         SignedIn,
         Id::ConnectionEnable,
+    ),
+    r(
+        "POST",
+        "/api/connections/{name}/accept",
+        SignedIn,
+        Id::ConnectionAccept,
     ),
     r("POST", "/api/skills/{action}", SignedIn, Id::SkillAction),
     r("POST", "/api/skills", SignedIn, Id::SkillAdd),
@@ -500,6 +531,17 @@ pub(crate) async fn handle(
         ),
         Id::Speak => speak(core, body).await,
         Id::EndpointCreate => create(core, body).await,
+        Id::EndpointUpdate => match read_json::<EndpointUpdate>(body).await {
+            Ok(u) => match core.set_endpoint_spoken_name(p, u.spoken_name.as_deref().unwrap_or(""))
+            {
+                Ok(e) => json_reply(StatusCode::OK, &endpoint_json(&e)),
+                Err(e) => endpoint_error(&e),
+            },
+            Err(_) => error(
+                StatusCode::BAD_REQUEST,
+                "expected {\"spoken_name\": text or null}",
+            ),
+        },
         Id::EndpointRotate => match core.rotate_endpoint(p) {
             Ok(t) => json_reply(StatusCode::OK, &json!({ "name": p, "token": t })),
             Err(e) => endpoint_error(&e),
@@ -537,6 +579,10 @@ pub(crate) async fn handle(
         Id::ConnectionDelete => ext(core, ExtOp::McpDelete(p.to_owned())).await,
         Id::ConnectionEnable => match enabled_flag(body).await {
             Ok(on) => ext(core, ExtOp::McpEnable(p.to_owned(), on)).await,
+            Err((s, m)) => error(s, m),
+        },
+        Id::ConnectionAccept => match accept_choice(body).await {
+            Ok(tool) => ext(core, ExtOp::McpAccept(p.to_owned(), tool)).await,
             Err((s, m)) => error(s, m),
         },
         Id::SkillAction => skill_action(core, p, body).await,
@@ -1260,6 +1306,25 @@ async fn enabled_flag(body: Incoming) -> Result<bool, (StatusCode, &'static str)
     }
 }
 
+/// `POST /api/connections/{name}/accept`: an empty body or `{}` accepts every tool of the connection that waits
+/// for review; `{"tool": "<name>"}` accepts that one (REQ-EXT-019).
+async fn accept_choice(body: Incoming) -> Result<Option<String>, (StatusCode, &'static str)> {
+    let Some(bytes) = read_body(body, MAX_BODY, BODY_TIMEOUT).await else {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "body too large or too slow"));
+    };
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Choice {
+        tool: Option<String>,
+    }
+    serde_json::from_slice::<Choice>(&bytes)
+        .map(|c| c.tool)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "expected {} or {\"tool\": name}"))
+}
+
 /// `{"tier": "read_only"|"reversible"|"costly"|null}` (REQ-SEC-030).
 async fn tier_choice(
     body: Incoming,
@@ -1563,10 +1628,10 @@ async fn create(core: &Core, body: Incoming) -> Resp {
     if !core.has_adapter(&req.adapter) {
         return error(StatusCode::BAD_REQUEST, "unknown adapter");
     }
-    match core.create_endpoint(&req.name, &req.adapter) {
+    match core.create_endpoint_with(&req.name, &req.adapter, req.spoken_name.as_deref()) {
         Ok((e, token)) => json_reply(
             StatusCode::CREATED,
-            &json!({ "name": e.name, "adapter": e.adapter, "token": token }),
+            &json!({ "name": e.name, "adapter": e.adapter, "spoken_name": e.spoken_name, "token": token }),
         ),
         Err(e) => endpoint_error(&e),
     }

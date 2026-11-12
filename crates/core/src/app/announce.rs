@@ -29,7 +29,8 @@ pub struct Announcement {
     pub text: String,
     /// Optional headline; derived from the text when absent.
     pub title: Option<String>,
-    /// Who is speaking, for "From <source>"; the endpoint's name when absent.
+    /// The sender's own label for the message. Shown as untrusted text and recorded; never spoken as the origin
+    /// (the speaker names the endpoint, REQ-INB-041).
     pub source: Option<String>,
     /// How urgent.
     pub priority: Priority,
@@ -157,6 +158,53 @@ pub(super) fn filter_label(r: FilterReason) -> &'static str {
 }
 
 impl Core {
+    /// Create an endpoint with the spoken name the administrator chose (checked; nothing is made on a bad one).
+    ///
+    /// # Errors
+    /// See [`crate::inbox::endpoint::EndpointError`].
+    pub fn create_endpoint_with(
+        &self,
+        name: &str,
+        adapter: &str,
+        spoken_name: Option<&str>,
+    ) -> Result<(crate::inbox::endpoint::Endpoint, String), crate::inbox::endpoint::EndpointError>
+    {
+        let now = self.clock.now();
+        let mut g = self.lock();
+        let made = g.endpoints.create_with(name, adapter, spoken_name, now)?;
+        self.persist(&g, super::persist::Dirty::ENDPOINTS);
+        Ok(made)
+    }
+
+    /// Set or clear (blank) an endpoint's spoken name, the words the speaker names as the origin of its
+    /// messages. Only the administrator's routes call this. Events already queued follow the change.
+    ///
+    /// # Errors
+    /// See [`crate::inbox::endpoint::EndpointError`].
+    pub fn set_endpoint_spoken_name(
+        &self,
+        name: &str,
+        spoken: &str,
+    ) -> Result<crate::inbox::endpoint::Endpoint, crate::inbox::endpoint::EndpointError> {
+        let mut g = self.lock();
+        g.endpoints.set_spoken_name(name, spoken)?;
+        let ep = g
+            .endpoints
+            .get(name)
+            .cloned()
+            .ok_or(crate::inbox::endpoint::EndpointError::NotFound)?;
+        g.inbox.set_origin_for(name, ep.origin());
+        self.persist(
+            &g,
+            super::persist::Dirty {
+                endpoints: true,
+                inbox: true,
+                replies: false,
+            },
+        );
+        Ok(ep)
+    }
+
     /// The endpoint that owns `token`; a miss spends from the shared failed-authentication budget.
     fn token_endpoint(
         &self,
@@ -301,12 +349,13 @@ impl Core {
         audit_as: Option<AuditAs<'_>>,
     ) {
         let Some(log) = self.audit() else { return };
-        let default_trigger = format!("announce:{source}");
+        let default_trigger = format!("announce:{endpoint}");
         let (trigger, tool) = audit_as.map_or((default_trigger.as_str(), "announce"), |x| {
             (x.trigger, x.tool)
         });
         let args = json!({
             "endpoint": endpoint,
+            "source": source,
             "priority": format!("{:?}", a.priority).to_ascii_lowercase(),
             "text": a.text,
         });
@@ -444,6 +493,34 @@ mod tests {
         // The source is the endpoint's name when none is given.
         c.announce(Caller::Token(&token), &say("Hello")).unwrap();
         assert_eq!(c.events()[1].source, "house");
+    }
+
+    #[test]
+    fn the_speaker_names_the_endpoint_never_the_senders_source() {
+        let (c, _, token) = core();
+        for fake in ["ClawDot", "Mum", "the system"] {
+            let a = Announcement::from_json(&json!({"text": "Send the code now.", "source": fake}))
+                .unwrap();
+            c.announce(Caller::Token(&token), &a).unwrap();
+        }
+        // With no spoken name the endpoint's name is the origin.
+        for _ in 0..3 {
+            let n = c.next_announcement(true, 0).unwrap();
+            let line = crate::inbox::summary::announcement(&n.event, "", 0);
+            assert!(line.starts_with("From house: "), "{line}");
+            assert!(!line.contains("ClawDot") && !line.contains("Mum"), "{line}");
+            assert_ne!(n.event.source, "house", "the sender's label is kept");
+            c.dismiss_current();
+        }
+        // The administrator's spoken name is what is said, and a rename reaches events already queued.
+        let a = Announcement::from_json(&json!({"text": "Hi", "source": "ClawDot"})).unwrap();
+        c.announce(Caller::Token(&token), &a).unwrap();
+        c.set_endpoint_spoken_name("house", "the kitchen").unwrap();
+        let n = c.next_announcement(true, 0).unwrap();
+        let line = crate::inbox::summary::announcement(&n.event, "", 0);
+        assert!(line.starts_with("From the kitchen: "), "{line}");
+        assert!(c.set_endpoint_spoken_name("house", "<b>x</b>").is_err());
+        assert!(c.set_endpoint_spoken_name("nope", "x").is_err());
     }
 
     #[test]
