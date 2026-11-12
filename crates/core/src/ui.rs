@@ -49,6 +49,8 @@ use std::sync::Arc;
 #[cfg(test)]
 mod csp_tests;
 #[cfg(test)]
+mod openai_host_tests;
+#[cfg(test)]
 mod rekey_tests;
 #[cfg(test)]
 mod tests;
@@ -844,6 +846,13 @@ const OPENAI_VOICES: [&str; 11] = [
     "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
 ];
 
+/// Whether `url` is OpenAI's own service. The host is compared, not the text: a server whose path or query merely
+/// mentions `api.openai.com`, or whose name only starts with it, is not OpenAI.
+fn is_openai(url: &str) -> bool {
+    crate::transport::Endpoint::parse(url)
+        .is_ok_and(|e| e.host.eq_ignore_ascii_case("api.openai.com"))
+}
+
 /// `GET /api/voices`: the voices the speech server offers (REQ-CFG-081): its own list when it has one, OpenAI's fixed
 /// set for OpenAI, otherwise a plain statement that the voice has to be typed.
 async fn voices(core: &Core) -> Resp {
@@ -868,7 +877,7 @@ async fn voices(core: &Core) -> Resp {
                 &json!({ "voices": ids, "details": details, "source": source }),
             )
         }
-        Err(_) if url.contains("api.openai.com") => json_reply(
+        Err(_) if is_openai(url) => json_reply(
             StatusCode::OK,
             &json!({
                 "voices": OPENAI_VOICES,
