@@ -105,6 +105,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
   /bridge/{endpoint}/replies:
     get:
       tags: [Webhooks]
@@ -152,6 +154,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
   /api/announce:
     post:
       tags: [Webhooks]
@@ -159,7 +163,7 @@ paths:
       description: |
         One-way announcement. Authenticate with an endpoint token (it starts with `cdt_`; it identifies the
         endpoint) or as the administrator (a session token, then `endpoint` names the endpoint to use). Every
-        refusal for a caller without credentials is `401`, or `429` when the shared failure budget is spent.
+        refusal for a caller without credentials is `401`, or `429` when that caller's address has used up its budget of failed attempts.
         The response never repeats the text.
       operationId: announce
       security: [{ endpointToken: [] }, { endpointTokenHeader: [] }, { session: [] }]
@@ -178,6 +182,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "413": { $ref: "#/components/responses/TooLarge" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
   /mcp:
     post:
       tags: [Webhooks]
@@ -188,7 +194,7 @@ paths:
         and `tools/call`; a notification gets `202` with no body. The two tools are `announce` (say a short
         message) and `ask_user` (ask the person a question aloud; the answer comes back as untrusted data and
         is never a confirmation of any action). Authenticate with an endpoint token only; an administrator
-        session is not accepted. Tool failures are `200` with `isError: true`. `ask_user` holds the request
+        session is not accepted. Tool failures are `200` with `isError: true`; that includes an `announce` or `ask_user` whose message could not be saved to storage (an `ask_user` that fails this way is withdrawn and not spoken). `ask_user` holds the request
         open up to its `timeout_secs` (1 to 300, default 60). `GET` and `DELETE` are `405`.
       operationId: mcp
       security: [{ endpointToken: [] }, { endpointTokenHeader: [] }]
@@ -352,6 +358,11 @@ paths:
     post:
       tags: [Session]
       summary: Change the administrator password
+      description: |
+        In password mode the current password must be given and is checked like a sign-in: it spends an attempt
+        from the caller's address budget (a wrong guess is not given back; a right one is). In open mode a
+        private-network caller may set the first password without one; that is written to the audit log and the
+        problem log.
       operationId: changePassword
       requestBody:
         required: true
@@ -362,17 +373,31 @@ paths:
               required: [password]
               additionalProperties: false
               properties:
-                password: { type: string, minLength: 8, maxLength: 128 }
+                password: { type: string, minLength: 8, maxLength: 128, description: "The new password." }
+                current:
+                  type: string
+                  description: |
+                    The password in force now. **Required in password mode** (for an installation that still has
+                    the old administrator token, that token is the current password). A missing or wrong value is
+                    `403`. In open mode there is no password to give and this field is ignored.
       responses:
         "200":
-          description: Changed. A new session token is returned.
+          description: Changed. Every other session ends and a new session token is returned.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SessionGrant" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "403":
+          description: |
+            Password mode and `current` is missing or wrong (`"the current password is missing or wrong"`;
+            this is `403`, not `401`, so the signed-in session is kept), or setup is required first, or the caller
+            is not on a private network (open mode).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
   /api/overview:
     get:
       tags: [Status]
@@ -507,6 +532,8 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "413": { $ref: "#/components/responses/TooLarge" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
   /api/endpoints/{name}:
     delete:
       tags: [Webhooks]
@@ -528,6 +555,8 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
   /api/endpoints/{name}/rotate:
     post:
       tags: [Webhooks]
@@ -551,6 +580,8 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
   /api/schedule:
     get:
       tags: [Schedule]
@@ -586,6 +617,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
         "503": { $ref: "#/components/responses/Unavailable" }
   /api/schedule/{id}:
     put:
@@ -611,6 +644,8 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
         "503": { $ref: "#/components/responses/Unavailable" }
     delete:
       tags: [Schedule]
@@ -628,6 +663,8 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/NotSaved" }
+        "507": { $ref: "#/components/responses/StorageFull" }
         "503": { $ref: "#/components/responses/Unavailable" }
   /api/tools:
     get:
@@ -1511,7 +1548,7 @@ components:
       description: |
         A session token from `POST /api/login`, `POST /api/setup` (password mode), `POST /api/admin/password`
         or `POST /api/recover/window`. In *open* mode (chosen at setup, private network only) no token is
-        needed from a private-network peer. Wrong tokens spend a shared authentication budget and end in `429`.
+        needed from a private-network peer. Failed attempts (wrong tokens, wrong passwords) are counted per client address and end in `429` for that address only; a larger ceiling over all addresses together is the backstop.
     endpointToken:
       type: http
       scheme: bearer
@@ -1585,6 +1622,19 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     ServerError:
       description: The change could not be saved.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotSaved:
+      description: |
+        The change was made in memory (an event is still announced, a timer still rings) but could not be written
+        to storage, so it will be lost if the device restarts. Never a `2xx`: a success is reported only for
+        something that is on disk. A sender may retry; repeats are merged.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    StorageFull:
+      description: Like `500`, and the cause is a full disk.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

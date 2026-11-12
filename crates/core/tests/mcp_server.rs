@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use clawdot_core::app::{Adapters, Core, Limits};
+use clawdot_core::app::{Adapters, Core, LOCALHOST_PEER, Limits};
 use clawdot_core::audit::{AuditConfig, AuditLog, Query};
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::inbox::reply::ReplyKind;
@@ -270,7 +270,7 @@ async fn ask_user_returns_what_the_person_said_as_labelled_data() {
     assert!(!h.core.ask_pending(1));
     assert!(
         h.core
-            .bridge_pending("hermes", &h.token, 0)
+            .bridge_pending("hermes", &h.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty(),
         "an answer goes to the asking caller only"
@@ -368,7 +368,7 @@ async fn an_answer_full_of_instructions_is_just_text_and_confirms_nothing() {
     // The reply queue for bridges is untouched, so the words satisfied nothing but the one waiting call.
     assert!(
         h.core
-            .bridge_pending("hermes", &h.token, 0)
+            .bridge_pending("hermes", &h.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );
@@ -402,7 +402,8 @@ async fn only_an_endpoint_token_gets_in_and_failures_are_rate_limited() {
     .await;
     assert_eq!(status, 200);
     // Guessing is throttled by the shared budget.
-    let mut last = 0;
+    // (A token refills each second, so one more attempt may pass when a second ticks over; some must be refused.)
+    let mut limited = 0;
     for _ in 0..40 {
         let (status, _) = http(
             h.addr,
@@ -412,9 +413,12 @@ async fn only_an_endpoint_token_gets_in_and_failures_are_rate_limited() {
             Duration::from_secs(5),
         )
         .await;
-        last = status;
+        limited += usize::from(status == 429);
     }
-    assert_eq!(last, 429);
+    assert!(
+        limited >= 10,
+        "guessing was not throttled: {limited} refusals"
+    );
 }
 
 // REQ-EXT-015
@@ -605,4 +609,73 @@ async fn only_post_is_served_and_oversized_or_malformed_bodies_are_refused() {
     )
     .await;
     assert!(body.contains("-32600"), "{body}");
+}
+
+// REQ-INB-004: an `announce` or `ask_user` call is reported as done only if the message was saved. MCP reports a
+// failed tool in the result (`isError`), not by an HTTP status, so that is where the truth goes.
+#[tokio::test(flavor = "current_thread")]
+async fn a_message_that_could_not_be_saved_is_a_tool_error_not_a_success() {
+    let dir = std::env::temp_dir().join(format!("clawdot-mcp-unsaved-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let core = Arc::new(
+        Core::open(
+            Arc::new(SystemClock),
+            Adapters::builtin(),
+            Limits::default(),
+            clawdot_core::app::Stores::in_dir(&dir),
+        )
+        .unwrap(),
+    );
+    let (_, token) = core.create_endpoint("hermes", "generic").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let served = Arc::clone(&core);
+    tokio::spawn(async move {
+        let _ = serve(listener, served, ServeOptions::default(), async {
+            let _ = rx.await;
+        })
+        .await;
+    });
+    let h = Harness {
+        core,
+        addr,
+        token,
+        _stop: tx,
+    };
+    h.core.flush_blocking();
+    // A directory where the inbox's temporary file would be written makes every save of it fail.
+    let blocker = dir.join("inbox.json.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+
+    let r = call_tool(&h, "announce", json!({"text": "the oven is hot"})).await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(
+        r["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not be saved"),
+        "{r}"
+    );
+    let r = call_tool(
+        &h,
+        "ask_user",
+        json!({"question": "Open the door?", "timeout_secs": 1}),
+    )
+    .await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(
+        r["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not asked"),
+        "{r}"
+    );
+    // Once saving works again the same call succeeds.
+    std::fs::remove_dir(&blocker).unwrap();
+    let r = call_tool(&h, "announce", json!({"text": "the oven is hot"})).await;
+    assert_eq!(r["isError"], false, "{r}");
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -115,17 +115,20 @@ impl ToolReq {
     pub async fn serve(self, assistant: &mut Assistant) {
         let result = assistant.call_tool(&self.name, &self.args).await;
         let effects = assistant.take_effects();
-        let saved = assistant.unconfirmed();
+        let saved = assistant.take_save();
         // A model told "timer set" says so at once (a realtime session speaks it as it arrives), so the result
         // is held back until the change is on disk. That wait is in its own task: the loop does not stand
-        // still for flash.
+        // still for flash. If the change could not be saved, the result says so, so the model tells the person.
         match saved {
-            Some(saved) => {
-                tokio::spawn(async move {
-                    saved.wait().await;
-                    self.answer(result, effects);
-                });
-            }
+            Some(saved) => match saved.outcome_now() {
+                Some(outcome) => self.answer(unsaved_note(result, outcome), effects),
+                None => {
+                    tokio::spawn(async move {
+                        let outcome = saved.wait().await;
+                        self.answer(unsaved_note(result, outcome), effects);
+                    });
+                }
+            },
             None => self.answer(result, effects),
         }
     }
@@ -139,6 +142,18 @@ impl ToolReq {
                 self.name
             ));
         }
+    }
+}
+
+/// A tool result with the warning that the change it reports could not be saved, when that is so. A call that
+/// failed reports no change, so its message is left alone.
+fn unsaved_note(
+    result: Result<String, String>,
+    outcome: Result<(), crate::app::persist::SaveError>,
+) -> Result<String, String> {
+    match (result, outcome) {
+        (Ok(text), Err(_)) => Ok(format!("{text} {}", crate::assistant::NOT_SAVED_NOTE)),
+        (result, _) => result,
     }
 }
 
@@ -1191,5 +1206,65 @@ mod tests {
         assert!(a.result.is_ok(), "{:?}", a.result);
         let saved: Scheduler = Scheduler::load(&store, 8).unwrap();
         assert_eq!(saved.list().len(), 1);
+    }
+
+    /// REQ-TMR-003: a timer the model set that could not be saved is still set (it rings), and the tool result the
+    /// model reads says so, so it does not tell the person it is safe. The next call that does save says nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_timer_tool_result_says_when_the_save_failed() {
+        use crate::app::{Adapters, Core, Limits, Stores};
+        use crate::store::{JsonStore, testutil::TempDir};
+        let dir = TempDir::new("tool-unsaved");
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(crate::sched::SystemClock);
+        let core = Arc::new(
+            Core::open(
+                clock.clone(),
+                Adapters::builtin(),
+                Limits::default(),
+                Stores::in_dir(&dir.0),
+            )
+            .unwrap(),
+        );
+        let store = JsonStore::new(dir.0.join("timers.json"), crate::sched::SCHEMA);
+        let mut assistant = Assistant::new(
+            clock,
+            Box::new(FixedOffset(0)),
+            Scheduler::new(8),
+            Some(store.clone()),
+            Some(Arc::clone(&core)),
+        );
+        let blocker = crate::store::temp_path(store.path());
+        std::fs::create_dir(&blocker).unwrap();
+        async fn run(assistant: &mut Assistant, args: serde_json::Value) -> ToolAnswer {
+            let (reply, answer) = oneshot::channel();
+            let req = ToolReq {
+                name: "set_timer".into(),
+                args,
+                reply,
+            };
+            req.serve(assistant).await;
+            answer.await.unwrap()
+        }
+        let answer = run(
+            &mut assistant,
+            serde_json::json!({"seconds": 600, "label": "tea"}),
+        )
+        .await;
+        let text = answer.result.unwrap();
+        assert!(
+            text.contains(crate::assistant::NOT_SAVED_NOTE),
+            "the model was not told: {text}"
+        );
+        assert_eq!(assistant.scheduled().len(), 1, "it is still set in memory");
+        // Storage works again: the next call is reported plainly.
+        std::fs::remove_dir(&blocker).unwrap();
+        let answer = run(
+            &mut assistant,
+            serde_json::json!({"seconds": 300, "label": "eggs"}),
+        )
+        .await;
+        let text = answer.result.unwrap();
+        assert!(!text.contains("could not be saved"), "{text}");
+        assert_eq!(Scheduler::load(&store, 8).unwrap().list().len(), 2);
     }
 }

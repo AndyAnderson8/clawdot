@@ -913,11 +913,95 @@ async fn the_recovery_code_endpoints_are_gone() {
         "POST",
         "/api/admin/password",
         &session,
-        &login_body("changed password"),
+        r#"{"password":"changed password","current":"correct horse"}"#,
     )
     .await;
     assert_eq!(s, 200);
     assert!(v.get("recovery_code").is_none());
+}
+
+// REQ-CFG-024: a session alone cannot change the password; the current one must be given and be right, and a
+// wrong guess costs an attempt from the caller's budget like a sign-in does.
+#[tokio::test]
+async fn changing_the_password_needs_the_current_one() {
+    let p = start(false).await;
+    let session = set_up_with_password(&p).await;
+    for body in [
+        r#"{"password":"changed password"}"#,
+        r#"{"password":"changed password","current":""}"#,
+        r#"{"password":"changed password","current":"wrong horse"}"#,
+    ] {
+        let (s, v) = call(&p, "POST", "/api/admin/password", &session, body).await;
+        assert_eq!(s, 403, "{body}");
+        assert_eq!(v["error"], "the current password is missing or wrong");
+    }
+    // Nothing changed: the same session works and the old password signs in.
+    assert_eq!(call(&p, "GET", "/api/about", &session, "").await.0, 200);
+    let (s, _) = call(&p, "POST", "/api/login", "", &login_body("correct horse")).await;
+    assert_eq!(s, 200);
+    // The right one changes it, and the new one signs in.
+    let ok = r#"{"password":"changed password","current":"correct horse"}"#;
+    assert_eq!(
+        call(&p, "POST", "/api/admin/password", &session, ok)
+            .await
+            .0,
+        200
+    );
+    let (s, _) = call(
+        &p,
+        "POST",
+        "/api/login",
+        "",
+        &login_body("changed password"),
+    )
+    .await;
+    assert_eq!(s, 200);
+}
+
+// A wrong current password is a guess like any other: it is throttled per address, and a good change gives its
+// attempt back.
+#[tokio::test]
+async fn guessing_the_current_password_is_throttled() {
+    let p = start(false).await;
+    let session = set_up_with_password(&p).await;
+    let wrong = r#"{"password":"changed password","current":"wrong horse"}"#;
+    let mut limited = false;
+    for _ in 0..40 {
+        let (s, _) = call(&p, "POST", "/api/admin/password", &session, wrong).await;
+        if s == 429 {
+            limited = true;
+            break;
+        }
+        assert_eq!(s, 403);
+    }
+    assert!(limited, "guessing the current password was never throttled");
+}
+
+// In open mode there is no password to give; setting one stays possible from a private address, and is recorded.
+#[tokio::test]
+async fn setting_a_password_in_open_mode_is_recorded() {
+    use crate::audit::{AuditConfig, AuditLog, Query};
+    let p = start(false).await;
+    let log = Arc::new(AuditLog::in_memory(AuditConfig::default()));
+    p.core.set_audit(Arc::clone(&log));
+    let (s, _) = call(&p, "POST", "/api/setup", "", r#"{"mode":"open"}"#).await;
+    assert_eq!(s, 200);
+    // A `current` in open mode is ignored.
+    let body = r#"{"password":"first password","current":"whatever"}"#;
+    let (s, _) = call(&p, "POST", "/api/admin/password", "", body).await;
+    assert_eq!(s, 200);
+    let page = log.query(&Query::default());
+    let rec = page
+        .records
+        .iter()
+        .find(|r| r.tool == "admin_password")
+        .expect("the change is in the audit log");
+    assert_eq!(rec.note.as_deref(), Some("password set in open mode"));
+    assert!(
+        !serde_json::to_string(&page.records)
+            .unwrap()
+            .contains("first password")
+    );
 }
 
 // An older install that was in open mode can still move to a password.

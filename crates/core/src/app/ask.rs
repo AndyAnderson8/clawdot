@@ -96,6 +96,7 @@ impl Core {
     pub(crate) fn ask_open<'a>(
         &'a self,
         token: &str,
+        peer: std::net::IpAddr,
         a: &Announcement,
         audit_as: AuditAs<'_>,
     ) -> Result<AskTicket<'a>, AskError> {
@@ -123,7 +124,7 @@ impl Core {
             slot
         };
         let release = |this: &Self| this.asks().retain(|p| p.slot != slot);
-        match self.announce_as(Caller::Token(token), a, Some(audit_as)) {
+        match self.announce_as(Caller::Token(token, peer), a, Some(audit_as)) {
             Ok((HookOutcome::Accepted(id) | HookOutcome::Coalesced(id), _)) => {
                 if let Some(p) = self.asks().iter_mut().find(|p| p.slot == slot) {
                     p.event_id = id;

@@ -2,7 +2,7 @@
 //! no network (REQ-AST-010, REQ-NFR-009). Anything it does not handle returns `None` and falls through to
 //! the LLM.
 
-use crate::app::persist::Durability;
+use crate::app::persist::{Durability, SaveError};
 use crate::app::{Core, ReplyError};
 use crate::fastpath::{Match, Matcher, Time};
 use crate::inbox::reply::ReplyKind;
@@ -12,7 +12,7 @@ use crate::sched::{
     Clock, Fired, Kind, Scheduler, Ts, Zone, civil_from_days, days, next_occurrence, weekday,
 };
 use crate::store::JsonStore;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 mod schedule_api;
 mod stopwatch;
@@ -212,8 +212,9 @@ pub struct Assistant {
     matcher: Matcher,
     sched: Scheduler,
     sched_store: Option<JsonStore>,
-    /// The last save handed to the background writer.
-    latest_save: Option<Durability>,
+    /// The latest change to the timers and alarms that nobody has been told the outcome of yet (see
+    /// [`Assistant::take_save`]).
+    unreported: Mutex<Option<Durability>>,
     zone: Box<dyn Zone + Send + Sync>,
     clock: Arc<dyn Clock + Send + Sync>,
     core: Option<Arc<Core>>,
@@ -230,6 +231,22 @@ impl std::fmt::Debug for Assistant {
 /// What the speaker says instead of answering from a clock that was never set (REQ-TMR-009).
 pub const CLOCK_UNSET: &str =
     "My clock isn't set yet, so I can't do that. It needs to get the time from the network.";
+
+/// What a model's tool result carries when a timer, alarm or reminder was set in memory but could not be written
+/// down, so it says the same to the person as the fast path does.
+pub const NOT_SAVED_NOTE: &str = "WARNING: it is set and will ring, but it could not be saved, so it will be lost if the assistant restarts. Tell the user so.";
+
+/// `say` (a spoken confirmation such as "Timer set for ten minutes.") with the honest news that the change could
+/// not be saved: "Timer set for ten minutes, but I could not save it, so it will be lost if I restart."
+#[must_use]
+pub fn say_not_saved(say: &str) -> String {
+    let say = say.trim().trim_end_matches(['.', '!']);
+    if say.is_empty() {
+        "I could not save that, so it will be lost if I restart.".to_owned()
+    } else {
+        format!("{say}, but I could not save it, so it will be lost if I restart.")
+    }
+}
 
 /// Fast-path intents whose answer or effect depends on the wall clock being right.
 fn needs_valid_clock(intent: &str) -> bool {
@@ -261,7 +278,7 @@ impl Assistant {
             matcher: Matcher::builtin(),
             sched,
             sched_store,
-            latest_save: None,
+            unreported: Mutex::new(None),
             zone,
             clock,
             core,
@@ -310,42 +327,61 @@ impl Assistant {
     }
 
     /// Save the timers and alarms. With a background writer the bytes are made here and written beside the
-    /// loop, so the caller does not wait for flash; [`Assistant::unconfirmed`] says whether the latest change
-    /// has reached the disk. Without one (tests, no storage) the write is inline.
+    /// loop, so the caller does not wait for flash; [`Assistant::take_save`] hands over what became of it.
+    /// Without one (tests, no storage) the write is inline. The change stays in memory whatever happens, so the
+    /// item still rings; what the user is told about it is the caller's to get right from the outcome.
     fn save(&mut self) {
         let Some(store) = &self.sched_store else {
             return;
         };
         let writer = self.core.as_ref().and_then(|c| c.writer());
-        match writer {
+        let saved = match writer {
             Some(w) => {
                 // The state is read under the writer's lock, so this save is queued after, and carries at least
                 // everything in, any save queued before it.
-                if let Some(ticket) = w.submit_with(store, || self.sched.encode(store)) {
-                    self.latest_save = Some(Durability::new(w, ticket));
+                match w.submit_with(store, || self.sched.encode(store)) {
+                    Some(ticket) => Durability::new(w, ticket, store.path()),
+                    None => Durability::settled(Err(SaveError { disk_full: false })),
                 }
             }
-            None => {
-                if let Err(e) = self.sched.save(store) {
+            None => match self.sched.save(store) {
+                Ok(()) => Durability::settled(Ok(())),
+                Err(e) => {
                     crate::diag::error(&format!("could not save timers and alarms: {e}"));
+                    Durability::settled(Err(SaveError::from_store(&e)))
                 }
-            }
-        }
+            },
+        };
+        *self
+            .unreported
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner) = Some(saved);
     }
 
-    /// The last change to the timers and alarms, if it may not be on disk yet. A reply that tells the user a
-    /// timer or alarm is set waits for this before it is spoken, so a crash right after the confirmation cannot
-    /// lose what they were told is set.
+    /// The outcome of the latest change to the timers and alarms, if nobody has been told it yet. A reply that
+    /// tells the user a timer or alarm is set waits for this before it is spoken, so a crash right after the
+    /// confirmation cannot lose what they were told is set, and says so if the change could not be saved. Taking
+    /// it clears it: a later reply that changed nothing is not held up, and does not repeat the bad news.
     #[must_use]
-    pub fn unconfirmed(&self) -> Option<Durability> {
-        self.latest_save.clone().filter(|d| !d.is_done())
+    pub fn take_save(&self) -> Option<Durability> {
+        self.unreported
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// Collect everything due now; persists if anything fired.
     pub fn tick(&mut self) -> Vec<Fired> {
         let fired = self.sched.take_due(&*self.clock, &*self.zone);
         if !fired.is_empty() {
+            // Nothing was promised to anyone about this save: a failure is in the log, and must not leak into the
+            // reply to someone else's request.
+            let pending = self.take_save();
             self.save();
+            *self
+                .unreported
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner) = pending;
         }
         fired
     }
@@ -659,7 +695,7 @@ impl Assistant {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Adapters, Limits};
+    use crate::app::{Adapters, LOCALHOST_PEER, Limits};
     use crate::sched::{FixedOffset, days_from_civil};
     use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -887,8 +923,13 @@ mod tests {
             "Nothing from your agents right now."
         );
 
-        core.ingest_hook("claude-code", &token, STOP_PAYLOAD.as_bytes())
-            .unwrap();
+        core.ingest_hook(
+            "claude-code",
+            &token,
+            LOCALHOST_PEER,
+            STOP_PAYLOAD.as_bytes(),
+        )
+        .unwrap();
         assert_eq!(say(&mut a, "any updates"), "Claude Code: 1 finished.");
 
         let id = core.next_announcement(true, 0).unwrap().event.id;
@@ -901,7 +942,9 @@ mod tests {
             say(&mut a, "tell it to also add unit tests"),
             "Okay, sending that to Claude Code."
         );
-        let pending = core.bridge_pending("claude-code", &token, 0).unwrap();
+        let pending = core
+            .bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
+            .unwrap();
         assert_eq!(
             (pending[0].text.as_str(), pending[0].session_ref.as_deref()),
             ("also add unit tests", Some("s1"))
@@ -913,8 +956,13 @@ mod tests {
         let (mut a, _, core) = setup(true);
         let core = core.unwrap();
         let (_, token) = core.create_endpoint("claude-code", "claude-code").unwrap();
-        core.ingest_hook("claude-code", &token, STOP_PAYLOAD.as_bytes())
-            .unwrap();
+        core.ingest_hook(
+            "claude-code",
+            &token,
+            LOCALHOST_PEER,
+            STOP_PAYLOAD.as_bytes(),
+        )
+        .unwrap();
         let id = core.next_announcement(true, 0).unwrap().event.id;
         core.mark_announced(&[id]);
         assert_eq!(
@@ -922,7 +970,9 @@ mod tests {
             "Okay. I'll let Claude Code know you've got it."
         );
         assert_eq!(
-            core.bridge_pending("claude-code", &token, 0).unwrap()[0].kind,
+            core.bridge_pending("claude-code", &token, LOCALHOST_PEER, 0)
+                .unwrap()[0]
+                .kind,
             ReplyKind::Ack
         );
     }
@@ -932,8 +982,13 @@ mod tests {
         let (mut a, _, core) = setup(true);
         let core = core.unwrap();
         let (_, token) = core.create_endpoint("claude-code", "claude-code").unwrap();
-        core.ingest_hook("claude-code", &token, STOP_PAYLOAD.as_bytes())
-            .unwrap();
+        core.ingest_hook(
+            "claude-code",
+            &token,
+            LOCALHOST_PEER,
+            STOP_PAYLOAD.as_bytes(),
+        )
+        .unwrap();
         let id = core.next_announcement(true, 0).unwrap().event.id;
         core.mark_announced(&[id]);
         assert_eq!(
