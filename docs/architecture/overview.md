@@ -128,6 +128,8 @@ The device never calls out to agent hosts; the bridge pulls. Reply types are `ac
 
 No raw audio is ever stored.
 
+The endpoint, inbox and reply files are compact JSON, and a change rewrites only the file it changed (an acknowledgement from a bridge touches `replies.json` alone). The core serialises under its lock and a small writer thread does the writes, coalescing several changes to one file into one write, so neither the lock nor the async runtime waits for flash. The HTTP layer awaits that thread before it answers, so a webhook, announcement or acknowledgement that was reported as accepted is on disk (REQ-INB-004).
+
 ## 8. Cross-cutting concerns
 
 - **Errors:** typed errors with context; user-facing failures are spoken in plain language.

@@ -35,6 +35,10 @@ async fn start_with_clock(
     opts: ServeOptions,
 ) -> Harness {
     let core = Arc::new(Core::in_memory(clock, Adapters::builtin(), limits));
+    start_core(core, opts).await
+}
+
+async fn start_core(core: Arc<Core>, opts: ServeOptions) -> Harness {
     let (_, token) = core.create_endpoint("claude-code", "claude-code").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -125,6 +129,34 @@ async fn a_claude_code_hook_is_accepted_and_the_response_is_an_empty_object() {
         "{head}"
     );
     assert_eq!(h.core.events().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_accepted_event_is_on_disk_before_the_response_arrives() {
+    let dir = crate::store::testutil::TempDir::new("http-durable");
+    let core = Arc::new(
+        Core::open(
+            Arc::new(SystemClock),
+            Adapters::builtin(),
+            Limits::default(),
+            crate::app::Stores::in_dir(&dir.0),
+        )
+        .unwrap(),
+    );
+    let h = start_core(core, ServeOptions::default()).await;
+    let auth = bearer(&h.token);
+    let (status, _, _) = call(
+        h.addr,
+        "POST",
+        "/hook/claude-code",
+        &[("Authorization", &auth)],
+        STOP,
+    )
+    .await;
+    assert_eq!(status, 202);
+    // Read at once, with no flush: the response itself must have waited for the write (REQ-INB-004).
+    let saved = std::fs::read_to_string(dir.0.join("inbox.json")).unwrap();
+    assert!(saved.contains("clawdot finished"), "{saved}");
 }
 
 #[tokio::test(flavor = "current_thread")]

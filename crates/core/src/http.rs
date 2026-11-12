@@ -308,7 +308,7 @@ async fn route(
                 crate::announce_api::handle(&core, headers, peer, body, opts.body_timeout).await
             }
             Id::Mcp => crate::mcp_server::handle(&core, headers, body, opts.body_timeout).await,
-            Id::Replies => replies_stream(core, streams, opts, headers, name),
+            Id::Replies => replies_stream(Arc::clone(&core), streams, opts, headers, name),
             Id::Ack => ack(&core, headers, name, id),
         },
         None => match path_row(ROUTES, &segs) {
@@ -327,6 +327,9 @@ async fn route(
             .unwrap_or_else(|| json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#)),
         },
     };
+    // A webhook, announcement or acknowledgement is reported as accepted only once it is on disk (REQ-INB-004).
+    // Nothing is waiting for most requests, so this returns at once.
+    core.durable().await;
     Ok(resp)
 }
 

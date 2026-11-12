@@ -158,7 +158,7 @@ impl Core {
         if was_open && event_id != 0 {
             let mut g = self.lock();
             if g.inbox.dismiss(event_id) {
-                self.persist(&g);
+                self.persist(&g, super::persist::Dirty::INBOX);
             }
         }
     }

@@ -134,6 +134,14 @@ impl Inbox {
         store.save(&self.state)
     }
 
+    /// The bytes [`Inbox::save`] would write, so the caller can serialise under a lock and write later.
+    ///
+    /// # Errors
+    /// A state that cannot be serialised.
+    pub fn encode(&self, store: &JsonStore) -> Result<Vec<u8>, StoreError> {
+        store.encode(&self.state)
+    }
+
     /// All events, oldest first.
     #[must_use]
     pub fn events(&self) -> &[Event] {

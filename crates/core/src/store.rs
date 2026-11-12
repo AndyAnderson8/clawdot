@@ -104,24 +104,39 @@ impl JsonStore {
         Ok(env.data)
     }
 
+    /// The bytes that [`JsonStore::write`] puts on disk for `value`: compact JSON, because these files are
+    /// rewritten often on flash and nobody is meant to edit them by hand.
+    ///
+    /// # Errors
+    /// A value that cannot be serialised.
+    pub fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, StoreError> {
+        let env = Envelope {
+            schema: self.schema,
+            data: value,
+        };
+        serde_json::to_vec(&env).map_err(|e| StoreError::Corrupt(e.to_string()))
+    }
+
     /// Atomically replace the document.
     ///
     /// # Errors
     /// I/O failures, or a value that cannot be serialised.
     pub fn save<T: Serialize>(&self, value: &T) -> Result<(), StoreError> {
-        let env = Envelope {
-            schema: self.schema,
-            data: value,
-        };
-        let bytes =
-            serde_json::to_vec_pretty(&env).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        self.write(&self.encode(value)?)
+    }
+
+    /// Atomically replace the document with bytes made by [`JsonStore::encode`].
+    ///
+    /// # Errors
+    /// I/O failures.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), StoreError> {
         if let Some(dir) = self.path.parent() {
             create_private_dir(dir)?;
         }
         let tmp = self.path.with_extension("tmp");
         {
             let mut f = create_private_file(&tmp)?;
-            f.write_all(&bytes)?;
+            f.write_all(bytes)?;
             f.sync_all()?;
         }
         fs::rename(&tmp, &self.path)?;

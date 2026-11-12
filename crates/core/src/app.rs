@@ -17,10 +17,12 @@ use tokio::sync::Notify;
 
 mod announce;
 mod ask;
+mod persist;
 mod portal;
 pub(crate) use announce::AuditAs;
 pub use announce::{AnnounceError, Announcement, Caller, outcome_json};
 pub use ask::{AskEnd, AskError, AskTicket, MAX_PENDING_ASKS};
+use persist::Dirty;
 pub use portal::{Fail, Job, Op, SchedOp};
 
 /// Adapters available to endpoints, by name.
@@ -208,6 +210,9 @@ pub struct Core {
     adapters: Adapters,
     limits: Limits,
     stores: Option<Stores>,
+    /// Writes the stores in the background; `None` without storage, or when no thread could be started (then
+    /// writes happen inline).
+    writer: Option<persist::Writer>,
     inner: Mutex<Inner>,
     notify: Notify,
     admin: Mutex<crate::admin::Admin>,
@@ -297,6 +302,7 @@ impl Core {
         replies: ReplyQueue,
     ) -> Self {
         let now = clock.now();
+        let writer = stores.as_ref().and_then(|_| persist::Writer::start());
         let secrets = stores
             .as_ref()
             .map_or_else(crate::secrets::Secrets::none, |s| {
@@ -306,6 +312,7 @@ impl Core {
             clock,
             adapters,
             limits,
+            writer,
             stores,
             inner: Mutex::new(Inner {
                 endpoints,
@@ -432,17 +439,53 @@ impl Core {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn persist(&self, inner: &Inner) {
+    /// Save the stores `dirty` names. The state is serialised here, under the lock; the write itself happens on
+    /// the writer thread (see [`persist`]), so the lock and the runtime do not wait for flash.
+    fn persist(&self, inner: &Inner, dirty: Dirty) {
         let Some(s) = &self.stores else { return };
+        if dirty.endpoints {
+            self.queue_write(&s.endpoints, s.endpoints.encode(&inner.endpoints));
+        }
+        if dirty.inbox {
+            self.queue_write(&s.inbox, inner.inbox.encode(&s.inbox));
+        }
+        if dirty.replies {
+            self.queue_write(&s.replies, inner.replies.encode(&s.replies));
+        }
+    }
+
+    fn queue_write(&self, store: &JsonStore, bytes: Result<Vec<u8>, StoreError>) {
         // A failed write must not lose the in-memory event, but it must not be silent either.
-        if let Err(e) = s.endpoints.save(&inner.endpoints) {
-            crate::diag::error(&format!("could not save endpoints: {e}"));
+        let bytes = match bytes {
+            Ok(b) => b,
+            Err(e) => {
+                crate::diag::error(&format!("could not save {}: {e}", store.path().display()));
+                return;
+            }
+        };
+        match &self.writer {
+            Some(w) => w.submit(store, bytes),
+            None => {
+                if let Err(e) = store.write(&bytes) {
+                    crate::diag::error(&format!("could not save {}: {e}", store.path().display()));
+                }
+            }
         }
-        if let Err(e) = inner.inbox.save(&s.inbox) {
-            crate::diag::error(&format!("could not save inbox: {e}"));
+    }
+
+    /// Resolves once every change made so far is on disk. The HTTP layer awaits this before it answers, so a
+    /// webhook, announcement or acknowledgement that was reported as accepted survives a power cut (REQ-INB-004).
+    /// Returns at once when nothing is waiting or the core has no storage.
+    pub async fn durable(&self) {
+        if let Some(w) = &self.writer {
+            w.flushed().await;
         }
-        if let Err(e) = inner.replies.save(&s.replies) {
-            crate::diag::error(&format!("could not save replies: {e}"));
+    }
+
+    /// Block until every change made so far is on disk. For tests and shutdown paths, not for the runtime.
+    pub fn flush_blocking(&self) {
+        if let Some(w) = &self.writer {
+            w.flush_blocking();
         }
     }
 
@@ -460,7 +503,7 @@ impl Core {
         let now = self.clock.now();
         let mut g = self.lock();
         let made = g.endpoints.create(name, adapter, now)?;
-        self.persist(&g);
+        self.persist(&g, Dirty::ENDPOINTS);
         Ok(made)
     }
 
@@ -471,7 +514,7 @@ impl Core {
     pub fn rotate_endpoint(&self, name: &str) -> Result<String, endpoint::EndpointError> {
         let mut g = self.lock();
         let t = g.endpoints.rotate(name)?;
-        self.persist(&g);
+        self.persist(&g, Dirty::ENDPOINTS);
         Ok(t)
     }
 
@@ -482,7 +525,7 @@ impl Core {
     pub fn revoke_endpoint(&self, name: &str) -> Result<(), endpoint::EndpointError> {
         let mut g = self.lock();
         g.endpoints.revoke(name)?;
-        self.persist(&g);
+        self.persist(&g, Dirty::ENDPOINTS);
         Ok(())
     }
 
@@ -495,7 +538,7 @@ impl Core {
             .map(|e| f(&mut e.filter))
             .is_some();
         if found {
-            self.persist(&g);
+            self.persist(&g, Dirty::ENDPOINTS);
         }
         found
     }
@@ -566,7 +609,7 @@ impl Core {
             Ingest::Filtered(r) => HookOutcome::Filtered(r),
         };
         if !matches!(outcome, HookOutcome::Filtered(_)) {
-            self.persist(&g);
+            self.persist(&g, Dirty::INBOX);
             self.notify.notify_waiters();
         }
         Ok(outcome)
@@ -605,7 +648,7 @@ impl Core {
         let ep = self.authenticate(&mut g, name, token, now)?;
         let acked = g.replies.ack(&ep.name, reply_id);
         if acked {
-            self.persist(&g);
+            self.persist(&g, Dirty::REPLIES);
         }
         Ok(acked)
     }
@@ -909,7 +952,7 @@ impl Core {
     pub fn mark_announced(&self, ids: &[u64]) {
         let mut g = self.lock();
         g.inbox.mark_announced(ids);
-        self.persist(&g);
+        self.persist(&g, Dirty::INBOX);
     }
 
     /// The event a spoken reply would go to.
@@ -940,7 +983,7 @@ impl Core {
         };
         if self.deliver_ask(ev.id, end) {
             g.inbox.acknowledge(ev.id);
-            self.persist(&g);
+            self.persist(&g, Dirty::INBOX);
             return Ok(Replied {
                 event_id: ev.id,
                 title: ev.title,
@@ -950,10 +993,14 @@ impl Core {
         g.replies
             .push(now, &ev.endpoint, ev.id, ev.session_ref.clone(), kind, text)
             .map_err(|_| ReplyError::QueueFull)?;
-        if kind == ReplyKind::Ack {
+        // Only an acknowledgement changes the event; an instruction only adds a reply for the bridge.
+        let dirty = if kind == ReplyKind::Ack {
             g.inbox.acknowledge(ev.id);
-        }
-        self.persist(&g);
+            Dirty::INBOX_AND_REPLIES
+        } else {
+            Dirty::REPLIES
+        };
+        self.persist(&g, dirty);
         self.notify.notify_waiters();
         Ok(Replied {
             event_id: ev.id,
@@ -970,7 +1017,7 @@ impl Core {
         };
         let done = g.inbox.dismiss(id);
         self.deliver_ask(id, AskEnd::Dismissed);
-        self.persist(&g);
+        self.persist(&g, Dirty::INBOX);
         done
     }
 
@@ -982,7 +1029,7 @@ impl Core {
             return false;
         };
         let done = g.inbox.snooze(id, now.saturating_add(secs));
-        self.persist(&g);
+        self.persist(&g, Dirty::INBOX);
         done
     }
 
@@ -1011,8 +1058,11 @@ impl Core {
         let expired = g.replies.expire(now);
         g.inbox.prune(now, 24 * 3600);
         let lapsed = g.inbox.expire(now);
-        if expired > 0 || lapsed > 0 {
-            self.persist(&g);
+        if expired > 0 {
+            self.persist(&g, Dirty::REPLIES);
+        }
+        if lapsed > 0 {
+            self.persist(&g, Dirty::INBOX);
         }
     }
 
@@ -1257,6 +1307,84 @@ mod tests {
         c.mark_announced(&[id]);
         assert!(c.snooze_current(i64::MAX));
         assert!(c.next_announcement(true, 0).is_none());
+    }
+
+    fn open_in(dir: &TempDir) -> Core {
+        let clock = Arc::new(TestClock(AtomicI64::new(1_800_000_000)));
+        Core::open(
+            clock,
+            Adapters::builtin(),
+            Limits::default(),
+            Stores::in_dir(&dir.0),
+        )
+        .unwrap()
+    }
+
+    /// Which of the three state files exist after the core has written everything it owes.
+    fn written(c: &Core, dir: &TempDir) -> Vec<&'static str> {
+        c.flush_blocking();
+        let found = ["endpoints.json", "inbox.json", "replies.json"]
+            .into_iter()
+            .filter(|f| dir.0.join(f).exists())
+            .collect();
+        for f in ["endpoints.json", "inbox.json", "replies.json"] {
+            let _ = std::fs::remove_file(dir.0.join(f));
+        }
+        found
+    }
+
+    #[test]
+    fn a_change_rewrites_only_the_files_it_changed() {
+        let dir = TempDir::new("dirty");
+        let c = open_in(&dir);
+        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
+        assert_eq!(written(&c, &dir), ["endpoints.json"], "a new endpoint");
+        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+            .unwrap();
+        assert_eq!(written(&c, &dir), ["inbox.json"], "a posted event");
+        let id = c.next_announcement(true, 0).unwrap().event.id;
+        c.mark_announced(&[id]);
+        assert_eq!(written(&c, &dir), ["inbox.json"], "an announcement");
+        c.reply(ReplyKind::Instruct, "go on").unwrap();
+        assert_eq!(written(&c, &dir), ["replies.json"], "an instruction");
+        let reply = c.bridge_pending("claude-code", &token, 0).unwrap()[0].id;
+        assert!(c.bridge_ack("claude-code", &token, reply).unwrap());
+        assert_eq!(written(&c, &dir), ["replies.json"], "a bridge ack");
+        c.reply(ReplyKind::Ack, "").unwrap();
+        assert_eq!(
+            written(&c, &dir),
+            ["inbox.json", "replies.json"],
+            "a spoken ack"
+        );
+    }
+
+    #[test]
+    fn state_files_are_compact_json() {
+        let dir = TempDir::new("compact");
+        let c = open_in(&dir);
+        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
+        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+            .unwrap();
+        c.flush_blocking();
+        for f in ["endpoints.json", "inbox.json"] {
+            let text = std::fs::read_to_string(dir.0.join(f)).unwrap();
+            assert!(!text.contains('\n'), "{f} is one line");
+            assert!(!text.contains("  "), "{f} has no indentation");
+            serde_json::from_str::<serde_json::Value>(&text).unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_resolves_once_an_accepted_event_is_on_disk() {
+        let dir = TempDir::new("durable");
+        let c = open_in(&dir);
+        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
+        c.ingest_hook("claude-code", &token, STOP.as_bytes())
+            .unwrap();
+        c.durable().await;
+        // No flush_blocking: awaiting durable() alone is what the HTTP layer does before it answers.
+        let text = std::fs::read_to_string(dir.0.join("inbox.json")).unwrap();
+        assert!(text.contains("clawdot finished"));
     }
 
     #[test]
