@@ -454,6 +454,27 @@ impl Client {
         self.send(Method::POST, path, content_type, body).await
     }
 
+    /// POST the speech as a multipart form: the text `fields`, then the audio as a WAV file named `file`.
+    async fn post_wav_form(
+        &self,
+        path: &str,
+        fields: &[(&str, &str)],
+        pcm: &[i16],
+    ) -> Result<Vec<u8>, ProviderError> {
+        // The boundary only needs to be absent from the data; WAV bytes could contain anything, so mix in the length.
+        let boundary = format!(
+            "clawdot-boundary-{:016x}",
+            pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
+        );
+        let body = multipart(&boundary, fields, &wav(pcm));
+        self.post(
+            path,
+            &format!("multipart/form-data; boundary={boundary}"),
+            body,
+        )
+        .await
+    }
+
     async fn get(&self, path: &str) -> Result<Vec<u8>, ProviderError> {
         self.send(Method::GET, path, "application/json", Vec::new())
             .await
@@ -593,24 +614,15 @@ impl HttpTranscriber {
         pcm: &[i16],
         language: Option<&str>,
     ) -> Result<String, String> {
-        let boundary = format!(
-            "clawdot-boundary-{:016x}",
-            pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
-        );
         let mut fields = vec![("model_id", self.model.as_str())];
         // ElevenLabs takes ISO 639 codes, so `pt-BR` is sent as `pt`.
         let code = language.map(|l| l.split('-').next().unwrap_or(l).to_owned());
         if let Some(c) = &code {
             fields.push(("language_code", c.as_str()));
         }
-        let body = multipart(&boundary, &fields, &wav(pcm));
         let raw = self
             .client
-            .post(
-                "/v1/speech-to-text",
-                &format!("multipart/form-data; boundary={boundary}"),
-                body,
-            )
+            .post_wav_form("/v1/speech-to-text", &fields, pcm)
             .await?;
         text_of(&raw, |v| v["text"].as_str())
     }
@@ -659,30 +671,15 @@ impl Transcriber for HttpTranscriber {
             }
             Dialect::Deepgram => return self.transcribe_deepgram(pcm, language.as_deref()).await,
         }
-        // The boundary only needs to be absent from the data; WAV bytes could contain anything, so mix in the length.
-        let boundary = format!(
-            "clawdot-boundary-{:016x}",
-            pcm.len() as u64 ^ 0x9e37_79b9_7f4a_7c15
-        );
         let mut fields = vec![("model", self.model.as_str()), ("response_format", "json")];
         if let Some(l) = &language {
             fields.push(("language", l.as_str()));
         }
-        let body = multipart(&boundary, &fields, &wav(pcm));
         let raw = self
             .client
-            .post(
-                "/audio/transcriptions",
-                &format!("multipart/form-data; boundary={boundary}"),
-                body,
-            )
+            .post_wav_form("/audio/transcriptions", &fields, pcm)
             .await?;
-        let v: Value = serde_json::from_slice(&raw)
-            .map_err(|_| "the provider returned something that is not JSON".to_owned())?;
-        v["text"]
-            .as_str()
-            .map(|t| t.trim().to_owned())
-            .ok_or_else(|| "the response has no `text`".into())
+        text_of(&raw, |v| v["text"].as_str())
     }
 }
 
