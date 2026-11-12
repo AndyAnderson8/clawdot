@@ -123,7 +123,7 @@ The README, the architecture overview, `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTIN
 
 ## Second pass, later the same day
 
-The reading continued through the rest of the core's own logic, the agent bridge and the satellite protocol. Everything in this section is on `dev`, each landed after the whole workspace test suite passed. As before, none of it has run on a device. The product spec stands at version 0.54 and the ESPHome spec at 0.3.
+The reading continued through the rest of the core's own logic, the agent bridge and the satellite protocol. Everything in this section is on `dev`, each landed after the whole workspace test suite passed. As before, none of it has run on a device. The product spec stands at version 0.55 and the ESPHome spec at 0.3.
 
 ### What was read in this pass
 
@@ -154,11 +154,11 @@ The reading continued through the rest of the core's own logic, the agent bridge
 - **The bridge uses its `Harness` trait**, which existed but was bypassed for the one concrete harness.
 - One end-to-end test that timed out under load is now held open by a gate instead of a fixed delay.
 
-### In progress
+### Landed after this section was first written
 
-- **Binding a spoken instruction to its agent.** Today the read-back says "I will send this to the agent" without saying which, and the destination is looked up when the held call finally runs. An event announced between the read-back and the "yes" would receive the confirmed text. The change binds the call to the event at read-back time and names the origin.
-- **Language as data.** Confirmation words, memory commands, the fast path's number words and grammar, sentence abbreviations and date words are English lists inside the functions that use them, and the fast path's intents are strings. They are moving into one language module and a typed intent, with no change in behaviour. A second language stays out of scope.
-
+- **A spoken instruction is bound to its agent.** The read-back used to say "I will send this to the agent" without saying which, and the destination was looked up when the held call finally ran, so an event announced between the read-back and the "yes" would have received the confirmed text. The core now writes the event and its spoken origin into the held call, drops anything the model supplies under those names, names the agent in the read-back, and sends to that event or to nothing (REQ-AST-015, REQ-SEC-011, REQ-INB-017; spec 0.55).
+- **Language as data.** Confirmation words, memory commands, the fast path's grammar and number words, date words, sentence abbreviations and the quit words are in one `lang` module, chosen once at start-up, and the fast path's intents are a typed enum with no catch-all arm. Behaviour is unchanged; the yes, no and cancel lists were checked to be identical. The spoken sentences are still English text in code, and the module lists the files that hold them.
+- **Secret-looking argument names are decided on whole words.** The rule matched letter runs, so `author` (it holds `auth`), `keyword` and `private` were treated as secrets: their values were left out of the audit record and, worse, out of the read-back of a held action. `api_key`, `apiKey`, `X-Auth-Token` and the like are still hidden.
 ### Found and not yet changed
 
 - **Endpointer tuning is fixed in code** (`vad.rs`: level, noise ratio, silence length). A microphone with a different gain cannot be tuned without rebuilding. This belongs in the device's preset or the satellite's configuration.
@@ -168,7 +168,9 @@ The reading continued through the rest of the core's own logic, the agent bridge
 - **`commands.rs` still names one adapter in code** when it prints the set-up snippet for a new endpoint; the snippet should come from the adapter's own file.
 - **The realtime address is not checked against the plain-http rule when it is saved**, only when it connects, so a refused address is reported late.
 - **The bridge reads lines and headers of any length** from the speaker, and does not parse an IPv6 address in `--url`.
-- **The fast path's grammar names one product** ("tell claude to ..."). It becomes data with the language work; whether it stays is a wording decision.
+- **The fast path's grammar names one product** ("tell claude to ..."). It is now data in the English table; whether it stays is a wording decision.
+- **The daily action caps are recounted from the audit log after a restart.** The log keeps the current file and one rotated file, so on a day busy enough to rotate twice a restart would undercount. The counters should be saved on their own.
+- **A reminder after a delay is refused while the clock is not set** (REQ-TMR-009), although the scheduler runs it on the monotonic clock exactly as it runs a timer.
 
 ### Decisions needed, added to the list above
 
@@ -181,8 +183,8 @@ The reading continued through the rest of the core's own logic, the agent bridge
 
 | Measure | Value |
 |---|---|
-| Core unit tests, all features | 926 |
+| Core unit tests, all features | about 990 |
 | `runtime.rs` | 489 lines (was 1,631) |
 | Functions over 70 lines in the core | 25 |
-| Product spec | 0.54 |
+| Product spec | 0.55 |
 | ESPHome spec | 0.3 |
