@@ -1,11 +1,13 @@
 //! Announcing through the system's Avahi instead of opening UDP 5353 a second time.
 //!
-//! On the TECHO5 Dot image `avahi-daemon` already owns the mDNS port and answers for `linux.local`. Two
-//! responders on one host answer the same question twice and fight over names, so ClawDot there describes its
-//! service in a file under `/etc/avahi/services/`, which the daemon watches and publishes itself. Browsing still
-//! needs to hear multicast; that uses a separate socket that shares the port (see `discovery::bind_multicast`).
+//! On a system image where `avahi-daemon` is already running, that daemon owns the mDNS port and answers for the
+//! machine's own host name. Two responders on one host answer the same question twice and fight over names, so
+//! ClawDot there describes its service in a file under `/etc/avahi/services/`, which the daemon watches and
+//! publishes itself. Browsing still needs to hear multicast; that uses a separate socket that shares the port (see
+//! `discovery::bind_multicast`).
 //!
-//! Writing under `/etc` needs the rights the Dot's service already has (root); elsewhere pass another path.
+//! Writing under `/etc` needs the rights of the user ClawDot runs as (usually root); to write elsewhere pass
+//! another path (`avahi:PATH`).
 
 use super::dns::Advert;
 use std::io;

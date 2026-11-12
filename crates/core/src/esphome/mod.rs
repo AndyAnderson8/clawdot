@@ -1,6 +1,6 @@
 //! Optional ESPHome voice-satellite client (spec 0004), behind the `esphome-satellite` cargo feature.
 //!
-//! The core dials an ESPHome voice satellite (a Dot running a base image, a Voice PE, linux-voice-assistant)
+//! The core dials an ESPHome voice satellite (a speaker running ESPHome firmware, a Voice PE, linux-voice-assistant)
 //! and uses it as a microphone and speaker, with no Home Assistant in between. Layers, bottom to top:
 //!
 //! * [`proto`]: a hand-written minimal protobuf codec for the messages used;
