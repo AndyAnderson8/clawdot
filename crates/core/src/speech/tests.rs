@@ -53,6 +53,29 @@ fn wav_files_round_trip_and_wrong_formats_are_explained() {
 }
 
 #[test]
+fn hostile_wav_headers_are_errors_or_short_audio_never_a_panic() {
+    let samples = vec![1i16, 2, 3, 4];
+    let good = wav(&samples);
+    // Every prefix of a good file is handled.
+    for n in 0..good.len() {
+        let _ = parse_wav(&good[..n]);
+    }
+    // A chunk that declares four gigabytes: the format block is too short, a data block is cut to the file.
+    let mut big_fmt = good[..12].to_vec();
+    big_fmt.extend(b"fmt ");
+    big_fmt.extend(u32::MAX.to_le_bytes());
+    assert!(parse_wav(&big_fmt).is_err());
+    let mut big_data = good.clone();
+    big_data[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(parse_wav(&big_data).unwrap(), samples);
+    // A chunk that is skipped may declare any length, and then there is no audio.
+    let mut skipped = good[..36].to_vec();
+    skipped.extend(b"junk");
+    skipped.extend(u32::MAX.to_le_bytes());
+    assert!(parse_wav(&skipped).unwrap_err().contains("no audio"));
+}
+
+#[test]
 fn wav_has_a_valid_header() {
     let w = wav(&[1, -2, 3]);
     assert_eq!(&w[..4], b"RIFF");

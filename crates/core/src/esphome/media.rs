@@ -219,6 +219,36 @@ mod tests {
     }
 
     // REQ-ESP-010
+    #[test]
+    fn only_a_get_or_head_for_a_32_digit_token_is_understood() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let ok = format!("GET /esphome/{token}.wav HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert_eq!(parse_request(&ok), Some((token, false)));
+        let head = format!("HEAD /esphome/{token}.wav HTTP/1.0\r\n\r\n");
+        assert_eq!(parse_request(&head), Some((token, true)));
+        for bad in [
+            String::new(),
+            "GET".into(),
+            "GET /".into(),
+            "GET / HTTP/1.1".into(),
+            format!("POST /esphome/{token}.wav HTTP/1.1"),
+            format!("get /esphome/{token}.wav HTTP/1.1"),
+            format!("GET /esphome/{token}.wav HTTP/2"),
+            format!("GET /esphome/{token}.wav HTTP/1.1 extra"),
+            format!("GET /esphome/{token}.wav  HTTP/1.1"),
+            format!("GET /esphome/{}.wav HTTP/1.1", &token[..31]),
+            format!("GET /esphome/{token}0.wav HTTP/1.1"),
+            format!("GET /esphome/../{token}.wav HTTP/1.1"),
+            format!("GET /esphome/{token}.wav?x=1 HTTP/1.1"),
+            format!("GET /esphome/{}.wav HTTP/1.1", "g".repeat(32)),
+            format!("GET /esphome/{}.wav HTTP/1.1", "é".repeat(16)),
+            format!("GET /{} HTTP/1.1", "a".repeat(10_000)),
+        ] {
+            assert_eq!(parse_request(&bad), None, "{bad:?}");
+        }
+    }
+
+    // REQ-ESP-010
     #[tokio::test]
     async fn req_esp_010_serves_only_known_tokens() {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();

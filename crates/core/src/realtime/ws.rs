@@ -455,6 +455,64 @@ mod tests {
         assert!(matches!(ws.recv().await, Err(WsError::Protocol(_))));
     }
 
+    /// A socket whose input buffer already holds `bytes`.
+    fn holding(bytes: &[u8]) -> WebSocket<tokio::io::DuplexStream> {
+        let (io, _peer) = duplex(8);
+        WebSocket {
+            io,
+            buf: bytes.to_vec(),
+            client: true,
+            partial: Vec::new(),
+            fragment: Fragment::Idle,
+        }
+    }
+
+    #[test]
+    fn truncated_zero_length_and_oversized_frames_are_handled() {
+        // Every proper prefix of a frame with a 16-bit length waits for more bytes.
+        let mut frame = vec![0x81, 126, 0, 5];
+        frame.extend(b"hello");
+        for n in 0..frame.len() {
+            assert_eq!(holding(&frame[..n]).parse(), Ok(None), "prefix of {n}");
+        }
+        assert_eq!(holding(&frame).parse(), Ok(Some(Msg::Text("hello".into()))));
+        // A zero-length final text frame is an empty message, not an error.
+        assert_eq!(
+            holding(&[0x81, 0]).parse(),
+            Ok(Some(Msg::Text(String::new())))
+        );
+        // A 16-bit length can never exceed the bound, but a 64-bit one that does is refused before any
+        // bytes of it have arrived, and so is one that does not fit in a usize.
+        let mut huge = vec![0x81, 127];
+        huge.extend(u64::MAX.to_be_bytes());
+        assert_eq!(holding(&huge).parse(), Err(WsError::TooLarge));
+        // Fragments that add up to more than the bound are refused as they arrive.
+        let mut ws = holding(&[]);
+        ws.partial = vec![b'a'; MAX_MESSAGE - 1];
+        ws.fragment = Fragment::Text;
+        ws.buf = vec![0x80, 2, b'b', b'c'];
+        assert_eq!(ws.parse(), Err(WsError::TooLarge));
+    }
+
+    #[test]
+    fn random_bytes_never_panic_the_frame_reader() {
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 24) as u8
+        };
+        for _ in 0..3000 {
+            let len = usize::from(next()) % 48;
+            let bytes: Vec<u8> = (0..len).map(|_| next()).collect();
+            let mut ws = holding(&bytes);
+            for _ in 0..8 {
+                if !matches!(ws.parse(), Ok(Some(_))) {
+                    break;
+                }
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn frames_that_arrive_with_the_handshake_reply_are_kept() {
         let io = raw_server(OK, vec![0x81, 2, b'h', b'i']).await;

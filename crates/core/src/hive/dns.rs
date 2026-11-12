@@ -369,6 +369,63 @@ mod tests {
         assert_eq!(q.questions, vec![(SERVICE.to_owned(), T_PTR)]);
     }
 
+    /// A query whose one question name is a chain of `hops` compression pointers ending at the root.
+    fn pointer_chain(hops: usize) -> Vec<u8> {
+        let mut p = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        for i in 0..hops {
+            let next = 12 + 2 * (i + 1);
+            p.extend([0xC0, u8::try_from(next).unwrap()]);
+        }
+        p.push(0); // the root label the last pointer lands on
+        p.extend([0, 12, 0, 1]); // type and class (after the first pointer, but inside the buffer)
+        p
+    }
+
+    #[test]
+    fn a_chain_of_compression_pointers_is_followed_only_so_far() {
+        assert!(parse(&pointer_chain(MAX_JUMPS)).is_some());
+        assert!(parse(&pointer_chain(MAX_JUMPS + 1)).is_none());
+        assert!(parse(&pointer_chain(100)).is_none());
+    }
+
+    #[test]
+    fn labels_and_names_that_are_too_long_or_cut_short_are_refused() {
+        // A label that claims 63 bytes but ends the packet.
+        let mut p = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 63];
+        p.extend([b'a'; 10]);
+        assert!(parse(&p).is_none());
+        // A length byte of 64..=191 is neither a label nor a pointer.
+        let q = [0u8, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 100, 0, 0, 12, 0, 1];
+        assert!(parse(&q).is_none());
+        // A name that adds up to more than 255 characters.
+        let mut long = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        for _ in 0..6 {
+            long.push(60);
+            long.extend([b'x'; 60]);
+        }
+        long.extend([0, 0, 12, 0, 1]);
+        assert!(parse(&long).is_none());
+    }
+
+    #[test]
+    fn a_record_that_claims_more_data_than_the_packet_holds_is_refused() {
+        // One answer: root name, type TXT, class IN, ttl 0, rdlength 0xFFFF, no data.
+        let p = [
+            0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0xFF, 0xFF,
+        ];
+        assert!(parse(&p).is_none());
+        // A TXT string that runs past the end of its record.
+        let q = [
+            0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 0, 0, 3, 9, b'a', b'b',
+        ];
+        assert!(parse(&q).is_none());
+        // An SRV record too short to hold a port and a name is skipped, not an error.
+        let r = [
+            0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 33, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0,
+        ];
+        assert_eq!(parse(&r).map(|m| m.records.len()), Some(0));
+    }
+
     #[test]
     fn hostile_packets_fail_cleanly() {
         // A compression pointer that points at itself.
