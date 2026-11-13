@@ -592,6 +592,12 @@ impl Core {
         }
     }
 
+    /// Block until every change made so far is on disk, or `limit` has passed. Returns whether it is all on disk.
+    /// For the stop on a signal, where a disk that does not answer must not keep the program from stopping.
+    pub fn flush_within(&self, limit: std::time::Duration) -> bool {
+        self.writer.as_ref().is_none_or(|w| w.flush_within(limit))
+    }
+
     // ----- endpoint management (used by the portal and CLI) -----
 
     /// Create an endpoint; returns it with its plaintext token, shown once.

@@ -1725,3 +1725,59 @@ fn a_confirmed_timer_and_the_last_turns_counters_are_on_disk_after_quit() {
     assert!(usage.contains("\"requests\":1"), "{usage}");
     drop(llm);
 }
+
+/// Start the program with a console and a model that answers once, let it answer, send it the signal `sig`
+/// (`TERM` or `INT`), and check that it leaves by itself with success and has left the usage counters of the
+/// answer it just gave on disk.
+#[cfg(unix)]
+fn stop_with_signal_and_check_the_counters(sig: &str) {
+    let answer =
+        sse(&[r#"{"choices":[{"delta":{"content":"Owls are lovely."},"finish_reason":"stop"}]}"#]);
+    let (llm_port, llm) = fake_llm(vec![answer]);
+    let dir = TempDir::new("flush-on-signal");
+    let (mut server, _) = Server::start_free(
+        &[
+            "--listen",
+            "127.0.0.1:{port}",
+            "--data-dir",
+            dir.to_str().unwrap(),
+            "--llm-url",
+            &format!("http://127.0.0.1:{llm_port}"),
+            "--llm-model",
+            "test-model",
+        ],
+        true,
+    );
+    server.wait_for(&["console ready"], START);
+    server.type_line("tell me about owls");
+    let said = server.next_speech().expect("the model answers");
+    assert!(said.contains("Owls are lovely."), "{said}");
+
+    let sent = Command::new("kill")
+        .arg(format!("-{sig}"))
+        .arg(server.child.id().to_string())
+        .status()
+        .unwrap();
+    assert!(sent.success(), "kill -{sig} failed");
+    assert!(
+        exits_by_itself(&mut server),
+        "SIG{sig} should end the program with success, not kill it"
+    );
+    let usage = std::fs::read_to_string(dir.join("usage.json")).expect("flushed on the way out");
+    assert!(usage.contains("\"requests\":1"), "{usage}");
+    drop(llm);
+}
+
+/// REQ-CFG-085: SIGTERM, which is how a service manager stops the program, is an orderly stop like `quit`.
+#[cfg(unix)]
+#[test]
+fn sigterm_stops_the_program_with_its_changes_on_disk() {
+    stop_with_signal_and_check_the_counters("TERM");
+}
+
+/// REQ-CFG-085: so is SIGINT, which is Ctrl-C at a terminal.
+#[cfg(unix)]
+#[test]
+fn sigint_stops_the_program_with_its_changes_on_disk() {
+    stop_with_signal_and_check_the_counters("INT");
+}

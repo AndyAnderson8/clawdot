@@ -39,7 +39,7 @@ async fn main() -> ExitCode {
         return reset_admin(&cli.data_dir(&file));
     }
     match start(cli, file, env).await {
-        Ok(Started::Run(app)) => app.run().await,
+        Ok(Started::Run(app)) => app.run(clawdot_core::shutdown::requested()).await,
         Ok(Started::Done(code)) => code,
         Err(f) => {
             eprintln!("clawdot: {}", f.message);
