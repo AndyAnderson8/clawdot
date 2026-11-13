@@ -452,7 +452,10 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         call: &ToolCall,
         d: &mut Dispatched,
     ) -> String {
-        if d.held.is_some() || d.ask.is_some() {
+        // A question for the user ends the batch. A held action does not: a read-only call still runs after
+        // it, and a call that would itself need holding is refused in `sort_by_tier` (REQ-SEC-011). Only a
+        // second question is skipped, since the user cannot be asked two things.
+        if d.ask.is_some() || (d.held.is_some() && call.name == ASK_USER) {
             self.note_act(&Act {
                 decision: decision::SKIPPED,
                 ..invalid(&call.name, "another action is being asked about first")
@@ -596,6 +599,8 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     ) -> String {
         let risk = self.host.risk(&call.name, &args).under(self.conv.tainted);
         let gate = self.turn.as_ref().map_or(Gate::Run, |t| t.gate(risk.tier));
+        // An action of this batch is already held, or one from an earlier batch is still waiting.
+        let batch_holds = d.held.is_some();
         if risk.tier == Tier::Destructive && !self.cfg.allow_destructive {
             self.note_act(&Act {
                 tool: &call.name,
@@ -607,7 +612,10 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 note: Some("destructive tools are not offered"),
             });
             format!("Error: there is no tool called `{}`.", call.name)
-        } else if !self.by_user && risk.tier != Tier::ReadOnly && self.held_and_fresh() {
+        } else if !self.by_user
+            && risk.tier != Tier::ReadOnly
+            && (batch_holds || self.held_and_fresh())
+        {
             // The user is deciding on an action already. A turn that outside text started must not put its own
             // proposal in that action's place, where a yes meant for the first would run the second
             // (REQ-SEC-011, REQ-SEC-012).
@@ -646,11 +654,11 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 },
                 gate,
             )
-        } else if risk.needs_hold() && self.conv.pending.is_some() {
-            // An action is already waiting for the user's yes or no. A second one must not replace it and a
-            // call must not cancel it: only the user's own words end it (REQ-SEC-011). A turn of the model
-            // loop never gets here, since it ends when it holds something; a realtime session does, because
-            // its model keeps calling tools while the question is open.
+        } else if risk.needs_hold() && (batch_holds || self.conv.pending.is_some()) {
+            // An action is already waiting for the user's yes or no, held earlier in this batch or by an earlier
+            // call. A second one must not replace it and a call must not cancel it: only the user's own words
+            // end it (REQ-SEC-011). A realtime session reaches this across batches, because its model keeps
+            // calling tools while the question is open; a turn of the model loop reaches it within a batch.
             self.note_act(&Act {
                 tool: &call.name,
                 tier: Some(risk.tier),

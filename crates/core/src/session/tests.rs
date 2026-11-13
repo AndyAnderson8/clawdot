@@ -596,8 +596,8 @@ async fn read_only_and_reversible_calls_run_and_costly_ones_are_held() {
     let ran: Vec<&str> = h.ran.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(
         ran,
-        ["web", "set_timer"],
-        "stopped at the held call: {ran:?}"
+        ["web", "set_timer", "set_timer"],
+        "the call after the held one still runs, as it needs no hold: {ran:?}"
     );
     assert!(r.speech.contains("send money"));
     let tool_msgs: Vec<String> = c
@@ -606,7 +606,8 @@ async fn read_only_and_reversible_calls_run_and_costly_ones_are_held() {
         .filter(|m| m.role == Role::Tool)
         .map(|m| m.content.clone())
         .collect();
-    assert!(tool_msgs[3].starts_with("Not run"), "{tool_msgs:?}");
+    assert!(tool_msgs[2].starts_with("Not run"), "{tool_msgs:?}");
+    assert_eq!(tool_msgs[3], "set_timer ok");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1276,14 +1277,15 @@ async fn bad_and_forged_calls_are_recorded_as_blocked_or_held() {
         ("d", "set_timer", r#"{"seconds":1}"#),
     ])]);
     turn(&b, &mut h, &mut c, &mut u, "go").await;
-    assert!(h.ran.is_empty());
+    let ran: Vec<&str> = h.ran.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(ran, ["set_timer"], "the valid call after the hold ran");
     assert_eq!(
         pairs(&log),
         [
             pair("no_such_tool", "blocked:invalid"),
             pair("set_timer", "blocked:invalid"),
             pair("send_money", "held"),
-            pair("set_timer", "blocked:pending"),
+            pair("set_timer", "ran"),
         ]
     );
     assert_eq!(rows(&log)[2].args, json!({"amount":5}));
@@ -2946,6 +2948,93 @@ async fn proposed_calls_leave_a_held_action_waiting_and_refuse_a_second_hold() {
     assert_eq!(h.ran.last().unwrap().0, "send_money");
     assert_eq!(h.ran.last().unwrap().1, json!({"to": "sam"}));
     assert!(c.pending().is_none());
+}
+
+/// REQ-SEC-011: in a normal turn, a read-only call that comes after a held action in the same batch still
+/// runs, and a second call that would need holding is refused; the first stays held.
+#[tokio::test(flavor = "current_thread")]
+async fn a_read_only_call_runs_after_a_hold_in_the_same_batch_and_a_second_hold_is_refused() {
+    let mut h = Lab {
+        costly: vec!["send_money"],
+        ..Lab::default()
+    };
+    let b = Script::new(vec![calls(&[
+        ("c1", "send_money", r#"{"to":"sam"}"#),
+        ("c2", "look", "{}"),
+        ("c3", "send_money", r#"{"to":"eve"}"#),
+    ])]);
+    let mut c = conv();
+    let r = lturn(&TurnCtl::default(), &b, &mut h, &mut c, &cfg(), "pay sam").await;
+    assert!(r.pending, "the first action is held");
+    assert_eq!(h.ran, ["look"], "the read ran, neither payment did");
+    assert_eq!(
+        c.pending().map(|p| p.args.clone()),
+        Some(json!({"to": "sam"}))
+    );
+    let results: Vec<&str> = c
+        .history()
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(results.len(), 3, "every call has a result");
+    assert_eq!(results[1], "look ok");
+    assert!(
+        results[2].contains("an action is already waiting"),
+        "{results:?}"
+    );
+}
+
+/// REQ-SEC-011, REQ-SEC-012: the same rule in a turn that outside text started, where the first action is a
+/// proposal.
+#[tokio::test(flavor = "current_thread")]
+async fn a_read_only_call_runs_after_a_proposal_in_an_event_turn() {
+    let mut h = Lab {
+        costly: vec!["send_money"],
+        ..Lab::default()
+    };
+    let b = Script::new(vec![calls(&[
+        ("c1", "send_money", r#"{"to":"sam"}"#),
+        ("c2", "look", "{}"),
+        ("c3", "send_money", r#"{"to":"eve"}"#),
+    ])]);
+    let mut c = conv();
+    let mut u = UsageTracker::new(UsageLimits::default());
+    event_turn(
+        "hook",
+        &b,
+        inputs_cfg(&mut h, &mut c, &cfg(), &mut u, 1000),
+        "alert",
+    )
+    .await;
+    assert_eq!(h.ran, ["look"]);
+    assert_eq!(
+        c.pending().map(|p| p.args.clone()),
+        Some(json!({"to": "sam"})),
+        "the second proposal did not replace the first"
+    );
+}
+
+/// REQ-SEC-011: a realtime batch follows the same rule: a call that needs no hold runs after one that does.
+#[tokio::test(flavor = "current_thread")]
+async fn proposed_calls_run_a_later_call_after_a_hold_in_the_same_batch() {
+    let mut h = Host {
+        confirm: vec!["send_money"],
+        ..Host::default()
+    };
+    let (mut c, mut u) = (conv(), UsageTracker::new(UsageLimits::default()));
+    let batch = [
+        call("c1", "send_money", r#"{"to":"sam"}"#),
+        call("c2", "set_timer", r#"{"seconds":5}"#),
+        call("c3", "send_money", r#"{"to":"eve"}"#),
+    ];
+    run_proposed_calls(inputs(&mut h, &mut c, &mut u, 1000), "pay sam", &batch).await;
+    let names: Vec<&str> = h.ran.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["set_timer"]);
+    assert_eq!(
+        c.pending().map(|p| p.args.clone()),
+        Some(json!({"to": "sam"}))
+    );
 }
 
 // REQ-SEC-011: the 120-second window still ends a held action that nobody answered, and then a new call can
