@@ -17,14 +17,16 @@
 //! The reply is dropped (its synthesis with it) when the listener stops it, when the satellite reports that
 //! playback ended, or when the session ends.
 
-use super::{
-    Audio, Duration, Env, Instant, Pending, SessionState, Synthesizer, VecDeque, duck,
-    finish_speech, send, send_chunks,
-};
+use super::playback::{Audio, duck, finish_speech, send_chunks};
+use super::state::{Env, Pending, SessionState};
+use super::wire::send;
+use crate::voice::Synthesizer;
 use clawdot_protocol::message::{AudioFormat, Indicator, Message};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWrite;
 
 /// One sentence being synthesised.
