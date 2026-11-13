@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { api, ApiError, failText, hasToken, keep } from "../../src/api.ts";
+import { api, ApiError, enc, failText, hasToken, keep } from "../../src/api.ts";
 
 interface Call {
   url: string;
@@ -76,4 +76,10 @@ test("failText wording", () => {
   assert.deepEqual(failText(new ApiError("Nope.", 400)), { text: "Nope.", signIn: false });
   assert.deepEqual(failText("weird"), { text: "Something went wrong. Try again.", signIn: false });
   assert.deepEqual(failText(new Error("")), { text: "Something went wrong. Try again.", signIn: false });
+});
+
+test("a name in a request path cannot change the path", () => {
+  assert.equal(enc("light"), "light");
+  assert.equal(enc("a/b c?d#e"), "a%2Fb%20c%3Fd%23e");
+  assert.equal(enc(7), "7");
 });

@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { Field } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { useState } from "preact/hooks";
-import { api, ApiError } from "../api.ts";
+import { api, ApiError, enc } from "../api.ts";
 import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
 import { CopyButton, useBusy } from "../parts.tsx";
 import { fail, get, load, say, set, sv, useApp } from "../store.ts";
@@ -23,7 +23,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     );
     if (!sure) return;
     try {
-      const r = await api<WebhookToken>("POST", "/api/endpoints/" + e.name + "/rotate");
+      const r = await api<WebhookToken>("POST", "/api/endpoints/" + enc(e.name) + "/rotate");
       set({ fresh: { ...get().fresh, [e.name]: r.token } });
       say("New token made. Copy it now; it is shown once.");
       props.setOpen(true);
@@ -36,7 +36,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     if (!(await ask("Remove the webhook " + e.name + "? Anything sending to it will be turned away.", "Remove")))
       return;
     try {
-      await api("DELETE", "/api/endpoints/" + e.name);
+      await api("DELETE", "/api/endpoints/" + enc(e.name));
       const { [e.name]: _gone, ...rest } = get().fresh;
       set({ fresh: rest });
       say("Deleted.");
@@ -55,7 +55,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
     setNameErr("");
     await run(async () => {
       try {
-        await api("PUT", "/api/endpoints/" + e.name, { spoken_name: spoken.trim() || null });
+        await api("PUT", "/api/endpoints/" + enc(e.name), { spoken_name: spoken.trim() || null });
         setRenaming(false);
         say("Saved.");
         await load();

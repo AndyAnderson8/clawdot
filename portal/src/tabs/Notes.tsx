@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { Field, useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { useEffect, useState } from "preact/hooks";
-import { api, ApiError } from "../api.ts";
+import { api, ApiError, enc } from "../api.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
 import { whenText } from "../time.ts";
 import type { Note, NotesList } from "../types.ts";
@@ -30,7 +30,7 @@ export function Notes(): JSX.Element {
     }
     let live = true;
     const t = setTimeout(() => {
-      api<NotesList>("GET", "/api/notes?q=" + encodeURIComponent(q))
+      api<NotesList>("GET", "/api/notes?q=" + enc(q))
         .then((r) => {
           if (live) setHits(r.notes);
         })
@@ -66,7 +66,7 @@ export function Notes(): JSX.Element {
       try {
         setData(
           editing
-            ? await api<NotesList>("PUT", "/api/notes/" + editing.id, { text })
+            ? await api<NotesList>("PUT", "/api/notes/" + enc(editing.id), { text })
             : await api<NotesList>("POST", "/api/notes", { text }),
         );
         say(editing ? "Saved." : "Saved. The assistant will see it from now on.");
@@ -80,7 +80,7 @@ export function Notes(): JSX.Element {
   const forget = async (id: number) => {
     if (!(await ask("Forget this memory? The assistant will no longer know it.", "Forget"))) return;
     try {
-      await api("DELETE", "/api/notes/" + id);
+      await api("DELETE", "/api/notes/" + enc(id));
       say("Forgotten.");
       await load();
     } catch (x) {

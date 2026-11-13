@@ -34,6 +34,11 @@ export function keep(t: string | undefined): void {
   }
 }
 
+/** A name placed in a request path, so a slash, a space or a question mark in it cannot change the path. */
+export function enc(name: string | number): string {
+  return encodeURIComponent(String(name));
+}
+
 export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = "Bearer " + token;

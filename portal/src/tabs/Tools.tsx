@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
+import { enc } from "../api.ts";
 import { relaxWarning, tierLabel } from "../activity.ts";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { Field, useBusy } from "../parts.tsx";
@@ -50,7 +51,7 @@ function WhenItRuns(props: { t: Tool }): JSX.Element {
       !(warn && !(await ask(warn, "Change it"))) &&
       (await change(
         "POST",
-        "/api/tools/" + t.name + "/tier",
+        "/api/tools/" + enc(t.name) + "/tier",
         { tier: to === "" ? null : to },
         to === "" ? "Back to the usual level." : "Saved. It applies from the next request.",
       ));
@@ -99,7 +100,7 @@ function ToolRow(props: { t: Tool }) {
   const t = props.t;
   const remove = async () => {
     if (await ask("Delete the tool " + t.name + "? The assistant will stop being able to use it.", "Delete"))
-      void change("DELETE", "/api/tools/" + t.name, undefined, "Deleted.");
+      void change("DELETE", "/api/tools/" + enc(t.name), undefined, "Deleted.");
   };
   return (
     <li class={"toolrow" + (t.enabled ? "" : " off")}>
@@ -112,7 +113,7 @@ function ToolRow(props: { t: Tool }) {
         onChange={() =>
           change(
             "POST",
-            "/api/tools/" + t.name + "/enabled",
+            "/api/tools/" + enc(t.name) + "/enabled",
             { enabled: !t.enabled },
             t.name + (t.enabled ? " turned off." : " turned on."),
           )

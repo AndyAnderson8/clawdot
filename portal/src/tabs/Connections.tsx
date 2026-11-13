@@ -1,6 +1,6 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api } from "../api.ts";
+import { api, enc } from "../api.ts";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { connectionDefinition } from "../forms.ts";
 import { Field, useBusy } from "../parts.tsx";
@@ -13,14 +13,14 @@ function Source(props: { s: McpServer }) {
   const s = props.s;
   const remove = async () => {
     if (await ask("Remove the source " + s.name + "? Its tools will disappear.", "Remove"))
-      void change("DELETE", "/api/connections/" + s.name, undefined, "Removed.");
+      void change("DELETE", "/api/connections/" + enc(s.name), undefined, "Removed.");
   };
   const n = s.tools.length;
   const waiting = s.needs_review ?? [];
   const accept = (tool?: string) =>
     change(
       "POST",
-      "/api/connections/" + s.name + "/accept",
+      "/api/connections/" + enc(s.name) + "/accept",
       tool ? { tool } : {},
       tool ? "Accepted." : "All accepted.",
     );
@@ -34,7 +34,7 @@ function Source(props: { s: McpServer }) {
         onChange={() =>
           change(
             "POST",
-            "/api/connections/" + s.name + "/enabled",
+            "/api/connections/" + enc(s.name) + "/enabled",
             { enabled: !s.enabled },
             s.name + (s.enabled ? " turned off." : " turned on."),
           )
@@ -127,7 +127,7 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
       // Every tool comes in; the ones left unticked are switched off.
       for (const t of off) {
         try {
-          await api("POST", "/api/tools/" + t + "/enabled", { enabled: false });
+          await api("POST", "/api/tools/" + enc(t) + "/enabled", { enabled: false });
         } catch (x) {
           fail(x);
         }

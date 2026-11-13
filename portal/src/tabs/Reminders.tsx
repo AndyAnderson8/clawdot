@@ -1,6 +1,6 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api, ApiError } from "../api.ts";
+import { api, ApiError, enc } from "../api.ts";
 import { reminderBody } from "../forms.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
 import { TimeField } from "../timefield.tsx";
@@ -84,7 +84,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
     await run(async () => {
       try {
         const r = editing
-          ? await api<ScheduleList>("PUT", "/api/schedule/" + editing, body)
+          ? await api<ScheduleList>("PUT", "/api/schedule/" + enc(editing), body)
           : await api<ScheduleList>("POST", "/api/schedule", body);
         say(editing ? "Saved." : "Added.");
         reset();
@@ -121,7 +121,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
     if (!(await ask("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?", "Cancel it", "Keep it")))
       return;
     try {
-      setData(await api<ScheduleList>("DELETE", "/api/schedule/" + i.id));
+      setData(await api<ScheduleList>("DELETE", "/api/schedule/" + enc(i.id)));
       say("Cancelled.");
     } catch (x) {
       fail(x);
