@@ -13,7 +13,14 @@ export function adapterName(adapter: string): string {
 
 const BODY = '{"title":"Backup finished","summary":"12 GB copied"}';
 
-export function snippets(base: string, name: string, adapter: string, tok: string | undefined): [string, string][] {
+/** `setup` is the endpoint's `setup` from the device: its adapter's set-up lines, with the placeholders unfilled. */
+export function snippets(
+  base: string,
+  name: string,
+  adapter: string,
+  tok: string | undefined,
+  setup: string[],
+): [string, string][] {
   const url = base + "/hook/" + name;
   const t = tok || "YOUR_TOKEN";
   const out: [string, string][] = [
@@ -33,16 +40,44 @@ export function snippets(base: string, name: string, adapter: string, tok: strin
       `rest_command:\n  tell_speaker:\n    url: "${url}"\n    method: post\n    headers:\n      Authorization: "Bearer ${t}"\n    content_type: "application/json"\n    payload: '{{ {"title": title, "summary": summary} | to_json }}'`,
     ],
   ];
-  if (adapter === "claude-code") {
-    const hook = (ev: string) =>
-      `    "${ev}": [{ "hooks": [{ "type": "http", "url": "${url}", "headers": { "Authorization": "Bearer ${t}" }, "timeout": 5 }] }]`;
+  // The plain adapter's own lines are the curl example above. Any other adapter brings its set-up text from the
+  // device (the same lines `clawdot --create-endpoint` prints), which is filled in here and not written again.
+  if (adapter !== GENERIC_ADAPTER) out.push(...adapterSnippets(setup, { public: base, endpoint: name, token: t }));
+  return out;
+}
+
+/** The adapter that needs no set-up beyond the snippets above. */
+const GENERIC_ADAPTER = "generic";
+
+/** `{public}`, `{endpoint}` and `{token}` replaced in one pass, so a value that holds a placeholder is not expanded. */
+export function fillSetup(text: string, values: { public: string; endpoint: string; token: string }): string {
+  return text.replace(/\{(public|endpoint|token)\}/g, (_, k: "public" | "endpoint" | "token") => values[k]);
+}
+
+/**
+ * An adapter's set-up lines as titled snippets. Blank lines separate the parts; the first line of a part (without its
+ * closing colon) is the title and the lines after it are the text, without the indent they are printed with.
+ */
+export function adapterSnippets(
+  setup: string[],
+  values: { public: string; endpoint: string; token: string },
+): [string, string][] {
+  const parts: string[][] = [];
+  let part: string[] = [];
+  for (const line of setup) {
+    if (line.trim() === "") {
+      parts.push(part);
+      part = [];
+    } else part.push(line);
+  }
+  parts.push(part);
+  const out: [string, string][] = [];
+  for (const [head, ...body] of parts) {
+    if (head === undefined || !body.length) continue;
+    const indent = Math.min(...body.map((l) => l.length - l.trimStart().length));
     out.push([
-      "Coding agent hooks: add to ~/.claude/settings.json",
-      '{\n  "hooks": {\n' + hook("Stop") + ",\n" + hook("Notification") + "\n  }\n}",
-    ]);
-    out.push([
-      "Let your voice replies reach the agent (run on the computer where it works)",
-      `CLAWDOT_TOKEN=${t} clawdot-bridge --url ${base} --endpoint ${name}`,
+      fillSetup(head.replace(/:$/, ""), values),
+      fillSetup(body.map((l) => l.slice(indent)).join("\n"), values),
     ]);
   }
   return out;

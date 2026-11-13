@@ -11,7 +11,7 @@
     "}",
     "",
     "Voice replies reach the agent through the bridge, on the machine where the agent runs:",
-    "  CLAWDOT_TOKEN=<token> clawdot-bridge --url {public} --endpoint {endpoint}",
+    "  CLAWDOT_TOKEN={token} clawdot-bridge --url {public} --endpoint {endpoint}",
     ""
   ],
   "rules": [

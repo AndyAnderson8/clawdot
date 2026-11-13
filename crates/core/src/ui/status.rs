@@ -32,7 +32,11 @@ fn state_label(s: &crate::inbox::event::EventState) -> &'static str {
 }
 
 pub(super) fn overview(core: &Core) -> Resp {
-    let endpoints: Vec<Value> = core.endpoints().iter().map(endpoint_json).collect();
+    let endpoints: Vec<Value> = core
+        .endpoints()
+        .iter()
+        .map(|e| endpoint_json(core, e))
+        .collect();
     let mut events = core.events();
     events.sort_by_key(|e| std::cmp::Reverse(e.id));
     let events: Vec<Value> = events

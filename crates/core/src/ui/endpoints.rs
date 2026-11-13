@@ -19,11 +19,19 @@ fn endpoint_error(e: &EndpointError) -> Resp {
     error(status, &e.to_string())
 }
 
+/// The set-up lines of the adapter called `adapter`, with `{public}`, `{endpoint}` and `{token}` unfilled (the page
+/// fills them). Empty when the adapter has none.
+fn setup_lines(core: &Core, adapter: &str) -> Vec<String> {
+    core.adapter(adapter)
+        .map_or_else(Vec::new, |a| a.setup_lines().to_vec())
+}
+
 /// An endpoint as the portal lists it. `spoken_name` is `null` when none is set (the speaker then says `name`).
-pub(super) fn endpoint_json(e: &crate::inbox::endpoint::Endpoint) -> Value {
+/// `setup` holds the adapter's set-up lines, the same ones `--create-endpoint` prints.
+pub(super) fn endpoint_json(core: &Core, e: &crate::inbox::endpoint::Endpoint) -> Value {
     json!({
         "name": e.name, "adapter": e.adapter, "enabled": e.enabled, "created_at": e.created_at,
-        "spoken_name": e.spoken_name,
+        "spoken_name": e.spoken_name, "setup": setup_lines(core, &e.adapter),
     })
 }
 
@@ -73,7 +81,10 @@ pub(super) async fn create(core: &Core, body: Incoming) -> Resp {
             }
             json_reply(
                 StatusCode::CREATED,
-                &json!({ "name": e.name, "adapter": e.adapter, "spoken_name": e.spoken_name, "token": token }),
+                &json!({
+                    "name": e.name, "adapter": e.adapter, "spoken_name": e.spoken_name, "token": token,
+                    "setup": setup_lines(core, &e.adapter),
+                }),
             )
         }
         Err(e) => endpoint_error(&e),
@@ -87,7 +98,7 @@ pub(super) async fn update(core: &Core, name: &str, body: Incoming) -> Resp {
             let mark = core.save_mark();
             let resp =
                 match core.set_endpoint_spoken_name(name, u.spoken_name.as_deref().unwrap_or("")) {
-                    Ok(e) => json_reply(StatusCode::OK, &endpoint_json(&e)),
+                    Ok(e) => json_reply(StatusCode::OK, &endpoint_json(core, &e)),
                     Err(e) => endpoint_error(&e),
                 };
             saved(core, mark, resp).await

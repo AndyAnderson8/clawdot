@@ -1,12 +1,12 @@
 import type { JSX } from "preact";
 import { useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
-import { currentText, FROM, labelOf, settingsPatch, type SettingSpec, cents } from "../forms.ts";
+import { currentText, FROM, hintText, labelOf, settingsPatch, type SettingSpec, cents } from "../forms.ts";
 import { providerFor } from "../providers.ts";
 import { TimeField } from "../timefield.tsx";
 import { fail, get, say, set, useApp } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
-import type { Settings as SettingsData } from "../types.ts";
+import type { SettingField, Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
 import { ModelSelect, VoiceControl } from "./Voice.tsx";
 import { ask } from "../confirm.tsx";
@@ -28,9 +28,13 @@ function zoneList(): string[] | null {
   return null;
 }
 
-/** The input for one setting, by its kind. It only shows a value and reports a new one; the form keeps the values. */
+/**
+ * The input for one setting, drawn from its kind and limits as the device reports them. It only shows a value and
+ * reports a new one; the form keeps the values.
+ */
 function Control(props: {
   sp: SettingSpec;
+  field: SettingField;
   id: string;
   value: string;
   /** A value is saved on the device, so a switch can offer to go back to the default. */
@@ -44,35 +48,10 @@ function Control(props: {
   zones: string[] | null;
   browserZone: string;
 }): JSX.Element {
-  const { sp, id, saved, put, url, hasKey, keyRev, zones, browserZone } = props;
+  const { sp, field, id, saved, put, url, hasKey, keyRev, zones, browserZone } = props;
   const v = props.value;
   const input = (e: Event) => put((e.currentTarget as HTMLInputElement).value);
-  if (sp.kind === "zone") {
-    return zones ? (
-      <select id={id} value={v} onChange={input}>
-        {zoneOptions(zones).map((z) => (
-          <option key={z.id} value={z.id}>
-            {z.label}
-          </option>
-        ))}
-      </select>
-    ) : (
-      <input id={id} type="text" value={v} placeholder={browserZone || "Europe/Berlin"} onInput={input} />
-    );
-  }
-  if (sp.kind === "language") {
-    return (
-      <select id={id} value={v} disabled={sp.off} onChange={input}>
-        <option value="">Detect it automatically</option>
-        {languageOptions(v).map((l) => (
-          <option key={l.code} value={l.code}>
-            {l.label}
-          </option>
-        ))}
-      </select>
-    );
-  }
-  if (sp.kind === "model") {
+  if (sp.widget === "model") {
     // A provider that needs a key is asked for its models only once a key is in place.
     const prov = providerFor(url);
     return (
@@ -86,24 +65,49 @@ function Control(props: {
       />
     );
   }
-  if (sp.kind === "voice") {
+  if (sp.widget === "voice") {
     return <VoiceControl id={id} value={v} off={sp.off} onInput={put} />;
   }
-  if (sp.kind === "area") {
-    return <textarea id={id} rows={7} maxLength={4000} value={v} onInput={input} />;
+  if (field.kind === "zone") {
+    return zones ? (
+      <select id={id} value={v} onChange={input}>
+        {zoneOptions(zones).map((z) => (
+          <option key={z.id} value={z.id}>
+            {z.label}
+          </option>
+        ))}
+      </select>
+    ) : (
+      <input id={id} type="text" value={v} placeholder={browserZone || "Europe/Berlin"} onInput={input} />
+    );
   }
-  if (sp.kind === "choice") {
+  if (field.kind === "language") {
     return (
       <select id={id} value={v} disabled={sp.off} onChange={input}>
-        {(sp.options ?? []).map(([val, text]) => (
-          <option key={val} value={val}>
-            {text}
+        <option value="">Detect it automatically</option>
+        {languageOptions(v).map((l) => (
+          <option key={l.code} value={l.code}>
+            {l.label}
           </option>
         ))}
       </select>
     );
   }
-  if (sp.kind === "bool") {
+  if (field.kind === "long_text") {
+    return <textarea id={id} rows={7} maxLength={field.max_length} value={v} onInput={input} />;
+  }
+  if (field.kind === "choice") {
+    return (
+      <select id={id} value={v} disabled={sp.off} onChange={input}>
+        {(field.choices ?? []).map((val) => (
+          <option key={val} value={val}>
+            {sp.labels?.[val] ?? val}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (field.kind === "flag") {
     return (
       <select id={id} value={v} disabled={sp.off} onChange={input}>
         <option value="true">On</option>
@@ -112,10 +116,10 @@ function Control(props: {
       </select>
     );
   }
-  if (sp.kind === "time") {
+  if (field.kind === "time") {
     return <TimeField id={id} value={v} disabled={sp.off} clearable onChange={put} />;
   }
-  if (sp.kind === "money") {
+  if (field.kind === "money") {
     return (
       <div class="moneybox">
         <span aria-hidden="true">$</span>
@@ -133,17 +137,16 @@ function Control(props: {
       </div>
     );
   }
-  if (sp.kind === "number") {
-    const whole = sp.min !== undefined;
+  if (field.kind === "whole") {
     return (
       <input
         id={id}
         type="number"
         value={v}
         autoComplete="off"
-        step={whole ? "1" : "any"}
-        min={whole ? String(sp.min) : "0"}
-        max={sp.max === undefined ? undefined : String(sp.max)}
+        step="1"
+        min={field.min === undefined ? undefined : String(field.min)}
+        max={field.max === undefined ? undefined : String(field.max)}
         disabled={sp.off}
         onInput={input}
       />
@@ -187,8 +190,8 @@ export function Group(props: {
     const cur = currentText(settings, sp.key);
     current[sp.key] = cur;
     start0[sp.key] = cur;
-    hints[sp.key] = sp.hint ?? "";
-    if (sp.kind === "zone" && zs) {
+    hints[sp.key] = hintText(sp, f);
+    if (f.kind === "zone" && zs) {
       zones.push(...(zs.includes(cur) ? zs : [cur, ...zs]));
       if (f.source === "default" && bz && zs.includes(bz)) {
         start0[sp.key] = bz;
@@ -210,7 +213,7 @@ export function Group(props: {
   const submit = async (ev: Event) => {
     ev.preventDefault();
     setErr("");
-    const body = settingsPatch(specs, current, vals);
+    const body = settingsPatch(settings.fields, specs, current, vals);
     if (!Object.keys(body).length) {
       say("Nothing to save: you have not changed anything here.");
       return;
@@ -289,6 +292,7 @@ export function Group(props: {
             <div class="sctl">
               <Control
                 sp={sp}
+                field={f}
                 id={id}
                 value={vals[sp.key] ?? ""}
                 saved={f.saved === true}

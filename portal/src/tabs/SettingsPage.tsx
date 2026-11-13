@@ -29,46 +29,32 @@ type Spec = SettingSpec[];
 const MODEL: Spec = [
   {
     key: "llm_url",
-    kind: "text",
     hint: "Where the service is. It starts with https://, or http:// for a model you run yourself.",
     hideWhen: (v: Record<string, string>) => providerFor(v["llm_url"] ?? "")?.id !== "custom",
   },
   {
     key: "llm_key_env",
-    kind: "text",
     hint: "Optional. Instead of pasting a key, name an environment variable on the device that holds it.",
     hideWhen: (v: Record<string, string>) => providerFor(v["llm_url"] ?? "")?.id !== "custom",
   },
-  { key: "llm_model", kind: "model", hint: "The model that answers you. The list comes from your provider." },
+  { key: "llm_model", widget: "model", hint: "The model that answers you. The list comes from your provider." },
 ];
 const LIMITS: Spec = [
   {
     key: "agent_max_rounds",
-    kind: "number",
-    min: 1,
-    max: 20,
-    hint: "How many times it may go back to the language model for one request. 1 to 20.",
+    hint: "How many times it may go back to the language model for one request.",
   },
   {
     key: "agent_max_tool_calls",
-    kind: "number",
-    min: 1,
-    max: 20,
-    hint: "The most tools it may use for one request. 1 to 20.",
+    hint: "The most tools it may use for one request.",
   },
   {
     key: "agent_deadline_secs",
-    kind: "number",
-    min: 5,
-    max: 300,
-    hint: "After this long it stops and says how far it got. 5 to 300.",
+    hint: "After this long it stops and says how far it got.",
   },
   {
     key: "agent_tool_timeout_secs",
-    kind: "number",
-    min: 1,
-    max: 120,
-    hint: "A tool that has not answered by then counts as failed. 1 to 120.",
+    hint: "A tool that has not answered by then counts as failed.",
   },
 ];
 
@@ -83,8 +69,8 @@ function General(props: { s: SettingsData }): JSX.Element {
         title="Device"
         settings={props.s}
         specs={[
-          { key: "device_name", kind: "text", hint: "Shown at the top of every page." },
-          { key: "zone", kind: "zone", hint: "Reminders and alarms use this time." },
+          { key: "device_name", hint: "Shown at the top of every page." },
+          { key: "zone", hint: "Reminders and alarms use this time." },
         ]}
       />
       <HardwareCard />
@@ -274,7 +260,6 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
         specs={[
           {
             key: "persona",
-            kind: "area",
             hint: "Written to the assistant, in your own words.",
           },
         ]}
@@ -290,16 +275,14 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
         settings={s}
         intro="Stops the assistant from using the language model once it has cost this much in a day. It starts again the next day. Some providers say what each request cost. For the others the cost is worked out from the prices below."
         specs={[
-          { key: "daily_spend_usd", kind: "money", hint: "In US dollars. Leave it empty for no limit." },
+          { key: "daily_spend_usd", hint: "In US dollars. Leave it empty for no limit." },
           {
             key: "llm_usd_per_mtok_in",
-            kind: "money",
             placeholder: "10.00",
             hint: "What your provider charges for a million tokens of what is sent to the model. Leave it empty and a high price is assumed, so the limit stops early, never late. Enter 0 for a model that is free.",
           },
           {
             key: "llm_usd_per_mtok_out",
-            kind: "money",
             placeholder: "40.00",
             hint: "What it charges for a million tokens of the model's reply.",
           },
@@ -315,8 +298,8 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
           "."
         }
         specs={[
-          { key: "quiet_start", kind: "time" },
-          { key: "quiet_end", kind: "time", hint: "A window that ends earlier than it starts runs past midnight." },
+          { key: "quiet_start" },
+          { key: "quiet_end", hint: "A window that ends earlier than it starts runs past midnight." },
         ]}
       />
     </>
@@ -342,11 +325,12 @@ function SpendBasis(): JSX.Element | null {
   ) : null;
 }
 
-const SPEECH_SERVICES: [string, string][] = [
-  ["openai", "An OpenAI-style speech server"],
-  ["elevenlabs", "ElevenLabs"],
-  ["deepgram", "Deepgram"],
-];
+/** The words for each speech service the device offers (its choices come from the device). */
+const SPEECH_LABELS: Record<string, string> = {
+  openai: "An OpenAI-style speech server",
+  elevenlabs: "ElevenLabs",
+  deepgram: "Deepgram",
+};
 
 function VoiceSection(props: { s: SettingsData }): JSX.Element {
   const s = props.s;
@@ -365,8 +349,7 @@ function VoiceSection(props: { s: SettingsData }): JSX.Element {
         specs={[
           {
             key: "speech_provider",
-            kind: "choice",
-            options: SPEECH_SERVICES,
+            labels: SPEECH_LABELS,
             hint: "ElevenLabs and Deepgram need only a key. An OpenAI-style server is set up where ClawDot is installed.",
           },
         ]}
@@ -410,13 +393,12 @@ function VoiceSection(props: { s: SettingsData }): JSX.Element {
         specs={[
           {
             key: "voice",
-            kind: "voice",
+            widget: "voice",
             hint: s.speech_configured ? "How the assistant sounds." : "Needs a speech provider.",
             off: !s.speech_configured,
           },
           {
             key: "speech_language",
-            kind: "language",
             hint: s.speech_configured
               ? "The language you speak to it. Detecting it works for most people; naming it is more accurate."
               : "Needs a speech provider.",
@@ -430,36 +412,30 @@ function VoiceSection(props: { s: SettingsData }): JSX.Element {
         settings={s}
         intro="An optional service that hears you and answers in one step, which is faster than listening, thinking and speaking in turn. It is billed by the minute of audio, and your spending limit counts it. Tools still ask you first. Off unless you turn it on."
         specs={[
-          { key: "realtime_enabled", kind: "bool", off: noRealtime },
+          { key: "realtime_enabled", off: noRealtime },
           {
             key: "realtime_url",
-            kind: "text",
             off: noRealtime,
             hint: "It starts with wss://. For example wss://api.openai.com/v1/realtime.",
           },
-          { key: "realtime_model", kind: "text", off: noRealtime, hint: "The realtime model's name." },
-          { key: "realtime_voice", kind: "text", off: noRealtime, hint: "A voice name the service offers." },
+          { key: "realtime_model", off: noRealtime, hint: "The realtime model's name." },
+          { key: "realtime_voice", off: noRealtime, hint: "A voice name the service offers." },
           {
             key: "realtime_usd_per_min_in",
-            kind: "money",
             off: noRealtime,
             placeholder: "0.03",
             hint: "What the service charges for a minute of your speech. Used to count spending; check it against your bill.",
           },
           {
             key: "realtime_usd_per_min_out",
-            kind: "money",
             off: noRealtime,
             placeholder: "0.10",
             hint: "What it charges for a minute of its speech.",
           },
           {
             key: "realtime_max_session_secs",
-            kind: "number",
-            min: 10,
-            max: 3600,
             off: noRealtime,
-            hint: "In seconds. A conversation ends by itself after this long. 10 to 3600.",
+            hint: "In seconds. A conversation ends by itself after this long.",
           },
         ]}
         below={() => (
@@ -501,12 +477,10 @@ function Notifications(props: { s: SettingsData }): JSX.Element {
         specs={[
           {
             key: "listen",
-            kind: "text",
             hint: "Where ClawDot serves this page and listens for webhooks. For example 0.0.0.0:3335 lets your whole network reach it.",
           },
           {
             key: "public_url",
-            kind: "text",
             hint: "The address other programs post webhook messages to. It appears in the setup snippets.",
           },
         ]}
