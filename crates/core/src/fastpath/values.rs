@@ -161,74 +161,85 @@ fn meridiem_at(lang: &Language, toks: &[String], i: usize) -> Option<Meridiem> {
     }
 }
 
-fn time_candidates(lang: &Language, toks: &[String]) -> Vec<(usize, Time)> {
-    let mut out: Vec<(usize, Time)> = Vec::new();
+type Times = Vec<(usize, Time)>;
+
+/// Record one reading of a time that used `used` tokens, if it is a real clock time.
+fn push_time(out: &mut Times, used: usize, hour: u8, minute: u8, meridiem: Option<Meridiem>) {
+    if valid_clock(hour, minute, meridiem) {
+        out.push((
+            used,
+            Time {
+                hour,
+                minute,
+                meridiem,
+            },
+        ));
+    }
+}
+
+/// The minute after a spoken hour: "thirty", or "oh five". Returns `(minute, tokens used)`.
+fn spoken_minute(lang: &Language, toks: &[String], hused: usize) -> Option<(u32, usize)> {
+    if toks
+        .get(hused)
+        .is_some_and(|t| lang.clock.oh.contains(&t.as_str()))
+    {
+        parse_number(lang, &toks[hused + 1..])
+            .filter(|(m, n)| *n == 1 && (1..=9).contains(m))
+            .map(|(m, n)| (m, n + 1))
+    } else {
+        parse_number(lang, toks.get(hused..).unwrap_or(&[])).filter(|(m, _)| (10..=59).contains(m))
+    }
+}
+
+/// Readings of a time that starts with a spoken or digit hour `h` taking `hused` tokens.
+fn spoken_hour_times(lang: &Language, toks: &[String], h: u8, hused: usize, out: &mut Times) {
+    // "seven thirty [pm]" / "7 30 [pm]" / "seven oh five"
+    if let Some((m, mused)) = spoken_minute(lang, toks, hused) {
+        let used = hused + mused;
+        if let Some(mer) = meridiem_at(lang, toks, used) {
+            push_time(out, used + 1, h, m as u8, Some(mer));
+        }
+        push_time(out, used, h, m as u8, None);
+    }
+    if toks
+        .get(hused)
+        .is_some_and(|t| lang.clock.oclock.contains(&t.as_str()))
+    {
+        if let Some(mer) = meridiem_at(lang, toks, hused + 1) {
+            push_time(out, hused + 2, h, 0, Some(mer));
+        }
+        push_time(out, hused + 1, h, 0, None);
+    }
+    if let Some(mer) = meridiem_at(lang, toks, hused) {
+        push_time(out, hused + 1, h, 0, Some(mer));
+    }
+    // a bare hour only counts for plain digits or words 1..=12 followed by something the template wants
+    if h >= 1 {
+        push_time(out, hused, h, 0, None);
+    }
+}
+
+fn time_candidates(lang: &Language, toks: &[String]) -> Times {
+    let mut out: Times = Vec::new();
     let Some(first) = toks.first() else {
         return out;
     };
-    let mut push = |used: usize, hour: u8, minute: u8, meridiem: Option<Meridiem>| {
-        if valid_clock(hour, minute, meridiem) {
-            out.push((
-                used,
-                Time {
-                    hour,
-                    minute,
-                    meridiem,
-                },
-            ));
-        }
-    };
     if first == lang.clock.noon {
-        push(1, 12, 0, Some(Meridiem::Pm));
+        push_time(&mut out, 1, 12, 0, Some(Meridiem::Pm));
     } else if first == lang.clock.midnight {
-        push(1, 12, 0, Some(Meridiem::Am));
+        push_time(&mut out, 1, 12, 0, Some(Meridiem::Am));
     }
     if let Some((h, m, mer)) = parse_clock_token(lang, first) {
         if mer.is_some() {
-            push(1, h, m, mer);
+            push_time(&mut out, 1, h, m, mer);
         } else {
             if let Some(mer) = meridiem_at(lang, toks, 1) {
-                push(2, h, m, Some(mer));
+                push_time(&mut out, 2, h, m, Some(mer));
             }
-            push(1, h, m, None);
+            push_time(&mut out, 1, h, m, None);
         }
     } else if let Some((h, hused)) = parse_number(lang, toks).filter(|(h, _)| *h <= 24) {
-        let h = h as u8;
-        // "seven thirty [pm]" / "7 30 [pm]" / "seven oh five"
-        let minute = if toks
-            .get(hused)
-            .is_some_and(|t| lang.clock.oh.contains(&t.as_str()))
-        {
-            parse_number(lang, &toks[hused + 1..])
-                .filter(|(m, n)| *n == 1 && (1..=9).contains(m))
-                .map(|(m, n)| (m, n + 1))
-        } else {
-            parse_number(lang, toks.get(hused..).unwrap_or(&[]))
-                .filter(|(m, _)| (10..=59).contains(m))
-        };
-        if let Some((m, mused)) = minute {
-            let used = hused + mused;
-            if let Some(mer) = meridiem_at(lang, toks, used) {
-                push(used + 1, h, m as u8, Some(mer));
-            }
-            push(used, h, m as u8, None);
-        }
-        if toks
-            .get(hused)
-            .is_some_and(|t| lang.clock.oclock.contains(&t.as_str()))
-        {
-            if let Some(mer) = meridiem_at(lang, toks, hused + 1) {
-                push(hused + 2, h, 0, Some(mer));
-            }
-            push(hused + 1, h, 0, None);
-        }
-        if let Some(mer) = meridiem_at(lang, toks, hused) {
-            push(hused + 1, h, 0, Some(mer));
-        }
-        // a bare hour only counts for plain digits or words 1..=12 followed by something the template wants
-        if h >= 1 {
-            push(hused, h, 0, None);
-        }
+        spoken_hour_times(lang, toks, h as u8, hused, &mut out);
     }
     out.sort_by_key(|(used, _)| std::cmp::Reverse(*used));
     out.dedup_by_key(|(used, t)| (*used, t.hour, t.minute, t.meridiem));
