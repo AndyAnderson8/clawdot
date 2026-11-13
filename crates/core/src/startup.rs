@@ -118,6 +118,15 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
 
     running.core.set_listen_ip(r.listen.ip());
     announce_admin(&running.core, &public);
+    announce_listening(r, &running);
+    spawn_server(&running.core, listener);
+    Ok(Started::Run(Box::new(assemble_app(
+        r, running, announcer, asks, stations,
+    ))))
+}
+
+/// Print where the server listens, how many endpoints it has and whether a language model is connected.
+fn announce_listening(r: &Resolved, running: &Running) {
     println!(
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         r.listen,
@@ -128,8 +137,16 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
             "not configured"
         }
     );
-    spawn_server(&running.core, listener);
+}
 
+/// Start the console and the speaker task, and put the brain, hub and event sources together as the [`App`].
+fn assemble_app(
+    r: &Resolved,
+    running: Running,
+    announcer: satellite::Announcer,
+    asks: mpsc::Receiver<Ask>,
+    stations: Vec<String>,
+) -> App {
     let (line_tx, lines) = mpsc::channel::<String>(8);
     if r.console {
         spawn_console(line_tx);
@@ -154,7 +171,7 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
             crate::speaker::RUNG_SCHEMA,
         )),
     );
-    let app = App::new(
+    App::new(
         running.brain,
         running.hub,
         running.core,
@@ -162,8 +179,7 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
         sources,
         speaker_task,
     )
-    .with_stations(stations);
-    Ok(Started::Run(Box::new(app)))
+    .with_stations(stations)
 }
 
 /// Warn when the wall clock is not set: alarms and reminders at a time wait until it is (REQ-TMR-006); a countdown
