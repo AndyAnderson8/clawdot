@@ -232,6 +232,9 @@ impl std::fmt::Debug for Clock {
 const RESTART_MIN: Duration = Duration::from_secs(1);
 const RESTART_MAX: Duration = Duration::from_secs(10);
 
+/// The detection name sent when a key or button started the turn (spec 0003 section 6.3).
+const BUTTON_WAKE: &str = "button";
+
 /// Most problems kept in [`AudioDevice::problems`].
 const MAX_PROBLEMS: usize = 32;
 /// Frames read per pass of the satellite loop when catching up (REQ-VOI-013): 80 ms.
@@ -263,6 +266,10 @@ pub struct AudioDevice<I, O, T> {
     recovering: bool,
     mic_unavailable: bool,
     wakes: usize,
+    /// What woke the core last: `button`, or the wake word's phrase.
+    wake_name: String,
+    /// A mute made with the mute button, not yet reported to the core.
+    pending_mute: Option<bool>,
     /// Problems met so far (a missing program, a stalled device), oldest first. Never contains audio.
     pub problems: Vec<String>,
 }
@@ -294,6 +301,8 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> AudioDevice<I, O, T> {
             recovering: false,
             mic_unavailable: false,
             wakes: 0,
+            wake_name: BUTTON_WAKE.to_owned(),
+            pending_mute: None,
             problems: Vec::new(),
         }
     }
@@ -520,6 +529,7 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> AudioDevice<I, O, T> {
             }
             if let Some(phrase) = self.wake.as_mut().and_then(|w| w.feed(&frame)) {
                 self.wakes += 1;
+                self.wake_name.clone_from(&phrase);
                 self.say(&format!("wake word heard: \"{phrase}\""));
                 self.armed_at = Some(now);
                 self.queue.clear();
@@ -601,7 +611,14 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> Device for AudioDevice<I, O, T> {
                 self.stop_playback();
                 Press::Nothing
             }
-            Some(Button::Mute) | None => self.trigger.poll(),
+            Some(Button::Mute) => {
+                // Toggle here and let the satellite report it to the core as `clawdot.mute-changed`.
+                let muted = !self.muted;
+                self.set_mute(muted);
+                self.pending_mute = Some(muted);
+                Press::Nothing
+            }
+            None => self.trigger.poll(),
         };
         match press {
             Press::Nothing => self.cfg.always_on && self.pump_idle(now),
@@ -610,11 +627,14 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> Device for AudioDevice<I, O, T> {
                 false
             }
             Press::Talk => {
-                if self.playing || self.muted {
-                    self.say("(not now: the assistant is speaking or the microphone is muted)");
+                if self.playing || self.muted || self.listening {
+                    // While listening the core already has the turn, and the live frames belong to it: do not
+                    // read them away or send a second detection.
+                    self.say("(not now: the assistant is speaking, listening, or the microphone is muted)");
                     return false;
                 }
                 if self.start_capture() {
+                    self.wake_name = BUTTON_WAKE.to_owned();
                     // Capture starts at the press, so the first words are not lost while the core answers.
                     self.armed_at = Some(now);
                     self.queue.clear();
@@ -632,6 +652,14 @@ impl<I: AudioIn, O: AudioOut, T: Trigger> Device for AudioDevice<I, O, T> {
                 }
             }
         }
+    }
+
+    fn wake_name(&self) -> String {
+        self.wake_name.clone()
+    }
+
+    fn poll_mute_change(&mut self) -> Option<bool> {
+        self.pending_mute.take()
     }
 
     fn begin_playback(&mut self) {
@@ -1126,6 +1154,9 @@ mod tests {
         fn open(&self) -> bool {
             self.0.lock().unwrap().open
         }
+        fn pending(&self) -> usize {
+            self.0.lock().unwrap().frames.len()
+        }
     }
 
     impl AudioIn for FakeMic {
@@ -1451,6 +1482,27 @@ mod tests {
             "audio captured before stream-start is sent first"
         );
         assert_eq!(dev.read_mic().unwrap()[0], 3);
+    }
+
+    #[test]
+    fn req_dev_025_a_talk_press_in_the_middle_of_a_turn_leaves_the_microphone_alone() {
+        let (mic, wake, clock) = (
+            FakeMic::default(),
+            ScriptedWake::default(),
+            TestClock::new(),
+        );
+        let mut dev = live(&mic, &wake, &clock).with_buttons(Pad(VecDeque::from([Button::Talk])));
+        dev.mic_active(true);
+        mic.push_quiet(30);
+        assert!(
+            !dev.poll_wake(),
+            "the core is already listening: no second wake"
+        );
+        assert_eq!(
+            mic.pending(),
+            30,
+            "the live microphone frames of the turn were not read and thrown away"
+        );
     }
 
     #[test]
