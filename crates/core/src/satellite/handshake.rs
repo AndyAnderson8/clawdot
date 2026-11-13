@@ -59,12 +59,17 @@ where
     }
     // The connection's own random identifier. It names this speaker's conversation and held confirmation in the
     // core, so one speaker's "yes" can never answer another's question; a new connection starts fresh.
-    let speaker_id = format!("sat:{}", new_session_id());
+    let (Ok(speaker_part), Ok(session_id)) = (new_session_id(), new_session_id()) else {
+        // Without a random id every speaker would share one: refuse rather than mix them up.
+        reject(wr, "unavailable".into()).await?;
+        return Ok(None);
+    };
+    let speaker_id = format!("sat:{speaker_part}");
     send(
         wr,
         &Message::Welcome(Welcome {
             protocol: PROTOCOL_VERSION,
-            session_id: new_session_id(),
+            session_id,
             audio_out: AudioCodec::Pcm,
         }),
     )
