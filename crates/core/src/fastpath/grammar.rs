@@ -48,9 +48,12 @@ fn push_node(alts: &mut [Vec<Node>], node: Node) {
     }
 }
 
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+/// Parse a sequence of alternatives up to `close` (or the end of the template when `close` is `None`).
 fn parse_alternatives(
     depth: usize,
-    it: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    it: &mut Chars<'_>,
     close: Option<char>,
 ) -> Result<Vec<Vec<Node>>, GrammarError> {
     if depth > MAX_NESTING {
@@ -81,76 +84,93 @@ fn parse_alternatives(
                 alts.push(Vec::new());
             }
             '(' | '[' => {
-                it.next();
-                let (end, optional) = if c == '(' { (')', false) } else { (']', true) };
-                let inner = parse_alternatives(depth + 1, it, Some(end))?;
-                let node = if optional {
-                    Node::Opt(inner)
-                } else {
-                    Node::Alt(inner)
-                };
+                let node = parse_group(depth, it)?;
                 push_node(&mut alts, node);
             }
             '{' => {
-                it.next();
-                let mut body = String::new();
-                loop {
-                    match it.next() {
-                        Some('}') => break,
-                        Some(ch) => body.push(ch),
-                        None => return Err(GrammarError("unclosed slot".into())),
-                    }
-                }
-                let (name, kind) = match body.split_once(':') {
-                    Some((n, k)) => (n.trim(), k.trim()),
-                    None => (body.trim(), body.trim()),
-                };
-                let kind = match kind {
-                    "number" => Kind::Number,
-                    "duration" => Kind::Duration,
-                    "time" => Kind::Time,
-                    _ => Kind::Text,
-                };
-                if name.is_empty() {
-                    return Err(GrammarError("slot has no name".into()));
-                }
-                push_node(&mut alts, Node::Slot(name.to_owned(), kind));
+                let node = parse_slot(it)?;
+                push_node(&mut alts, node);
             }
             _ => {
-                let mut word = String::new();
-                while let Some(&ch) = it.peek() {
-                    if ch.is_whitespace() || "()[]{}|".contains(ch) {
-                        break;
-                    }
-                    word.push(ch);
-                    it.next();
-                }
-                let word = word.to_lowercase();
-                if it.peek() == Some(&'[') {
-                    // `word[s]` is "word" or "words": an optional suffix glued to the word.
-                    it.next();
-                    let inner = parse_alternatives(depth + 1, it, Some(']'))?;
-                    let suffix = match inner.as_slice() {
-                        [alt] => match alt.as_slice() {
-                            [Node::Word(s)] => Some(s.clone()),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    let Some(suffix) = suffix else {
-                        return Err(GrammarError(format!(
-                            "`{word}[...]` must be a plain suffix"
-                        )));
-                    };
-                    let longer = format!("{word}{suffix}");
-                    let either = Node::Alt(vec![vec![Node::Word(word)], vec![Node::Word(longer)]]);
-                    push_node(&mut alts, either);
-                } else {
-                    push_node(&mut alts, Node::Word(word));
-                }
+                let node = parse_word(depth, it)?;
+                push_node(&mut alts, node);
             }
         }
     }
+}
+
+/// A `( ... )` group of alternatives, or a `[ ... ]` optional. The iterator is at the opening bracket.
+fn parse_group(depth: usize, it: &mut Chars<'_>) -> Result<Node, GrammarError> {
+    let optional = it.next() == Some('[');
+    let end = if optional { ']' } else { ')' };
+    let inner = parse_alternatives(depth + 1, it, Some(end))?;
+    Ok(if optional {
+        Node::Opt(inner)
+    } else {
+        Node::Alt(inner)
+    })
+}
+
+/// A `{name}` or `{name:kind}` slot. The iterator is at the opening brace.
+fn parse_slot(it: &mut Chars<'_>) -> Result<Node, GrammarError> {
+    it.next();
+    let mut body = String::new();
+    loop {
+        match it.next() {
+            Some('}') => break,
+            Some(ch) => body.push(ch),
+            None => return Err(GrammarError("unclosed slot".into())),
+        }
+    }
+    let (name, kind) = match body.split_once(':') {
+        Some((n, k)) => (n.trim(), k.trim()),
+        None => (body.trim(), body.trim()),
+    };
+    let kind = match kind {
+        "number" => Kind::Number,
+        "duration" => Kind::Duration,
+        "time" => Kind::Time,
+        _ => Kind::Text,
+    };
+    if name.is_empty() {
+        return Err(GrammarError("slot has no name".into()));
+    }
+    Ok(Node::Slot(name.to_owned(), kind))
+}
+
+/// A literal word, or `word[s]`: the word with an optional glued suffix, meaning "word" or "words".
+fn parse_word(depth: usize, it: &mut Chars<'_>) -> Result<Node, GrammarError> {
+    let mut word = String::new();
+    while let Some(&ch) = it.peek() {
+        if ch.is_whitespace() || "()[]{}|".contains(ch) {
+            break;
+        }
+        word.push(ch);
+        it.next();
+    }
+    let word = word.to_lowercase();
+    if it.peek() != Some(&'[') {
+        return Ok(Node::Word(word));
+    }
+    it.next();
+    let inner = parse_alternatives(depth + 1, it, Some(']'))?;
+    let suffix = match inner.as_slice() {
+        [alt] => match alt.as_slice() {
+            [Node::Word(s)] => Some(s.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(suffix) = suffix else {
+        return Err(GrammarError(format!(
+            "`{word}[...]` must be a plain suffix"
+        )));
+    };
+    let longer = format!("{word}{suffix}");
+    Ok(Node::Alt(vec![
+        vec![Node::Word(word)],
+        vec![Node::Word(longer)],
+    ]))
 }
 
 fn cross(left: Vec<Vec<Item>>, right: &[Vec<Item>]) -> Result<Vec<Vec<Item>>, GrammarError> {
