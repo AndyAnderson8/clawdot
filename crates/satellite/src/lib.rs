@@ -15,7 +15,7 @@ pub mod hw;
 use clawdot_protocol::message::{
     AudioFormat, Capabilities, Hello, Indicator, Message, PROTOCOL_VERSION, Wake,
 };
-use clawdot_protocol::{Decoder, Limits, encode};
+use clawdot_protocol::{Decoder, Limits, encode_checked};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -65,6 +65,11 @@ pub trait Device {
     fn poll_wake(&mut self) -> bool {
         false
     }
+    /// The `name` sent in the `detection` after [`Device::poll_wake`] returned true: the wake word that was
+    /// heard, or `button` when a key or button stood in for it (spec 0003 section 6.3).
+    fn wake_name(&self) -> String {
+        "button".to_owned()
+    }
     /// Whether the reply has finished playing. The satellite reports `playback-done` only when this is true,
     /// polling it on every pass so a long reply never stops the keepalive (REQ-VOI-018).
     fn playback_idle(&mut self) -> bool {
@@ -92,17 +97,28 @@ pub trait Device {
 }
 
 /// Connection settings.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// Stable device identifier.
     pub device_id: String,
-    /// Shared token, if the core requires one.
+    /// Shared token, if the core requires one. Never printed: `Debug` shows only whether it is set.
     pub token: Option<String>,
     /// Send `wake` right after the handshake, as a device with a wake word or button would.
     pub wake_on_connect: bool,
     /// Treat the core as gone after this long without hearing anything (REQ-SAT-008). The core pings every
     /// 5 s, so silence this long means the connection is dead. [`DEAD_AFTER`] is the protocol default.
     pub dead_after: Duration,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("device_id", &self.device_id)
+            .field("token", &self.token.as_ref().map(|_| "<set>"))
+            .field("wake_on_connect", &self.wake_on_connect)
+            .field("dead_after", &self.dead_after)
+            .finish()
+    }
 }
 
 /// Default dead-peer timeout (REQ-SAT-008).
@@ -136,9 +152,52 @@ pub struct Report {
 const FRAME_SAMPLES: usize = 320;
 const IO_TIMEOUT: Duration = Duration::from_millis(20);
 
+/// Most indicator states kept in [`Report::indicators`]; the oldest are dropped, so a long session stays small.
+pub const MAX_REPORTED_INDICATORS: usize = 256;
+/// Longest `reject` reason shown, in characters.
+const MAX_REASON_CHARS: usize = 200;
+
+/// Encode within the protocol limits (REQ-SAT-017): a message the core would refuse is an error here, not on
+/// the wire. A write that cannot finish in time means the peer has stopped reading, which is a dead peer
+/// (REQ-SAT-008).
 fn send(sock: &mut TcpStream, m: &Message) -> Result<(), String> {
-    let bytes = encode(&m.to_frame()).map_err(|e| e.to_string())?;
-    sock.write_all(&bytes).map_err(|e| format!("write: {e}"))
+    let bytes = encode_checked(&m.to_frame(), Limits::default()).map_err(|e| e.to_string())?;
+    sock.write_all(&bytes).map_err(|e| {
+        if matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            "the core stopped responding (it is not reading what is sent to it)".to_owned()
+        } else {
+            format!("write: {e}")
+        }
+    })
+}
+
+/// Text from the peer, safe to print: control characters removed, at most [`MAX_REASON_CHARS`] characters.
+fn plain(text: &str) -> String {
+    let mut out: String = text
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_REASON_CHARS + 1)
+        .collect();
+    if out.chars().count() > MAX_REASON_CHARS {
+        out = out.chars().take(MAX_REASON_CHARS).collect();
+        out.push_str("...");
+    }
+    out
+}
+
+/// Whether audio is the format the satellite plays (REQ-SAT-004): 16 kHz, 16-bit, mono.
+fn check_format(f: AudioFormat) -> Result<(), String> {
+    if f == AudioFormat::PCM_16K_MONO {
+        Ok(())
+    } else {
+        Err(format!(
+            "the core sent audio as {} Hz, {} bytes per sample, {} channels; only 16000 Hz, 2 bytes, 1 channel is supported",
+            f.rate, f.width, f.channels
+        ))
+    }
 }
 
 /// Return one message if ready. `Ok(None)` means nothing yet; `closed` is set when the peer hung up.
@@ -186,6 +245,9 @@ fn samples(payload: &[u8]) -> Vec<i16> {
 pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Result<Report, String> {
     sock.set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|e| e.to_string())?;
+    // Without this a core that stops reading blocks write_all for ever, and the dead-peer rule never runs.
+    sock.set_write_timeout(Some(cfg.dead_after.max(IO_TIMEOUT)))
+        .map_err(|e| e.to_string())?;
     let mut dec = Decoder::new(Limits::default());
     let mut closed = false;
     send(
@@ -208,7 +270,7 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
         match poll(&mut sock, &mut dec, &mut closed)? {
             Some(Message::Welcome(_)) => break,
             Some(Message::Reject(r)) => {
-                return Err(format!("{REFUSED}: {}", r.reason));
+                return Err(format!("{REFUSED}: {}", plain(&r.reason)));
             }
             Some(_) => {}
             None if closed => {
@@ -253,7 +315,7 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
             send(
                 &mut sock,
                 &Message::Wake(Wake {
-                    name: "button".into(),
+                    name: device.wake_name(),
                     timestamp_ms: None,
                 }),
             )?;
@@ -295,6 +357,9 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
                 device.mic_active(false);
             }
             Message::SetIndicator(i) => {
+                if report.indicators.len() >= MAX_REPORTED_INDICATORS {
+                    report.indicators.remove(0);
+                }
                 report.indicators.push(i);
                 device.indicator(i);
             }
@@ -313,8 +378,14 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
             Message::MediaControl(a) if device.supports_streams() => {
                 device.pause_stream(a == clawdot_protocol::message::MediaAction::Pause);
             }
-            Message::AudioStart(_) => device.begin_playback(),
-            Message::AudioChunk { payload, .. } => {
+            Message::AudioStart(f) => {
+                check_format(f)?;
+                device.begin_playback();
+            }
+            Message::AudioChunk {
+                format, payload, ..
+            } => {
+                check_format(format)?;
                 let pcm = samples(&payload);
                 report.samples_played += pcm.len();
                 device.play(&pcm);
@@ -327,7 +398,9 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
                     done_pending = true;
                 }
             }
-            Message::Reject(r) => return Err(format!("the core ended the session: {}", r.reason)),
+            Message::Reject(r) => {
+                return Err(format!("the core ended the session: {}", plain(&r.reason)));
+            }
             // Welcome again, errors, events from the satellite side, and anything unknown: ignore (REQ-SAT-009).
             _ => {}
         }
@@ -563,6 +636,211 @@ mod tests {
         let secs: Vec<u64> = (0..8).map(|n| backoff(n).as_secs()).collect();
         assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30, 30]);
         assert_eq!(backoff(u32::MAX).as_secs(), 30, "no overflow");
+    }
+
+    /// A device with a configurable microphone and wake, and nothing else.
+    #[derive(Default)]
+    struct Plain {
+        mic_samples: usize,
+        wake: Option<String>,
+    }
+
+    impl Device for Plain {
+        fn read_mic(&mut self) -> Option<Vec<i16>> {
+            (self.mic_samples > 0).then(|| vec![0; self.mic_samples])
+        }
+        fn begin_playback(&mut self) {}
+        fn play(&mut self, _: &[i16]) {}
+        fn end_playback(&mut self) {}
+        fn stop_playback(&mut self) {}
+        fn indicator(&mut self, _: Indicator) {}
+        fn set_volume(&mut self, _: u8) {}
+        fn set_mute(&mut self, _: bool) {}
+        fn poll_wake(&mut self) -> bool {
+            self.wake.is_some()
+        }
+        fn wake_name(&self) -> String {
+            self.wake.clone().unwrap_or_default()
+        }
+        fn finished(&self) -> bool {
+            false
+        }
+    }
+
+    /// Run `plain` against a core script on a thread; fail the test if the session does not end by itself.
+    fn run_bounded(
+        port: u16,
+        mut dev: Plain,
+        cfg: Config,
+        limit: Duration,
+    ) -> Result<Report, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let _ = tx.send(run(sock, &mut dev, &cfg));
+        });
+        rx.recv_timeout(limit)
+            .expect("the satellite never ended the session")
+    }
+
+    #[test]
+    fn req_sat_008_a_core_that_stops_reading_is_a_dead_peer_not_a_hang() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (port, h) = fake_core(move |s, _| {
+            send(s, &welcome()).unwrap();
+            send(s, &Message::StreamStart).unwrap();
+            // Read nothing more, but keep the connection open until the test is over.
+            let _ = done_rx.recv_timeout(Duration::from_secs(60));
+        });
+        let cfg = Config {
+            wake_on_connect: false,
+            dead_after: Duration::from_millis(400),
+            ..cfg()
+        };
+        let dev = Plain {
+            mic_samples: 400_000,
+            ..Plain::default()
+        };
+        let e = run_bounded(port, dev, cfg, Duration::from_secs(30)).unwrap_err();
+        assert!(e.contains("stopped responding"), "{e}");
+        assert!(!is_refusal(&e), "a dead link is worth retrying");
+        let _ = done_tx.send(());
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn req_sat_017_a_message_over_the_limits_is_not_sent() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (port, h) = fake_core(move |s, _| {
+            send(s, &welcome()).unwrap();
+            send(s, &Message::StreamStart).unwrap();
+            let _ = done_rx.recv_timeout(Duration::from_secs(60));
+        });
+        let cfg = Config {
+            wake_on_connect: false,
+            ..cfg()
+        };
+        // 1.2 MB in one chunk is over the 1 MiB payload limit.
+        let dev = Plain {
+            mic_samples: 600_000,
+            ..Plain::default()
+        };
+        let e = run_bounded(port, dev, cfg, Duration::from_secs(30)).unwrap_err();
+        assert!(e.contains("payload too long"), "{e}");
+        let _ = done_tx.send(());
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn req_sat_006_a_wake_word_is_sent_under_its_own_name() {
+        let (name_tx, name_rx) = std::sync::mpsc::channel();
+        let (port, h) = fake_core(move |s, dec| {
+            let mut closed = false;
+            send(s, &welcome()).unwrap();
+            loop {
+                if let Message::Wake(w) = next(s, dec, &mut closed) {
+                    name_tx.send(w.name).unwrap();
+                    return;
+                }
+            }
+        });
+        let dev = Plain {
+            wake: Some("okay nabu".into()),
+            ..Plain::default()
+        };
+        let cfg = Config {
+            wake_on_connect: false,
+            ..cfg()
+        };
+        let _ = run_bounded(port, dev, cfg, Duration::from_secs(30));
+        assert_eq!(name_rx.recv().unwrap(), "okay nabu");
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn req_sat_004_audio_in_another_format_is_a_protocol_error() {
+        let bad = AudioFormat {
+            rate: 24_000,
+            width: 2,
+            channels: 1,
+        };
+        for chunk in [false, true] {
+            let (port, h) = fake_core(move |s, _| {
+                send(s, &welcome()).unwrap();
+                if chunk {
+                    send(s, &Message::AudioStart(AudioFormat::PCM_16K_MONO)).unwrap();
+                    send(
+                        s,
+                        &Message::AudioChunk {
+                            format: bad,
+                            timestamp_ms: None,
+                            payload: vec![0; 640],
+                        },
+                    )
+                    .unwrap();
+                } else {
+                    send(s, &Message::AudioStart(bad)).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            });
+            let cfg = Config {
+                wake_on_connect: false,
+                ..cfg()
+            };
+            let e = run_bounded(port, Plain::default(), cfg, Duration::from_secs(30)).unwrap_err();
+            assert!(e.contains("24000"), "{e}");
+            assert!(!is_refusal(&e));
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn the_indicator_history_is_bounded_and_keeps_the_newest() {
+        let (port, h) = fake_core(|s, _| {
+            send(s, &welcome()).unwrap();
+            for _ in 0..MAX_REPORTED_INDICATORS * 2 {
+                send(s, &Message::SetIndicator(Indicator::Idle)).unwrap();
+            }
+            send(s, &Message::SetIndicator(Indicator::Error)).unwrap();
+        });
+        let cfg = Config {
+            wake_on_connect: false,
+            ..cfg()
+        };
+        let r = run_bounded(port, Plain::default(), cfg, Duration::from_secs(30)).unwrap();
+        assert_eq!(r.indicators.len(), MAX_REPORTED_INDICATORS);
+        assert_eq!(r.indicators.last(), Some(&Indicator::Error));
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn a_reject_reason_from_the_peer_is_plain_and_short() {
+        for after_welcome in [false, true] {
+            let reason = format!("\u{1b}[31mred\nline\r{}", "x".repeat(500));
+            let (port, h) = fake_core(move |s, _| {
+                if after_welcome {
+                    send(s, &welcome()).unwrap();
+                }
+                send(s, &Message::Reject(Reject { reason })).unwrap();
+            });
+            let e = run(
+                TcpStream::connect(("127.0.0.1", port)).unwrap(),
+                &mut FileDevice::new(vec![]),
+                &cfg(),
+            )
+            .unwrap_err();
+            assert!(!e.chars().any(char::is_control), "{e:?}");
+            assert!(e.contains("[31mred"), "text is kept: {e}");
+            assert!(e.chars().count() < 300, "{}", e.chars().count());
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn the_token_is_not_in_debug_output() {
+        let shown = format!("{:?}", cfg());
+        assert!(!shown.contains("tok\""), "{shown}");
+        assert!(shown.contains("<set>"), "{shown}");
     }
 
     #[test]
