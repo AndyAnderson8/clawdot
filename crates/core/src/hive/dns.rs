@@ -24,7 +24,8 @@ const CACHE_FLUSH: u16 = 0x8000;
 
 const MAX_JUMPS: usize = 8;
 const MAX_NAME: usize = 255;
-/// Records read per message section: a ClawDot message has a handful; anything more is not for us.
+/// The most questions, and the most records of all sections together, a message may declare: a ClawDot
+/// message has a handful; anything more is not for us.
 const MAX_RECORDS: usize = 32;
 
 /// Decoded record data. Types this code does not use are skipped.
