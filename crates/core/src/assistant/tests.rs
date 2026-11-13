@@ -148,12 +148,20 @@ fn an_unset_clock_is_admitted_not_read_out_as_the_time() {
         "what's the date",
         "set an alarm for 7 am",
         "set an alarm for 7 am every day",
-        "remind me in 5 minutes to stretch",
         "remind me to call mum at 5 pm",
     ] {
         assert_eq!(say(&mut a, u), CLOCK_UNSET, "{u}");
     }
-    assert!(a.scheduled().is_empty(), "no alarm or reminder may be set");
+    assert!(
+        a.scheduled().is_empty(),
+        "no alarm or reminder at a time may be set"
+    );
+    // A reminder after a delay is a countdown, like a timer, and needs no calendar.
+    assert_eq!(
+        say(&mut a, "remind me in 5 minutes to stretch"),
+        "Okay, I'll remind you to stretch in 5 minutes."
+    );
+    assert_eq!(a.scheduled().len(), 1);
     // Commands that do not depend on the time still work.
     assert_eq!(
         say(&mut a, "cancel the timer"),
@@ -168,7 +176,7 @@ fn an_unset_clock_is_admitted_not_read_out_as_the_time() {
         say(&mut a, "how much time is left"),
         "10 minutes left on your timer."
     );
-    assert_eq!(a.scheduled().len(), 1);
+    assert_eq!(a.scheduled().len(), 2);
     assert_eq!(say(&mut a, "cancel the timer"), "Timer cancelled.");
     // Once the clock is set, the same questions are answered.
     clock.0.store(utc(2026, 11, 7, 14, 42), Ordering::Relaxed);

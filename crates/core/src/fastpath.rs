@@ -218,8 +218,8 @@ impl Intent {
         }
     }
 
-    /// Whether the answer or effect depends on the wall clock being right. A countdown timer is not
-    /// one: it runs on the monotonic clock and works on a device that has never had the time.
+    /// Whether the answer or effect depends on the wall clock being right. A countdown is not one: a timer, or
+    /// a reminder after a delay, runs on the monotonic clock and works on a device that has never had the time.
     #[must_use]
     pub const fn needs_valid_clock(self) -> bool {
         match self {
@@ -233,7 +233,6 @@ impl Intent {
             | Self::AlarmSetDaily
             | Self::AlarmSetWeekdays
             | Self::AlarmSetWeekend
-            | Self::ReminderSetIn
             | Self::ReminderSetAt => true,
             Self::Stop
             | Self::InboxStatus
@@ -253,6 +252,7 @@ impl Intent {
             | Self::TimerCancel
             | Self::TimerQuery
             | Self::TimerSet
+            | Self::ReminderSetIn
             | Self::StopwatchReset
             | Self::AlarmCancel => false,
         }
