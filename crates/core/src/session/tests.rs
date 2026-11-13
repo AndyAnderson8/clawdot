@@ -3037,6 +3037,30 @@ async fn proposed_calls_run_a_later_call_after_a_hold_in_the_same_batch() {
     );
 }
 
+/// REQ-SEC-012: a turn that outside text started is not offered `ask_user`; one the user started is.
+#[tokio::test(flavor = "current_thread")]
+async fn ask_user_is_not_offered_in_an_event_turn() {
+    let b = Script::new(vec![text("Noted.")]);
+    let (mut h, mut c, mut u) = (
+        Lab::default(),
+        conv(),
+        UsageTracker::new(UsageLimits::default()),
+    );
+    event_turn(
+        "hook",
+        &b,
+        inputs_cfg(&mut h, &mut c, &cfg(), &mut u, 1000),
+        "alert",
+    )
+    .await;
+    let tools = &b.requests()[0].tools;
+    assert!(!tools.is_empty());
+    assert!(tools.iter().all(|t| t.name != ASK_USER));
+    let b = Script::new(vec![text("Hi.")]);
+    lturn(&TurnCtl::default(), &b, &mut h, &mut c, &cfg(), "hello").await;
+    assert!(b.requests()[0].tools.iter().any(|t| t.name == ASK_USER));
+}
+
 // REQ-SEC-011: the 120-second window still ends a held action that nobody answered, and then a new call can
 // be held.
 #[tokio::test(flavor = "current_thread")]

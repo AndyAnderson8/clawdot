@@ -1074,7 +1074,7 @@ async fn voice_turn<H: ToolHost>(
     }
     if let Some(calls) = calls {
         let mut tools = offered(&*t.host, &t.cfg);
-        tools.extend(pseudo_tools(t.conv));
+        tools.extend(pseudo_tools(t.conv, t.by_user));
         // The calls enter the history as a model reply would have put them, so every call has its result.
         t.conv
             .history
