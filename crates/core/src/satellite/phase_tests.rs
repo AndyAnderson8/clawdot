@@ -1,8 +1,14 @@
 //! The session phases, each exercised alone against an in-memory writer (REQ-SAT-002, REQ-MUS-004, REQ-SAT-020).
 
+use super::handshake::{Accepted, handshake, reset_answer};
+use super::playback::{Audio, Music, apply_effects, finish_speech, on_playback_done};
+use super::state::{Pending, SessionState};
 use super::*;
+use crate::assistant::{Effect, MediaCmd};
 use crate::inbox::endpoint::hash_token;
+use clawdot_protocol::frame::{Decoder, Limits, encode};
 use clawdot_protocol::message::{Capabilities, Hello, Version};
+use clawdot_protocol::message::{MediaAction, Message, PROTOCOL_VERSION};
 
 /// Everything written to `bytes`, decoded.
 fn decode_all(bytes: &[u8]) -> Vec<Message> {
