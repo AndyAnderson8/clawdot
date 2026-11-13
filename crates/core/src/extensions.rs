@@ -847,45 +847,7 @@ impl Extensions {
     /// and marked `needs_review` (REQ-SKL-002); nothing in it is run. What was left out, and why, is kept in
     /// the listing as `import`.
     fn skill_import(&mut self, v: &Value) -> Result<(), Fail> {
-        let mut found: Vec<Skill> = Vec::new();
-        let mut said: Vec<String> = Vec::new();
-        if v["format"] == EXPORT_FORMAT && v["version"] == 1 {
-            let Some(list) = v["skills"].as_array() else {
-                return Err(invalid("The file has no skills in it."));
-            };
-            for item in list {
-                match serde_json::from_value::<Skill>(item.clone()) {
-                    Ok(s) => found.push(s),
-                    Err(_) => said.push("a skill in the file is not in the right shape".to_owned()),
-                }
-            }
-        } else if v["format"] == SKILL_FOLDER_FORMAT {
-            let files: Vec<SkillFile> = serde_json::from_value(v["files"].clone())
-                .map_err(|_| invalid("Expected {\"files\": [{\"path\":.., \"text\":..}]}."))?;
-            if files.len() > MAX_IMPORT_FILES {
-                return Err(invalid(format!(
-                    "That is too many files at once. Choose a folder with at most {MAX_IMPORT_FILES} files."
-                )));
-            }
-            let (drafts, left_out) = skillfolder::read(&files);
-            said.extend(left_out);
-            for d in drafts {
-                found.push(Skill {
-                    name: d.name,
-                    instructions: d.instructions,
-                    tools: Vec::new(),
-                    enabled: false,
-                    description: d.description,
-                    source: d.source,
-                    needs_review: true,
-                    files: d.files,
-                });
-            }
-        } else {
-            return Err(invalid(
-                "That is not a skills file. Choose a skill folder or its SKILL.md, or a file made by Export on the Skills tab.",
-            ));
-        }
+        let (found, mut said) = skills_in_import(v)?;
         let mut added = 0usize;
         let saved = transact(&mut self.skills, self.skills_store.as_ref(), |k| {
             for mut s in found {
@@ -1051,12 +1013,6 @@ impl Extensions {
         http: &HttpTools,
         mcp: &McpClient,
     ) -> Value {
-        let merge = |mut base: Value, extra: Value| {
-            if let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) {
-                b.extend(e.iter().map(|(k, v)| (k.clone(), v.clone())));
-            }
-            base
-        };
         let mut tools = Vec::new();
         for t in builtin {
             if matches!(t.name.as_str(), "play_music" | "music_control") {
@@ -1081,6 +1037,21 @@ impl Extensions {
                 self.tier_fields(&t.name, Some(http.risk(&t.name).tier), true),
             ));
         }
+        let servers = self.mcp_rows(mcp, &mut tools);
+        let problems: Vec<Value> = self
+            .inactive
+            .iter()
+            .map(|(k, n, r)| json!({ "kind": k, "name": n, "reason": r }))
+            .collect();
+        let import = self
+            .import_report
+            .as_ref()
+            .map(|(added, skipped)| json!({ "added": added, "skipped": skipped }));
+        json!({ "tools": tools, "mcp": servers, "skills": self.skills.skills, "problems": problems, "import": import })
+    }
+
+    /// The MCP servers for the listing, and each server's tools added to `tools` as rows of their own.
+    fn mcp_rows(&self, mcp: &McpClient, tools: &mut Vec<Value>) -> Vec<Value> {
         let mut servers = Vec::new();
         for s in mcp.report().as_array().cloned().unwrap_or_default() {
             let name = s["name"].as_str().unwrap_or("").to_owned();
@@ -1107,17 +1078,61 @@ impl Extensions {
                 "connecting": s["connecting"], "needs_review": s["needs_review"], "enabled": server_on, "deletable": !config, "origin": if config { "config" } else { "portal" },
             }));
         }
-        let problems: Vec<Value> = self
-            .inactive
-            .iter()
-            .map(|(k, n, r)| json!({ "kind": k, "name": n, "reason": r }))
-            .collect();
-        let import = self
-            .import_report
-            .as_ref()
-            .map(|(added, skipped)| json!({ "added": added, "skipped": skipped }));
-        json!({ "tools": tools, "mcp": servers, "skills": self.skills.skills, "problems": problems, "import": import })
+        servers
     }
+}
+
+/// The skills an import file holds, in the order they appear, and a plain sentence for each part that could not
+/// be read. Either a file made by Export or a skill folder; any other file is refused. Nothing is saved here.
+fn skills_in_import(v: &Value) -> Result<(Vec<Skill>, Vec<String>), Fail> {
+    let mut found: Vec<Skill> = Vec::new();
+    let mut said: Vec<String> = Vec::new();
+    if v["format"] == EXPORT_FORMAT && v["version"] == 1 {
+        let Some(list) = v["skills"].as_array() else {
+            return Err(invalid("The file has no skills in it."));
+        };
+        for item in list {
+            match serde_json::from_value::<Skill>(item.clone()) {
+                Ok(s) => found.push(s),
+                Err(_) => said.push("a skill in the file is not in the right shape".to_owned()),
+            }
+        }
+    } else if v["format"] == SKILL_FOLDER_FORMAT {
+        let files: Vec<SkillFile> = serde_json::from_value(v["files"].clone())
+            .map_err(|_| invalid("Expected {\"files\": [{\"path\":.., \"text\":..}]}."))?;
+        if files.len() > MAX_IMPORT_FILES {
+            return Err(invalid(format!(
+                "That is too many files at once. Choose a folder with at most {MAX_IMPORT_FILES} files."
+            )));
+        }
+        let (drafts, left_out) = skillfolder::read(&files);
+        said.extend(left_out);
+        for d in drafts {
+            found.push(Skill {
+                name: d.name,
+                instructions: d.instructions,
+                tools: Vec::new(),
+                enabled: false,
+                description: d.description,
+                source: d.source,
+                needs_review: true,
+                files: d.files,
+            });
+        }
+    } else {
+        return Err(invalid(
+            "That is not a skills file. Choose a skill folder or its SKILL.md, or a file made by Export on the Skills tab.",
+        ));
+    }
+    Ok((found, said))
+}
+
+/// `base` with every field of `extra` set on it.
+fn merge(mut base: Value, extra: Value) -> Value {
+    if let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) {
+        b.extend(e.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    base
 }
 
 fn save_failed(e: crate::store::StoreError) -> Fail {

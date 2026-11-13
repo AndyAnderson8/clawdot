@@ -6,7 +6,7 @@
 
 use crate::board_file::{BoardFile, ButtonSource as SourceSpec};
 use std::collections::VecDeque;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -123,6 +123,54 @@ pub struct KeyButtons {
 /// Most events kept for the loop to read. Overflow drops the oldest (REQ-DEV-020).
 pub const QUEUE_LIMIT: usize = 32;
 
+/// Longest line the key reader keeps, in bytes. Key lines are a letter or a word; anything longer is not one.
+const MAX_KEY_LINE: usize = 256;
+
+enum Line {
+    Text(String),
+    /// A line longer than [`MAX_KEY_LINE`]; it has been read to its end and thrown away.
+    TooLong,
+    End,
+}
+
+/// The next line, read with a cap. Bytes that are not UTF-8 become replacement characters (they match no key)
+/// instead of ending the reader.
+fn next_line(reader: &mut impl BufRead) -> Line {
+    let mut buf = Vec::new();
+    loop {
+        match reader
+            .by_ref()
+            .take(MAX_KEY_LINE as u64)
+            .read_until(b'\n', &mut buf)
+        {
+            Ok(0) => return Line::End,
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Line::End,
+        }
+    }
+    if buf.last() == Some(&b'\n') || buf.len() < MAX_KEY_LINE {
+        return Line::Text(String::from_utf8_lossy(&buf).into_owned());
+    }
+    // Full without a newline: skip to the end of the line.
+    let mut sink = Vec::new();
+    loop {
+        sink.clear();
+        match reader
+            .by_ref()
+            .take(MAX_KEY_LINE as u64)
+            .read_until(b'\n', &mut sink)
+        {
+            Ok(0) => break,
+            Ok(_) if sink.last() == Some(&b'\n') => break,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    Line::TooLong
+}
+
 /// A bounded queue: pushing past the limit drops the oldest event.
 #[derive(Debug, Default)]
 struct Queue {
@@ -152,9 +200,13 @@ impl KeyButtons {
         let tx = queue.clone();
         let has_action = keys.iter().any(|(_, b)| b == "action");
         thread::spawn(move || {
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
-                let line = line.trim().to_ascii_lowercase();
+            let mut reader = reader;
+            loop {
+                let line = match next_line(&mut reader) {
+                    Line::End => break,
+                    Line::TooLong => continue,
+                    Line::Text(t) => t.trim().to_ascii_lowercase(),
+                };
                 let button = match line.as_str() {
                     "q" | "quit" | "exit" => {
                         tx.push(ButtonEvent::Quit);
@@ -193,6 +245,13 @@ impl KeyButtons {
             }
         });
         Self { queue }
+    }
+
+    /// Whether the input has ended (the terminal closed, or the stream ran out). The daemon keeps running; only
+    /// `q` stops it.
+    #[must_use]
+    pub fn input_ended(&self) -> bool {
+        self.queue.closed.lock().is_ok_and(|c| *c)
     }
 
     /// Read from the terminal, with the key map of a board file.
@@ -544,7 +603,7 @@ mod tests {
         );
         // Wait for the reader thread to finish (it pushes Quit last).
         let end = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < end && !*k.queue.closed.lock().unwrap() {
+        while Instant::now() < end && !k.input_ended() {
             thread::sleep(Duration::from_millis(2));
         }
         let mut n = 0;
@@ -557,6 +616,32 @@ mod tests {
         }
         assert!(n <= QUEUE_LIMIT, "{n} events kept");
         assert_eq!(last_button, "stop", "the newest press survived");
+    }
+
+    #[test]
+    fn req_dev_020_bad_bytes_and_endless_lines_do_not_stop_the_key_reader() {
+        let mut input = b"t\n\xff\xfe\xfd\n".to_vec();
+        // A line with no end for much longer than any key line: read with a cap, skipped, and reading goes on.
+        input.extend(std::iter::repeat_n(b'x', 1_000_000));
+        input.extend_from_slice(b"\ns\nt");
+        let keys = vec![('t', "action".to_owned()), ('s', "stop".to_owned())];
+        let mut k = KeyButtons::new(Cursor::new(input), keys);
+        let end = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < end && !k.input_ended() {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(k.input_ended());
+        let mut downs = Vec::new();
+        while let Some(e) = k.poll() {
+            if let ButtonEvent::Edge {
+                button, down: true, ..
+            } = e
+            {
+                downs.push(button);
+            }
+        }
+        // `t`, then (after the bad bytes) nothing for the junk lines, then `s`, then the unterminated `t`.
+        assert_eq!(downs, ["action", "stop", "action"]);
     }
 
     #[test]

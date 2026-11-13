@@ -9,8 +9,8 @@ use std::ops::Range;
 
 use crate::error::{Error, Result};
 use crate::kernels::{
-    ConvGeometry, QuantParams, Requant, Rounding, conv2d, depthwise_conv2d, fully_connected,
-    logistic_table, multiply_by_quantized, out_size, quantize_multiplier,
+    ConvGeometry, QuantParams, Requant, Rounding, checked_requant, conv2d, depthwise_conv2d,
+    fully_connected, logistic_table, multiply_by_quantized, out_size,
 };
 use crate::model::{Activation, Model, OpKind, Operator, Options, Subgraph, Tensor, TensorType};
 
@@ -125,6 +125,18 @@ pub struct Interpreter {
     step_outputs: Vec<Vec<(usize, Range<usize>)>>,
     trace_ids: Vec<usize>,
     traced: Vec<(usize, Vec<i8>)>,
+}
+
+/// Whether the arena and all variables fit in [`MAX_MEMORY`]. The sizes are summed with saturation and nothing is
+/// allocated here.
+fn check_variable_memory(arena_len: usize, sizes: &[Option<usize>]) -> Result<()> {
+    let total = sizes
+        .iter()
+        .fold(arena_len, |t, s| t.saturating_add(s.unwrap_or(0)));
+    if total > MAX_MEMORY {
+        return Err(Error::Limit("tensor arena and variables over 1 MiB"));
+    }
+    Ok(())
 }
 
 fn invalid(msg: impl Into<String>) -> Error {
@@ -496,23 +508,19 @@ impl Interpreter {
         }
 
         // Variable buffers.
-        let mut vars = Vec::with_capacity(sizes.len());
-        let mut total = arena_len;
         for (i, s) in sizes.iter().enumerate() {
-            let n = s.unwrap_or(0);
             if let Some((_, len)) = var_init.get(i).copied().flatten() {
-                if len != n {
+                if len != s.unwrap_or(0) {
                     return Err(invalid(
                         "a variable's initial value differs in size from the variable",
                     ));
                 }
             }
-            total = total.saturating_add(n);
-            vars.push(vec![0i8; n]);
         }
-        if total > MAX_MEMORY {
-            return Err(Error::Limit("tensor arena and variables over 1 MiB"));
-        }
+        // Check the total before allocating anything: a bad model must not be able to abort the process
+        // (REQ-WAK-002).
+        check_variable_memory(arena_len, &sizes)?;
+        let vars: Vec<Vec<i8>> = sizes.iter().map(|s| vec![0i8; s.unwrap_or(0)]).collect();
 
         // Input and output tensors.
         let in_t = &sg.tensors[input_id];
@@ -732,9 +740,9 @@ impl Plan<'_> {
                         output_zp: out_zp,
                         act_min: lo,
                         act_max: hi,
-                        requant: vec![quantize_multiplier(
+                        requant: vec![checked_requant(
                             f64::from(in_scale) * f64::from(scales[0]) / f64::from(out_scale),
-                        )],
+                        )?],
                         rounding: self.rounding,
                     },
                     input: self.arena(in_i, what)?,
@@ -876,7 +884,7 @@ impl Plan<'_> {
                     output: self.arena(out_i, what)?,
                     input_zp: in_zp,
                     output_zp: out_zp,
-                    requant: quantize_multiplier(f64::from(in_scale) / f64::from(out_scale)),
+                    requant: checked_requant(f64::from(in_scale) / f64::from(out_scale))?,
                     lo,
                     hi,
                 })
@@ -984,10 +992,8 @@ impl Plan<'_> {
         let (lo, hi) = activation_range(activation, out_zp);
         let requant = scales
             .iter()
-            .map(|&s| {
-                quantize_multiplier(f64::from(in_scale) * f64::from(s) / f64::from(out_scale))
-            })
-            .collect();
+            .map(|&s| checked_requant(f64::from(in_scale) * f64::from(s) / f64::from(out_scale)))
+            .collect::<Result<Vec<_>>>()?;
         self.account(
             (n * out_h * out_w * out_c) as u64,
             (k_h * k_w * if depthwise { 1 } else { in_c }) as u64,
@@ -1331,4 +1337,24 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn req_wak_002_variable_sizes_are_summed_and_checked_before_anything_is_allocated() {
+        // These sizes would abort the process if a buffer were allocated for them; the check only adds.
+        let huge = [Some(usize::MAX / 2), Some(usize::MAX / 2), Some(8)];
+        assert!(matches!(
+            check_variable_memory(0, &huge),
+            Err(Error::Limit(_))
+        ));
+        assert!(matches!(
+            check_variable_memory(MAX_MEMORY, &[Some(1)]),
+            Err(Error::Limit(_))
+        ));
+        assert!(check_variable_memory(MAX_MEMORY - 8, &[Some(8), None]).is_ok());
+    }
 }

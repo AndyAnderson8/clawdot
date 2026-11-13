@@ -119,6 +119,69 @@ impl Default for AuditConfig {
     }
 }
 
+impl Record {
+    /// The record of one act, with every name and text clipped, redacted and bounded.
+    fn of(
+        id: u64,
+        ts: Ts,
+        day: i64,
+        turn: u64,
+        trigger: &str,
+        cost: Option<f64>,
+        a: &Act<'_>,
+    ) -> Self {
+        let (status, result) = match a.outcome {
+            None => (None, None),
+            Some(Ok(text)) => (Some("ok"), Some(excerpt(text))),
+            Some(Err(text)) => (Some("error"), Some(excerpt(text))),
+        };
+        let detail = match a.outcome {
+            Some(Ok(text)) if text.chars().count() > LONG_RESULT_CHARS => Some(redact_detail(text)),
+            _ => None,
+        };
+        Self {
+            v: FORMAT,
+            id,
+            ts,
+            day,
+            turn,
+            trigger: clean_name(trigger),
+            tool: clean_name(a.tool),
+            tier: a.tier.map_or("unknown", Tier::label).to_owned(),
+            args: redact_args(a.args),
+            decision: a.decision.to_owned(),
+            held_id: a.held_id,
+            dry_run: a.decision == decision::DRY_RUN,
+            status: status.map(str::to_owned),
+            result,
+            detail,
+            turn_cost_usd: cost.filter(|c| c.is_finite() && *c > 0.0),
+            note: a.note.map(|n| clip(n, MAX_VALUE_CHARS)),
+        }
+    }
+}
+
+/// The record as one line of JSON that fits a line of the log. A long detail is shortened, and dropped if it
+/// still does not fit, rather than the record being lost. `None` when it cannot be serialised or cannot be
+/// made to fit.
+fn line_of(rec: &mut Record) -> Option<String> {
+    let mut line = serde_json::to_string(rec).ok()?;
+    if line.len() > MAX_LINE_BYTES && rec.detail.is_some() {
+        // Multi-byte text can make a long detail too big for one line: keep less rather than lose the record.
+        rec.detail = rec.detail.take().map(|d| clip(&d, 500));
+        line = serde_json::to_string(rec).ok()?;
+        if line.len() > MAX_LINE_BYTES {
+            rec.detail = None;
+            line = serde_json::to_string(rec).ok()?;
+        }
+    }
+    if line.len() > MAX_LINE_BYTES {
+        // Cannot happen with the clips above; refuse rather than write something unbounded.
+        return None;
+    }
+    Some(line)
+}
+
 /// One line of the log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
@@ -468,48 +531,7 @@ impl AuditLog {
         let id = s.next_id;
         // The day the counts are for, which is not the day asked for while the clock is unset (see load_counts).
         let day = s.load_counts(day);
-        let (status, result) = match a.outcome {
-            None => (None, None),
-            Some(Ok(text)) => (Some("ok"), Some(excerpt(text))),
-            Some(Err(text)) => (Some("error"), Some(excerpt(text))),
-        };
-        let detail = match a.outcome {
-            Some(Ok(text)) if text.chars().count() > LONG_RESULT_CHARS => Some(redact_detail(text)),
-            _ => None,
-        };
-        let mut rec = Record {
-            v: FORMAT,
-            id,
-            ts,
-            day,
-            turn,
-            trigger: clean_name(trigger),
-            tool: clean_name(a.tool),
-            tier: a.tier.map_or("unknown", Tier::label).to_owned(),
-            args: redact_args(a.args),
-            decision: a.decision.to_owned(),
-            held_id: a.held_id,
-            dry_run: a.decision == decision::DRY_RUN,
-            status: status.map(str::to_owned),
-            result,
-            detail,
-            turn_cost_usd: cost.filter(|c| c.is_finite() && *c > 0.0),
-            note: a.note.map(|n| clip(n, MAX_VALUE_CHARS)),
-        };
-        let mut line = serde_json::to_string(&rec).ok()?;
-        if line.len() > MAX_LINE_BYTES && rec.detail.is_some() {
-            // Multi-byte text can make a long detail too big for one line: keep less rather than lose the record.
-            rec.detail = rec.detail.take().map(|d| clip(&d, 500));
-            line = serde_json::to_string(&rec).ok()?;
-            if line.len() > MAX_LINE_BYTES {
-                rec.detail = None;
-                line = serde_json::to_string(&rec).ok()?;
-            }
-        }
-        if line.len() > MAX_LINE_BYTES {
-            // Cannot happen with the clips above; refuse rather than write something unbounded.
-            return None;
-        }
+        let mut line = line_of(&mut Record::of(id, ts, day, turn, trigger, cost, a))?;
         line.push('\n');
         // The daily caps count what ran, whether or not the record could be written: a full or read-only disk
         // must not turn the caps off (REQ-SEC-016).

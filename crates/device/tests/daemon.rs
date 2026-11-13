@@ -4,7 +4,9 @@
 
 use clawdot_device::board::{Board, ConfiguredBoard, NullBoard, Parts};
 use clawdot_device::button::{ButtonEvent, ScriptedButtons};
-use clawdot_device::daemon::{DaemonConfig, DaemonDevice, GainOut, run_forever};
+use clawdot_device::daemon::{
+    CONNECT_TIMEOUT, DaemonConfig, DaemonDevice, GainOut, connect_core, quiet_policy, run_forever,
+};
 use clawdot_device::led::{LedState, NullLeds};
 use clawdot_device::quiet::{QuietHours, QuietPolicy};
 use clawdot_device::{BoardFile, tone};
@@ -468,4 +470,138 @@ fn req_dev_029_the_real_engine_hears_its_word_from_the_open_microphone_and_wakes
     core.join().unwrap();
     assert!(r.is_ok() || dev.inner().wakes() >= 1, "{r:?}");
     assert_eq!(dev.inner().wakes(), 1, "one utterance, one wake");
+}
+
+#[test]
+fn req_dev_020_connecting_to_a_core_that_never_answers_is_bounded() {
+    // A listener whose accept queue is full drops further connection attempts without answering, which is
+    // what an unreachable host looks like to the caller.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let mut held = Vec::new();
+    let mut stuck = false;
+    for _ in 0..70_000 {
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(50)) {
+            Ok(s) => held.push(s),
+            Err(_) => {
+                stuck = true;
+                break;
+            }
+        }
+    }
+    if !stuck {
+        eprintln!("this system accepts every connection: cannot make an unanswered address");
+        return;
+    }
+    let started = Instant::now();
+    let r = connect_core(&addr.to_string(), Duration::from_millis(300));
+    assert!(r.is_err(), "nothing answers, so this cannot succeed");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+    drop(held);
+}
+
+#[test]
+fn req_dev_020_a_core_that_accepts_and_drops_is_retried_ever_more_slowly() {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for s in l.incoming() {
+            drop(s);
+        }
+    });
+    let rec = Rec::default();
+    let mut dev = DaemonDevice::new(desktop_parts(&rec, ""), DaemonConfig::default());
+    let mut calls = 0u32;
+    let mut slept = Duration::ZERO;
+    let r = run_forever(
+        || connect_core(&format!("127.0.0.1:{port}"), CONNECT_TIMEOUT),
+        &mut dev,
+        &cfg(),
+        Some(3),
+        |d| {
+            calls += 1;
+            assert!(calls < 600, "the backoff never grew: retried every second");
+            slept += d;
+        },
+    );
+    assert!(r.is_err());
+    // Waits of 1 s and 2 s before the third failed attempt ends it.
+    assert!(slept >= Duration::from_secs(3), "{slept:?}");
+}
+
+#[test]
+fn req_dev_017_a_press_the_satellite_ignores_does_not_light_wake() {
+    let rec = Rec::default();
+    let mut dev = DaemonDevice::new(
+        scripted_parts(&rec, press("action"), true),
+        DaemonConfig::default(),
+    );
+    dev.set_online(true);
+    dev.set_mute(true);
+    assert!(!dev.poll_wake(), "muted: the press is ignored");
+    assert_ne!(dev.status().led, LedState::Wake);
+    assert_eq!(dev.status().led, LedState::Muted);
+
+    let rec = Rec::default();
+    let mut dev = DaemonDevice::new(
+        scripted_parts(&rec, press("action"), true),
+        DaemonConfig::default(),
+    );
+    dev.set_online(true);
+    assert!(dev.poll_wake(), "idle: the press is accepted");
+    assert_eq!(dev.status().led, LedState::Wake);
+}
+
+#[test]
+fn req_dev_015_the_muted_indicator_sets_the_muted_state() {
+    let rec = Rec::default();
+    let mut dev = DaemonDevice::new(desktop_parts(&rec, ""), DaemonConfig::default());
+    dev.set_online(true);
+    dev.indicator(Indicator::Muted);
+    assert!(dev.status().muted);
+    dev.indicator(Indicator::Idle);
+    assert_eq!(
+        dev.status().led,
+        LedState::Muted,
+        "idle does not clear a mute that is still on"
+    );
+}
+
+#[test]
+fn req_dev_006_the_quiet_led_level_is_the_boards_own() {
+    let mut v: serde_json::Value = serde_json::from_str(DESKTOP).unwrap();
+    v["leds"]["quiet_brightness_pct"] = serde_json::Value::from(30);
+    let file = BoardFile::from_value(&v).unwrap();
+    let led_text = Arc::new(Mutex::new(Vec::<u8>::new()));
+    struct W(Arc<Mutex<Vec<u8>>>);
+    impl Write for W {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let board = ConfiguredBoard::new(file)
+        .with_audio(Box::new(WavIn::new(vec![], 0)), Box::new(Rec::default()))
+        .with_key_reader(Box::new(Cursor::new(Vec::new())))
+        .with_led_output(Box::new(W(led_text.clone())));
+    let parts = Box::new(board).assemble().unwrap();
+    let quiet = quiet_policy(Some("22:00-07:00"), None, parts.led_brightness.1).unwrap();
+    let mut dev = DaemonDevice::new(
+        parts,
+        DaemonConfig {
+            quiet,
+            ..DaemonConfig::default()
+        },
+    )
+    .with_clock(|| 23 * 60);
+    dev.pump_local();
+    let text = String::from_utf8(led_text.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("led: brightness 30%"), "{text}");
 }

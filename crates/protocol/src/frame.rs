@@ -124,6 +124,26 @@ pub fn encode(frame: &Frame) -> Result<Vec<u8>, FrameError> {
     Ok(out)
 }
 
+/// Serialise a frame and refuse one a conforming receiver would reject (REQ-SAT-017): a header line longer than
+/// `limits.max_header` (senders here put the data inline, so it counts toward the header) or a payload longer
+/// than `limits.max_payload`.
+///
+/// # Errors
+/// [`FrameError::HeaderTooLong`] or [`FrameError::PayloadTooLong`] for an oversized part, and everything
+/// [`encode`] returns.
+pub fn encode_checked(frame: &Frame, limits: Limits) -> Result<Vec<u8>, FrameError> {
+    if frame.payload.len() > limits.max_payload {
+        return Err(FrameError::PayloadTooLong(frame.payload.len()));
+    }
+    let out = encode(frame)?;
+    // The header is everything before the single newline; the payload follows it.
+    let header_len = out.len() - frame.payload.len() - 1;
+    if header_len > limits.max_header {
+        return Err(FrameError::HeaderTooLong);
+    }
+    Ok(out)
+}
+
 #[derive(Debug)]
 struct Pending {
     kind: String,
@@ -366,6 +386,37 @@ mod tests {
         let mut d = Decoder::new(Limits::default());
         d.push(b"{\"type\":\"x\",\"payload_length\":999999999999}\n");
         assert!(matches!(d.next_frame(), Err(FrameError::PayloadTooLong(_))));
+    }
+
+    #[test]
+    fn req_sat_017_encode_checked_refuses_what_a_receiver_would_reject() {
+        let limits = Limits {
+            max_header: 64,
+            max_data: 64,
+            max_payload: 8,
+        };
+        let ok = Frame::new("audio-chunk").with_payload(vec![0; 8]);
+        assert_eq!(
+            encode_checked(&ok, limits).unwrap(),
+            encode(&ok).unwrap(),
+            "a frame within limits is encoded as before"
+        );
+        let big = Frame::new("audio-chunk").with_payload(vec![0; 9]);
+        assert_eq!(
+            encode_checked(&big, limits),
+            Err(FrameError::PayloadTooLong(9))
+        );
+        let mut data = Map::new();
+        data.insert("text".into(), Value::String("x".repeat(100)));
+        let long = Frame::new("error").with_data(data);
+        assert_eq!(
+            encode_checked(&long, limits),
+            Err(FrameError::HeaderTooLong)
+        );
+        // What it accepts, the decoder with the same limits accepts.
+        let mut d = Decoder::new(limits);
+        d.push(&encode_checked(&ok, limits).unwrap());
+        assert_eq!(d.next_frame().unwrap().unwrap(), ok);
     }
 
     #[test]

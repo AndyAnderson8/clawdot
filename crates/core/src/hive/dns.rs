@@ -239,6 +239,51 @@ fn read_name(buf: &[u8], pos: &mut usize) -> Option<String> {
     Some(out)
 }
 
+/// The data of one record of type `t` at `start..start + len`, which the caller has checked lies inside `buf`.
+/// The outer `None` is a record that is malformed; the inner `None` is a type this module does not keep.
+fn rdata(buf: &[u8], t: u16, start: usize, len: usize) -> Option<Option<Rdata>> {
+    let end = start + len;
+    Some(match t {
+        T_PTR => {
+            let mut p = start;
+            Some(Rdata::Ptr(read_name(buf, &mut p)?))
+        }
+        T_SRV if len >= 7 => {
+            let port = u16::from_be_bytes([buf[start + 4], buf[start + 5]]);
+            let mut p = start + 6;
+            Some(Rdata::Srv {
+                port,
+                target: read_name(buf, &mut p)?,
+            })
+        }
+        T_TXT => {
+            let mut txt = Vec::new();
+            let mut p = start;
+            while p < end {
+                let l = usize::from(buf[p]);
+                let s = buf.get(p + 1..p + 1 + l).filter(|_| p + 1 + l <= end)?;
+                p += 1 + l;
+                let s = String::from_utf8_lossy(s);
+                if s.is_empty() {
+                    continue;
+                }
+                let (k, v) = s.split_once('=').unwrap_or((&s, ""));
+                if txt.len() < 16 {
+                    txt.push((k.to_ascii_lowercase(), v.to_owned()));
+                }
+            }
+            Some(Rdata::Txt(txt))
+        }
+        T_A if len == 4 => Some(Rdata::A(Ipv4Addr::new(
+            buf[start],
+            buf[start + 1],
+            buf[start + 2],
+            buf[start + 3],
+        ))),
+        _ => None,
+    })
+}
+
 /// Parse a datagram. `None` means malformed; unknown record types are skipped, not errors.
 #[must_use]
 pub fn parse(buf: &[u8]) -> Option<Message> {
@@ -269,45 +314,7 @@ pub fn parse(buf: &[u8]) -> Option<Message> {
         let start = r.pos;
         let end = start.checked_add(len)?;
         buf.get(start..end)?;
-        let data = match t {
-            T_PTR => {
-                let mut p = start;
-                Some(Rdata::Ptr(read_name(buf, &mut p)?))
-            }
-            T_SRV if len >= 7 => {
-                let port = u16::from_be_bytes([buf[start + 4], buf[start + 5]]);
-                let mut p = start + 6;
-                Some(Rdata::Srv {
-                    port,
-                    target: read_name(buf, &mut p)?,
-                })
-            }
-            T_TXT => {
-                let mut txt = Vec::new();
-                let mut p = start;
-                while p < end {
-                    let l = usize::from(buf[p]);
-                    let s = buf.get(p + 1..p + 1 + l).filter(|_| p + 1 + l <= end)?;
-                    p += 1 + l;
-                    let s = String::from_utf8_lossy(s);
-                    if s.is_empty() {
-                        continue;
-                    }
-                    let (k, v) = s.split_once('=').unwrap_or((&s, ""));
-                    if txt.len() < 16 {
-                        txt.push((k.to_ascii_lowercase(), v.to_owned()));
-                    }
-                }
-                Some(Rdata::Txt(txt))
-            }
-            T_A if len == 4 => Some(Rdata::A(Ipv4Addr::new(
-                buf[start],
-                buf[start + 1],
-                buf[start + 2],
-                buf[start + 3],
-            ))),
-            _ => None,
-        };
+        let data = rdata(buf, t, start, len)?;
         r.pos = end;
         if let Some(data) = data {
             m.records.push(Record { name, ttl, data });

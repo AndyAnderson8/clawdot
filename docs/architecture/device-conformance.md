@@ -32,7 +32,7 @@ Each case is a function named for its requirement (`req_dev_005_stop_without_the
 | 013 | Stripped profile: absent LEDs, buttons and hardware mute are declared absent, each has an equivalent, the error state still makes a sound |
 | 014 | Built-in tones play locally with no core |
 | 015 | Software mute is never reported as hardware; no microphone audio while muted |
-| 016 | Software ducking lowers and restores the daemon's own audio |
+| 016 | Skipped with a reason on every board today: the daemon has no other audio source to duck and does not read the board's duck level. `GainOut` ducking is covered by a unit test of its own |
 | 017 | The wake-engine seam (frame in, detection out, muted means not fed) and push-to-talk from the board's talk button |
 | 019 | Forbidden paths and `..` are refused |
 | 020 | Bounded button queue keeping the newest event; with no core the LED says offline and the mute button still works |

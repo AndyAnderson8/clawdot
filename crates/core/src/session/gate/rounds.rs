@@ -139,7 +139,8 @@ impl<H: ToolHost> Turn<'_, H> {
                     return Ok(c);
                 }
                 Some(Err(e)) => {
-                    self.usage.record_request(day);
+                    // An answer that was cut off after it began may have been billed (REQ-AST-011).
+                    self.usage.record_failed(day, &req, &e);
                     last_err = Some(e);
                 }
             }

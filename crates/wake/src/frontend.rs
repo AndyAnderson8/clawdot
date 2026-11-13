@@ -3,8 +3,10 @@
 //!
 //! This is the algorithm of the TensorFlow Lite Micro microfrontend (Apache-2.0, The TensorFlow Authors),
 //! including its 16-bit fixed-point FFT, which is the kiss FFT (BSD-3-Clause, Mark Borgerding) built for
-//! `FIXED_POINT=16`. It is integer arithmetic throughout, so the output can be compared value for value with
-//! the reference. Written from the published algorithm and checked against the reference output.
+//! `FIXED_POINT=16`. The work done for every frame is integer arithmetic, so the output can be compared value
+//! for value with the reference. The tables (twiddle factors, mel filterbank weights, the gain lookup) are built
+//! once at start-up with floating point, as the reference builds them. Written from the published algorithm
+//! and checked against the reference output.
 //!
 //! Stages per 30 ms window (every 10 ms): Hann window, scale up to use the 16-bit range, real FFT of 512
 //! points, power spectrum, triangular mel filterbank (125 to 7500 Hz), square root, noise reduction,

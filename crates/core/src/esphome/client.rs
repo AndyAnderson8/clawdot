@@ -265,29 +265,15 @@ where
         pipeline.asks.clone(),
         settings,
     )));
-    let now = Instant::now();
-    let mut bridge = Bridge {
+    let mut bridge = Bridge::new(
         link,
-        sat: sat_wr,
-        t: *t,
-        follow_up: pipeline.settings.dialog.follow_up_secs > 0,
-        media: media.clone(),
+        sat_wr,
+        *t,
+        pipeline.settings.dialog.follow_up_secs > 0,
+        media.clone(),
         reply_mode,
-        run: None,
-        listening: false,
-        thinking: false,
-        discard: false,
-        rec: None,
-        live: None,
-        out: None,
-        done_at: None,
-        announce_by: None,
-        ping_at: now + t.ping_every,
-        heard: now,
-        last_audio: now,
-        silence_at: now,
         info,
-    };
+    );
     let caps = Capabilities {
         wake_word: true,
         media_url: bridge.info.media_key.is_some(),
@@ -510,6 +496,40 @@ struct Bridge<IO> {
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
+    fn new(
+        link: Link<IO>,
+        sat: WriteHalf<DuplexStream>,
+        t: Timing,
+        follow_up: bool,
+        media: Option<MediaStore>,
+        reply_mode: ReplyMode,
+        info: Info,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            link,
+            sat,
+            t,
+            follow_up,
+            media,
+            reply_mode,
+            run: None,
+            listening: false,
+            thinking: false,
+            discard: false,
+            rec: None,
+            live: None,
+            out: None,
+            done_at: None,
+            announce_by: None,
+            ping_at: now + t.ping_every,
+            heard: now,
+            last_audio: now,
+            silence_at: now,
+            info,
+        }
+    }
+
     async fn sat_send(&mut self, m: &Message) -> Result<(), String> {
         let bytes = encode(&m.to_frame()).map_err(|e| e.to_string())?;
         self.sat
