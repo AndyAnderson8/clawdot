@@ -76,6 +76,8 @@ warning so a headless device still starts.
 | Voice | `voice` | after a restart (needs the `speech` section of the configuration file) |
 | Listen address, public address | `listen`, `public_url` | after a restart |
 
+**How the layers are built.** The command line is parsed into a `Cli` (`cli.rs`), which holds only what was typed, and the `--config` file into a `Config` (`config.rs`). `seed::resolve` turns those two, the built-in defaults and `settings.json` into one `Resolved` value (`seed.rs`): the effective setting values plus the sections of the file that are read directly (`tools`, `mcp`, `stations`, `speech`, `satellite`, `device`, `updates`, `esphome`). It is built once; start-up reads it by reference and changes nothing in it. The file's value for a setting is found through one table, `FILE_KEYS` in `seed.rs`, that gives for each setting key the JSON pointer to its field in the file; a test fails when a field of the `llm`, `limits`, `agent` or `voice` sections, or a top-level key, has no row and is not on the list of keys read directly or of fields that are not settings. To make a setting settable from the file, add the field to `Config`, a row to `settings::FIELDS`, and a row to `FILE_KEYS`.
+
 The former `board` setting (`auto` or `none`) is retired: nothing ever read it. A `settings.json` or an export that still holds it loads, and the value is dropped. What a device is called now comes from the `device` section of the configuration file, which is read at start.
 
 A change is validated as a whole before anything is saved; an error says what is wrong and how to fix it. The page

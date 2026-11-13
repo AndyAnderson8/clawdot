@@ -45,7 +45,7 @@ Optional features of `clawdot-core` (all off except the first two): `tz` (time-z
 
 ### Start-up and the loop
 
-`main.rs` reads the environment once (`env.rs`), parses arguments (`cli.rs`), runs a one-shot command if asked (`say`, `--create-endpoint`, `--reset-admin`, `--voice-in`), and otherwise calls `startup::start`. That runs a fixed sequence: settings, clock, the stores, the brain, the listening socket (bound before any token is printed), the satellite servers, hive discovery, the update check. It returns an `App`.
+`main.rs` reads the environment once (`env.rs`), parses the arguments into a `Cli` and the `--config` file into a `Config` (`cli.rs`), runs a one-shot command if asked (`say`, `--create-endpoint`, `--reset-admin`, `--voice-in`), and otherwise calls `startup::start`. That first resolves the three layers and the saved settings into one immutable `Resolved` (`seed.rs`), which the rest reads by reference, and then runs a fixed sequence: settings, clock, the stores, the brain, the listening socket (bound before any token is printed), the satellite servers, hive discovery, the update check. It returns an `App`.
 
 `app_loop.rs` is the running application: **one loop that owns the state** (the built-in tools and timers, the portal's tools and skills, settings, the usage files) and reacts to events. Slow work does not run in it. A model turn, a realtime session, speech and a new MCP connection are tasks that send their results back as messages ([ADR-0021](../adr/0021-turns-as-tasks.md)). `runtime.rs` holds the `Brain` (live settings, the status snapshot); what the loop does with a turn, a portal change and a connection result is on `App`, in `app_loop/`.
 
