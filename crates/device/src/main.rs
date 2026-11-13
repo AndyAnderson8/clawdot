@@ -1,12 +1,13 @@
 //! `clawdot-device`: run the device daemon, or check a board file.
 
 use clawdot_device::board::{self, EMBEDDED};
-use clawdot_device::caps::{Build, Declared};
-use clawdot_device::daemon::{DaemonConfig, DaemonDevice, real_sleep, run_forever};
-use clawdot_device::quiet::{QuietHours, QuietPolicy};
+use clawdot_device::caps::{Build, Capability, Declared};
+use clawdot_device::daemon::{
+    CONNECT_TIMEOUT, DaemonConfig, DaemonDevice, connect_core, quiet_policy, real_sleep,
+    run_forever,
+};
 use clawdot_satellite::front::WakeSink;
 use clawdot_satellite::{Config, DEAD_AFTER};
-use std::net::TcpStream;
 use std::process::ExitCode;
 
 const HELP: &str = "\
@@ -62,6 +63,27 @@ struct Opts {
     wake_refractory_ms: Option<u64>,
 }
 
+/// A device name from the command line reaches the audio program as an argument, so a value that starts with
+/// `-` would be read there as an option. The rest of the board file's text rule (`is_token`) is not applied: it
+/// would refuse names such as `Microphone (USB Audio)`, which ffmpeg on Windows needs.
+fn device_name(option: &str, value: String) -> Result<String, String> {
+    if value.is_empty() || value.starts_with('-') || value.chars().any(char::is_control) {
+        return Err(format!(
+            "{option}: the name must not be empty, start with `-`, or contain control characters"
+        ));
+    }
+    Ok(value)
+}
+
+/// A wake model is refused on a board that does not run a wake word on the device (`features.on_device_wake`
+/// false): the engine would be fed and never declared, so the core would not know to expect a word.
+fn wake_allowed(wanted: bool, declared: &Declared) -> Result<(), String> {
+    if wanted && !declared.has(Capability::WakeWord) {
+        return Err("--wake-model: this board's file says `features.on_device_wake` is false, so no wake word runs on the device; remove --wake-model or change the board file".into());
+    }
+    Ok(())
+}
+
 fn parse(args: impl Iterator<Item = String>) -> Result<Option<Opts>, String> {
     let mut o = Opts::default();
     let mut args = args;
@@ -76,10 +98,15 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Opts>, String> {
             "--check" => o.check = true,
             "--quiet" => o.quiet = Some(val("--quiet")?),
             "--quiet-volume" => {
-                o.quiet_volume =
-                    Some(val("--quiet-volume")?.parse().map_err(|_| {
-                        "--quiet-volume needs a whole number from 0 to 100".to_owned()
-                    })?);
+                o.quiet_volume = Some(
+                    val("--quiet-volume")?
+                        .parse()
+                        .ok()
+                        .filter(|v| *v <= 100)
+                        .ok_or_else(|| {
+                            "--quiet-volume needs a whole number from 0 to 100".to_owned()
+                        })?,
+                );
             }
             "--utc-offset-min" => {
                 o.utc_offset_min = val("--utc-offset-min")?
@@ -93,8 +120,12 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Opts>, String> {
                         .map_err(|_| "--turns needs a whole number".to_owned())?,
                 );
             }
-            "--mic-device" => o.mic_device = Some(val("--mic-device")?),
-            "--speaker-device" => o.speaker_device = Some(val("--speaker-device")?),
+            "--mic-device" => {
+                o.mic_device = Some(device_name("--mic-device", val("--mic-device")?)?)
+            }
+            "--speaker-device" => {
+                o.speaker_device = Some(device_name("--speaker-device", val("--speaker-device")?)?);
+            }
             "--always-on" => o.always_on = true,
             "--wake-model" => o.wake_models.push(val("--wake-model")?),
             "--wake-licence" => o.wake_licence = Some(val("--wake-licence")?),
@@ -188,9 +219,10 @@ fn wake_sink(o: &Opts) -> Result<Option<Box<dyn WakeSink>>, String> {
 
 fn go(o: &Opts) -> Result<(), String> {
     let name = o.board.as_deref().ok_or("--board is needed")?;
-    let wake = if o.check { None } else { wake_sink(o)? };
+    // The board decides first whether a wake engine may run on it; only then is a model loaded.
+    let want_wake = !o.check && !o.wake_models.is_empty();
     let build = Build {
-        wake_engine: wake.is_some(),
+        wake_engine: want_wake,
         ..Build::CURRENT
     };
     let board = board::load_tuned(
@@ -206,6 +238,8 @@ fn go(o: &Opts) -> Result<(), String> {
         build,
     )?;
     let declared: Declared = board.declared();
+    wake_allowed(want_wake, &declared)?;
+    let wake = if want_wake { wake_sink(o)? } else { None };
     if o.check {
         println!("board: {}", board.name());
         print!("{}", declared.report());
@@ -217,22 +251,17 @@ fn go(o: &Opts) -> Result<(), String> {
         .as_deref()
         .map(|v| std::env::var(v).map_err(|_| format!("{v} is not set")))
         .transpose()?;
-    let quiet = match &o.quiet {
-        Some(w) => Some(
-            QuietHours::parse(w, o.quiet_volume.unwrap_or(20), 10)
-                .map_err(|e| format!("--quiet: {e}"))?,
-        ),
-        None => None,
-    };
     let device_id = o.id.clone().unwrap_or_else(|| board.name().to_owned());
     let parts = board.assemble()?;
+    // The LED level in quiet hours is the board's own (`leds.quiet_brightness_pct`).
+    let quiet = quiet_policy(o.quiet.as_deref(), o.quiet_volume, parts.led_brightness.1)?;
     for p in &parts.problems {
         eprintln!("clawdot-device: {p}");
     }
     let mut device = DaemonDevice::new(
         parts,
         DaemonConfig {
-            quiet: QuietPolicy::new(quiet),
+            quiet,
             utc_offset_min: o.utc_offset_min,
             max_turns: o.turns,
             verbose: true,
@@ -248,7 +277,7 @@ fn go(o: &Opts) -> Result<(), String> {
     };
     let core = core.to_owned();
     run_forever(
-        || TcpStream::connect(&core).map_err(|e| format!("cannot connect to {core}: {e}")),
+        || connect_core(&core, CONNECT_TIMEOUT),
         &mut device,
         &cfg,
         None,
@@ -286,5 +315,58 @@ fn main() -> ExitCode {
             eprintln!("clawdot-device: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use clawdot_device::BoardFile;
+
+    fn args(a: &[&str]) -> impl Iterator<Item = String> {
+        a.iter()
+            .map(|s| (*s).to_owned())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn req_dev_006_quiet_volume_is_zero_to_one_hundred() {
+        assert!(parse(args(&["--quiet-volume", "100"])).is_ok());
+        for bad in ["101", "255", "256", "-1", "x"] {
+            let e = parse(args(&["--quiet-volume", bad])).err().unwrap();
+            assert!(e.contains("0 to 100"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn req_dev_019_a_device_name_cannot_become_an_option() {
+        for opt in ["--mic-device", "--speaker-device"] {
+            assert!(parse(args(&[opt, "-f"])).is_err(), "{opt}");
+            assert!(parse(args(&[opt, ""])).is_err(), "{opt}");
+            assert!(parse(args(&[opt, "a\nb"])).is_err(), "{opt}");
+            assert!(
+                parse(args(&[opt, "Microphone (USB Audio)"])).is_ok(),
+                "{opt}"
+            );
+        }
+    }
+
+    #[test]
+    fn req_dev_017_a_wake_model_is_refused_where_the_board_has_no_on_device_wake() {
+        let mut v: serde_json::Value =
+            serde_json::from_str(include_str!("../../../boards/desktop.json")).unwrap();
+        let build = Build {
+            wake_engine: true,
+            ..Build::CURRENT
+        };
+        let on = Declared::from_board(&BoardFile::from_value(&v).unwrap(), build);
+        assert!(wake_allowed(true, &on).is_ok());
+        v["features"]["on_device_wake"] = serde_json::Value::from(false);
+        let off = Declared::from_board(&BoardFile::from_value(&v).unwrap(), build);
+        let e = wake_allowed(true, &off).unwrap_err();
+        assert!(e.contains("on_device_wake"), "{e}");
+        assert!(wake_allowed(false, &off).is_ok(), "no model asked for");
     }
 }
