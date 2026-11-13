@@ -874,3 +874,81 @@ fn actions_run_before_the_clock_is_set_count_on_the_first_real_day() {
     assert_eq!(log.today(0), (1, 0));
     assert_eq!(log.today(20_000), (1, 0));
 }
+
+// REQ-SEC-014: a secret named by a key, then a colon, then its value as the next word.
+#[test]
+fn a_key_with_a_colon_hides_the_next_word() {
+    for (text, leak) in [
+        ("config api_key: abc123 done", "abc123"),
+        ("passphrase: correct-horse", "correct-horse"),
+        ("my pin: 1234 ok", "1234"),
+        ("session_id= s3cr3tvalue here", "s3cr3tvalue"),
+    ] {
+        let out = redact_text(text);
+        assert!(!out.contains(leak), "{text} -> {out}");
+        assert!(out.contains(REDACTED));
+    }
+}
+
+#[test]
+fn ordinary_sentences_are_not_taken_for_secrets() {
+    for text in [
+        "The key: under the mat",
+        "Session: Tuesday at five",
+        "Remember to pin the note to the fridge",
+        "Meeting at 3: bring the keys and the cookie jar",
+        "Dinner: pasta, then dessert",
+        "Note: buy milk and eggs",
+        "see https://example.com/blog/a-long-article-about-gardening-in-spring for tips",
+        "my pin code idea: a new game",
+    ] {
+        assert_eq!(redact_text(text), text, "{text}");
+    }
+}
+
+#[test]
+fn a_secret_in_a_url_path_or_fragment_is_hidden() {
+    let hook = "https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXXXXXXXXXXXXXX";
+    let out = redact_text(&format!("post to {hook} now"));
+    assert!(!out.contains("XXXXXXXX"), "{out}");
+    assert!(out.contains("hooks.slack.com/services/T000/B000/"), "{out}");
+    let out = redact_text("open https://app.example.com/cb#access_token=abc&state=ok");
+    assert!(!out.contains("abc") && out.contains("state=ok"), "{out}");
+    let out = redact_text("https://x.example/p?a=1#id_token=zzz");
+    assert!(!out.contains("zzz") && out.contains("a=1"), "{out}");
+    let out = redact_text("https://x.example/home/settings/profile");
+    assert_eq!(out, "https://x.example/home/settings/profile");
+}
+
+// REQ-SEC-014: two argument keys that clean to one name are both recorded.
+#[test]
+fn argument_keys_that_clean_to_the_same_name_do_not_overwrite_each_other() {
+    let args = json!({"a b": "decoy", "a_b": "real", "a/b": "third"});
+    let v = redact_args(&args);
+    let s = v.to_string();
+    for want in ["decoy", "real", "third"] {
+        assert!(s.contains(want), "{s}");
+    }
+    assert_eq!(v.as_object().map(Map::len), Some(3));
+}
+
+// A failed write (a full disk) may leave half a line; the next record must start on its own line.
+#[cfg(unix)]
+#[test]
+fn a_failed_write_does_not_run_the_next_record_into_it() {
+    let dir = TempDir::new("audit-full");
+    let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+    let none = json!({});
+    let ran = act("t", Tier::ReadOnly, &none, decision::RAN);
+    assert!(log.record(1, 1, 1, "voice", None, &ran).is_some());
+    let path = dir.0.join("audit.jsonl");
+    fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink("/dev/full", &path).unwrap();
+    assert!(log.record(1, 1, 1, "voice", None, &ran).is_none());
+    assert_eq!(log.health().write_errors, 1);
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, "{\"half\":").unwrap();
+    assert!(log.record(1, 1, 1, "voice", None, &ran).is_some());
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("{\"half\":\n{"), "{text}");
+}

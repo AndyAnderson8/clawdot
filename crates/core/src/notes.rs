@@ -673,6 +673,24 @@ mod tests {
         assert_eq!(s.forget_nth(0), Err(NoteError::Missing));
     }
 
+    // REQ-SEC-014: "name: value" with a secret name is refused as a note; ordinary notes are not.
+    #[test]
+    fn a_secret_written_as_name_colon_value_is_refused_and_ordinary_notes_are_not() {
+        let s = on();
+        assert_eq!(
+            s.add("my api_key: hunter2", 1).unwrap_err(),
+            NoteError::Secret
+        );
+        for text in [
+            "the key: under the mat",
+            "dentist: Tuesday at 3",
+            "pin the poster above the desk",
+            "wifi name: the blue house",
+            "session: Friday evening",
+        ] {
+            assert!(s.add(text, 1).is_ok(), "{text}");
+        }
+    }
     #[test]
     fn bounds_hold_and_secrets_are_refused() {
         let s = on();

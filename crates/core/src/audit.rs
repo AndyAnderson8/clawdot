@@ -716,13 +716,22 @@ impl State {
                     *needs_newline = false;
                 }
                 let mut f = open_append(path)?;
-                if *needs_newline {
-                    f.write_all(b"\n")?;
-                    *size += 1;
-                    *needs_newline = false;
+                let newline_first = *needs_newline;
+                let written = (|| {
+                    if *needs_newline {
+                        f.write_all(b"\n")?;
+                        *needs_newline = false;
+                    }
+                    f.write_all(line.as_bytes())
+                })();
+                if written.is_err() {
+                    // A write that failed part way (a full disk) may have left half a line: the next record
+                    // starts on a new line, and the size is what the file holds, not what was meant.
+                    *needs_newline = true;
+                    *size = fs::metadata(&*path).map_or(*size, |m| m.len());
+                    return written;
                 }
-                f.write_all(line.as_bytes())?;
-                *size += len;
+                *size += len + u64::from(newline_first);
                 Ok(())
             }
         }
@@ -1036,7 +1045,8 @@ fn clean_name(s: &str) -> String {
 }
 
 /// Words that name a secret when they are a whole word of a key (`api_key`, `apiKey`, `X-Auth-Token`).
-const SECRET_WORDS: [&str; 20] = [
+const SECRET_WORDS: [&str; 21] = [
+    "pin",
     "token",
     "secret",
     "password",
@@ -1173,10 +1183,79 @@ fn redact_words(text: &str) -> String {
         after_scheme = matches!(
             lower.trim_end_matches(':'),
             "bearer" | "basic" | "token" | "authorization" | "apikey" | "password" | "secret"
-        );
+        ) || names_next_word_secret(bare);
         out.push(replaced);
     }
     out.join(" ")
+}
+
+/// Whether a word such as `api_key:` or `pin=` ends in a colon or equals sign after a secret key, so that the
+/// next word is its value (`api_key: abc123`). A key that is also an everyday word on its own (`key:`,
+/// `session:`) does not count, or ordinary sentences would be taken for secrets; with a second word
+/// (`api_key`, `session_id`) or a clearer one (`pin`, `passphrase`) it does.
+fn names_next_word_secret(bare: &str) -> bool {
+    let Some(key) = bare
+        .strip_suffix(':')
+        .or_else(|| bare.strip_suffix('='))
+        .map(|k| k.trim_matches(|c: char| !c.is_alphanumeric()))
+    else {
+        return false;
+    };
+    if key.is_empty() || key.contains(char::is_whitespace) {
+        return false;
+    }
+    let words = key_words(key);
+    if words.len() == 1
+        && matches!(
+            words[0].as_str(),
+            "key" | "session" | "signature" | "cookie" | "auth"
+        )
+    {
+        return false;
+    }
+    sensitive_key(key)
+}
+
+/// Whether a path segment of a URL is a secret (a webhook or an invite token): long, with no spaces, and not
+/// an all-lower-case slug.
+fn secret_path_segment(seg: &str) -> bool {
+    if looks_like_token(seg) {
+        return true;
+    }
+    seg.len() >= 20
+        && seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        && (seg.chars().any(|c| c.is_ascii_digit()) && seg.chars().any(|c| c.is_ascii_alphabetic())
+            || seg.chars().any(|c| c.is_ascii_uppercase())
+                && seg.chars().any(|c| c.is_ascii_lowercase())
+            || seg.chars().all(|c| c.is_ascii_uppercase()))
+}
+
+/// Redact the path segments of a URL that are secrets, keeping the host and the rest.
+fn redact_path(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_owned();
+    };
+    let start = scheme_end + 3;
+    let end = url[start..]
+        .find(['?', '#'])
+        .map_or(url.len(), |i| start + i);
+    let Some(slash) = url[start..end].find('/') else {
+        return url.to_owned();
+    };
+    let path_start = start + slash;
+    let path: Vec<String> = url[path_start..end]
+        .split('/')
+        .map(|seg| {
+            if secret_path_segment(seg) {
+                REDACTED.to_owned()
+            } else {
+                seg.to_owned()
+            }
+        })
+        .collect();
+    format!("{}{}{}", &url[..path_start], path.join("/"), &url[end..])
 }
 
 fn redact_word(word: &str, bare: &str) -> String {
@@ -1190,11 +1269,11 @@ fn redact_word(word: &str, bare: &str) -> String {
         if let Some(at) = authority.rfind('@') {
             let tail = &rest[at + 1..];
             let head = &bare[..scheme_end + 3];
-            return redact_query(&format!("{head}{REDACTED}@{tail}"));
+            return redact_path(&redact_query(&format!("{head}{REDACTED}@{tail}")));
         }
-        return redact_query(word);
+        return redact_path(&redact_query(word));
     }
-    if bare.contains('?') || bare.contains('&') {
+    if bare.contains('?') || bare.contains('&') || bare.contains('#') {
         return redact_query(word);
     }
     // key=value or key:value with a secret-sounding key.
@@ -1211,13 +1290,28 @@ fn redact_word(word: &str, bare: &str) -> String {
     word.to_owned()
 }
 
-/// Redact `name=value` pairs in a query string.
+/// Redact `name=value` pairs in a query string and in a fragment (`#access_token=abc`).
 fn redact_query(s: &str) -> String {
-    let Some(q) = s.find('?') else {
+    let Some(q) = s.find(['?', '#']) else {
         return s.to_owned();
     };
-    let (head, query) = s.split_at(q + 1);
-    let parts: Vec<String> = query
+    let (head, rest) = s.split_at(q + 1);
+    // `rest` is the query, then perhaps a `#` and the fragment; or, when the first mark was `#`, the fragment.
+    let (first, fragment) = match rest.split_once('#') {
+        Some((a, b)) => (a, Some(b)),
+        None => (rest, None),
+    };
+    let mut out = format!("{head}{}", redact_pairs(first));
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(&redact_pairs(f));
+    }
+    out
+}
+
+/// `a=b&c=d` with the values of secret names, and token-like values, replaced.
+fn redact_pairs(pairs: &str) -> String {
+    let parts: Vec<String> = pairs
         .split('&')
         .map(|p| match p.split_once('=') {
             Some((k, v)) if !v.is_empty() && (sensitive_key(k) || looks_like_token(v)) => {
@@ -1226,7 +1320,7 @@ fn redact_query(s: &str) -> String {
             _ => p.to_owned(),
         })
         .collect();
-    format!("{head}{}", parts.join("&"))
+    parts.join("&")
 }
 
 /// A result or message shortened for the log.
@@ -1259,7 +1353,16 @@ fn redact_value(v: &Value, depth: usize) -> Value {
                 } else {
                     redact_value(x, depth + 1)
                 };
-                out.insert(clean_name(k), value);
+                // Two keys can clean to one name; both are kept (`a_b`, `a_b_2`) so the log cannot show one
+                // value where the tool ran with the other.
+                let name = clean_name(k);
+                let mut unique = name.clone();
+                let mut n = 2;
+                while out.contains_key(&unique) {
+                    unique = format!("{name}_{n}");
+                    n += 1;
+                }
+                out.insert(unique, value);
             }
             Value::Object(out)
         }
