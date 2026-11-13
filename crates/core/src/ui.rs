@@ -32,19 +32,26 @@
 //! strict Content-Security-Policy as a second line of defence.
 
 use crate::admin::{self, AdminError};
-use crate::app::{Core, Fail, Op, SchedOp};
+use crate::app::{Core, Op, SchedOp};
 use crate::extensions::{self, ExtOp};
 use crate::http::{BODY_TIMEOUT, read_body};
 use crate::inbox::endpoint::EndpointError;
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_TYPE, HeaderMap, HeaderValue, WWW_AUTHENTICATE};
 use hyper::{Method, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::convert::Infallible;
 use std::net::IpAddr;
 use std::sync::Arc;
+
+use self::common::{
+    KeyBody, MAX_BODY, MAX_SKILL_BODY, MAX_SKILL_IMPORT_BODY, MAX_TOOL_BODY, Resp, attachment,
+    bearer, error, fail_reply, json_reply, query_decode, query_param, read_json, read_json_limit,
+    reply, saved,
+};
+
+mod common;
 
 #[cfg(test)]
 mod csp_tests;
@@ -54,8 +61,6 @@ mod openai_host_tests;
 mod rekey_tests;
 #[cfg(test)]
 mod tests;
-
-type Resp = Response<BoxBody<Bytes, Infallible>>;
 
 /// The page and a gzip copy of it. `ui.html` is generated from the TypeScript sources in `portal/` and
 /// committed (ADR-0016); `build.rs` copies it and makes the gzip, so the program carries no compression code
@@ -70,39 +75,10 @@ const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 /// the picture of their device (or has one saved in the page as data); nothing else on the page asks another site
 /// for anything.
 const CSP: &str = include_str!(concat!(env!("OUT_DIR"), "/ui-csp.txt"));
-/// API bodies are tiny; refuse anything larger.
-const MAX_BODY: usize = 4096;
-/// A tool description with its parameters, and a skills file.
-const MAX_TOOL_BODY: usize = 16 * 1024;
-const MAX_SKILL_BODY: usize = 64 * 1024;
-/// A folder of skills sent as files to import.
-const MAX_SKILL_IMPORT_BODY: usize = 384 * 1024;
 /// Events shown in the overview, newest first.
 const MAX_EVENTS: usize = 50;
 /// Longest event text sent to the page.
 const MAX_TEXT: usize = 600;
-
-fn reply(status: StatusCode, content_type: &'static str, body: String) -> Resp {
-    let mut r = Response::new(Full::new(Bytes::from(body)).boxed());
-    *r.status_mut() = status;
-    r.headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    r.headers_mut()
-        .insert("cache-control", HeaderValue::from_static("no-store"));
-    r.headers_mut().insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
-    r
-}
-
-fn json_reply(status: StatusCode, v: &Value) -> Resp {
-    reply(status, "application/json", v.to_string())
-}
-
-fn error(status: StatusCode, msg: &str) -> Resp {
-    json_reply(status, &json!({ "error": msg }))
-}
 
 /// The static page.
 #[must_use]
@@ -150,12 +126,6 @@ fn accepts_gzip(header: Option<&str>) -> bool {
             (name.eq_ignore_ascii_case("gzip") || name == "*") && !refused
         })
     })
-}
-
-fn bearer(headers: &HeaderMap) -> Option<&str> {
-    let v = headers.get(hyper::header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, rest) = v.split_once(' ')?;
-    scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
 }
 
 fn admin_error(e: AdminError) -> Resp {
@@ -739,12 +709,6 @@ async fn models_with_key(core: &Core, body: Incoming) -> Resp {
     fetch_models(url, &key).await
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeyBody {
-    key: String,
-}
-
 /// `PUT /api/llm/key`: keep the key pasted on the page and use it from now on.
 async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
     let k = match read_json::<KeyBody>(body).await {
@@ -831,14 +795,6 @@ fn realtime_key_clear(core: &Core) -> Resp {
         return error(StatusCode::INTERNAL_SERVER_ERROR, &m);
     }
     json_reply(StatusCode::OK, &json!({ "hint": null }))
-}
-
-/// The value of `key` in a query string, with percent-escapes and `+` decoded; `None` if absent or not text.
-fn query_param(query: Option<&str>, key: &str) -> Option<String> {
-    let raw = query?
-        .split('&')
-        .find_map(|p| p.strip_prefix(key)?.strip_prefix('='))?;
-    query_decode(raw)
 }
 
 /// The voices of OpenAI's speech service, which has a fixed set and no list to ask for.
@@ -974,14 +930,6 @@ fn export_settings(core: &Core) -> Resp {
         );
     }
     attachment(json_reply(StatusCode::OK, &v), "clawdot-settings.json")
-}
-
-/// Mark a response as a file to save.
-fn attachment(mut r: Resp, name: &'static str) -> Resp {
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
-        r.headers_mut().insert("content-disposition", v);
-    }
-    r
 }
 
 /// `GET /api/logs?limit=`: the core's recent warnings and errors, newest first (REQ-CFG-064).
@@ -1242,29 +1190,6 @@ fn notes_forget(core: &Core, id: Option<u64>) -> Resp {
     }
 }
 
-/// Percent-decode a query component (also `+` as a space). `None` when an escape is broken (`%` followed by two
-/// characters that are not hex digits) or the result is not UTF-8: a request is refused rather than guessed at. A
-/// `%` with fewer than two characters after it is not an escape and stays as typed.
-fn query_decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while let Some(&c) = b.get(i) {
-        match c {
-            b'+' => out.push(b' '),
-            b'%' if i + 2 < b.len() => {
-                let digit = |x: u8| char::from(x).to_digit(16);
-                let (h, l) = (digit(b[i + 1])?, digit(b[i + 2])?);
-                out.push(u8::try_from(h * 16 + l).ok()?);
-                i += 2;
-            }
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    String::from_utf8(out).ok()
-}
-
 fn parse_audit_query(raw: &str) -> Result<crate::audit::Query, String> {
     let mut q = crate::audit::Query::default();
     for pair in raw.split('&').filter(|p| !p.is_empty()).take(16) {
@@ -1291,18 +1216,6 @@ fn parse_audit_query(raw: &str) -> Result<crate::audit::Query, String> {
         }
     }
     Ok(q)
-}
-
-/// Map a failed portal request to a status code and a message the page can show as written.
-fn fail_reply(f: &Fail) -> Resp {
-    let status = match f {
-        Fail::NotFound(_) => StatusCode::NOT_FOUND,
-        Fail::Invalid(_) => StatusCode::BAD_REQUEST,
-        Fail::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-        Fail::NotSaved(_, true) => StatusCode::INSUFFICIENT_STORAGE,
-        Fail::NotSaved(_, false) => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    error(status, &f.to_string())
 }
 
 /// Timers, alarms, and reminders: the main loop does the work, so both the voice path and the portal use
@@ -1409,22 +1322,6 @@ async fn skill_action(core: &Core, action: &str, body: Incoming) -> Resp {
         },
         _ => error(StatusCode::NOT_FOUND, "not found"),
     }
-}
-
-async fn read_json<T: serde::de::DeserializeOwned>(
-    body: Incoming,
-) -> Result<T, (StatusCode, &'static str)> {
-    read_json_limit(body, MAX_BODY).await
-}
-
-async fn read_json_limit<T: serde::de::DeserializeOwned>(
-    body: Incoming,
-    max: usize,
-) -> Result<T, (StatusCode, &'static str)> {
-    let Some(bytes) = read_body(body, max, BODY_TIMEOUT).await else {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE, "body too large or too slow"));
-    };
-    serde_json::from_slice(&bytes).map_err(|_| (StatusCode::BAD_REQUEST, "bad request body"))
 }
 
 /// Hashing is deliberately slow; keep it off the async thread.
@@ -1717,14 +1614,4 @@ async fn create(core: &Core, body: Incoming) -> Resp {
         }
         Err(e) => endpoint_error(&e),
     }
-}
-
-/// Turn a success into the truth when what it changed could not be saved (see [`Core::saved_since`]).
-async fn saved(core: &Core, mark: crate::app::SaveMark, resp: Resp) -> Resp {
-    if resp.status().is_success() {
-        if let Err(e) = core.saved_since(mark).await {
-            return crate::http::not_saved(e);
-        }
-    }
-    resp
 }
