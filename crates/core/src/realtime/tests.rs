@@ -494,8 +494,68 @@ async fn without_a_yes_a_held_action_never_runs() {
 // from the model discards the held action. Dropping is the safe direction: the action is never run without
 // the user's own yes, and a later yes finds nothing to release. Whether the model should be able to cancel a
 // pending confirmation this way is an open question for the maintainer (docs/open-questions.md).
+// REQ-SEC-011, REQ-RTV-003: a call the model makes while an action waits for the user's answer does not cancel
+// it. A read-only call runs; a call that would itself need holding is refused with a result that says an
+// action is waiting; the user's yes then runs the first action once, with its own arguments.
 #[tokio::test(flavor = "current_thread")]
-async fn a_new_call_from_the_model_discards_a_held_action_and_a_later_yes_runs_nothing() {
+async fn a_held_action_stays_while_the_model_calls_other_tools_and_only_the_users_yes_runs_it() {
+    let r = session(
+        cfg(),
+        UsageLimits::default(),
+        vec![],
+        false,
+        |mut s| async move {
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(
+                &mut s,
+                calls_done(&[("c1", "send_money", r#"{"to":"sam"}"#)]),
+            )
+            .await;
+            next(&mut s).await;
+            next(&mut s).await;
+            put(&mut s, said("pay sam")).await;
+            // Before the user answers, the model reads something.
+            put(&mut s, calls_done(&[("c2", "get_time", "{}")])).await;
+            let out = next(&mut s).await;
+            assert_eq!(out["item"]["output"], "get_time ok");
+            next(&mut s).await;
+            // And then tries to hold a different action.
+            put(
+                &mut s,
+                calls_done(&[("c3", "send_money", r#"{"to":"eve"}"#)]),
+            )
+            .await;
+            let out = next(&mut s).await;
+            let refused = out["item"]["output"].as_str().unwrap();
+            assert!(
+                refused.starts_with("Not run: an action is already waiting"),
+                "{refused}"
+            );
+            next(&mut s).await;
+            put(&mut s, spoke()).await;
+            put(&mut s, said("yes")).await;
+            let rc = next(&mut s).await;
+            let tell = rc["response"]["instructions"].as_str().unwrap();
+            assert!(tell.contains("send_money ok"), "{tell}");
+            s.send_close().await.unwrap();
+        },
+    )
+    .await;
+    assert_eq!(r.result, Ok(SessionEnd::Closed));
+    assert_eq!(
+        r.host.ran,
+        vec![
+            ("get_time".to_owned(), json!({})),
+            ("send_money".to_owned(), json!({"to": "sam"})),
+        ],
+        "the read ran, the second send never did, and the first ran once after the yes"
+    );
+}
+
+// REQ-SEC-011: a held action is still dropped when the user says no, even after the model called other tools.
+#[tokio::test(flavor = "current_thread")]
+async fn a_no_still_drops_a_held_action_after_other_calls() {
     let r = session(
         cfg(),
         UsageLimits::default(),
@@ -507,20 +567,21 @@ async fn a_new_call_from_the_model_discards_a_held_action_and_a_later_yes_runs_n
             put(&mut s, calls_done(&[("c1", "send_money", "{}")])).await;
             next(&mut s).await;
             next(&mut s).await;
-            // Before the user answers, the model calls something else.
+            put(&mut s, said("pay sam")).await;
             put(&mut s, calls_done(&[("c2", "get_time", "{}")])).await;
-            let out = next(&mut s).await;
-            assert_eq!(out["item"]["output"], "get_time ok");
+            next(&mut s).await;
             next(&mut s).await;
             put(&mut s, spoke()).await;
-            put(&mut s, said("yes")).await;
+            put(&mut s, said("no")).await;
+            let rc = next(&mut s).await;
+            let tell = rc["response"]["instructions"].as_str().unwrap();
+            assert!(tell.contains("I won't do that"), "{tell}");
             s.send_close().await.unwrap();
         },
     )
     .await;
-    assert_eq!(r.result, Ok(SessionEnd::Closed));
     let names: Vec<&str> = r.host.ran.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["get_time"], "the held send_money must never run");
+    assert_eq!(names, ["get_time"]);
 }
 
 #[tokio::test(flavor = "current_thread")]

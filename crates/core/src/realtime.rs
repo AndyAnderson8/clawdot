@@ -691,13 +691,13 @@ where
 
     /// The model made function calls: run them as one turn through the host and hand the results back.
     async fn on_calls(&mut self, calls: Vec<FnCall>) -> Result<(), RealtimeError> {
-        // The user's words that led to these calls, or empty when the calls did not follow any new words. A held
-        // action that is still waiting for its answer is answered by the user's own words only (`on_transcript`).
-        // Reaching this point with one still held means the model issued a new call before the user answered; the
-        // gate then reads the empty text as "not a yes", so the held action is discarded and never run, as for "a
-        // different tool" in REQ-SEC-011. Dropping is the safe direction. Whether the model should be able to
-        // cancel a pending confirmation this way is a question for the maintainer (docs/open-questions.md).
+        // The user's words that led to these calls, or empty when the calls did not follow any new words. They
+        // are not an answer: a held action that is still waiting is answered by the user's own words only
+        // (`on_transcript`). The gate leaves it held while the model calls other tools, runs a read-only call,
+        // and refuses one that would itself need holding, until the user answers or its window runs out
+        // (REQ-SEC-011).
         let user_text = self.st.last_user.take().unwrap_or_default();
+        let was_held = self.env.conv.pending().is_some();
         let script: Vec<ToolCall> = calls
             .iter()
             .map(|c| ToolCall {
@@ -708,7 +708,7 @@ where
             .collect();
         let inputs = self.inputs();
         let res = run_proposed_calls(inputs, &user_text, &script).await;
-        if self.env.conv.pending().is_some() {
+        if !was_held && self.env.conv.pending().is_some() {
             self.st.utterances.hold();
         }
         let dialect = self.dialect;

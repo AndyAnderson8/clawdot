@@ -241,6 +241,20 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         self.answer_held(user_text).await
     }
 
+    /// Drop a held action whose window has run out, for a turn that cannot answer it (the calls of a model
+    /// outside the turn loop). One still inside its window is left alone.
+    fn drop_held_if_stale(&mut self) {
+        let mono = self.mono;
+        if let Some(old) = self
+            .conv
+            .pending
+            .take_if(|p| mono - p.proposed_at > CONFIRM_WINDOW_SECS)
+        {
+            self.resolved(&old, decision::EXPIRED, "no answer in time");
+            self.conv.set_recent(old.recent, "expired");
+        }
+    }
+
     /// The user's answer to "forget all my notes?" is read here, by the host. `Some` ends the turn.
     fn answer_forget_all(&mut self, user_text: &str) -> Option<TurnResult> {
         let (by_user, mono) = (self.by_user, self.mono);
@@ -610,6 +624,22 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 },
                 gate,
             )
+        } else if risk.needs_hold() && self.conv.pending.is_some() {
+            // An action is already waiting for the user's yes or no. A second one must not replace it and a
+            // call must not cancel it: only the user's own words end it (REQ-SEC-011). A turn of the model
+            // loop never gets here, since it ends when it holds something; a realtime session does, because
+            // its model keeps calling tools while the question is open.
+            self.note_act(&Act {
+                tool: &call.name,
+                tier: Some(risk.tier),
+                args: &args,
+                decision: decision::SKIPPED,
+                held_id: None,
+                outcome: None,
+                note: Some("another action is waiting for the user's answer"),
+            });
+            "Not run: an action is already waiting for the user's answer, so this one was not held. Do not retry it until the user has answered; they will say yes or no."
+                .to_owned()
         } else if risk.needs_hold() {
             let args = self.host.pin_args(&call.name, args).await;
             match self.keep_pending(call, &args, risk.tier, &HOLD) {
@@ -986,9 +1016,9 @@ impl<B> Batch<'_, B> {
 }
 
 /// The common opening of the two realtime entry points: a voice turn for a model outside the turn loop
-/// (REQ-RTV-003), with the summaries of long results off. The words are first read as the answer to a
-/// question about forgetting notes or to a held action. With `calls` they are then run; without, the turn
-/// ends there.
+/// (REQ-RTV-003), with the summaries of long results off. Without `calls`, the words are read as the answer
+/// to a question about forgetting notes or to a held action, and the turn ends there. With `calls`, the
+/// words are not read as an answer; the calls are run, and a held action stays held (REQ-SEC-011).
 async fn voice_turn<H: ToolHost>(
     inputs: TurnInputs<'_, H>,
     user_text: &str,
@@ -1004,7 +1034,12 @@ async fn voice_turn<H: ToolHost>(
         ..inputs
     };
     let mut t = Turn::begin(&ctl, Trigger::User, "voice", inputs, user_text);
-    if let Some(r) = t.answer_first(user_text).await {
+    if calls.is_some() {
+        // A model's calls are never an answer. `user_text` here only names the turn (it scopes the tools),
+        // and may be the words of an earlier utterance, so it must not be read as a yes or a no. A held
+        // action stays until the user's own words answer it (`answer_held_action`) or its window ends.
+        t.drop_held_if_stale();
+    } else if let Some(r) = t.answer_first(user_text).await {
         return r;
     }
     if let Some(calls) = calls {
