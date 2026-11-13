@@ -48,6 +48,18 @@ export async function settingsNumbers(c: Ctx): Promise<void> {
     assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { agent_max_rounds: null });
     // quiet hours are on the Assistant tab
     await section("assistant", "Assistant");
+    // saving one group leaves what is typed in the others alone
+    const persona = await b.ev<string>(`T.q('#f-persona').value`);
+    await T(`set('#f-persona', 'a draft nobody saved')`);
+    await T(`set('#f-agent_max_rounds', '6')`);
+    await b.ev(`T.q('#f-agent_max_rounds').form.requestSubmit()`);
+    await b.until(`T.text('#msg') === 'Saved.'`, "the limits saved");
+    await eq(`T.q('#f-persona').value`, "a draft nobody saved", "the other group keeps its unsaved text");
+    await eq(`T.q('#f-agent_max_rounds').value`, "6", "the saved group shows what was saved");
+    await b.ev(`T.q('#f-agent_max_rounds').form.querySelector('.head button').click()`);
+    await b.until(`T.q('#f-agent_max_rounds').value === '8'`, "the limits are back to the default");
+    await eq(`T.q('#f-persona').value`, "a draft nobody saved", "and still after a reset");
+    await T(`set('#f-persona', ${JSON.stringify(persona)})`);
     // a number the page cannot read is refused with a sentence; it is never sent (it would reset the setting)
     const puts = () => mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").length;
     const before = puts();

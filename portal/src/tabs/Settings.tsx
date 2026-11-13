@@ -4,7 +4,7 @@ import { api, ApiError } from "../api.ts";
 import { currentText, FROM, hintText, labelOf, settingsPatch, type SettingSpec, cents } from "../forms.ts";
 import { providerFor } from "../providers.ts";
 import { TimeField } from "../timefield.tsx";
-import { fail, get, say, set, useApp } from "../store.ts";
+import { adopt, fail, say, useApp } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
 import type { SettingField, Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
@@ -167,8 +167,7 @@ function Control(props: {
   );
 }
 
-/** One group of settings with its own Save button. Only the values you changed are sent. */
-export function Group(props: {
+interface GroupProps {
   title: string;
   intro?: string;
   specs: SettingSpec[];
@@ -177,7 +176,18 @@ export function Group(props: {
   extra?: (f: { vals: Record<string, string>; setVals: (v: Record<string, string>) => void }) => JSX.Element;
   /** More rows after the settings, before the Save button (a key, a status line). */
   below?: () => JSX.Element | null;
-}): JSX.Element {
+}
+
+/**
+ * One group of settings with its own Save button. Only the values you changed are sent. Saving starts this group
+ * again from the saved values; the other groups keep what has been typed in them.
+ */
+export function Group(props: GroupProps): JSX.Element {
+  const [round, setRound] = useState(0);
+  return <GroupForm key={round} {...props} onSaved={() => setRound((n) => n + 1)} />;
+}
+
+function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
   const { title, intro, specs, settings } = props;
   const keyRev = useApp().keyRev;
   const current: Record<string, string> = {};
@@ -227,8 +237,8 @@ export function Group(props: {
     }
     try {
       const next = await api<SettingsData>("PUT", "/api/settings", body);
-      const merged = Object.assign({}, get().settings, next);
-      set({ settings: merged, settingsRev: get().settingsRev + 1 });
+      const merged = adopt(next);
+      props.onSaved();
       say(merged.note || "Saved.");
     } catch (x) {
       if (x instanceof ApiError && x.status === 400) {
@@ -251,8 +261,8 @@ export function Group(props: {
         "/api/settings",
         Object.fromEntries(saved.map((sp) => [sp.key, null])),
       );
-      const merged = Object.assign({}, get().settings, next);
-      set({ settings: merged, settingsRev: get().settingsRev + 1 });
+      adopt(next);
+      props.onSaved();
       say("Back to the defaults.");
     } catch (x) {
       fail(x);

@@ -4,7 +4,7 @@ import { api, ApiError } from "../api.ts";
 import { parseSettingsFile, settingsChanges, type SettingChange } from "../forms.ts";
 import { saveFile } from "../parts.tsx";
 import { Updates } from "./Updates.tsx";
-import { fail, get, say, set, useApp } from "../store.ts";
+import { adopt, fail, get, say, useApp } from "../store.ts";
 import type { About as AboutData, Settings } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
@@ -50,7 +50,7 @@ export function About(): JSX.Element {
     if (!sure) return;
     try {
       const next = await api<Settings>("PUT", "/api/settings", Object.fromEntries(saved.map(([k]) => [k, null])));
-      set({ settings: Object.assign({}, get().settings, next), settingsRev: get().settingsRev + 1 });
+      adopt(next, true);
       say("All settings are back to their defaults.");
     } catch (x) {
       fail(x);
@@ -79,7 +79,7 @@ export function About(): JSX.Element {
     setImportErr("");
     try {
       const next = await api<Settings>("PUT", "/api/settings", picked.settings);
-      set({ settings: Object.assign({}, get().settings, next), settingsRev: get().settingsRev + 1 });
+      adopt(next, true);
       setPicked(null);
       say("Settings imported.");
     } catch (x) {

@@ -196,6 +196,17 @@ export async function start(): Promise<void> {
   }
 }
 
+/**
+ * Take the device's answer to a settings change into the stored settings. `remount` also bumps `settingsRev`, so
+ * every form starts again from the new values; leave it off when the form that was saved starts itself again, so the
+ * other forms keep what the person has typed and not yet saved.
+ */
+export function adopt(next: Settings, remount = false): Settings {
+  const merged = Object.assign({}, state.settings, next);
+  set(remount ? { settings: merged, settingsRev: state.settingsRev + 1 } : { settings: merged });
+  return merged;
+}
+
 export function signedOut(): void {
   set({ fresh: {} });
 }
