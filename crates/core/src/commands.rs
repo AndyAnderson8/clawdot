@@ -12,7 +12,9 @@ pub fn reset_admin(dir: &std::path::Path) -> ExitCode {
     match crate::admin::reset(dir) {
         Ok(removed) => {
             println!(
-                "{}Start clawdot and open the web UI to set an administrator password again.\n\
+                "{}Start clawdot (restart it if it was running) and open the web UI from any computer or phone on your \
+                 network to set an administrator password again. This is the way to do it for a speaker connected \
+                 through ESPHome, which cannot open the reset window from its button.\n\
                  Until you do, the setup page can be completed by anyone on a private network who reaches it.",
                 if removed {
                     "The web UI administrator setting was cleared. Endpoints and other state are unchanged.\n"
