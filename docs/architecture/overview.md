@@ -61,7 +61,7 @@ A turn sees one tool host built in layers: built-in tools (`assistant/tools.rs`:
 
 ### The inbox
 
-Agents post to `POST /hook/{endpoint}` or `POST /api/announce`, or call the core's own MCP server at `POST /mcp`. An adapter maps the payload to an event; the queue is bounded per endpoint (`inbox/`). The speaker task says events in order, summarised and with their source named. Replies from the person go out on an SSE stream per endpoint (`/bridge/{endpoint}/replies`) that the agent bridge reads and acknowledges.
+Agents post to `POST /hook/{endpoint}` or `POST /api/announce`, or call the core's own MCP server at `POST /mcp`. An adapter maps the payload to an event; the queue is bounded per endpoint (`inbox/`). An endpoint has a name, which the URLs, the portal, the bridge and the spoken origin use, and an id (32 random hex digits, made at creation and never reused). Its events, the replies waiting for its bridge, a question it is asking and its rate-limit state are all held under the id, so deleting an endpoint and creating another of the same name starts with none of them; the bridge route takes the name in the path and the core turns it into the id once the token is checked, and a reply on the wire carries the name. The speaker task says events in order, summarised and with their source named. Replies from the person go out on an SSE stream per endpoint (`/bridge/{endpoint}/replies`) that the agent bridge reads and acknowledges.
 
 ### State and storage
 
@@ -96,7 +96,7 @@ Everything is in the data directory (`--data-dir`, default `./clawdot-data`). No
 | `admin.json` | The administrator setting and the password hash |
 | `settings.json` | Settings saved from the portal |
 | `secrets.json` | Provider keys pasted into the portal |
-| `endpoints.json` | Webhook endpoints (token hashes, adapter, spoken name) |
+| `endpoints.json` | Webhook endpoints (id, name, token hash, adapter, spoken name; a file from before ids is given them at the first start) |
 | `inbox.json`, `replies.json` | Queued agent events and pending replies |
 | `timers.json` | Timers, alarms, reminders, the stopwatch |
 | `usage.json` | The day's request and spend counters |
