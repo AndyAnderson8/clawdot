@@ -85,19 +85,7 @@ impl RunReport {
 }
 
 fn sentences(text: &str) -> usize {
-    let mut n = 0;
-    let mut in_sentence = false;
-    for c in text.chars() {
-        if matches!(c, '.' | '!' | '?') {
-            if in_sentence {
-                n += 1;
-            }
-            in_sentence = false;
-        } else if !c.is_whitespace() {
-            in_sentence = true;
-        }
-    }
-    n + usize::from(in_sentence)
+    clawdot_core::voice::sentences(clawdot_core::lang::DEFAULT, text).len()
 }
 
 fn contains_all(text: &str, needles: &[String]) -> Result<(), String> {
