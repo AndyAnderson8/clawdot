@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.55 |
+| **Version** | 0.56 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -473,3 +473,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.53 | 2026-11-11 | Durations are monotonic and calendar points are wall time (REQ-TMR-002, 003, 006, 009; REQ-AST-007, 021; REQ-SEC-004, 011; REQ-CFG-019, 069). A countdown timer works before the clock is set (REQ-TMR-009). |
 | 0.54 | 2026-11-11 | REQ-INB-006: an event waits while a configured satellite is not connected, instead of being summarised and marked as announced unheard |
 | 0.55 | 2026-11-12 | REQ-AST-015, REQ-SEC-011, REQ-INB-017: a held `instruct` reply names the agent it goes to and is bound to that event when it is proposed; the yes sends to it or, if it is no longer open, sends nothing. |
+| 0.56 | 2026-11-12 | REQ-VOI-025: the endpointer is tuned by an optional `listening` object in `satellite` and in each ESPHome device, the device's value winning. REQ-RTV-008, REQ-SEC-001: a plain `ws://` realtime address beyond the private network is refused when saved and when the file is read. REQ-CFG-009, REQ-CFG-016: printed snippets name the machine's own `.local` name, `clawdot.local` only when it is not known. REQ-INB-015: the reference bridge bounds what it reads and accepts an IPv6 host. |
