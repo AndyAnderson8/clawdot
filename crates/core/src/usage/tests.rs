@@ -409,3 +409,53 @@ fn counters_from_before_the_basis_existed_still_load() {
     let back: State = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
     assert_eq!(back, s);
 }
+
+// REQ-AST-011: a device with no battery clock starts in 1970. Its unknown day (0) and any day before the saved
+// one must leave today's spend alone, and a real later day still rolls.
+#[test]
+fn an_unset_clock_at_boot_keeps_the_day_s_spend() {
+    let dir = TempDir::new("usage");
+    let store = JsonStore::new(dir.0.join("usage.json"), SCHEMA);
+    let t = UsageTracker::new(capped(1.0));
+    t.add_cost(20_000, 0.9);
+    t.record_request(20_000);
+    t.save(&store).unwrap();
+
+    let back = UsageTracker::load(&store, capped(1.0)).unwrap();
+    assert!(back.check(0).is_ok(), "unknown day");
+    back.add_cost(0, 0.05);
+    back.record_request(0);
+    assert!(back.check(3).is_ok(), "a day in 1970");
+    back.add_cost(3, 0.02);
+    assert_eq!(back.requests_today(), 2);
+    assert!(
+        (back.spend_today() - 0.97).abs() < 1e-9,
+        "{}",
+        back.spend_today()
+    );
+    // The network time arrives and it is the same day: nothing is lost.
+    assert!(back.check(20_000).is_ok());
+    assert!((back.spend_today() - 0.97).abs() < 1e-9);
+    back.add_cost(20_000, 0.03);
+    assert_eq!(back.check(20_000), Err(LimitReached::Spend));
+    // A real new day rolls.
+    assert!(back.check(20_001).is_ok());
+    assert_eq!(back.spend_today(), 0.0);
+    assert_eq!(back.request_days().1[0], (20_000, 2));
+}
+
+#[test]
+fn spend_counted_before_the_first_real_day_is_kept_on_it() {
+    let t = UsageTracker::new(UsageLimits::default());
+    t.add_cost(0, 0.25);
+    t.record_request(0);
+    t.record_request(20_000);
+    assert_eq!((t.requests_today(), t.spend_today()), (2, 0.25));
+}
+
+// A reported cost is rounded up like the others: a cost under half a millionth is not free.
+#[test]
+fn a_tiny_reported_cost_is_rounded_up() {
+    let (micro, basis) = price_request(&UsageLimits::default(), Some(&usage(Some(4e-7))), 0, 0);
+    assert_eq!((micro, basis), (1, Basis::Reported));
+}

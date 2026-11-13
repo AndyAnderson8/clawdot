@@ -571,3 +571,13 @@ fn a_restart_takes_the_time_off_a_saved_timer_and_the_portal_listing_follows_the
     assert_eq!(list["items"][0]["seconds_left"], 450);
     assert_eq!(list["items"][0]["fire_at"], after.now() + 450);
 }
+
+// REQ-AST-011, REQ-SEC-015: the usage day is 0 (unknown) until the wall clock is set, so a device that boots
+// in 1970 does not roll the daily counters back and forth.
+#[test]
+fn the_usage_day_is_unknown_until_the_clock_is_set() {
+    let (a, clock, _) = setup(false);
+    assert_eq!(a.local_day(), days_from_civil(2026, 11, 7));
+    clock.0.store(100, Ordering::Relaxed);
+    assert_eq!(a.local_day(), 0);
+}

@@ -134,7 +134,8 @@ pub fn price_request(
         .and_then(|u| u.cost_usd)
         .filter(|c| c.is_finite() && *c > 0.0)
     {
-        return ((cost * 1_000_000.0).round() as u64, Basis::Reported);
+        // Rounded up like the other paths: a request is never free for being small.
+        return ((cost * 1_000_000.0).ceil() as u64, Basis::Reported);
     }
     let (in_tokens, out_tokens) = usage.map_or((0, 0), |u| (u.prompt_tokens, u.completion_tokens));
     let (a, ab) = side_cost(
@@ -211,26 +212,35 @@ struct Cell {
 }
 
 impl Cell {
+    /// Move the counters to `day`. A day of 0 or less means the clock is not set (see
+    /// `Assistant::local_day`): the counters stay where they are, so a device that starts in 1970 does not
+    /// wipe today's spend. A day below the saved one is ignored for the same reason. The first real day seen
+    /// after a file with no day keeps what was counted before it. Only a greater day rolls (REQ-AST-011).
     fn roll(&mut self, day: i64) {
-        if self.state.day != day {
-            let mut history = std::mem::take(&mut self.state.history);
-            if self.state.requests > 0 && self.state.day != 0 {
-                history.push(PastDay {
-                    day: self.state.day,
-                    requests: self.state.requests,
-                });
-            }
-            if history.len() > KEEP_DAYS {
-                history.drain(..history.len() - KEEP_DAYS);
-            }
-            self.state = State {
-                day,
-                requests: 0,
-                micro_usd: 0,
-                history,
-                basis: None,
-            };
+        if day <= 0 || day <= self.state.day {
+            return;
         }
+        if self.state.day == 0 {
+            self.state.day = day;
+            return;
+        }
+        let mut history = std::mem::take(&mut self.state.history);
+        if self.state.requests > 0 && self.state.day != 0 {
+            history.push(PastDay {
+                day: self.state.day,
+                requests: self.state.requests,
+            });
+        }
+        if history.len() > KEEP_DAYS {
+            history.drain(..history.len() - KEEP_DAYS);
+        }
+        self.state = State {
+            day,
+            requests: 0,
+            micro_usd: 0,
+            history,
+            basis: None,
+        };
     }
 
     /// Add `micro` millionths of a dollar that rest on `basis`.
