@@ -1,8 +1,21 @@
 use super::*;
+use crate::assistant::{Effect, MediaCmd};
 use crate::inbox::endpoint::hash_token;
 use crate::vad::tests::{silence, tone};
+use crate::voice::{Synthesizer, Transcriber};
+use clawdot_protocol::frame::{Decoder, Limits, encode};
+use clawdot_protocol::message::{
+    AudioCodec, AudioFormat, Indicator, MediaAction, Message, PROTOCOL_VERSION,
+};
 use clawdot_protocol::message::{Capabilities, Hello, Version, Wake};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 use tokio::io::DuplexStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::time::timeout;
 
 struct Ears(&'static str);
