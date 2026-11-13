@@ -984,6 +984,58 @@ async fn only_the_administrator_sets_the_spoken_name_and_it_is_validated() {
     assert!(p.core.endpoints()[0].spoken_name.is_none());
 }
 
+// REQ-CFG-016: the page prints the adapter's set-up lines from the API, so the text exists once, in the adapter file.
+#[tokio::test]
+async fn endpoints_carry_their_adapters_setup_lines_unfilled() {
+    let p = start(false).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    let adapter_lines = |name: &str| -> Value {
+        let a = crate::inbox::adapter::Adapter::builtins()
+            .map(Result::unwrap)
+            .find(|a| a.name == name)
+            .unwrap();
+        json!(a.setup_lines())
+    };
+    let (s, agent) = call(
+        &p,
+        "POST",
+        "/api/endpoints",
+        &session,
+        r#"{"name":"agent","adapter":"claude-code"}"#,
+    )
+    .await;
+    assert_eq!(s, 201, "{agent}");
+    assert_eq!(agent["setup"], adapter_lines("claude-code"));
+    let (_, plain) = call(
+        &p,
+        "POST",
+        "/api/endpoints",
+        &session,
+        r#"{"name":"ci","adapter":"generic"}"#,
+    )
+    .await;
+    assert_eq!(plain["setup"], adapter_lines("generic"));
+
+    let (_, o) = call(&p, "GET", "/api/overview", &session, "").await;
+    let lines = |name: &str| {
+        o["endpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap()["setup"]
+            .clone()
+    };
+    assert_eq!(lines("agent"), adapter_lines("claude-code"));
+    assert_eq!(lines("ci"), adapter_lines("generic"));
+    // The placeholders are the page's to fill: no token appears in a listing.
+    let text = lines("agent").to_string();
+    assert!(text.contains("{token}") && text.contains("{public}") && text.contains("{endpoint}"));
+    assert!(!text.contains(agent["token"].as_str().unwrap()));
+}
+
 // REQ-EXT-019
 #[tokio::test]
 async fn accepting_a_connections_tools_needs_the_administrator_and_a_real_connection() {

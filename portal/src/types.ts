@@ -73,6 +73,8 @@ export interface Endpoint {
   created_at: number;
   /** What the speaker calls this webhook when it reads a message out; none means its name. */
   spoken_name?: string | null;
+  /** The adapter's set-up lines, as `clawdot --create-endpoint` prints them, with `{public}`, `{endpoint}` and `{token}` unfilled. */
+  setup: string[];
 }
 export interface Overview {
   now: number;

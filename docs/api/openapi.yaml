@@ -524,12 +524,16 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [name, adapter, token]
+                required: [name, adapter, token, setup]
                 properties:
                   name: { type: string }
                   adapter: { type: string }
                   spoken_name: { type: [string, "null"] }
                   token: { type: string, description: "Shown once." }
+                  setup:
+                    type: array
+                    items: { type: string }
+                    description: "The adapter's set-up lines with `{public}`, `{endpoint}` and `{token}` unfilled, as in `Endpoint`."
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1809,7 +1813,7 @@ components:
         token: { type: string, description: "A session token (password mode)." }
     Endpoint:
       type: object
-      required: [name, adapter, enabled, created_at]
+      required: [name, adapter, enabled, created_at, setup]
       properties:
         name: { type: string }
         adapter: { type: string }
@@ -1818,6 +1822,14 @@ components:
         spoken_name:
           type: [string, "null"]
           description: What the speaker says as the origin; `null` means the speaker says `name`.
+        setup:
+          type: array
+          items: { type: string }
+          description: |
+            The adapter's set-up lines, as `--create-endpoint` prints them, with the placeholders `{public}` (the
+            address other programs use), `{endpoint}` (this endpoint's name) and `{token}` left for the caller
+            to fill. Blank lines separate the parts; the first line of a part says what it is for. Empty when the
+            adapter has none. No token is ever in them.
     AgentEvent:
       type: object
       required: [id, endpoint, source, origin, title, text, state, received_at]

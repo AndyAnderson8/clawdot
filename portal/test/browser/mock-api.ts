@@ -69,6 +69,22 @@ export function settingMeta(key: string): Json {
   return m;
 }
 
+const adaptersDir = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..", "crates", "core", "adapters");
+
+/** The set-up lines of the adapter called `name`, read from the adapter file the device embeds (none for an unknown one). */
+export function adapterSetup(name: string): string[] {
+  try {
+    return (JSON.parse(readFileSync(join(adaptersDir, name + ".json"), "utf8")) as { setup?: string[] }).setup ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** One entry of the endpoint listing, with its adapter's set-up lines as the device gives them. */
+export function endpoint(name: string, adapter: string, createdAt: number): Json {
+  return { name, adapter, enabled: true, created_at: createdAt, setup: adapterSetup(adapter) };
+}
+
 /** One entry of the settings listing: the setting's description from the fixture, and its value and source. */
 function setting(key: string, value: unknown, source: string, extra: Json = {}): Json {
   return { ...settingMeta(key), value, source, ...extra };
@@ -184,7 +200,7 @@ function seed(mode: string): Json {
       },
     ],
     nextId: 3,
-    endpoints: [{ name: "claude-code", adapter: "claude-code", enabled: true, created_at: t - 100 }],
+    endpoints: [endpoint("claude-code", "claude-code", t - 100)],
     events: [
       {
         id: 1,
@@ -735,12 +751,13 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         if (m === "POST" && seg.length === 1) {
           if (eps.some((e) => e["name"] === body.name)) return err(409, "That name is taken.");
           const spoken = body.spoken_name ?? null;
-          eps.push({ name: body.name, adapter: body.adapter, enabled: true, created_at: now(), spoken_name: spoken });
+          eps.push({ ...endpoint(body.name, body.adapter, now()), spoken_name: spoken });
           return send(201, {
             name: body.name,
             adapter: body.adapter,
             spoken_name: spoken,
             token: "tok-" + body.name + "-1",
+            setup: adapterSetup(body.adapter),
           });
         }
         if (m === "PUT" && seg.length === 2) {

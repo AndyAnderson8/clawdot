@@ -1,6 +1,6 @@
 // The longest realistic content for every list and field, so a layout that only fits short text shows itself.
 // Merged into the mock device's state (objects one level deep, arrays replaced).
-import { settingMeta } from "./mock-api.ts";
+import { endpoint, settingMeta } from "./mock-api.ts";
 
 const t = Math.floor(Date.now() / 1000);
 const longName = "extremely_long_tool_name_for_the_hallway_light_controller_v2";
@@ -47,7 +47,7 @@ export const STRESS: Record<string, unknown> = {
       repeat: null,
     },
   ],
-  endpoints: [{ name: inputName, adapter: "claude-code", enabled: true, created_at: t - 100 }],
+  endpoints: [endpoint(inputName, "claude-code", t - 100)],
   events: [
     {
       id: 1,
