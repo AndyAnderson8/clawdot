@@ -102,6 +102,9 @@ export async function signIn(c: Ctx): Promise<void> {
         "wrong password message",
       );
       await eq(`T.q('#msg').className`, "toast err", "error styling");
+      await eq(`T.q('#msg').getAttribute('role')`, "alert", "an error is announced as one");
+      await T(`click('#msg button')`);
+      await eq(`T.text('#msg')`, "", "an error can be closed");
       await eq(`T.q('#pw').value`, "wrong", "what was typed stays, to correct");
       await T(`set('#pw', ${JSON.stringify(PASSWORD)})`);
       await T(`submit('#loginform')`);

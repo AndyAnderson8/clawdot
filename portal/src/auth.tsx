@@ -2,7 +2,7 @@
 // speaker's light ring drawn large, and an open, roomy form beside it.
 import type { ComponentChildren, JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api, keep } from "./api.ts";
+import { api, failText, keep } from "./api.ts";
 import { Logo, Wordmark } from "./brand.tsx";
 import { Forgot } from "./forgot.tsx";
 import { useBusy } from "./parts.tsx";
@@ -205,7 +205,7 @@ export function Login(): JSX.Element {
             ? "That password was not accepted. Check it and try again."
             : status === 429
               ? "Too many attempts. Wait a few seconds and try again."
-              : (x as Error).message,
+              : failText(x).text,
           true,
         );
       }

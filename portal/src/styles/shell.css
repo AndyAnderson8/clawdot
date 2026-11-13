@@ -180,6 +180,34 @@ footer a:hover {
   z-index: 20;
   box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
 }
+.toast:not(:empty) {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+}
+.toast > span {
+  flex: 1;
+}
+button.toastclose {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+}
+button.toastclose svg {
+  width: 1.125rem;
+  height: 1.125rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
 .toast.err {
   background: var(--color-text-error);
   color: var(--color-background-body);

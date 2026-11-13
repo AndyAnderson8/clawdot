@@ -168,7 +168,7 @@ export async function start(): Promise<void> {
   try {
     st = await api<AuthState>("GET", "/api/auth");
   } catch (x) {
-    say(x instanceof Error ? x.message : "Something went wrong. Try again.", true);
+    say(failText(x).text, true);
     return;
   }
   set({

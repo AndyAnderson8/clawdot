@@ -1,7 +1,7 @@
 // A forgotten password on a speaker with no shell: the way back in (REQ-CFG-071..073), and the box that appears while a reset window is open.
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api, keep } from "./api.ts";
+import { api, failText, keep } from "./api.ts";
 import { useBusy } from "./parts.tsx";
 import { say, start, useApp } from "./store.ts";
 
@@ -23,7 +23,7 @@ export function Forgot(): JSX.Element {
         say("");
         await start();
       } catch (x) {
-        say(x instanceof Error ? x.message : "Something went wrong. Try again.", true);
+        say(failText(x).text, true);
       }
     });
   };
