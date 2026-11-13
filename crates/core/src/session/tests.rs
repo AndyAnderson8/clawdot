@@ -1,9 +1,18 @@
 use super::*;
+use crate::audit::{AuditLog, decision};
+use crate::cancel::CancelToken;
 use crate::llm::ToolCall;
+use crate::llm::{ChatRequest, Completion, LlmError, Role, ToolSpec};
+use crate::notes::NoteStore;
+use crate::sched::{Clock, Ts};
 use crate::usage::UsageLimits;
+use crate::usage::{LimitReached, UsageTracker};
+use serde_json::Value;
 use serde_json::json;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 struct Script {
     replies: Mutex<VecDeque<Result<Completion, LlmError>>>,

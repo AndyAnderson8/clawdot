@@ -8,6 +8,12 @@
 //! ([`run_proposed_calls`], [`answer_held_action`]) and no second model request is made on its behalf.
 
 use super::*;
+use crate::audit::{Act, Gate, TurnLog, decision};
+use crate::llm::{ChatRequest, Completion, LlmError, Message, ToolCall, ToolSpec};
+use crate::notes;
+use crate::sched::Ts;
+use crate::usage::{LimitReached, UsageTracker};
+use serde_json::Value;
 
 mod rounds;
 
