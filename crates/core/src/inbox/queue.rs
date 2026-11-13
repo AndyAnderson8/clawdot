@@ -3,8 +3,9 @@
 
 use super::adapter::Mapped;
 use super::endpoint::{Endpoint, Endpoints, QuietHours};
-use super::event::{Event, EventKind, EventState, Priority};
-use crate::sched::Ts;
+use super::event::{Event, EventKind, EventState, Priority, Rel, Timing};
+use super::{Moment, Restore, saved_at};
+use crate::sched::{Clock, Ts};
 use crate::store::{JsonStore, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +60,61 @@ pub struct InboxState {
     /// The last value given to an event's `spoken_seq`.
     #[serde(default)]
     spoken_seq: u64,
+    /// The wall time of the save, when the clock was valid then (see `Restore`). Read at load only.
+    #[serde(default, skip_serializing)]
+    saved_at: Option<Ts>,
+}
+
+/// An event as it is written: its own fields and its durations relative to the save.
+#[derive(Serialize)]
+struct EventOut<'a> {
+    #[serde(flatten)]
+    event: &'a Event,
+    rel: Rel,
+}
+
+/// The inbox as it is written. Borrows the events, so saving copies no event text.
+#[derive(Serialize)]
+struct Saved<'a> {
+    next_id: u64,
+    events: Vec<EventOut<'a>>,
+    spoken_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    saved_at: Option<Ts>,
+}
+
+/// An event's durations from a file: the relative form if it has one, otherwise (a file from before durations
+/// were kept apart) from its wall-clock times. A clock that is not valid cannot place an old wall time: a time
+/// to live then starts over from the event's arrival, and a snooze ends at once, so nothing is lost or kept
+/// for years.
+fn timing_from(e: &Event, rel: Option<Rel>, r: &Restore) -> Timing {
+    let mut t = match rel {
+        Some(rel) => Timing {
+            received: r.past(rel.age),
+            expires: rel.ttl_left.map(|l| r.ahead(l)),
+            snooze: rel.snooze_left.map(|l| r.ahead(l)),
+        },
+        None => Timing {
+            received: r.past(r.wall.saturating_sub(e.received_at).max(0)),
+            expires: e.expires_at.map(|t| {
+                let from = if r.valid { r.wall } else { e.received_at };
+                r.ahead(t.saturating_sub(from))
+            }),
+            snooze: match e.state {
+                EventState::Snoozed { until } => Some(r.ahead(if r.valid {
+                    until.saturating_sub(r.wall)
+                } else {
+                    0
+                })),
+                _ => None,
+            },
+        },
+    };
+    match e.state {
+        EventState::Snoozed { .. } => t.snooze = t.snooze.or(Some(r.mono)),
+        _ => t.snooze = None,
+    }
+    t
 }
 
 /// What to announce next: the most important event, and how many others are waiting.
@@ -117,13 +173,28 @@ impl Inbox {
         self.quiet
     }
 
-    /// Restore from a store.
+    /// Restore from a store and put the durations (time to live, snooze, age) back on the monotonic clock.
+    ///
+    /// A file holds each duration as seconds relative to the save, with the wall time of the save. The time
+    /// the program was off is taken off with the wall clock as far as it can be trusted (a clock that is not
+    /// valid, or is behind the save, takes off nothing). A file from before this form is read from its
+    /// wall-clock times (see `timing_from`).
     ///
     /// # Errors
     /// Storage errors.
-    pub fn load(store: &JsonStore, limits: InboxLimits) -> Result<Self, StoreError> {
+    pub fn load(
+        store: &JsonStore,
+        limits: InboxLimits,
+        clock: &dyn Clock,
+    ) -> Result<Self, StoreError> {
+        let mut state: InboxState = store.load()?;
+        let restore = Restore::new(state.saved_at.take(), clock);
+        for e in &mut state.events {
+            let rel = e.rel.take();
+            e.timing = timing_from(e, rel, &restore);
+        }
         Ok(Self {
-            state: store.load()?,
+            state,
             limits,
             quiet: None,
         })
@@ -133,16 +204,37 @@ impl Inbox {
     ///
     /// # Errors
     /// Storage errors.
-    pub fn save(&self, store: &JsonStore) -> Result<(), StoreError> {
-        store.save(&self.state)
+    pub fn save(&self, store: &JsonStore, clock: &dyn Clock) -> Result<(), StoreError> {
+        store.write(&self.encode(store, clock)?)
     }
 
-    /// The bytes [`Inbox::save`] would write, so the caller can serialise under a lock and write later.
+    /// The bytes [`Inbox::save`] would write, so the caller can serialise under a lock and write later. The
+    /// durations are worked out afresh at every save, because the file is rewritten only when the inbox
+    /// changes and an old figure would be wrong.
     ///
     /// # Errors
     /// A state that cannot be serialised.
-    pub fn encode(&self, store: &JsonStore) -> Result<Vec<u8>, StoreError> {
-        store.encode(&self.state)
+    pub fn encode(&self, store: &JsonStore, clock: &dyn Clock) -> Result<Vec<u8>, StoreError> {
+        let mono = clock.monotonic_secs();
+        let events = self
+            .state
+            .events
+            .iter()
+            .map(|e| EventOut {
+                event: e,
+                rel: Rel {
+                    age: mono.saturating_sub(e.timing.received),
+                    ttl_left: e.timing.expires.map(|t| t.saturating_sub(mono)),
+                    snooze_left: e.timing.snooze.map(|t| t.saturating_sub(mono)),
+                },
+            })
+            .collect();
+        store.encode(&Saved {
+            next_id: self.state.next_id,
+            events,
+            spoken_seq: self.state.spoken_seq,
+            saved_at: saved_at(clock),
+        })
     }
 
     /// All events, oldest first.
@@ -166,7 +258,13 @@ impl Inbox {
     }
 
     /// Queue an event from an endpoint, applying its filter.
-    pub fn ingest(&mut self, now: Ts, endpoint: &Endpoint, mapped: Mapped) -> Ingest {
+    pub fn ingest(
+        &mut self,
+        now: impl Into<Moment>,
+        endpoint: &Endpoint,
+        mapped: Mapped,
+    ) -> Ingest {
+        let now = now.into();
         let f = &endpoint.filter;
         if f.muted {
             return Ingest::Filtered(FilterReason::Muted);
@@ -185,13 +283,14 @@ impl Inbox {
                     && e.session_ref == mapped.session_ref
                     && e.kind == mapped.kind
                     && e.state == EventState::New
-                    && now - e.received_at <= f.coalesce_window_secs
+                    && now.mono.saturating_sub(e.timing.received) <= f.coalesce_window_secs
             }) {
                 existing.title = mapped.title;
                 existing.text = mapped.text;
                 existing.status = mapped.status;
                 existing.priority = existing.priority.max(mapped.priority);
-                existing.received_at = now;
+                existing.received_at = now.wall;
+                existing.timing.received = now.mono;
                 return Ingest::Coalesced(existing.id);
             }
         }
@@ -210,8 +309,14 @@ impl Inbox {
             priority: mapped.priority,
             session_ref: mapped.session_ref,
             no_reply: mapped.no_reply,
-            expires_at: mapped.ttl_secs.map(|t| now.saturating_add(t)),
-            received_at: now,
+            expires_at: mapped.ttl_secs.map(|t| now.wall.saturating_add(t)),
+            received_at: now.wall,
+            timing: Timing {
+                received: now.mono,
+                expires: mapped.ttl_secs.map(|t| now.mono.saturating_add(t)),
+                snooze: None,
+            },
+            rel: None,
             state: EventState::New,
             spoken_seq: 0,
         });
@@ -252,7 +357,7 @@ impl Inbox {
                 EventState::Snoozed { .. } => 2,
                 EventState::New => 3,
             };
-            (class, e.priority, e.received_at)
+            (class, e.priority, e.timing.received)
         };
         while self.state.events.len() > self.limits.max_events
             || self.total_bytes() > self.limits.max_bytes
@@ -300,35 +405,43 @@ impl Inbox {
     }
 
     /// Drop finished-with events older than `keep_secs`. Returns how many, so the caller knows to save.
-    pub fn prune(&mut self, now: Ts, keep_secs: i64) -> usize {
+    pub fn prune(&mut self, now: impl Into<Moment>, keep_secs: i64) -> usize {
+        let now = now.into();
         let before = self.state.events.len();
         self.state.events.retain(|e| {
             !matches!(e.state, EventState::Dismissed | EventState::Acknowledged)
-                || now - e.received_at <= keep_secs
+                || now.mono.saturating_sub(e.timing.received) <= keep_secs
         });
         before - self.state.events.len()
     }
 
     /// Drop events whose time to live ran out before they were spoken (REQ-INB-023). Returns how many.
-    pub fn expire(&mut self, now: Ts) -> usize {
+    pub fn expire(&mut self, now: impl Into<Moment>) -> usize {
+        let now = now.into();
         let before = self.state.events.len();
         self.state.events.retain(|e| !Self::lapsed(e, now));
         before - self.state.events.len()
     }
 
     /// Unspoken and past its time to live.
-    fn lapsed(e: &Event, now: Ts) -> bool {
+    fn lapsed(e: &Event, now: Moment) -> bool {
         matches!(e.state, EventState::New | EventState::Snoozed { .. })
-            && e.expires_at.is_some_and(|t| t <= now)
+            && e.timing.expires.is_some_and(|t| t <= now.mono)
     }
 
-    fn announceable(&self, e: &Event, now: Ts, minute_of_day: u16, endpoints: &Endpoints) -> bool {
+    fn announceable(
+        &self,
+        e: &Event,
+        now: Moment,
+        minute_of_day: u16,
+        endpoints: &Endpoints,
+    ) -> bool {
         if Self::lapsed(e, now) {
             return false;
         }
         let due = match e.state {
             EventState::New => true,
-            EventState::Snoozed { until } => until <= now,
+            EventState::Snoozed { .. } => e.timing.snooze.is_none_or(|t| t <= now.mono),
             _ => false,
         };
         if !due {
@@ -346,11 +459,12 @@ impl Inbox {
     #[must_use]
     pub fn plan(
         &self,
-        now: Ts,
+        now: impl Into<Moment>,
         device_idle: bool,
         minute_of_day: u16,
         endpoints: &Endpoints,
     ) -> Option<Plan> {
+        let now = now.into();
         if !device_idle {
             return None;
         }
@@ -365,7 +479,7 @@ impl Inbox {
             (
                 std::cmp::Reverse(e.priority),
                 !e.kind.wants_reply(),
-                e.received_at,
+                e.timing.received,
                 e.id,
             )
         });
@@ -386,6 +500,7 @@ impl Inbox {
             };
             if matches!(e.state, EventState::New | EventState::Snoozed { .. }) {
                 e.state = EventState::Announced;
+                e.timing.snooze = None;
             }
             if e.state == EventState::Announced {
                 e.spoken_seq = seq;
@@ -404,15 +519,27 @@ impl Inbox {
         self.set_state(id, EventState::Dismissed)
     }
 
-    /// Postpone an event.
-    pub fn snooze(&mut self, id: u64, until: Ts) -> bool {
-        self.set_state(id, EventState::Snoozed { until })
+    /// Postpone an event for `secs` seconds, counted on the monotonic clock.
+    pub fn snooze(&mut self, id: u64, now: impl Into<Moment>, secs: i64) -> bool {
+        let now = now.into();
+        let done = self.set_state(
+            id,
+            EventState::Snoozed {
+                until: now.wall.saturating_add(secs),
+            },
+        );
+        if let Some(e) = self.get_mut(id) {
+            e.timing.snooze = Some(now.mono.saturating_add(secs));
+        }
+        done
     }
 
+    /// Change an event's state. A snooze belongs to the state, so any other state ends it.
     fn set_state(&mut self, id: u64, state: EventState) -> bool {
         match self.get_mut(id) {
             Some(e) => {
                 e.state = state;
+                e.timing.snooze = None;
                 true
             }
             None => false,

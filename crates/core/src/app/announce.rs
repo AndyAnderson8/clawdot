@@ -7,6 +7,7 @@
 
 use super::{Bucket, Core, HookError, HookOutcome, take};
 use crate::audit::{Act, decision};
+use crate::inbox::Moment;
 use crate::inbox::adapter::Mapped;
 use crate::inbox::event::{EventKind, MAX_TITLE, Priority, truncate_chars};
 use crate::inbox::queue::{FilterReason, Ingest};
@@ -322,7 +323,7 @@ impl Core {
             no_reply: !a.reply,
             ttl_secs: a.ttl_secs,
         };
-        let outcome = match g.inbox.ingest(now, &ep, mapped) {
+        let outcome = match g.inbox.ingest(Moment { wall: now, mono }, &ep, mapped) {
             Ingest::Accepted(id) => HookOutcome::Accepted(id),
             Ingest::Coalesced(id) => HookOutcome::Coalesced(id),
             Ingest::Filtered(r) => HookOutcome::Filtered(r),

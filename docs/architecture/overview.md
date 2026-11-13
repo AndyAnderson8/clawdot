@@ -101,6 +101,7 @@ Everything is in the data directory (`--data-dir`, default `./clawdot-data`). No
 | `timers.json` | Timers, alarms, reminders, the stopwatch |
 | `usage.json` | The day's request and spend counters |
 | `audit.jsonl`, `audit.1.jsonl` | The audit log, rotated at a size cap |
+| `audit-counts.json` | The day's counts of actions and costly actions, for the daily caps |
 | `memory.json` | Notes the user asked to keep (only if enabled) |
 | `tools.json`, `connections.json`, `skills.json` | Tools, MCP connections and skills managed in the portal |
 | `update.json` | Update-check state |

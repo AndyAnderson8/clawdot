@@ -342,6 +342,8 @@ mod tests {
             no_reply: false,
             expires_at: None,
             received_at: 0,
+            timing: crate::inbox::event::Timing::default(),
+            rel: None,
             state: EventState::New,
             spoken_seq: 0,
         }

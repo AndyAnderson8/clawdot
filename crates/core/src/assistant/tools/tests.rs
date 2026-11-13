@@ -39,16 +39,24 @@ fn time_dependent_tools_refuse_an_unset_clock() {
         .store(utc(2010, 1, 1, 0, 3), std::sync::atomic::Ordering::Relaxed);
     for (tool, args) in [
         ("set_alarm", json!({"hour": 7, "minute": 0})),
-        ("set_reminder", json!({"seconds": 60, "text": "x"})),
+        (
+            "set_reminder_at",
+            json!({"text": "x", "hour": 17, "minute": 0}),
+        ),
         ("current_time", json!({})),
     ] {
         let e = call(&mut a, tool, args).unwrap_err();
         assert!(e.contains("clock isn't set"), "{tool}: {e}");
     }
-    // A countdown timer runs on the monotonic clock and needs no calendar (REQ-TMR-009).
+    // A countdown runs on the monotonic clock and needs no calendar (REQ-TMR-009): a timer, and a reminder
+    // after a delay.
     assert_eq!(
         call(&mut a, "set_timer", json!({"seconds": 60})).unwrap(),
         "Timer set for 1 minute."
+    );
+    assert_eq!(
+        call(&mut a, "set_reminder", json!({"seconds": 600, "text": "x"})).unwrap(),
+        "Will remind about \"x\" in 10 minutes."
     );
     assert!(
         call(&mut a, "list_timers", json!({}))
