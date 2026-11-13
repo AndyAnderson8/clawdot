@@ -133,7 +133,7 @@ A known event whose fields are missing or out of range (for example `level` of 1
 2. `welcome`. The satellite is idle.
 3. **Spoken turn.** `detection` (or `button` `action`) → the core sends `set-indicator listening` and `stream-start` → the satellite streams `audio-chunk`s → the core finds the end of speech and sends `stream-stop` and `set-indicator thinking` → the core sends `set-indicator speaking`, `audio-start`, `audio-chunk`s, `audio-stop` → the satellite plays the reply and sends `playback-done` → the core may send `stream-start` again (a follow-up window without the wake word).
 4. **Mute.** `mute-changed` from the device, or the `mute` button (the core then answers `set-mute`). A muted satellite sends no mic audio and the core ignores the wake word.
-5. **Keepalive.** The core pings every 5 s; the satellite answers `pong`. Either side may also ping. Silence for 20 s ends the session; the satellite reconnects with exponential backoff (the reference client starts at 1 s, doubles, and caps at 30 s).
+5. **Keepalive.** The core pings every 5 s; the satellite answers `pong`. Either side may also ping. Silence for 20 s ends the session; the satellite reconnects with exponential backoff (1 s, doubling, capped at 30 s). The reconnect loop is in `clawdot-device` (`run_forever`); the reference satellite binary connects once and exits when the session ends. The backoff restarts only after a `welcome`.
 6. **Reconnection** starts a fresh session with a new `hello`; no state survives it.
 
 ## 8. Versioning
@@ -172,3 +172,4 @@ A known event whose fields are missing or out of range (for example `level` of 1
 | 0.3.2 | 2026-11-09 | REQ-SAT-019: ESPHome devices attach through the optional adapter of spec 0004; REQ-SAT-014 is for stock Wyoming satellites. No change to the wire or the protocol version. |
 | 0.3.3 | 2026-11-09 | REQ-SAT-020: `clawdot.admin-reset` and `clawdot.admin-reset-window` for the hardware-assisted administrator password reset (additive; unknown events are still ignored, no protocol version change). |
 | 0.3.4 | 2026-11-13 | REQ-SAT-020: the long-press administrator reset applies to the native satellite protocol only; a device connected through ESPHome resets the password with `clawdot --reset-admin`. |
+| 0.3.5 | 2026-11-13 | Section 7.5: the reconnect loop with backoff is in `clawdot-device` (`run_forever`) and restarts only after a `welcome`; the `clawdot-satellite` binary connects once. |

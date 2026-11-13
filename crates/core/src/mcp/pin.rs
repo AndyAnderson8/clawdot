@@ -200,6 +200,31 @@ fn clean_map(m: &Map<String, Value>, depth: usize) -> Value {
     Value::Object(out)
 }
 
+/// A list of types, cut to the ones JSON Schema has; `None` when none are left.
+fn clean_type_list(a: &[Value]) -> Option<Value> {
+    let t: Vec<Value> = a
+        .iter()
+        .filter(|x| x.as_str().is_some_and(|s| TYPES.contains(&s)))
+        .cloned()
+        .collect();
+    (!t.is_empty()).then_some(Value::Array(t))
+}
+
+/// The names of the required parameters, cut to short names without control characters.
+fn clean_required(a: &[Value]) -> Value {
+    Value::Array(
+        a.iter()
+            .filter(|x| {
+                x.as_str().is_some_and(|s| {
+                    s.chars().count() <= MAX_PROPERTY_NAME && !s.chars().any(char::is_control)
+                })
+            })
+            .take(MAX_ITEMS)
+            .cloned()
+            .collect(),
+    )
+}
+
 fn clean(v: &Value, depth: usize) -> Value {
     let Value::Object(m) = v else {
         return Value::Object(Map::new());
@@ -211,14 +236,7 @@ fn clean(v: &Value, depth: usize) -> Value {
     for (key, val) in m {
         let kept: Option<Value> = match (key.as_str(), val) {
             ("type", Value::String(s)) if TYPES.contains(&s.as_str()) => Some(val.clone()),
-            ("type", Value::Array(a)) => {
-                let t: Vec<Value> = a
-                    .iter()
-                    .filter(|x| x.as_str().is_some_and(|s| TYPES.contains(&s)))
-                    .cloned()
-                    .collect();
-                (!t.is_empty()).then_some(Value::Array(t))
-            }
+            ("type", Value::Array(a)) => clean_type_list(a),
             ("description", Value::String(s)) => Some(Value::String(one_line(s, MAX_PARAM_TEXT))),
             ("properties" | "$defs" | "definitions", Value::Object(p)) => Some(clean_map(p, depth)),
             ("items", Value::Object(_)) => Some(clean(val, depth + 1)),
@@ -230,18 +248,7 @@ fn clean(v: &Value, depth: usize) -> Value {
                     .map(|x| clean(x, depth + 1))
                     .collect(),
             )),
-            ("required", Value::Array(a)) => Some(Value::Array(
-                a.iter()
-                    .filter(|x| {
-                        x.as_str().is_some_and(|s| {
-                            s.chars().count() <= MAX_PROPERTY_NAME
-                                && !s.chars().any(char::is_control)
-                        })
-                    })
-                    .take(MAX_ITEMS)
-                    .cloned()
-                    .collect(),
-            )),
+            ("required", Value::Array(a)) => Some(clean_required(a)),
             ("enum", Value::Array(a)) => Some(Value::Array(
                 a.iter().filter_map(short_scalar).take(MAX_ITEMS).collect(),
             )),

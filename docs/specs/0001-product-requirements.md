@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.66 |
+| **Version** | 0.67 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -486,3 +486,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.64 | 2026-11-11 | REQ-VOI-025: the stop-while-working window follows the tuned no-speech value, at most 4 seconds. REQ-SEC-001: IPv6 link-local addresses count as private. REQ-CFG-009: a hive peer is listed under the packet source address and an advertised address record is ignored. REQ-UPD-004: the release file is named from the build target, so an ARMv6 build looks for a file no release carries |
 | 0.65 | 2026-11-11 | REQ-INB-008, REQ-CFG-028: an endpoint has a stable random id, and its events, waiting replies, held question and rate-limit state are held under it, so an endpoint created later under the same name cannot reach them; files saved before ids are given them at the first start |
 | 0.66 | 2026-11-11 | REQ-CFG-039, REQ-CFG-062: GET /api/settings also reports each setting's kind, limits or choices, and group from the core's settings table, and the page draws its controls from them. REQ-INB-019: endpoints carry their adapter's set-up lines, and the page fills in the address, name and token |
+| 0.67 | 2026-11-11 | REQ-AST-011, REQ-SEC-015: the daily spend and action counts no longer reset when the clock is unset or steps back; an answer cut off after it began is priced for its prompt and a stream that ends early is an error. REQ-SEC-014: secrets written as name: value, in URL paths and in fragments are redacted. A turn is cancelled when its satellite goes away |

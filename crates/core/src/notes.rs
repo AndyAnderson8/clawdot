@@ -152,9 +152,25 @@ impl NoteStore {
         let mut doc: Doc = file.load().map_err(|e| format!("memory.json: {e}"))?;
         // A file edited by hand must not break the bounds.
         doc.notes.truncate(MAX_NOTES);
+        // Whitespace the way `add` keeps it (one line, single spaces), and no empty notes.
         for n in &mut doc.notes {
-            n.text = n.text.chars().take(MAX_NOTE_CHARS).collect();
+            let one_line = n.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            n.text = one_line.chars().take(MAX_NOTE_CHARS).collect();
         }
+        doc.notes.retain(|n| !n.text.is_empty());
+        // Ids name a note for the portal and for "forget": a repeated or zero id is given a new one.
+        let mut next = doc
+            .next_id
+            .max(doc.notes.iter().map(|n| n.id).max().unwrap_or(0));
+        let mut seen = std::collections::HashSet::new();
+        for n in &mut doc.notes {
+            if n.id == 0 || !seen.insert(n.id) {
+                next += 1;
+                n.id = next;
+                seen.insert(next);
+            }
+        }
+        doc.next_id = next;
         let mut bytes = 0;
         doc.notes.retain(|n| {
             bytes += n.text.len();
@@ -673,6 +689,24 @@ mod tests {
         assert_eq!(s.forget_nth(0), Err(NoteError::Missing));
     }
 
+    // REQ-SEC-014: "name: value" with a secret name is refused as a note; ordinary notes are not.
+    #[test]
+    fn a_secret_written_as_name_colon_value_is_refused_and_ordinary_notes_are_not() {
+        let s = on();
+        assert_eq!(
+            s.add("my api_key: hunter2", 1).unwrap_err(),
+            NoteError::Secret
+        );
+        for text in [
+            "the key: under the mat",
+            "dentist: Tuesday at 3",
+            "pin the poster above the desk",
+            "wifi name: the blue house",
+            "session: Friday evening",
+        ] {
+            assert!(s.add(text, 1).is_ok(), "{text}");
+        }
+    }
     #[test]
     fn bounds_hold_and_secrets_are_refused() {
         let s = on();
@@ -755,6 +789,29 @@ mod tests {
                 .iter()
                 .all(|n| n.text.chars().count() <= MAX_NOTE_CHARS)
         );
+    }
+
+    // A file edited by hand: spaces and line breaks tidied, empty notes dropped, every id different.
+    #[test]
+    fn a_hand_edited_file_is_tidied_on_open() {
+        let dir = TempDir::new("notes-tidy");
+        let doc = serde_json::json!({"schema": 1, "data": {"next_id": 2, "notes": [
+            {"id": 2, "text": "the  garage\ncode is  12", "ts": 0},
+            {"id": 2, "text": "   ", "ts": 0},
+            {"id": 2, "text": "the router is in the hall", "ts": 0},
+            {"id": 0, "text": "milk", "ts": 0},
+        ]}});
+        std::fs::write(dir.0.join("memory.json"), doc.to_string()).unwrap();
+        let s = NoteStore::open(crate::lang::DEFAULT, &dir.0, true).unwrap();
+        let notes = s.list();
+        assert_eq!(notes[0].text, "the garage code is 12");
+        assert_eq!(notes.len(), 3);
+        let mut ids: Vec<u64> = notes.iter().map(|n| n.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "{notes:?}");
+        let added = s.add("a new one", 1).unwrap();
+        assert!(!ids.contains(&added.id));
     }
 
     #[test]

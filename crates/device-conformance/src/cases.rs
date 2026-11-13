@@ -6,13 +6,12 @@ use clawdot_device::board::EMBEDDED;
 use clawdot_device::board_file::{BoardFile, DuckKind, MuteKind, UpdateMode};
 use clawdot_device::button::{ButtonEvent, KeyButtons, QUEUE_LIMIT, ScriptedButtons};
 use clawdot_device::caps::Capability;
-use clawdot_device::daemon::{DaemonConfig, DaemonDevice, GainOut, run_forever};
+use clawdot_device::daemon::{DaemonConfig, DaemonDevice, run_forever};
 use clawdot_device::led::{LedController, LedState, NullLeds};
 use clawdot_device::quiet::{QuietHours, QuietPolicy};
 use clawdot_device::tone::{self, Tone};
 use clawdot_device::wake::{Detection, ScriptedEngine, WakeRouter, WordId, WordInfo};
 use clawdot_protocol::message::{AudioFormat, Indicator, Message};
-use clawdot_satellite::audio::AudioOut;
 use clawdot_satellite::{Config, DEAD_AFTER, Device};
 use serde_json::Value;
 use std::io::Cursor;
@@ -732,23 +731,12 @@ fn req_dev_016_ducking(b: &dyn BoardUnderTest) -> Outcome {
             DuckKind::Mixer => {
                 Outcome::Skip("mixer ducking needs the ALSA backend, which is not built".into())
             }
-            DuckKind::Software => check(|| {
-                let rec = crate::fake::Rec::default();
-                let mut out = GainOut::new(rec.clone());
-                out.begin().map_err(|e| e.to_string())?;
-                out.play(&[1000]).map_err(|e| e.to_string())?;
-                out.duck(f.audio.playback.duck_level_pct);
-                out.play(&[1000]).map_err(|e| e.to_string())?;
-                out.duck(100);
-                out.play(&[1000]).map_err(|e| e.to_string())?;
-                let got = rec.samples();
-                let ducked =
-                    i16::try_from(i32::from(f.audio.playback.duck_level_pct) * 10).unwrap_or(0);
-                if got != vec![1000, ducked, 1000] {
-                    return Err(format!("ducking and restoring gave {got:?}"));
-                }
-                Ok(())
-            }),
+            // The daemon has no other audio source to lower, and nothing in it calls `duck` or reads the board's
+            // level, so a pass here would only show that `GainOut` can scale samples (a unit test of its own).
+            DuckKind::Software => Outcome::Skip(format!(
+                "the board declares software ducking at {}%; the daemon has no other audio source to duck and does not use this value yet",
+                f.audio.playback.duck_level_pct
+            )),
         },
     }
 }

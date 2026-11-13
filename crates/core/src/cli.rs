@@ -104,11 +104,25 @@ pub fn parse(argv: &[String]) -> Result<(Cli, Config), String> {
     Ok((cli, file))
 }
 
+/// The flags that take one text value and set the setting of that name, as (flag, setting).
+const TEXT_FLAGS: &[(&str, &str)] = &[
+    ("--public-url", "public_url"),
+    ("--zone", "zone"),
+    ("--name", "device_name"),
+    ("--llm-url", "llm_url"),
+    ("--llm-model", "llm_model"),
+    ("--llm-key-env", "llm_key_env"),
+];
+
 /// Record the command-line flags in `cli`. An empty error means help was asked for.
 fn apply_flags(cli: &mut Cli, argv: &[String]) -> Result<(), String> {
     let mut it = argv.iter().cloned();
     while let Some(flag) = it.next() {
         let mut value = |n: &str| it.next().ok_or_else(|| format!("{n} needs a value"));
+        if let Some((_, key)) = TEXT_FLAGS.iter().find(|(f, _)| *f == flag) {
+            cli.flags.insert((*key).into(), value(&flag)?.into());
+            continue;
+        }
         match flag.as_str() {
             "-h" | "--help" => return Err(String::new()),
             "--config" => {
@@ -130,17 +144,6 @@ fn apply_flags(cli: &mut Cli, argv: &[String]) -> Result<(), String> {
                     .map_err(|e| format!("bad --listen: {e}"))?;
                 cli.flags.insert("listen".into(), listen.to_string().into());
             }
-            "--public-url" => {
-                cli.flags
-                    .insert("public_url".into(), value("--public-url")?.into());
-            }
-            "--zone" => {
-                cli.flags.insert("zone".into(), value("--zone")?.into());
-            }
-            "--name" => {
-                cli.flags
-                    .insert("device_name".into(), value("--name")?.into());
-            }
             "--create-endpoint" => cli.create.push(value("--create-endpoint")?),
             "--rotate-endpoint" => cli.rotate.push(value("--rotate-endpoint")?),
             "--reset-admin" => cli.reset_admin = true,
@@ -155,18 +158,6 @@ fn apply_flags(cli: &mut Cli, argv: &[String]) -> Result<(), String> {
             "--voice-out" => cli.voice_out = Some(PathBuf::from(value("--voice-out")?)),
             "--no-console" => cli.no_console = true,
             "--echo-speech" => cli.echo_speech = true,
-            "--llm-url" => {
-                cli.flags
-                    .insert("llm_url".into(), value("--llm-url")?.into());
-            }
-            "--llm-model" => {
-                cli.flags
-                    .insert("llm_model".into(), value("--llm-model")?.into());
-            }
-            "--llm-key-env" => {
-                cli.flags
-                    .insert("llm_key_env".into(), value("--llm-key-env")?.into());
-            }
             "--persona-file" => cli.persona_file = Some(PathBuf::from(value("--persona-file")?)),
             "--dry-run" => {
                 cli.flags.insert("dry_run".into(), true.into());

@@ -74,6 +74,12 @@ const CHARGE_STEP_USD: f64 = 0.000_1;
 const MAX_CHUNK: usize = 32 * 1024;
 /// How long connecting may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The longest a write to the service may take (audio, a pong, the close frame). A connection that has gone
+/// half dead accepts no more bytes and says nothing, so without a limit the session would never end.
+#[cfg(not(test))]
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const WRITE_TIMEOUT: Duration = Duration::from_millis(300);
 /// The most characters of a provider's error message that are ever spoken.
 const MAX_SPOKEN_ERROR_CHARS: usize = 160;
 
@@ -391,23 +397,49 @@ enum Reply {
     InFlight { queued: Vec<String> },
 }
 
+/// How long a speech start may go without its transcript before the transcript is taken as lost (the service
+/// failed to transcribe it, or the user made a noise with no words).
+const TRANSCRIPT_WAIT: Duration = Duration::from_secs(8);
+
 /// Counts of utterances that keep a held action from being answered by the wrong words. Transcripts arrive
 /// after the model has started replying, so the transcript of the very request that caused a held action can
 /// arrive after the hold; only a transcript of a later utterance can answer it.
+///
+/// A transcript that never comes would leave `heard` behind `started` for good, and the user's "yes" would not
+/// be accepted until the action expired. So a start still without a transcript after [`TRANSCRIPT_WAIT`] counts
+/// as heard, and `heard` never passes `started`.
 #[derive(Debug, Default)]
 struct Utterances {
     /// Utterances the user has begun.
     started: u32,
-    /// Transcripts received.
+    /// Transcripts received, plus those given up on.
     heard: u32,
     /// `started` when the last action was held.
     barrier: u32,
+    /// When each utterance without a transcript began, oldest first.
+    waiting: std::collections::VecDeque<tokio::time::Instant>,
 }
 
 impl Utterances {
-    /// A transcript arrived: whether it is of an utterance later than the hold, so it may answer one.
-    fn heard_one(&mut self) -> bool {
+    /// The user began an utterance at `now`.
+    fn start(&mut self, now: tokio::time::Instant) {
+        self.started += 1;
+        self.waiting.push_back(now);
+    }
+
+    /// A transcript arrived at `now`: whether it is of an utterance later than the hold, so it may answer one.
+    fn heard_one(&mut self, now: tokio::time::Instant) -> bool {
+        while self
+            .waiting
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) > TRANSCRIPT_WAIT)
+        {
+            self.waiting.pop_front();
+            self.heard += 1;
+        }
+        self.waiting.pop_front();
         self.heard += 1;
+        self.heard = self.heard.min(self.started);
         self.heard > self.barrier
     }
 
@@ -518,13 +550,13 @@ where
     H: ToolHost,
 {
     async fn send(&mut self, msg: &Value) -> Result<(), RealtimeError> {
-        self.ws
-            .send_text(&msg.to_string())
+        let sent = tokio::time::timeout(WRITE_TIMEOUT, self.ws.send_text(&msg.to_string()))
             .await
-            .map_err(|e| match e {
-                WsError::Io(_) | WsError::Eof => RealtimeError::Dropped,
-                other => other.into(),
-            })
+            .map_err(|_| RealtimeError::Dropped)?;
+        sent.map_err(|e| match e {
+            WsError::Io(_) | WsError::Eof => RealtimeError::Dropped,
+            other => other.into(),
+        })
     }
 
     /// The end of a session: write the audio cost not yet counted and close the socket if it is still usable.
@@ -537,7 +569,7 @@ where
             outcome,
             Err(RealtimeError::Dropped | RealtimeError::Unreachable(_))
         ) {
-            let _ = self.ws.send_close().await;
+            let _ = tokio::time::timeout(WRITE_TIMEOUT, self.ws.send_close()).await;
         }
     }
 
@@ -566,7 +598,9 @@ where
                             return Ok(end);
                         }
                     }
-                    Msg::Ping(p) => self.ws.send_pong(&p).await?,
+                    Msg::Ping(p) => tokio::time::timeout(WRITE_TIMEOUT, self.ws.send_pong(&p))
+                        .await
+                        .map_err(|_| RealtimeError::Dropped)??,
                     Msg::Close => return Ok(SessionEnd::Closed),
                 },
                 chunk = self.io.mic.recv() => {
@@ -602,7 +636,7 @@ where
                 return Ok(self.charge(usd));
             }
             Event::UserSpeechStarted => {
-                self.st.utterances.started += 1;
+                self.st.utterances.start(tokio::time::Instant::now());
                 if self.io.speaker.send(Speaker::Flush).await.is_err() {
                     return Ok(Some(SessionEnd::Hangup));
                 }
@@ -638,7 +672,7 @@ where
     /// The user's words arrived. They answer a held action (read here, by the host) or become the text the
     /// next tool turn runs under.
     async fn on_transcript(&mut self, text: &str) -> Result<(), RealtimeError> {
-        let may_answer = self.st.utterances.heard_one();
+        let may_answer = self.st.utterances.heard_one(tokio::time::Instant::now());
         let held_tool = self
             .env
             .conv

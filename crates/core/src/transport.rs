@@ -278,9 +278,19 @@ impl HttpBackend {
             return Err(read_error(body, status).await);
         }
         if !streaming {
-            return read_whole(body, on_text).await;
+            return read_whole(body, on_text).await.map_err(after_answer_began);
         }
-        read_stream(body, on_text).await
+        read_stream(body, on_text).await.map_err(after_answer_began)
+    }
+}
+
+/// A failure once the provider has started to answer (a 200 status): the prompt was received and may be
+/// billed, so it is an [`LlmError::Interrupted`] rather than a refusal. A provider's own error object stays
+/// what it is.
+fn after_answer_began(e: LlmError) -> LlmError {
+    match e {
+        LlmError::Transport(m) | LlmError::Malformed(m) => LlmError::Interrupted(m),
+        other => other,
     }
 }
 
@@ -357,6 +367,7 @@ async fn read_stream(
             }
         }
     }
+    acc.check_whole(done)?;
     Ok(acc.finish())
 }
 
@@ -867,5 +878,35 @@ mod tests {
             backend.complete(&request()).await,
             Err(LlmError::Transport(_))
         ));
+    }
+
+    // REQ-AST-011: a stream that is cut before it finishes is an error the caller prices as billed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stream_cut_off_part_way_is_an_interrupted_answer() {
+        const CUT: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n";
+        let (port, _s) = fake_server(CUT, false).await;
+        let backend = HttpBackend::new(
+            &format!("http://127.0.0.1:{port}/v1"),
+            "",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let err = backend.stream(&request(), |_| {}).await.unwrap_err();
+        assert!(matches!(err, LlmError::Interrupted(_)), "{err}");
+        assert!(err.may_be_billed());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_malformed_line_in_a_stream_is_an_interrupted_answer() {
+        const BAD: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {not json\n\n";
+        let (port, _s) = fake_server(BAD, false).await;
+        let backend = HttpBackend::new(
+            &format!("http://127.0.0.1:{port}/v1"),
+            "",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let err = backend.stream(&request(), |_| {}).await.unwrap_err();
+        assert!(err.may_be_billed(), "{err}");
     }
 }

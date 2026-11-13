@@ -111,6 +111,17 @@ pub(super) struct SessionState {
     pub(super) last_reset_ask: Option<Instant>,
 }
 
+impl Drop for SessionState {
+    /// However the session ends (the peer closed, went silent, or broke the framing), a turn still running for
+    /// it is told to stop: nobody is left to hear the answer, and the core would go on paying for the model
+    /// call (REQ-AST-011, REQ-AST-022).
+    fn drop(&mut self) {
+        if let Some(t) = &self.turn_cancel {
+            t.cancel();
+        }
+    }
+}
+
 impl SessionState {
     pub(super) fn new(settings: &Settings) -> Self {
         let (registration, announce_rx) = settings.announcer.register();

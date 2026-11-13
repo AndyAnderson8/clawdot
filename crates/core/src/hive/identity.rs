@@ -76,6 +76,11 @@ impl Identity {
         let store = JsonStore::new(dir.join(FILE), SCHEMA);
         let stored: Stored = store.load()?;
         if stored.pkcs8.is_empty() {
+            // A file that is there with no key in it was damaged or edited: a new key would change the
+            // speaker's id without a word, so it is the same error as a file that cannot be read.
+            if dir.join(FILE).exists() {
+                return Err(IdentityError::BadKey);
+            }
             let doc = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
                 .map_err(|_| IdentityError::Random)?;
             let key =
@@ -208,6 +213,9 @@ mod tests {
         assert!(matches!(Identity::open(&dir.0), Err(IdentityError::BadKey)));
         std::fs::write(dir.0.join(FILE), "not json").unwrap();
         assert!(Identity::open(&dir.0).is_err());
+        // A file with an empty key is damaged too, not a first start.
+        std::fs::write(dir.0.join(FILE), r#"{"schema":1,"data":{"pkcs8":""}}"#).unwrap();
+        assert!(matches!(Identity::open(&dir.0), Err(IdentityError::BadKey)));
         assert!(!a.id().is_empty());
     }
 

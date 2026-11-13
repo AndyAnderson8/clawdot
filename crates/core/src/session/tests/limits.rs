@@ -519,3 +519,23 @@ fn the_stop_phrases_are_plain_and_a_sentence_containing_stop_is_not_one() {
         assert!(!is_cancel(crate::lang::DEFAULT, no), "{no}");
     }
 }
+
+// REQ-AST-011: an answer that was cut off after it began may have been billed, so the turn path prices its
+// prompt; a refusal before any answer is free.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cut_off_answer_is_priced_but_a_refusal_is_free() {
+    for (err, billed) in [
+        (LlmError::Interrupted("stream broke".into()), true),
+        (LlmError::Transport("connection refused".into()), false),
+    ] {
+        let (mut h, mut c, mut u) = fresh();
+        let b = Script::new(vec![Err(err.clone())]);
+        turn(&b, &mut h, &mut c, &mut u, "what is the weather").await;
+        assert_eq!(
+            u.spend_today() > 0.0,
+            billed,
+            "{err:?}: spend {}",
+            u.spend_today()
+        );
+    }
+}

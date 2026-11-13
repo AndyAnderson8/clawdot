@@ -86,6 +86,21 @@ fn name_unnamed_calls(calls: &mut [ToolCall]) {
     for c in calls.iter_mut().filter(|c| c.id.is_empty()) {
         c.id = fresh_call_id("call", &mut next, |id| sent.iter().any(|s| s == id));
     }
+    // A provider that repeats an id would have two results answer one call: the repeat gets a suffix.
+    for i in 1..calls.len() {
+        if calls[..i].iter().any(|p| p.id == calls[i].id) {
+            let base = calls[i].id.clone();
+            let mut n = 2;
+            let fresh = loop {
+                let candidate = format!("{base}_{n}");
+                if !calls.iter().any(|p| p.id == candidate) {
+                    break candidate;
+                }
+                n += 1;
+            };
+            calls[i].id = fresh;
+        }
+    }
 }
 
 /// One message in a conversation.
@@ -308,11 +323,25 @@ pub enum LlmError {
     Provider(String),
     /// The response was not understood.
     Malformed(String),
+    /// The provider started to answer and the answer did not arrive whole: the stream was cut, the reply
+    /// was larger than allowed, or a line of it could not be read. The prompt was received, so the provider
+    /// may have billed it (see [`LlmError::may_be_billed`]).
+    Interrupted(String),
+}
+
+impl LlmError {
+    /// Whether the provider may have charged for the request that failed with this error. A refusal before
+    /// any answer (an HTTP error status, no connection) is free; an answer cut off part way is not.
+    #[must_use]
+    pub const fn may_be_billed(&self) -> bool {
+        matches!(self, Self::Interrupted(_))
+    }
 }
 
 impl fmt::Display for LlmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Interrupted(e) => write!(f, "the language model's answer was cut off: {e}"),
             Self::Transport(e) => write!(f, "could not reach the language model: {e}"),
             Self::Provider(e) => write!(f, "the language model reported an error: {e}"),
             Self::Malformed(e) => write!(f, "unexpected response from the language model: {e}"),
@@ -385,6 +414,12 @@ pub fn parse_completion(body: &str) -> Result<Completion, LlmError> {
         })
         .unwrap_or_default();
     name_unnamed_calls(&mut tool_calls);
+    let finish_reason = choice.get("finish_reason").and_then(Value::as_str);
+    if finish_reason == Some("length") && !tool_calls.is_empty() {
+        return Err(LlmError::Malformed(
+            "the reply reached the length limit in the middle of a tool call".into(),
+        ));
+    }
     Ok(Completion {
         text: msg
             .get("content")
@@ -470,20 +505,31 @@ impl StreamAccumulator {
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 for c in calls {
-                    let index = c
-                        .get("index")
-                        .and_then(Value::as_u64)
-                        .and_then(|i| usize::try_from(i).ok())
-                        .unwrap_or(0);
-                    if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
-                        return Err(LlmError::Malformed("too many tool calls".into()));
-                    }
                     let id = c
                         .get("id")
                         .and_then(Value::as_str)
                         .filter(|i| !i.is_empty());
                     let name = c.pointer("/function/name").and_then(Value::as_str);
                     let args = c.pointer("/function/arguments").and_then(Value::as_str);
+                    let index = match c
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .and_then(|i| usize::try_from(i).ok())
+                    {
+                        Some(i) => i,
+                        // No index: the chunk belongs to the newest call, unless it opens another one
+                        // (a new id, or a second name).
+                        None => self.calls.iter().next_back().map_or(0, |(i, last)| {
+                            let new_id = id.is_some_and(|id| !last.id.is_empty() && id != last.id);
+                            let new_name = name
+                                .is_some_and(|n| !n.is_empty() && !last.name.is_empty())
+                                && id.is_none_or(|id| id != last.id);
+                            if new_id || new_name { i + 1 } else { *i }
+                        }),
+                    };
+                    if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
+                        return Err(LlmError::Malformed("too many tool calls".into()));
+                    }
                     self.keep(
                         id.map_or(0, str::len)
                             + name.map_or(0, str::len)
@@ -510,6 +556,28 @@ impl StreamAccumulator {
         self.kept = self.kept.saturating_add(n);
         if self.kept > MAX_STREAMED {
             return Err(LlmError::Malformed("response too large".into()));
+        }
+        Ok(())
+    }
+
+    /// Whether what arrived is a whole reply. `done` is whether the stream's `[DONE]` line was seen.
+    ///
+    /// # Errors
+    /// A stream that ended with neither `[DONE]` nor a finish reason was cut off: its text is a truncated
+    /// answer and its tool calls may carry half an argument list. A reply that stopped at the length limit
+    /// while calling a tool has arguments that were cut off at the limit.
+    pub fn check_whole(&self, done: bool) -> Result<(), LlmError> {
+        if !done && self.finish_reason.is_none() {
+            return Err(LlmError::Malformed(
+                "the stream ended before the reply was finished".into(),
+            ));
+        }
+        if self.finish_reason.as_deref() == Some("length")
+            && self.calls.values().any(|c| !c.name.is_empty())
+        {
+            return Err(LlmError::Malformed(
+                "the reply reached the length limit in the middle of a tool call".into(),
+            ));
         }
         Ok(())
     }
@@ -960,5 +1028,72 @@ mod tests {
             acc.feed_line(&line).is_err()
         });
         assert!(failed, "1000 tool calls were accepted");
+    }
+
+    #[test]
+    fn a_stream_that_ends_before_it_is_finished_is_an_error() {
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(r#"data: {"choices":[{"delta":{"content":"The answer is"}}]}"#)
+            .unwrap();
+        assert!(matches!(
+            acc.check_whole(false),
+            Err(LlmError::Malformed(_))
+        ));
+        // [DONE] or a finish reason makes it whole.
+        assert!(acc.check_whole(true).is_ok());
+        acc.feed_line(r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+            .unwrap();
+        assert!(acc.check_whole(false).is_ok());
+    }
+
+    #[test]
+    fn a_reply_cut_at_the_length_limit_in_a_tool_call_is_an_error() {
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"f","arguments":"{\"x\":"}}]},"finish_reason":"length"}]}"#,
+        )
+        .unwrap();
+        assert!(acc.check_whole(true).is_err());
+        let body = r#"{"choices":[{"message":{"tool_calls":[{"id":"a","function":{"name":"f","arguments":"{"}}]},"finish_reason":"length"}]}"#;
+        assert!(matches!(
+            parse_completion(body),
+            Err(LlmError::Malformed(_))
+        ));
+        let text_only = r#"{"choices":[{"message":{"content":"long"},"finish_reason":"length"}]}"#;
+        assert!(parse_completion(text_only).is_ok());
+    }
+
+    // Some servers send tool-call deltas with no `index`; each new id or name starts a new call.
+    #[test]
+    fn streamed_tool_calls_without_an_index_are_not_merged() {
+        let mut acc = StreamAccumulator::default();
+        for l in [
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"set_timer","arguments":""}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"s\":1}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"b","function":{"name":"get_time","arguments":"{}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"stop","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            acc.feed_line(l).unwrap();
+        }
+        let c = acc.finish();
+        let got: Vec<(&str, &str, &str)> = c
+            .tool_calls
+            .iter()
+            .map(|t| (t.id.as_str(), t.name.as_str(), t.arguments.as_str()))
+            .collect();
+        assert_eq!(got[0], ("a", "set_timer", "{\"s\":1}"));
+        assert_eq!(got[1], ("b", "get_time", "{}"));
+        assert_eq!((got[2].1, got.len()), ("stop", 3));
+    }
+
+    #[test]
+    fn repeated_tool_call_ids_are_made_unique() {
+        let body = r#"{"choices":[{"message":{"tool_calls":[
+            {"id":"x","function":{"name":"a","arguments":"{}"}},
+            {"id":"x","function":{"name":"b","arguments":"{}"}},
+            {"id":"x_2","function":{"name":"c","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let c = parse_completion(body).unwrap();
+        let ids: Vec<&str> = c.tool_calls.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["x", "x_3", "x_2"]);
     }
 }

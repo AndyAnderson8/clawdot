@@ -176,41 +176,49 @@ impl Assistant {
                     .set_alarm(now, &*self.zone, h, m, mask, label)
                     .map_err(|e| sched_fail(&e))
             }
-            "reminder" => {
-                if label.is_empty() {
-                    return Err(invalid("A reminder needs some text to say."));
-                }
-                if let Some(secs) = spec.seconds {
-                    if spec.date.is_some() || spec.time.is_some() {
-                        return Err(invalid(
-                            "Give a reminder either a delay or a date and a time, not both.",
-                        ));
-                    }
-                    return self
-                        .sched
-                        .set_reminder_in(&*self.clock, secs, label)
-                        .map_err(|e| sched_fail(&e));
-                }
-                let (Some(date), Some(time)) = (spec.date.as_deref(), spec.time.as_deref()) else {
-                    return Err(invalid("A reminder needs a delay, or a date and a time."));
-                };
-                let (Some((y, mo, d)), Some((h, mi))) = (parse_date(date), parse_time(time)) else {
-                    return Err(invalid("Use a date like 2026-11-09 and a time like 15:30."));
-                };
-                let day = days_from_civil(y, mo, d);
-                if civil_from_days(day) != (y, mo, d) {
-                    return Err(invalid("That date does not exist."));
-                }
-                let at = self
-                    .zone
-                    .local_to_utc(day, h, mi)
-                    .ok_or_else(|| invalid("That date and time do not exist."))?;
-                self.sched
-                    .set_reminder(now, at, label)
-                    .map_err(|e| sched_fail(&e))
-            }
+            "reminder" => self.add_reminder(&spec, label, now),
             _ => Err(invalid("The kind must be timer, alarm, or reminder.")),
         }
+    }
+
+    /// A reminder, after a delay or at a date and time in the device's zone, with some text to say.
+    fn add_reminder(
+        &mut self,
+        spec: &Spec,
+        label: &str,
+        now: crate::sched::Ts,
+    ) -> Result<u64, Fail> {
+        if label.is_empty() {
+            return Err(invalid("A reminder needs some text to say."));
+        }
+        if let Some(secs) = spec.seconds {
+            if spec.date.is_some() || spec.time.is_some() {
+                return Err(invalid(
+                    "Give a reminder either a delay or a date and a time, not both.",
+                ));
+            }
+            return self
+                .sched
+                .set_reminder_in(&*self.clock, secs, label)
+                .map_err(|e| sched_fail(&e));
+        }
+        let (Some(date), Some(time)) = (spec.date.as_deref(), spec.time.as_deref()) else {
+            return Err(invalid("A reminder needs a delay, or a date and a time."));
+        };
+        let (Some((y, mo, d)), Some((h, mi))) = (parse_date(date), parse_time(time)) else {
+            return Err(invalid("Use a date like 2026-11-09 and a time like 15:30."));
+        };
+        let day = days_from_civil(y, mo, d);
+        if civil_from_days(day) != (y, mo, d) {
+            return Err(invalid("That date does not exist."));
+        }
+        let at = self
+            .zone
+            .local_to_utc(day, h, mi)
+            .ok_or_else(|| invalid("That date and time do not exist."))?;
+        self.sched
+            .set_reminder(now, at, label)
+            .map_err(|e| sched_fail(&e))
     }
 }
 

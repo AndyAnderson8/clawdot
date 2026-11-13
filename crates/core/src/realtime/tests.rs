@@ -1171,3 +1171,78 @@ fn a_provider_message_is_one_short_line_without_the_key_even_when_the_cut_falls_
     assert!(!said.contains("sk-"), "{said}");
     assert_eq!(one_line("\n", "k"), "no details were given.");
 }
+
+// REQ-RTV-004: a connection that takes no more bytes must end the session, not hold it for ever.
+#[tokio::test(flavor = "current_thread")]
+async fn a_half_dead_connection_that_takes_no_audio_ends_the_session() {
+    // A small pipe that nobody reads from after the upgrade.
+    let (a, b) = duplex(256);
+    let srv = tokio::spawn(async move {
+        let (ws, _) = accept(b).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        drop(ws);
+    });
+    let mut ws = ws::connect(a, "h", "/", &[]).await.unwrap();
+    let (mic_tx, mic_rx) = mpsc::channel(64);
+    let (spk_tx, _spk_rx) = mpsc::channel(256);
+    mic_tx.send(vec![1_u8; 20_000]).await.unwrap();
+    let mut io = Io {
+        mic: mic_rx,
+        speaker: spk_tx,
+    };
+    let mut host = Host::default();
+    let mut conv = Conversation::new("system", 20, 20_000, 600);
+    let tcfg = TurnConfig::default();
+    let mut usage = UsageTracker::new(UsageLimits::default());
+    let clock = || (1_i64, 1_000_i64, 1_000_i64);
+    let mut c = cfg();
+    c.max_session = Duration::from_secs(3000);
+    let mut env = Env {
+        host: &mut host,
+        conv: &mut conv,
+        turn_cfg: &tcfg,
+        usage: &mut usage,
+        clock: &clock,
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        run(&mut ws, &OpenAi, &c, &mut io, &mut env),
+    )
+    .await
+    .expect("the session never ended");
+    assert_eq!(result, Err(RealtimeError::Dropped));
+    drop(mic_tx);
+    srv.abort();
+}
+
+// REQ-SEC-011: a transcript that never arrives must not leave the held-action barrier behind for good.
+#[test]
+fn a_lost_transcript_does_not_block_the_users_yes() {
+    use tokio::time::Instant;
+    let t0 = Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    let mut u = Utterances::default();
+    // The request starts; its transcript is lost. The action is held.
+    u.start(at(0));
+    u.hold();
+    // The user says yes 15 s later and its transcript arrives.
+    u.start(at(15));
+    assert!(u.heard_one(at(17)), "the yes answers the hold");
+
+    // Normal order: the request's own transcript arrives after the hold and cannot answer it.
+    let mut u = Utterances::default();
+    u.start(at(0));
+    u.hold();
+    assert!(!u.heard_one(at(1)), "the transcript of the request itself");
+    u.start(at(3));
+    assert!(u.heard_one(at(4)));
+
+    // A late transcript of the lost one cannot push `heard` past `started`.
+    let mut u = Utterances::default();
+    u.start(at(0));
+    u.start(at(1));
+    u.hold();
+    assert!(!u.heard_one(at(2)));
+    assert!(!u.heard_one(at(3)));
+    assert!(!u.heard_one(at(4)));
+}

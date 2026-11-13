@@ -8,14 +8,14 @@ use crate::board::Parts;
 use crate::button::{Action, ActionMap, ButtonEvent, ButtonSource, Gesture, GestureDetector};
 use crate::caps::{Capability, Declared};
 use crate::led::{LedController, LedState};
-use crate::quiet::{QuietPolicy, minute_of_day_now};
+use crate::quiet::{QuietHours, QuietPolicy, minute_of_day_now};
 use crate::tone::{self, Tone};
 use clawdot_protocol::message::{Capabilities, Indicator};
 use clawdot_satellite::audio::{AudioError, AudioIn, AudioOut};
 use clawdot_satellite::front::{AudioDevice, DeviceConfig, Press, Trigger, WakeSink};
 use clawdot_satellite::hw::OutputCaps;
 use clawdot_satellite::{Config, Device, Report, backoff, is_refusal, run};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -176,6 +176,7 @@ pub struct DaemonDevice {
     online: bool,
     stops: usize,
     admin_reset_pending: bool,
+    handshaken: bool,
 }
 
 impl std::fmt::Debug for DaemonDevice {
@@ -239,6 +240,7 @@ impl DaemonDevice {
             online: false,
             stops: 0,
             admin_reset_pending: false,
+            handshaken: false,
         }
     }
 
@@ -300,6 +302,12 @@ impl DaemonDevice {
         self.leds.set(LedState::Offline, !online);
     }
 
+    /// Whether the core answered with `welcome` since this was last asked. The reconnect loop uses it to reset
+    /// its backoff only for a core that completed a handshake.
+    pub fn take_handshake(&mut self) -> bool {
+        std::mem::take(&mut self.handshaken)
+    }
+
     /// Play a built-in tone locally, if nothing else is playing (REQ-DEV-014).
     fn play_tone(&mut self, t: Tone) {
         if self.playing {
@@ -332,9 +340,9 @@ impl DaemonDevice {
         match a {
             Action::Talk => {
                 if self.online {
-                    self.leds.turn(LedState::Wake);
-                    self.equivalent_tone(LedState::Wake);
-                    // A full queue means presses are already waiting: drop this one.
+                    // The Wake light and tone wait for the satellite to accept the press (`poll_wake`): it
+                    // ignores a press while playing, listening or muted. A full queue means presses are
+                    // already waiting: drop this one.
                     let _ = self.trigger.try_send(Press::Talk);
                 } else {
                     self.play_tone(Tone::Error);
@@ -447,6 +455,9 @@ impl Device for DaemonDevice {
             Indicator::Error => Some(LedState::Error),
             Indicator::Notification => Some(LedState::Inbox),
             Indicator::Muted => {
+                // The state and the light agree: this is a mute, whether or not `set-mute` came with it.
+                self.muted = true;
+                self.inner.set_mute(true);
                 self.leds.set(LedState::Muted, true);
                 None
             }
@@ -481,7 +492,22 @@ impl Device for DaemonDevice {
 
     fn poll_wake(&mut self) -> bool {
         self.pump_local();
-        self.inner.poll_wake()
+        let woke = self.inner.poll_wake();
+        if woke {
+            // Show and sound the wake only now that the press (or the word) was accepted.
+            self.leds.turn(LedState::Wake);
+            self.equivalent_tone(LedState::Wake);
+        }
+        woke
+    }
+
+    fn wake_name(&self) -> String {
+        self.inner.wake_name()
+    }
+
+    fn session_open(&mut self) {
+        self.handshaken = true;
+        self.set_online(true);
     }
 
     fn playback_idle(&mut self) -> bool {
@@ -534,12 +560,13 @@ pub fn run_forever(
     let mut attempt = 0u32;
     let mut last = Report::default();
     loop {
-        let result = connect().and_then(|sock| {
-            device.set_online(true);
-            attempt = 0;
-            run(sock, device, cfg)
-        });
+        let result = connect().and_then(|sock| run(sock, device, cfg));
         device.set_online(false);
+        if device.take_handshake() {
+            // Only a core that answered with `welcome` earns a fresh backoff. One that accepts the connection
+            // and drops it must keep getting slower retries.
+            attempt = 0;
+        }
         match result {
             Ok(report) => {
                 last = report;
@@ -568,6 +595,47 @@ pub fn run_forever(
             waited += step;
         }
     }
+}
+
+/// The quiet-hours policy for a window given on the command line. The LED level in quiet hours is the board's
+/// own `leds.quiet_brightness_pct` (`board_quiet_led_pct`), so a board that asks for a dim light rather than a
+/// dark one gets it. `volume` defaults to 20.
+///
+/// # Errors
+/// The window or the volume is not valid.
+pub fn quiet_policy(
+    window: Option<&str>,
+    volume: Option<u8>,
+    board_quiet_led_pct: u8,
+) -> Result<QuietPolicy, String> {
+    let hours = window
+        .map(|w| QuietHours::parse(w, volume.unwrap_or(20), board_quiet_led_pct))
+        .transpose()
+        .map_err(|e| format!("--quiet: {e}"))?;
+    Ok(QuietPolicy::new(hours))
+}
+
+/// How long one attempt to reach the core may take before the daemon goes back to serving its buttons.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Open a connection to the core within `timeout`. The plain `TcpStream::connect` waits for the system's own
+/// limit (about two minutes for an address that never answers), during which stop, mute, the LEDs and tones would
+/// not be served (REQ-DEV-020). Name resolution is the system's and has no limit here.
+///
+/// # Errors
+/// The address does not resolve, or no address answered in time; the text names the address.
+pub fn connect_core(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
+    let addrs = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve {addr}: {e}"))?;
+    let mut last = format!("{addr} has no address");
+    for a in addrs {
+        match TcpStream::connect_timeout(&a, timeout) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = format!("cannot connect to {addr}: {e}"),
+        }
+    }
+    Err(last)
 }
 
 /// Sleep the real way.
