@@ -20,6 +20,7 @@ use ring::digest::{SHA256, digest};
 use ring::hmac;
 use ring::rand::SystemRandom;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use zeroize::{Zeroize, Zeroizing};
 
 const PROTOCOL_NAME: &[u8] = b"Noise_NNpsk0_25519_ChaChaPoly_SHA256";
 const PROLOGUE: &[u8] = b"NoiseAPIInit\x00\x00";
@@ -35,7 +36,8 @@ const MAX_RECORD: usize = 65_535;
 /// # Errors
 /// A message when the text is not 32 bytes of base64.
 pub fn decode_psk(text: &str) -> Result<[u8; 32], String> {
-    let mut out = Vec::with_capacity(33);
+    // The decoded key passes through this buffer, so it is wiped when the function returns.
+    let mut out = Zeroizing::new(Vec::with_capacity(33));
     let (mut acc, mut bits) = (0u32, 0u32);
     let body = text.trim_end_matches('=');
     if text.len() - body.len() > 2 {
@@ -62,23 +64,26 @@ pub fn decode_psk(text: &str) -> Result<[u8; 32], String> {
         .map_err(|_| "the Noise key must decode to exactly 32 bytes".to_owned())
 }
 
-fn hmac256(key: &[u8; 32], parts: &[&[u8]]) -> [u8; 32] {
+fn hmac256(key: &[u8; 32], parts: &[&[u8]]) -> Secret {
     let k = hmac::Key::new(hmac::HMAC_SHA256, key);
     let mut ctx = hmac::Context::with_key(&k);
     for p in parts {
         ctx.update(p);
     }
-    let mut out = [0u8; 32];
+    let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(ctx.sign().as_ref());
     out
 }
 
+/// A 32 byte secret that is wiped when it goes out of scope.
+type Secret = Zeroizing<[u8; 32]>;
+
 /// Noise's HKDF with three outputs (callers use the first two or three).
-fn hkdf(ck: &[u8; 32], ikm: &[u8]) -> ([u8; 32], [u8; 32], [u8; 32]) {
+fn hkdf(ck: &[u8; 32], ikm: &[u8]) -> (Secret, Secret, Secret) {
     let temp = hmac256(ck, &[ikm]);
     let o1 = hmac256(&temp, &[&[1]]);
-    let o2 = hmac256(&temp, &[&o1, &[2]]);
-    let o3 = hmac256(&temp, &[&o2, &[3]]);
+    let o2 = hmac256(&temp, &[&o1[..], &[2]]);
+    let o3 = hmac256(&temp, &[&o2[..], &[3]]);
     (o1, o2, o3)
 }
 
@@ -116,14 +121,27 @@ struct Symmetric {
     n: u64,
 }
 
+impl Drop for Symmetric {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
 impl Symmetric {
+    /// Overwrite the hash, the chaining key and the cipher key with zeros.
+    fn wipe(&mut self) {
+        self.h.zeroize();
+        self.ck.zeroize();
+        self.k.zeroize();
+    }
+
     fn new() -> Self {
-        let mut h = [0u8; 32];
+        let mut h = Zeroizing::new([0u8; 32]);
         // The protocol name is longer than 32 bytes, so it is hashed.
         h.copy_from_slice(digest(&SHA256, PROTOCOL_NAME).as_ref());
         let mut s = Self {
-            h,
-            ck: h,
+            h: *h,
+            ck: *h,
             k: None,
             n: 0,
         };
@@ -140,34 +158,34 @@ impl Symmetric {
 
     fn mix_key(&mut self, ikm: &[u8]) {
         let (ck, k, _) = hkdf(&self.ck, ikm);
-        self.ck = ck;
-        self.k = Some(k);
+        self.ck = *ck;
+        self.k = Some(*k);
         self.n = 0;
     }
 
     fn mix_key_and_psk(&mut self, psk: &[u8; 32]) {
         let (ck, temp_h, k) = hkdf(&self.ck, psk);
-        self.ck = ck;
-        self.mix_hash(&temp_h);
-        self.k = Some(k);
+        self.ck = *ck;
+        self.mix_hash(&*temp_h);
+        self.k = Some(*k);
         self.n = 0;
     }
 
     fn encrypt_and_hash(&mut self, pt: &[u8]) -> Result<Vec<u8>, String> {
-        let Some(k) = self.k else {
+        let Some(k) = self.k.as_ref() else {
             return Err("handshake out of order".into());
         };
-        let ct = seal(&k, self.n, &self.h, pt)?;
+        let ct = seal(k, self.n, &self.h, pt)?;
         self.n += 1;
         self.mix_hash(&ct);
         Ok(ct)
     }
 
     fn decrypt_and_hash(&mut self, ct: &[u8]) -> Result<Vec<u8>, String> {
-        let Some(k) = self.k else {
+        let Some(k) = self.k.as_ref() else {
             return Err("handshake out of order".into());
         };
-        let pt = open(&k, self.n, &self.h, ct)?;
+        let pt = open(k, self.n, &self.h, ct)?;
         self.n += 1;
         self.mix_hash(ct);
         Ok(pt)
@@ -176,7 +194,7 @@ impl Symmetric {
     /// The two transport keys: first for initiator-to-responder, second for the other direction.
     fn split(&self) -> ([u8; 32], [u8; 32]) {
         let (a, b, _) = hkdf(&self.ck, &[]);
-        (a, b)
+        (*a, *b)
     }
 }
 
@@ -192,9 +210,9 @@ fn new_ephemeral() -> Result<(EphemeralPrivateKey, [u8; 32]), String> {
     Ok((key, out))
 }
 
-fn dh(private: EphemeralPrivateKey, peer: &[u8]) -> Result<Vec<u8>, String> {
+fn dh(private: EphemeralPrivateKey, peer: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     agree_ephemeral(private, &UnparsedPublicKey::new(&X25519, peer), |s| {
-        s.to_vec()
+        Zeroizing::new(s.to_vec())
     })
     .map_err(|_| "the device sent an unusable Noise key".to_owned())
 }
@@ -205,6 +223,20 @@ pub struct Transport {
     recv_key: [u8; 32],
     send_n: u64,
     recv_n: u64,
+}
+
+impl Drop for Transport {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+impl Transport {
+    /// Overwrite both keys with zeros.
+    fn wipe(&mut self) {
+        self.send_key.zeroize();
+        self.recv_key.zeroize();
+    }
 }
 
 impl std::fmt::Debug for Transport {
@@ -472,6 +504,25 @@ mod tests {
                 Some(Msg::VoiceAudio { .. })
             ));
         }
+    }
+
+    // REQ-ESP-014: the wipe functions leave no key bytes behind (this tests the functions, not freed memory).
+    #[test]
+    fn req_esp_014_wiping_clears_every_key_field() {
+        let mut t = Transport {
+            send_key: KEY,
+            recv_key: KEY,
+            send_n: 0,
+            recv_n: 0,
+        };
+        t.wipe();
+        assert_eq!((t.send_key, t.recv_key), ([0; 32], [0; 32]));
+        let mut s = Symmetric::new();
+        s.mix_key_and_psk(&KEY);
+        assert!(s.h != [0; 32] && s.ck != [0; 32] && s.k.is_some());
+        s.wipe();
+        assert_eq!((s.h, s.ck), ([0; 32], [0; 32]));
+        assert_eq!(s.k, None);
     }
 
     // REQ-ESP-014
