@@ -78,7 +78,7 @@ impl<H: ToolHost> Turn<'_, H> {
             sent,
             not_run,
         } = d;
-        let (by_user, mono) = (self.by_user, self.mono);
+        let mono = self.mono;
         if cancelled || self.ctl.cancel.is_cancelled() {
             if let Some(h) = held.take() {
                 self.resolved(&h, decision::CANCELLED, "the user cancelled");
@@ -95,19 +95,7 @@ impl<H: ToolHost> Turn<'_, H> {
         }
         if let Some(h) = held {
             // The host asks, in words built from the stored arguments, and the turn ends.
-            let speech = if by_user && self.conv.tainted {
-                format!(
-                    "{}. This followed text from outside, such as a web page or an alert, so check it. Yes or no?",
-                    h.description.trim_end_matches('.')
-                )
-            } else if by_user {
-                format!("{}. Yes or no?", h.description.trim_end_matches('.'))
-            } else {
-                format!(
-                    "Suggested action: {}. Say yes if you want that, or no to drop it.",
-                    h.description.trim_end_matches('.')
-                )
-            };
+            let speech = self.question_about(&h);
             if let Some(old) = self.conv.pending.replace(h) {
                 self.resolved(&old, decision::DECLINED, "replaced by a newer request");
                 self.conv.set_recent(old.recent, "declined");
@@ -130,6 +118,21 @@ impl<H: ToolHost> Turn<'_, H> {
             return Some(failed_turn(self.conv, take(&mut self.result), &self.st));
         }
         None
+    }
+
+    /// The words the host asks with about a held action, built from its stored description: after text from
+    /// outside the user is told to check it, and a turn the user did not start only suggests it.
+    fn question_about(&self, held: &PendingAction) -> String {
+        let what = held.description.trim_end_matches('.');
+        if self.by_user && self.conv.tainted {
+            format!(
+                "{what}. This followed text from outside, such as a web page or an alert, so check it. Yes or no?"
+            )
+        } else if self.by_user {
+            format!("{what}. Yes or no?")
+        } else {
+            format!("Suggested action: {what}. Say yes if you want that, or no to drop it.")
+        }
     }
 
     /// End a turn whose calls came from somewhere other than a model round that could answer next: the words

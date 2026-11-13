@@ -24,7 +24,8 @@ mod settle;
 mod sort;
 
 /// One turn in progress: the pieces the gate needs, with the host's bookkeeping. Its state is private to this
-/// module and the model loop in `rounds`; `run_turn_from` only opens a turn and runs it.
+/// module and its phase files (`admit`, `sort`, `run`, `release`, `settle`, and the model loop in `rounds`);
+/// `run_turn_from` only opens a turn and runs it.
 pub(super) struct Turn<'a, H> {
     ctl: &'a TurnCtl,
     host: &'a mut H,
@@ -118,6 +119,33 @@ impl ChatBackend for NoModel {
     }
 }
 
+/// Add the words that open a turn to the history. The user's own are told to the host and added as they are.
+/// An event's are framed as untrusted data and taint the conversation, and a proposal whose window has run
+/// out is dropped, since the event cannot answer it.
+fn add_opening_words<H: ToolHost>(
+    host: &mut H,
+    conv: &mut Conversation,
+    turn: Option<&TurnLog>,
+    usage: &UsageTracker,
+    by_user: bool,
+    mono: i64,
+    user_text: &str,
+) {
+    if by_user {
+        host.begin_turn(user_text);
+        conv.history.push(Message::user(user_text));
+    } else {
+        conv.history.push(Message::user(framed_event(user_text)));
+        conv.tainted = true;
+        if let Some(old) = conv
+            .pending
+            .take_if(|p| mono - p.proposed_at > CONFIRM_WINDOW_SECS)
+        {
+            note_resolved(turn, usage, &old, decision::EXPIRED, "no answer in time");
+        }
+    }
+}
+
 impl<'a, H: ToolHost> Turn<'a, H> {
     /// Open a turn: the audit record, the idle expiry, the host told the user's words, and the words added to
     /// the history (an event's text is framed as untrusted data instead).
@@ -152,25 +180,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             );
         }
         let by_user = trigger == Trigger::User;
-        if by_user {
-            host.begin_turn(user_text);
-            conv.history.push(Message::user(user_text));
-        } else {
-            conv.history.push(Message::user(framed_event(user_text)));
-            conv.tainted = true;
-            if let Some(old) = conv
-                .pending
-                .take_if(|p| mono - p.proposed_at > CONFIRM_WINDOW_SECS)
-            {
-                note_resolved(
-                    turn.as_ref(),
-                    usage,
-                    &old,
-                    decision::EXPIRED,
-                    "no answer in time",
-                );
-            }
-        }
+        add_opening_words(host, conv, turn.as_ref(), usage, by_user, mono, user_text);
         Self {
             ctl,
             host,

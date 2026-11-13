@@ -44,39 +44,63 @@ impl<H: ToolHost> Turn<'_, H> {
         call: &ToolCall,
         d: &mut Dispatched,
     ) -> String {
-        // A question for the user ends the batch. A held action does not: a read-only call still runs after
-        // it, and a call that would itself need holding is refused in `sort_by_tier` (REQ-SEC-011). Only a
-        // second question is skipped, since the user cannot be asked two things.
+        if let Some(told) = self.skip_after_earlier_call(call, d) {
+            return told;
+        }
+        if let Some(told) = self.ask_user_call(call, d) {
+            return told;
+        }
+        if let Some(told) = self.stop_at_limit(call, d) {
+            return told;
+        }
+        self.result.tool_calls += 1;
+        self.validate(batch, call, d).await
+    }
+
+    /// A call that an earlier call of the batch rules out. A question for the user ends the batch. A held
+    /// action does not: a read-only call still runs after it, and a call that would itself need holding is
+    /// refused in `sort_by_tier` (REQ-SEC-011). Only a second question is skipped, since the user cannot be
+    /// asked two things. A limit hit earlier stops every call after it. `Some` is what the model is told.
+    fn skip_after_earlier_call(&mut self, call: &ToolCall, d: &mut Dispatched) -> Option<String> {
         if d.ask.is_some() || (d.held.is_some() && call.name == ASK_USER) {
             self.note_act(&Act {
                 decision: decision::SKIPPED,
                 ..invalid(&call.name, "another action is being asked about first")
             });
             d.not_run.push(call.name.clone());
-            return "Not run: the user is being asked about another action first.".to_owned();
+            return Some("Not run: the user is being asked about another action first.".to_owned());
         }
         if let Some(stop) = d.limit_hit {
             d.not_run.push(call.name.clone());
-            return format!(
+            return Some(format!(
                 "Not run: the turn was stopped ({}).",
                 match stop {
                     Stop::Deadline => "out of time",
                     _ => "tool call limit",
                 }
-            );
+            ));
         }
-        if call.name == ASK_USER && !self.by_user {
+        None
+    }
+
+    /// The pseudo-tool that asks the user a question: refused in a turn the user did not start, otherwise
+    /// the question is noted for the end of the batch. `Some` is what the model is told.
+    fn ask_user_call(&mut self, call: &ToolCall, d: &mut Dispatched) -> Option<String> {
+        if call.name != ASK_USER {
+            return None;
+        }
+        if !self.by_user {
             // A question aloud opens the microphone. Outside text must not be able to make the speaker do
             // that, so only a turn the user started may ask (REQ-SEC-012).
             self.note_act(&invalid(
                 &call.name,
                 "turn not started by the user, so it may not ask aloud",
             ));
-            return "Not run: this turn was started by outside text, not by the user, so you cannot ask the user a question aloud. Put your question in your final reply instead."
-                .to_owned();
+            return Some("Not run: this turn was started by outside text, not by the user, so you cannot ask the user a question aloud. Put your question in your final reply instead."
+                .to_owned());
         }
-        if call.name == ASK_USER {
-            return match serde_json::from_str::<Value>(&call.arguments)
+        Some(
+            match serde_json::from_str::<Value>(&call.arguments)
                 .ok()
                 .and_then(|a| clean_question(&a))
             {
@@ -85,8 +109,13 @@ impl<H: ToolHost> Turn<'_, H> {
                     "The user is being asked; their answer arrives in their next turn.".to_owned()
                 }
                 None => "Error: ask_user needs a `question` with the words to say.".to_owned(),
-            };
-        }
+            },
+        )
+    }
+
+    /// The turn's own limits: the tool call cap and the deadline. A call that hits one is not run, and the
+    /// rest of the batch is stopped. `Some` is what the model is told.
+    fn stop_at_limit(&mut self, call: &ToolCall, d: &mut Dispatched) -> Option<String> {
         if self.result.tool_calls >= self.cfg.max_tool_calls {
             d.limit_hit = Some(Stop::Calls);
             d.not_run.push(call.name.clone());
@@ -94,10 +123,10 @@ impl<H: ToolHost> Turn<'_, H> {
                 decision: decision::STOPPED,
                 ..invalid(&call.name, "tool call limit reached")
             });
-            return format!(
+            return Some(format!(
                 "Not run: the limit of {} tool calls for one turn was reached.",
                 self.cfg.max_tool_calls
-            );
+            ));
         }
         if self.st.over_deadline(self.ctl, &self.cfg) {
             d.limit_hit = Some(Stop::Deadline);
@@ -106,10 +135,9 @@ impl<H: ToolHost> Turn<'_, H> {
                 decision: decision::STOPPED,
                 ..invalid(&call.name, "deadline reached")
             });
-            return "Not run: the time allowed for one turn ran out.".to_owned();
+            return Some("Not run: the time allowed for one turn ran out.".to_owned());
         }
-        self.result.tool_calls += 1;
-        self.validate(batch, call, d).await
+        None
     }
 
     /// Phase 2: is it a well-formed call to a tool that is offered? The two pseudo-tools that read the
