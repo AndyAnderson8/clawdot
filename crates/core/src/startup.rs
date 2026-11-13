@@ -413,19 +413,25 @@ pub async fn build_brain(
         agent: r.agent.clone(),
         hardware: crate::hardware::detected().clone().with_device(&r.device),
         voice_configured: r.speech.url.is_some() && r.speech.tts_model.is_some(),
-        rt: Realtime::with_env_and_secrets(
-            RtSettings::from_live(live),
-            core.env().lookup(),
-            core.secrets().clone(),
-        ),
+        rt: build_realtime(live, core),
         connects: tools.connects,
     };
-    if brain.rt.settings().enabled && !RtSettings::built() {
-        brain.rt.set_error(Some(
+    Ok((brain, hub))
+}
+
+/// The realtime voice settings from the live values, with an error noted when it is on but not built in.
+fn build_realtime(live: &serde_json::Map<String, serde_json::Value>, core: &Core) -> Realtime {
+    let rt = Realtime::with_env_and_secrets(
+        RtSettings::from_live(live),
+        core.env().lookup(),
+        core.secrets().clone(),
+    );
+    if rt.settings().enabled && !RtSettings::built() {
+        rt.set_error(Some(
             "Realtime voice is turned on, but this build of ClawDot does not include it.".into(),
         ));
     }
-    Ok((brain, hub))
+    rt
 }
 
 /// Open the audit log and the notes, hand them to the core, and return the handles every conversation shares.
