@@ -81,7 +81,7 @@ impl<H: ToolHost> Turn<'_, H> {
     /// means the calls were settled and another round may follow.
     async fn round<B: ChatBackend>(&mut self, backend: &B, round: usize) -> Option<TurnResult> {
         let mut tools = offered(&*self.host, &self.cfg);
-        tools.extend(pseudo_tools(self.conv));
+        tools.extend(pseudo_tools(self.conv, self.by_user));
         let mut completion = match self.ask_model(backend, &tools).await {
             Ok(c) => c,
             Err(ended) => return Some(ended),

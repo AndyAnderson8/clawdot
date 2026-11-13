@@ -1132,9 +1132,12 @@ fn missing_required(spec: Option<&ToolSpec>, args: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The tools the host itself provides to the model.
-fn pseudo_tools(conv: &Conversation) -> Vec<ToolSpec> {
-    let mut v = vec![ToolSpec {
+/// The tools the host itself provides to the model. `ask_user` is left out of a turn the user did not start:
+/// the gate would refuse it, so offering it only costs the model a round (REQ-SEC-012).
+fn pseudo_tools(conv: &Conversation, by_user: bool) -> Vec<ToolSpec> {
+    let mut v = Vec::new();
+    if by_user {
+        v.push(ToolSpec {
         name: ASK_USER.to_owned(),
         description: "Ask the user a question out loud and wait for the answer. Use it when a detail you need is missing, or when a name could mean more than one thing. Never guess a detail that matters, and always ask before an action on something ambiguous. The turn ends with the question.".to_owned(),
         parameters: serde_json::json!({
@@ -1142,7 +1145,8 @@ fn pseudo_tools(conv: &Conversation) -> Vec<ToolSpec> {
             "properties": {"question": {"type": "string", "description": "One short question, in plain speech."}},
             "required": ["question"]
         }),
-    }];
+        });
+    }
     if conv.notes.as_ref().is_some_and(|n| n.enabled()) {
         v.push(ToolSpec {
             name: RECALL.to_owned(),
@@ -1449,7 +1453,7 @@ fn offered<H: ToolHost>(host: &H, cfg: &TurnConfig) -> Vec<ToolSpec> {
 /// same list a turn offers, so destructive tools stay out unless the administrator enabled them.
 pub fn tools_for<H: ToolHost>(host: &H, conv: &Conversation, cfg: &TurnConfig) -> Vec<ToolSpec> {
     let mut tools = offered(host, cfg);
-    tools.extend(pseudo_tools(conv));
+    tools.extend(pseudo_tools(conv, true));
     tools
 }
 

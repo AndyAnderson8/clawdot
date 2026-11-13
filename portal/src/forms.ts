@@ -10,6 +10,8 @@ export interface ReminderForm {
   days: number[];
   date: string;
   time2: string;
+  /** A reminder is after a delay or at a time. */
+  when: "delay" | "time";
 }
 
 export interface ReminderBody {
@@ -26,8 +28,9 @@ export interface ReminderBody {
 /** The body to send, or the message to show when the form is incomplete. */
 export function reminderBody(f: ReminderForm): ReminderBody | string {
   const body: ReminderBody = { kind: f.kind, label: f.label.trim() };
-  if (f.kind === "timer") {
+  if (f.kind === "timer" || (f.kind === "reminder" && f.when === "delay")) {
     body.seconds = Math.round(Number(f.amount) * Number(f.unit));
+    if (f.kind === "reminder" && !(body.seconds >= 1)) return "Enter how long to wait before the reminder.";
   } else if (f.kind === "alarm") {
     if (!f.time) return "Pick a time for the alarm.";
     const [h, m] = f.time.split(":");

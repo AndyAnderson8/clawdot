@@ -71,6 +71,10 @@ The pipeline speaks a reply [sentence by sentence](speech-latency.md): `audio-st
 - The plaintext API is for a trusted network. Use Noise where the device supports it.
 - Text from a device is untrusted and is clipped and control-character-stripped before it reaches a log line.
 
+## Resetting the administrator password
+
+A device connected through ESPHome cannot open the administrator reset window. The 10 second button hold (REQ-DEV-031) is a message of the native satellite protocol, `clawdot.admin-reset` (REQ-SAT-020), and the ESPHome API has no equivalent event, so the client has nothing to translate it from and does not invent one. For such a device, reset the password on the machine where the core runs: stop the core, run `clawdot --reset-admin --data-dir <your data directory>`, start it again and choose a new password in the portal. The device itself is not involved. The full guide is [forgot-password.md](../guides/forgot-password.md).
+
 ## Not implemented
 
 The ESPHome **server** side (ClawDot appearing as a device), entities other than the media player (light, switch, mute, sensors), timers reported by the device, wake-word selection, UDP audio, and Bluetooth/camera features. See [open-questions.md](../open-questions.md) for the points to verify on a real device.

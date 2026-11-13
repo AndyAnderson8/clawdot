@@ -688,12 +688,18 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           return send(200, sched());
         }
         if (body.kind === "timer" && !(body.seconds >= 1)) return err(400, "Timers run from 1 second to 24 hours.");
+        if (body.kind === "reminder" && body.seconds !== undefined) {
+          if (!body.label) return err(400, "A reminder needs some text to say.");
+          if (!(body.seconds >= 1)) return err(400, "That time does not work.");
+          if (body.date || body.time) return err(400, "Give a reminder either a delay or a date and a time, not both.");
+        }
         const item = {
           id: id || st["nextId"]++,
           kind: body.kind,
           label: body.label,
           fire_at: now() + (body.seconds ?? 3600),
           seconds_left: body.seconds ?? 3600,
+          countdown: body.kind === "timer" || (body.kind === "reminder" && body.seconds !== undefined),
           repeat:
             body.kind === "alarm" && body.days.length
               ? { hour: body.hour, minute: body.minute, days: body.days, every_day: body.days.length === 7 }

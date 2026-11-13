@@ -105,6 +105,7 @@ A device with no battery clock boots with a stale time and has it corrected by t
 | Thing | Kind | Clock |
 |---|---|---|
 | Countdown timer, snooze, reminder "in ten minutes" | duration | monotonic |
+| Stopwatch while the program runs (REQ-TMR-012); across a restart the time it was off is added from the wall clock (REQ-TMR-011) | duration | monotonic |
 | Confirmation window of a held action (120 s), the clarifying-question window, the forget-all confirmation | duration | monotonic |
 | Conversation idle expiry (600 s), per-speaker idle eviction | duration | monotonic |
 | Administrator session (12 h), password-reset window (300 s) and its cooldown (60 s) | duration | monotonic |
@@ -112,7 +113,6 @@ A device with no battery clock boots with a stale time and has it corrected by t
 | Turn deadline and the spacing of progress phrases | duration | monotonic |
 | Alarm, reminder at a date and time, repeating alarm | calendar | wall |
 | Quiet hours, the day number for usage counters and caps | calendar | wall |
-| Stopwatch (REQ-TMR-011: time while the speaker was off counts) | calendar | wall |
 | Audit record time, event time shown to people, notes' dates | calendar | wall |
 | Announcement `ttl_secs`, inbox snooze, reply expiry, handled-event pruning | calendar (kept) | wall |
 
