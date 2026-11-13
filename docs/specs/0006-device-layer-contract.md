@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.5 |
+| **Version** | 0.6 |
 | **Author(s)** | Maintainer direction, drafted by an agent |
 | **Created** | 2026-11-09 |
 | **Related** | [ADR-0015](../adr/0015-own-the-device-layer.md) (Proposed), [ADR-0012](../adr/0012-board-support-layer.md), [0001](0001-product-requirements.md) (REQ-BRD, REQ-VOI-013..019), [0002](0002-resource-budget.md), [0003](0003-satellite-protocol.md), [R-11](../research/11-wake-word-spike.md), [R-07](../research/07-echo-dot-gen2-hardware.md) |
@@ -237,3 +237,4 @@ The format is defined by [`schemas/board/board-1.schema.json`](../../schemas/boa
 | 0.3 | 2026-11-09 | REQ-DEV-025..030: always-on capture, half-duplex hold-off, mute, microphone faults, wake word configuration and status lines, for the PC voice loop. |
 | 0.4 | 2026-11-09 | REQ-DEV-031: the administrator reset gesture (hold the action button for 10 seconds, or `admin` in the desktop console), with the wire messages of spec 0003 0.3.3. |
 | 0.5 | 2026-11-11 | REQ-DEV-032..037: the image recipe and installer (no Amazon or vendor files, proprietary files read from the unit, verified backups and dry run, safe kernel and boot-image updates, GPL source and licence manifest), from [R-12](../research/12-own-linux-layer.md). |
+| 0.6 | 2026-11-13 | REQ-DEV-006 is partly met: the LED and volume ceilings are applied on the device; deferral of announcements is not, because the device cannot tell an announcement from a reply until the wire marks unsolicited audio. |

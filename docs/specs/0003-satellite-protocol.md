@@ -172,3 +172,4 @@ A known event whose fields are missing or out of range (for example `level` of 1
 | 0.3.2 | 2026-11-09 | REQ-SAT-019: ESPHome devices attach through the optional adapter of spec 0004; REQ-SAT-014 is for stock Wyoming satellites. No change to the wire or the protocol version. |
 | 0.3.3 | 2026-11-09 | REQ-SAT-020: `clawdot.admin-reset` and `clawdot.admin-reset-window` for the hardware-assisted administrator password reset (additive; unknown events are still ignored, no protocol version change). |
 | 0.3.4 | 2026-11-13 | REQ-SAT-020: the long-press administrator reset applies to the native satellite protocol only; a device connected through ESPHome resets the password with `clawdot --reset-admin`. |
+| 0.3.5 | 2026-11-13 | Section 7.5: the reconnect loop with backoff is in `clawdot-device` (`run_forever`) and restarts only after a `welcome`; the `clawdot-satellite` binary connects once. |

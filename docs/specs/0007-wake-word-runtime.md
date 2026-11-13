@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.2 |
+| **Version** | 0.3 |
 | **Author(s)** | Maintainer direction, drafted by an agent |
 | **Created** | 2026-11-09 |
 | **Related** | [R-11](../research/11-wake-word-spike.md) sections 3.2, 8, 9, [0006](0006-device-layer-contract.md) (REQ-DEV-017, REQ-DEV-021, section 7), [0001](0001-product-requirements.md) (REQ-VOI-001, REQ-VOI-009), [0002](0002-resource-budget.md) |
@@ -64,3 +64,4 @@ The wake-word engine behind the `WakeEngine` seam of spec 0006 is a small purpos
 |---|---|---|
 | 0.1 | 2026-11-09 | First draft: REQ-WAK-001..012 from R-11 sections 3.2, 8 and 9. |
 | 0.2 | 2026-11-09 | REQ-WAK-011 restated with the measured agreement (bit-exact interpreter under the library rounding, window mean within 0.04 end to end, not the 0.02 guessed in R-11); compute limit added to section 5. |
+| 0.3 | 2026-11-13 | REQ-WAK-004: the frontend tables are built with floating point at start-up and only the per-frame work is integer. REQ-WAK-007: a word loaded with a cutoff outside 0.5 to 0.999 is refused. |
