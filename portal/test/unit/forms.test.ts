@@ -30,6 +30,7 @@ const base: ReminderForm = {
   days: [],
   date: "",
   time2: "",
+  when: "time",
 };
 
 test("timer body is seconds, trimmed label", () => {
@@ -67,6 +68,19 @@ test("reminder body needs a date and a time", () => {
     reminderBody({ ...base, kind: "reminder", date: "2026-12-01", time2: "" }),
     "Pick a date and a time for the reminder.",
   );
+});
+
+// REQ-TMR-009
+test("a reminder after a delay sends seconds and no date", () => {
+  const f: ReminderForm = { ...base, kind: "reminder", when: "delay", amount: "10", unit: "60", date: "2026-12-01" };
+  assert.deepEqual(reminderBody(f), { kind: "reminder", label: "tea", seconds: 600 });
+  assert.deepEqual(reminderBody({ ...f, amount: "2", unit: "3600" }), {
+    kind: "reminder",
+    label: "tea",
+    seconds: 7200,
+  });
+  assert.equal(reminderBody({ ...f, amount: "" }), "Enter how long to wait before the reminder.");
+  assert.equal(reminderBody({ ...f, amount: "0" }), "Enter how long to wait before the reminder.");
 });
 
 test("tool definition", () => {
