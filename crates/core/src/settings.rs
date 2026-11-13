@@ -185,7 +185,8 @@ impl Initial {
 /// that reads them all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
-    /// Applied by a handler of its own, keyed by the setting's name.
+    /// Belongs to no group. Which applier runs for the setting is decided by the live-settings table in
+    /// `runtime/live.rs`, not by this value; here it only marks the setting as outside every group.
     Own,
     /// The language model address, model name and key variable.
     Llm,
