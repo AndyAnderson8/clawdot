@@ -10,6 +10,10 @@
 //! ```
 //!
 //! Filters: `basename`, `trim`, `lower`, `truncate:N`. A literal `{` is written `{{`.
+//!
+//! An adapter file may also carry `setup`, a list of lines printed when `--create-endpoint` makes an endpoint with
+//! this adapter (how to point the sending program at it). In them `{public}`, `{endpoint}` and `{token}` stand for
+//! the public address, the endpoint's name and its token; nothing else in them is interpreted.
 
 use super::event::{EventKind, MAX_REF, MAX_TEXT, MAX_TITLE, Priority, truncate_chars};
 use serde::Deserialize;
