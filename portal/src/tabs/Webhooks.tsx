@@ -4,14 +4,12 @@ import { AddButton, Dialog } from "../dialog.tsx";
 import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
-import { CopyButton } from "../parts.tsx";
+import { CopyButton, useBusy } from "../parts.tsx";
 import { fail, get, load, say, set, sv, useApp } from "../store.ts";
 import type { Endpoint, WebhookToken } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
 const base = () => String(sv("public_url") || location.origin);
-
-const SPOKEN_RULE = "Use up to 40 letters, numbers, spaces and - _ ' . and start with a letter or a number.";
 
 function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void }) {
   const { e } = props;
@@ -51,18 +49,21 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
   const [renaming, setRenaming] = useState(false);
   const [spoken, setSpoken] = useState(e.spoken_name ?? "");
   const [nameErr, setNameErr] = useState("");
+  const [saving, run] = useBusy();
   const saveSpoken = async (ev: Event) => {
     ev.preventDefault();
     setNameErr("");
-    try {
-      await api("PUT", "/api/endpoints/" + e.name, { spoken_name: spoken.trim() || null });
-      setRenaming(false);
-      say("Saved.");
-      await load();
-    } catch (x) {
-      if (x instanceof ApiError && x.status === 400) setNameErr(SPOKEN_RULE);
-      else fail(x);
-    }
+    await run(async () => {
+      try {
+        await api("PUT", "/api/endpoints/" + e.name, { spoken_name: spoken.trim() || null });
+        setRenaming(false);
+        say("Saved.");
+        await load();
+      } catch (x) {
+        if (x instanceof ApiError && x.status === 400) setNameErr(x.message);
+        else fail(x);
+      }
+    });
   };
 
   return (
@@ -103,7 +104,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
             {nameErr}
           </p>
           <div class="row">
-            <button>Save</button>
+            <button disabled={saving}>Save</button>
           </div>
         </form>
       </Dialog>
@@ -150,25 +151,28 @@ export function Webhooks(): JSX.Element {
   const [adapter, setAdapter] = useState("generic");
   const [spokenName, setSpokenName] = useState("");
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [creating, run] = useBusy();
   const ov = s.overview;
 
   const create = async (ev: Event) => {
     ev.preventDefault();
-    try {
-      const body: Record<string, string> = { name: name.trim(), adapter };
-      if (spokenName.trim()) body["spoken_name"] = spokenName.trim();
-      const r = await api<WebhookToken>("POST", "/api/endpoints", body);
-      set({ fresh: { ...get().fresh, [r.name]: r.token } });
-      setName("");
-      setSpokenName("");
-      setAdding(false);
-      setOpen((o) => ({ ...o, [r.name]: true }));
-      say("Created. Copy the token now; it is shown once.");
-      await load();
-      document.getElementById("snip-" + r.name)?.scrollIntoView({ block: "center" });
-    } catch (x) {
-      fail(x);
-    }
+    await run(async () => {
+      try {
+        const body: Record<string, string> = { name: name.trim(), adapter };
+        if (spokenName.trim()) body["spoken_name"] = spokenName.trim();
+        const r = await api<WebhookToken>("POST", "/api/endpoints", body);
+        set({ fresh: { ...get().fresh, [r.name]: r.token } });
+        setName("");
+        setSpokenName("");
+        setAdding(false);
+        setOpen((o) => ({ ...o, [r.name]: true }));
+        say("Created. Copy the token now; it is shown once.");
+        await load();
+        document.getElementById("snip-" + r.name)?.scrollIntoView({ block: "center" });
+      } catch (x) {
+        fail(x);
+      }
+    });
   };
 
   return (
@@ -243,7 +247,7 @@ export function Webhooks(): JSX.Element {
             </select>
           </Field>
           <div class="row">
-            <button>Add webhook</button>
+            <button disabled={creating}>Add webhook</button>
           </div>
         </form>
       </Dialog>

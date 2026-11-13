@@ -112,6 +112,7 @@ export function fail(x: unknown): void {
   const f = failText(x);
   if (f.signIn) {
     keep("");
+    signedOut();
     void start();
   }
   say(f.text, true);
@@ -190,6 +191,7 @@ export async function start(): Promise<void> {
   } catch (x) {
     if (x instanceof ApiError && x.status === 401) {
       keep("");
+      signedOut();
       set({ view: "login" });
       say("Please sign in.", true);
     } else fail(x);
@@ -207,6 +209,7 @@ export function adopt(next: Settings, remount = false): Settings {
   return merged;
 }
 
+/** Forget everything the last session held (webhook tokens, settings, listings), so the next sign-in starts clean. */
 export function signedOut(): void {
-  set({ fresh: {} });
+  set({ fresh: {}, settings: null, ext: null, overview: null, status: null });
 }

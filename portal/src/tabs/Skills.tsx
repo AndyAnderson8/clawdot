@@ -13,7 +13,7 @@ import {
   type SkillDraft,
   type SkillFile,
 } from "../forms.ts";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { Skill } from "../types.ts";
 import { ask } from "../confirm.tsx";
@@ -27,22 +27,25 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
   const [name, setName] = useState(k?.name ?? "");
   const [text, setText] = useState(k?.instructions ?? "");
   const [tools, setTools] = useState((k?.tools ?? []).join(", "));
+  const [busy, run] = useBusy();
   const submit = async (ev: Event) => {
     ev.preventDefault();
-    const ok = k
-      ? await change(
-          "POST",
-          "/api/skills/edit",
-          { name: k.name, skill: skillBody(name, text, tools, k.enabled) },
-          "Saved.",
-        )
-      : await change(
-          "POST",
-          "/api/skills",
-          skillBody(name, text, tools, true),
-          "Added. The assistant uses it from now on.",
-        );
-    if (ok) props.onDone();
+    await run(async () => {
+      const ok = k
+        ? await change(
+            "POST",
+            "/api/skills/edit",
+            { name: k.name, skill: skillBody(name, text, tools, k.enabled) },
+            "Saved.",
+          )
+        : await change(
+            "POST",
+            "/api/skills",
+            skillBody(name, text, tools, true),
+            "Added. The assistant uses it from now on.",
+          );
+      if (ok) props.onDone();
+    });
   };
   const remove = async () => {
     if (k && (await ask("Delete the skill " + k.name + "?", "Delete")))
@@ -90,7 +93,7 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
         />
       </Field>
       <div class="row dlgfoot">
-        <button>{k ? "Save changes" : "Add skill"}</button>
+        <button disabled={busy}>{k ? "Save changes" : "Add skill"}</button>
         <button class="plain" type="button" onClick={props.onDone}>
           Cancel
         </button>
@@ -108,7 +111,7 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
 function SkillImport(props: { onDone: () => void }): JSX.Element {
   const [list, setList] = useState<{ found: SkillDraft[]; skipped: string[] } | null>(null);
   const [off, setOff] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = useBusy();
   const [raw, setRaw] = useState<SkillFile[]>([]);
 
   const read = async (files: FileList | null) => {
@@ -139,9 +142,9 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     setList({ found: r.found, skipped: [...skippedBig, ...r.skipped] });
     setOff([]);
   };
-  const add = async () => {
+  const add = () => run(addNow);
+  const addNow = async () => {
     if (!list) return;
-    setBusy(true);
     const skills = list.found.filter((s) => !off.includes(s.name));
     try {
       const { folders, plain } = skillImports(skills, raw);
@@ -170,7 +173,6 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     } catch (x) {
       fail(x);
     }
-    setBusy(false);
   };
   const chosen = list ? list.found.length - off.length : 0;
   return (

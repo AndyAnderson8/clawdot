@@ -42,8 +42,9 @@ export async function clock(c: Ctx): Promise<void> {
     await T(`set('#rlabel', 'gym')`);
     await T(`click('.days input[value="0"]')`);
     await T(`click('.days input[value="2"]')`);
-    await T(`submit('#clockdialog form')`);
+    await b.ev(`(() => { const f = T.q('#clockdialog form'); f.requestSubmit(); f.requestSubmit(); })()`);
     await b.until(`T.rows().length === 2 && T.q('#clockdialog').open === false`, "alarm added, and the dialog closes");
+    assert.equal(posts() - before, 1, "one request for a double click");
     const post = mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").pop()!;
     assert.deepEqual(post.body, { kind: "alarm", label: "gym", hour: 6, minute: 30, days: [0, 2] });
     // Timers: the timer is listed here and the alarms are not.

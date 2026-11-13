@@ -5,6 +5,7 @@ import { useState } from "preact/hooks";
 import { api, keep } from "./api.ts";
 import { Logo, Wordmark } from "./brand.tsx";
 import { Forgot } from "./forgot.tsx";
+import { useBusy } from "./parts.tsx";
 import { fail, say, start, useApp } from "./store.ts";
 
 const LEDS = 12;
@@ -113,16 +114,21 @@ export function Setup(): JSX.Element {
   const s = useApp();
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
-  const finish = async (body: { mode: string; password?: string }) => {
-    try {
-      const r = await api<{ token?: string }>("POST", "/api/setup", body);
-      keep(r.token);
-      say("");
-      await start();
-    } catch (x) {
-      fail(x);
-    }
-  };
+  const [busy, run] = useBusy();
+  const finish = (body: { mode: string; password?: string }) =>
+    run(async () => {
+      try {
+        const r = await api<{ token?: string }>("POST", "/api/setup", body);
+        // Cleared only now: a refusal or a lost connection leaves what was typed to try again.
+        setPw1("");
+        setPw2("");
+        keep(r.token);
+        say("");
+        await start();
+      } catch (x) {
+        fail(x);
+      }
+    });
   const setPassword = (ev: Event) => {
     ev.preventDefault();
     if (pw1 !== pw2) {
@@ -133,10 +139,7 @@ export function Setup(): JSX.Element {
       say("Use at least 8 characters.", true);
       return;
     }
-    const password = pw1;
-    setPw1("");
-    setPw2("");
-    void finish({ mode: "password", password });
+    void finish({ mode: "password", password: pw1 });
   };
   return (
     <section id="setup">
@@ -158,7 +161,9 @@ export function Setup(): JSX.Element {
         <p class="authhint" role="status" id="pwhint">
           {pw1 || pw2 ? pairHint(pw1, pw2) : "Webhooks have their own tokens; this password is only for this page."}
         </p>
-        <button class="authgo">Create password</button>
+        <button class="authgo" disabled={busy}>
+          Create password
+        </button>
       </form>
       <form
         id="openform"
@@ -172,7 +177,7 @@ export function Setup(): JSX.Element {
           Prefer no password? You can leave it open on this network, but anyone here could then use this page and see
           what your webhooks receive.
         </p>
-        <button class="plain small" id="openbtn" disabled={!s.openAllowed || !s.peerPrivate}>
+        <button class="plain small" id="openbtn" disabled={!s.openAllowed || !s.peerPrivate || busy}>
           Leave it open
         </button>
       </form>
@@ -182,26 +187,29 @@ export function Setup(): JSX.Element {
 
 export function Login(): JSX.Element {
   const [pw, setPw] = useState("");
+  const [busy, run] = useBusy();
   const submit = async (ev: Event) => {
     ev.preventDefault();
-    const password = pw;
-    setPw("");
-    try {
-      const r = await api<{ token: string }>("POST", "/api/login", { password });
-      keep(r.token);
-      say("");
-      await start();
-    } catch (x) {
-      const status = (x as { status?: number }).status;
-      say(
-        status === 401
-          ? "That password was not accepted. Check it and try again."
-          : status === 429
-            ? "Too many attempts. Wait a few seconds and try again."
-            : (x as Error).message,
-        true,
-      );
-    }
+    await run(async () => {
+      try {
+        const r = await api<{ token: string }>("POST", "/api/login", { password: pw });
+        // Cleared only now: a wrong password, a 429 or a lost connection leaves it to correct or send again.
+        setPw("");
+        keep(r.token);
+        say("");
+        await start();
+      } catch (x) {
+        const status = (x as { status?: number }).status;
+        say(
+          status === 401
+            ? "That password was not accepted. Check it and try again."
+            : status === 429
+              ? "Too many attempts. Wait a few seconds and try again."
+              : (x as Error).message,
+          true,
+        );
+      }
+    });
   };
   return (
     <section id="login">
@@ -209,7 +217,9 @@ export function Login(): JSX.Element {
       <p class="authlead">Welcome back. Enter the admin password to manage your speaker.</p>
       <form id="loginform" onSubmit={submit}>
         <PasswordField id="pw" label="Password" autoComplete="current-password" value={pw} onInput={setPw} />
-        <button class="authgo">Sign in</button>
+        <button class="authgo" disabled={busy}>
+          Sign in
+        </button>
       </form>
       <Forgot />
     </section>

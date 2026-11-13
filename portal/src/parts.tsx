@@ -1,7 +1,28 @@
 // Small pieces several tabs share.
 import type { ComponentChildren, JSX } from "preact";
-import { useState } from "preact/hooks";
+import { useRef, useState } from "preact/hooks";
 import { say } from "./store.ts";
+
+/**
+ * One send at a time. `run(job)` starts the job unless one is already running (a double click, Enter held down),
+ * and `busy` is true meanwhile so the button can be disabled.
+ */
+export function useBusy(): [boolean, (job: () => Promise<void>) => Promise<void>] {
+  const [busy, setBusy] = useState(false);
+  const running = useRef(false);
+  const run = async (job: () => Promise<void>) => {
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
+    try {
+      await job();
+    } finally {
+      running.current = false;
+      setBusy(false);
+    }
+  };
+  return [busy, run];
+}
 
 /** Copy `text` to the clipboard, with a fallback for pages served over plain http on a home network. */
 export async function copyText(text: string): Promise<boolean> {

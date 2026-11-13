@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
+import { useBusy } from "../parts.tsx";
 import { api } from "../api.ts";
 import { fail } from "../store.ts";
 import { ask } from "../confirm.tsx";
@@ -26,7 +27,7 @@ export function SavedKey(props: {
 }): JSX.Element {
   const [typed, setTyped] = useState("");
   const [replacing, setReplacing] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = useBusy();
   const [msg, setMsg] = useState("");
   const [bad, setBad] = useState(false);
   const [local, setLocal] = useState<string | null>(null);
@@ -38,20 +39,20 @@ export function SavedKey(props: {
       setMsg("Paste the key first.");
       return;
     }
-    setBusy(true);
-    try {
-      const r = await api<{ hint: string | null }>("PUT", props.path, { key });
-      setLocal(r.hint ?? "");
-      setTyped("");
-      setReplacing(false);
-      setBad(false);
-      setMsg("Key saved on this device.");
-      props.onChange?.(r.hint ?? "");
-    } catch (x) {
-      setBad(true);
-      setMsg(x instanceof Error ? x.message : "The key could not be saved.");
-    }
-    setBusy(false);
+    await run(async () => {
+      try {
+        const r = await api<{ hint: string | null }>("PUT", props.path, { key });
+        setLocal(r.hint ?? "");
+        setTyped("");
+        setReplacing(false);
+        setBad(false);
+        setMsg("Key saved on this device.");
+        props.onChange?.(r.hint ?? "");
+      } catch (x) {
+        setBad(true);
+        setMsg(x instanceof Error ? x.message : "The key could not be saved.");
+      }
+    });
   };
   const remove = async () => {
     if (!(await ask("Remove the saved key?", "Remove"))) return;

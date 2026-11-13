@@ -10,6 +10,7 @@ import type { SettingField, Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
 import { ModelSelect, VoiceControl } from "./Voice.tsx";
 import { ask } from "../confirm.tsx";
+import { useBusy } from "../parts.tsx";
 
 function browserZone(): string {
   try {
@@ -237,9 +238,13 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
   // The settings whose time boxes hold something that is not yet a time.
   const [halfTimes, setHalfTimes] = useState<Record<string, boolean>>({});
   const errRef = useRef<HTMLParagraphElement>(null);
+  const [busy, run] = useBusy();
 
-  const submit = async (ev: Event) => {
+  const submit = (ev: Event) => {
     ev.preventDefault();
+    return run(() => save());
+  };
+  const save = async () => {
     setErr("");
     const half = specs.find((sp) => halfTimes[sp.key] && !sp.hideWhen?.(vals) && (!sp.optional || shown[sp.key]));
     const body = half
@@ -382,7 +387,7 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
         {err}
       </p>
       <div class="row">
-        <button>{"Save " + title.charAt(0).toLowerCase() + title.slice(1)}</button>
+        <button disabled={busy}>{"Save " + title.charAt(0).toLowerCase() + title.slice(1)}</button>
       </div>
     </form>
   );

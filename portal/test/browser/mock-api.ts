@@ -765,7 +765,11 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           const e = eps.find((x) => x["name"] === seg[1]);
           if (!e) return err(404, "no such endpoint");
           const spoken = String(body.spoken_name ?? "").trim();
-          if (spoken && !/^[\p{L}\p{N}][\p{L}\p{N} \-_'.]{0,39}$/u.test(spoken)) return err(400, "bad spoken name");
+          if (spoken && !/^[\p{L}\p{N}][\p{L}\p{N} \-_'.]{0,39}$/u.test(spoken))
+            return err(
+              400,
+              "the spoken name is plain words of up to 40 characters: letters, digits, spaces, - _ ' and .",
+            );
           e["spoken_name"] = spoken || null;
           return send(200, e);
         }

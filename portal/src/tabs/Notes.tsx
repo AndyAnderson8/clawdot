@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { useEffect, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
@@ -18,6 +18,7 @@ export function Notes(): JSX.Element {
   const [editing, setEditing] = useState<Note | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Note[] | null>(null);
+  const [busy, run] = useBusy();
 
   // Searching asks the device, which ranks memories the same way it picks them for a request. A short wait after
   // typing keeps it from asking on every key.
@@ -61,18 +62,20 @@ export function Notes(): JSX.Element {
   const save = async (ev: Event) => {
     ev.preventDefault();
     setErr("");
-    try {
-      setData(
-        editing
-          ? await api<NotesList>("PUT", "/api/notes/" + editing.id, { text })
-          : await api<NotesList>("POST", "/api/notes", { text }),
-      );
-      say(editing ? "Saved." : "Saved. The assistant will see it from now on.");
-      close();
-    } catch (x) {
-      if (x instanceof ApiError && [400, 404, 409].includes(x.status)) setErr(x.message);
-      else fail(x);
-    }
+    await run(async () => {
+      try {
+        setData(
+          editing
+            ? await api<NotesList>("PUT", "/api/notes/" + editing.id, { text })
+            : await api<NotesList>("POST", "/api/notes", { text }),
+        );
+        say(editing ? "Saved." : "Saved. The assistant will see it from now on.");
+        close();
+      } catch (x) {
+        if (x instanceof ApiError && [400, 404, 409].includes(x.status)) setErr(x.message);
+        else fail(x);
+      }
+    });
   };
   const forget = async (id: number) => {
     if (!(await ask("Forget this memory? The assistant will no longer know it.", "Forget"))) return;
@@ -237,7 +240,7 @@ export function Notes(): JSX.Element {
                 </p>
               </Field>
               <div class="row dlgfoot">
-                <button disabled={!data.enabled}>{editing ? "Save changes" : "Save memory"}</button>
+                <button disabled={!data.enabled || busy}>{editing ? "Save changes" : "Save memory"}</button>
                 <button class="plain" type="button" onClick={close}>
                   Cancel
                 </button>

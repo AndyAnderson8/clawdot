@@ -3,7 +3,7 @@ import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { connectionDefinition } from "../forms.ts";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { ConnectionTest, McpServer } from "../types.ts";
 import { Problems } from "./Tools.tsx";
@@ -102,7 +102,7 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
   const [confirmFirst, setConfirmFirst] = useState(true);
   const [found, setFound] = useState<string[] | null>(null);
   const [off, setOff] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = useBusy();
   const def = () => connectionDefinition({ name, url, tokenVar, confirm: confirmFirst });
   const changed =
     <T,>(set: (v: T) => void) =>
@@ -113,7 +113,6 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
     };
 
   const check = async () => {
-    setBusy(true);
     try {
       const r = await api<ConnectionTest>("POST", "/api/connections/test", def());
       setFound(r.tools.map((t) => t.name));
@@ -121,10 +120,8 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
     } catch (x) {
       fail(x);
     }
-    setBusy(false);
   };
   const add = async () => {
-    setBusy(true);
     const ok = await change("POST", "/api/connections", def(), "");
     if (ok) {
       // Every tool comes in; the ones left unticked are switched off.
@@ -145,11 +142,10 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
       setOff([]);
       props.onClose();
     }
-    setBusy(false);
   };
   const submit = (ev: Event) => {
     ev.preventDefault();
-    void (found ? add() : check());
+    void run(found ? add : check);
   };
 
   return (

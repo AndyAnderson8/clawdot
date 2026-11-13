@@ -50,9 +50,14 @@ export async function toolsSourcesSkills(c: Ctx): Promise<void> {
     await T(`set('#tool-url', 'https://h/{room}')`);
     await T(`click('#adddetail')`);
     await T(`set('#tooldialog input[aria-label="Detail name"]', 'room')`);
-    await T(`submit('#tooldialog form')`);
+    await b.ev(`(() => { const f = T.q('#tooldialog form'); f.requestSubmit(); f.requestSubmit(); })()`);
     await b.until(`T.q('#tooldialog').open === false`, "the dialog closes once it is added");
     await b.until(`T.rows('#toolcard ul.rows > li').length === ${total} + 1`, "tool added");
+    assert.equal(
+      mock.log.filter((l) => l.method === "POST" && l.path === "/api/tools").length,
+      1,
+      "one request for a double click",
+    );
     const post = mock.log.find((l) => l.method === "POST" && l.path === "/api/tools")!;
     assert.deepEqual(post.body, {
       name: "lamp",

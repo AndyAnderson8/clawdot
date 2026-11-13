@@ -4,6 +4,7 @@ import { api, ApiError } from "../api.ts";
 import { reminderBody } from "../forms.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
 import { TimeField } from "../timefield.tsx";
+import { useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { DAYS, fmt, hhmm, parts, repeatText, span, whenText, zoneName } from "../time.ts";
 import type { ScheduleItem, ScheduleKind, ScheduleList } from "../types.ts";
@@ -48,6 +49,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const [time2, setTime2] = useState("09:00");
   const [when, setWhen] = useState<"delay" | "time">("time");
   const [open, setOpen] = useState(false);
+  const [busy, run] = useBusy();
 
   usePolled(async () => {
     try {
@@ -79,16 +81,18 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
       say(body, true);
       return;
     }
-    try {
-      const r = editing
-        ? await api<ScheduleList>("PUT", "/api/schedule/" + editing, body)
-        : await api<ScheduleList>("POST", "/api/schedule", body);
-      say(editing ? "Saved." : "Added.");
-      reset();
-      setData(r);
-    } catch (x) {
-      fail(x);
-    }
+    await run(async () => {
+      try {
+        const r = editing
+          ? await api<ScheduleList>("PUT", "/api/schedule/" + editing, body)
+          : await api<ScheduleList>("POST", "/api/schedule", body);
+        say(editing ? "Saved." : "Added.");
+        reset();
+        setData(r);
+      } catch (x) {
+        fail(x);
+      }
+    });
   };
 
   const startEdit = (i: ScheduleItem) => {
@@ -292,7 +296,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
             </div>
           </div>
           <div class="row dlgfoot">
-            <button>{editing ? "Save changes" : "Add"}</button>
+            <button disabled={busy}>{editing ? "Save changes" : "Add"}</button>
             <button class="plain" type="button" onClick={reset}>
               Cancel
             </button>

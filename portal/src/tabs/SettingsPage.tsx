@@ -9,7 +9,7 @@ import { About } from "./About.tsx";
 import { Sources } from "./Connections.tsx";
 import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { PROVIDERS, providerFor } from "../providers.ts";
 import { TestSpeaker } from "./TestSpeaker.tsx";
 import { FeaturesSection } from "./Features.tsx";
@@ -88,7 +88,7 @@ function KeyRow(props: {
   const prov = providerFor(url);
   const [typed, setTyped] = useState("");
   const [replacing, setReplacing] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = useBusy();
   const [msg, setMsg] = useState("");
   const [bad, setBad] = useState(false);
   if (!prov) return null;
@@ -108,24 +108,24 @@ function KeyRow(props: {
       setBad(true);
       return;
     }
-    setBusy(true);
     setMsg("");
-    try {
-      // The service is asked first, so a key that does not work is never kept.
-      const r = await api<{ models: string[] }>("POST", "/api/models", { url, key });
-      await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
-      await keyChanged();
-      setTyped("");
-      setReplacing(false);
-      setBad(false);
-      setMsg(
-        "Key accepted. " + r.models.length + (r.models.length === 1 ? " model is" : " models are") + " available.",
-      );
-    } catch (x) {
-      setBad(true);
-      setMsg(x instanceof Error ? x.message : "The key could not be checked.");
-    }
-    setBusy(false);
+    await run(async () => {
+      try {
+        // The service is asked first, so a key that does not work is never kept.
+        const r = await api<{ models: string[] }>("POST", "/api/models", { url, key });
+        await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
+        await keyChanged();
+        setTyped("");
+        setReplacing(false);
+        setBad(false);
+        setMsg(
+          "Key accepted. " + r.models.length + (r.models.length === 1 ? " model is" : " models are") + " available.",
+        );
+      } catch (x) {
+        setBad(true);
+        setMsg(x instanceof Error ? x.message : "The key could not be checked.");
+      }
+    });
   };
   const remove = async () => {
     if (!(await ask("Remove the saved key? The assistant will stop answering until you add one.", "Remove"))) return;
@@ -519,6 +519,7 @@ function Security(): JSX.Element {
   const [pw, setPw] = useState("");
   const [cur, setCur] = useState("");
   const [pwErr, setPwErr] = useState("");
+  const [saving, run] = useBusy();
   const hasPassword = s.mode === "password";
   const savePassword = async (ev: Event) => {
     ev.preventDefault();
@@ -528,23 +529,25 @@ function Security(): JSX.Element {
       return;
     }
     const password = pw;
-    try {
-      const r = await api<{ token: string }>(
-        "POST",
-        "/api/admin/password",
-        hasPassword ? { password, current: cur } : { password },
-      );
-      setPw("");
-      setCur("");
-      keep(r.token);
-      say("Password saved.");
-      await start();
-    } catch (x) {
-      // A wrong current password is said next to the boxes, and what was typed stays so it can be corrected.
-      if (x instanceof ApiError && x.status === 403)
-        setPwErr("That is not the current password. Check it and try again.");
-      else fail(x);
-    }
+    await run(async () => {
+      try {
+        const r = await api<{ token: string }>(
+          "POST",
+          "/api/admin/password",
+          hasPassword ? { password, current: cur } : { password },
+        );
+        setPw("");
+        setCur("");
+        keep(r.token);
+        say("Password saved.");
+        await start();
+      } catch (x) {
+        // A wrong current password is said next to the boxes, and what was typed stays so it can be corrected.
+        if (x instanceof ApiError && x.status === 403)
+          setPwErr("That is not the current password. Check it and try again.");
+        else fail(x);
+      }
+    });
   };
   const signOut = async () => {
     try {
@@ -596,7 +599,7 @@ function Security(): JSX.Element {
           {pwErr}
         </p>
         <div class="row">
-          <button>Save password</button>
+          <button disabled={saving}>Save password</button>
         </div>
       </form>
       <section class="card sgroup">

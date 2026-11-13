@@ -16,9 +16,15 @@ export async function webhooks(c: Ctx): Promise<void> {
     await T(`set('#wname', 'ci')`);
     await T(`set('#wadapter', 'generic')`);
     await T(`set('#wspoken', 'Build server')`);
-    await T(`submit('#webhookdialog form')`);
+    // a double click sends one request, not two
+    await b.ev(`(() => { const f = T.q('#webhookdialog form'); f.requestSubmit(); f.requestSubmit(); })()`);
     await b.until(`T.q('#snip-ci')?.open === true && T.q('#snip-ci code.token')`, "token shown");
     await eq(`T.q('#webhookdialog').open`, false, "the dialog closes once the webhook is added");
+    assert.equal(
+      mock.log.filter((l) => l.method === "POST" && l.path === "/api/endpoints").length,
+      1,
+      "one request for a double click",
+    );
     await eq(`T.text('#snip-ci code.token')`, "tok-ci-1", "token");
     // What the speaker says a message is from is the user's choice, set here and changed here.
     assert.deepEqual(mock.log.find((l) => l.method === "POST" && l.path === "/api/endpoints")!.body, {
@@ -32,7 +38,10 @@ export async function webhooks(c: Ctx): Promise<void> {
     await b.until(`T.q('#spoken-ci').open === true`, "a dialog to change it");
     await T(`set('#spokenname-ci', '<b>Mum</b>')`);
     await T(`submit('#spoken-ci form')`);
-    await b.until(`T.text('#spoken-ci .errtext').startsWith('Use up to 40')`, "markup is refused, with the rule");
+    await b.until(
+      `T.text('#spoken-ci .errtext').startsWith('the spoken name is plain words')`,
+      "markup is refused, with the device's words",
+    );
     await T(`set('#spokenname-ci', 'Garage')`);
     await T(`submit('#spoken-ci form')`);
     await b.until(`T.text('#panel li:nth-child(2) .spokenas q') === 'From Garage'`, "changed");

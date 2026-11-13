@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { relaxWarning, tierLabel } from "../activity.ts";
 import { AddButton, Dialog } from "../dialog.tsx";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { change, loadExt, say, useApp, usePolled } from "../store.ts";
 import { matching, toolDefinition, type ParamForm } from "../forms.ts";
 import type { Extensions, Tool } from "../types.ts";
@@ -166,6 +166,7 @@ function AddTool(props: { open: boolean; onClose: () => void }) {
   const [tokenVar, setTokenVar] = useState("");
   const [confirmFirst, setConfirmFirst] = useState(true);
   const [params, setParams] = useState<ParamForm[]>([]);
+  const [busy, run] = useBusy();
   const edit = (id: number, patch: Partial<ParamForm>) =>
     setParams(params.map((p) => (p.id === id ? { ...p, ...patch } : p)));
 
@@ -176,16 +177,18 @@ function AddTool(props: { open: boolean; onClose: () => void }) {
       say(def, true);
       return;
     }
-    if (await change("POST", "/api/tools", def, "Added. The assistant can use it now.")) {
-      setName("");
-      setDescription("");
-      setMethod("POST");
-      setUrl("");
-      setTokenVar("");
-      setConfirmFirst(true);
-      setParams([]);
-      props.onClose();
-    }
+    await run(async () => {
+      if (await change("POST", "/api/tools", def, "Added. The assistant can use it now.")) {
+        setName("");
+        setDescription("");
+        setMethod("POST");
+        setUrl("");
+        setTokenVar("");
+        setConfirmFirst(true);
+        setParams([]);
+        props.onClose();
+      }
+    });
   };
 
   return (
@@ -328,7 +331,7 @@ function AddTool(props: { open: boolean; onClose: () => void }) {
           />
         </div>
         <div class="row dlgfoot">
-          <button>Add tool</button>
+          <button disabled={busy}>Add tool</button>
           <button class="plain" type="button" onClick={props.onClose}>
             Cancel
           </button>
