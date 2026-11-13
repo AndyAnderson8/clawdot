@@ -147,7 +147,7 @@ export async function settingsVoice(c: Ctx): Promise<void> {
         "the models the provider offers",
       );
       const labels = await b.ev<string[]>(
-        `T.all('#panel form.panel:first-of-type .slabel label').map((l) => l.textContent.replace('Optional', '').trim())`,
+        `T.all('#panel form.panel:first-of-type .slabel label, #panel form.panel:first-of-type .slabel .ltitle').map((l) => l.textContent.replace('Optional', '').trim())`,
       );
       assert.deepEqual(
         labels.slice(0, 5),

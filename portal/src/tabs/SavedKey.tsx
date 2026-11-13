@@ -68,7 +68,11 @@ export function SavedKey(props: {
   return (
     <div class="srow" id={props.id + "row"}>
       <div class="slabel">
-        <label for={props.id + "key"}>{props.label}</label>
+        {hint && !replacing ? (
+          <span class="ltitle">{props.label}</span>
+        ) : (
+          <label for={props.id + "key"}>{props.label}</label>
+        )}
         <p class="mut">{props.what}</p>
       </div>
       <div class="sctl">

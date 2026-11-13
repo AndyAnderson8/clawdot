@@ -109,7 +109,7 @@ function ToolRow(props: { t: Tool }) {
         class="switch"
         type="checkbox"
         checked={t.enabled}
-        aria-label={t.name + (t.enabled ? " is on" : " is off")}
+        aria-label={t.name}
         onChange={() =>
           change(
             "POST",
@@ -129,7 +129,7 @@ function ToolRow(props: { t: Tool }) {
       </div>
       <div class="toolact">
         {t.deletable ? (
-          <button class="danger small" type="button" onClick={remove}>
+          <button class="danger small" type="button" aria-label={"Delete " + t.name} onClick={remove}>
             Delete
           </button>
         ) : null}

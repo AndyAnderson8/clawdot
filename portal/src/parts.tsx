@@ -53,17 +53,26 @@ export async function copyText(text: string): Promise<boolean> {
 
 export function CopyButton(props: { text: string | (() => string); label?: string }): JSX.Element {
   const [done, setDone] = useState(false);
-  const click = async () => {
+  const click = async (ev: Event) => {
+    const button = ev.currentTarget as HTMLElement;
     const text = typeof props.text === "function" ? props.text() : props.text;
-    if (await copyText(text)) {
+    const ok = await copyText(text);
+    // The plain-http way of copying selects a hidden box, which takes the focus with it when it goes.
+    if (document.activeElement !== button) button.focus({ preventScroll: true });
+    if (ok) {
       setDone(true);
       setTimeout(() => setDone(false), 1500);
     } else say("Copy failed. Select the text and copy it by hand.", true);
   };
   return (
-    <button class="plain" type="button" onClick={click}>
-      {done ? "Copied" : (props.label ?? "Copy")}
-    </button>
+    <>
+      <button class="plain" type="button" onClick={click}>
+        {done ? "Copied" : (props.label ?? "Copy")}
+      </button>
+      <span class="sr" role="status">
+        {done ? "Copied" : ""}
+      </span>
+    </>
   );
 }
 

@@ -16,6 +16,7 @@ export async function clock(c: Ctx): Promise<void> {
     await b.until(`T.rows().length === 1`, "one alarm");
     await shot("clock");
     await eq(`T.rows()[0].includes('<b>work</b>')`, true, "label shown as text");
+    await eq(`T.q('#panel li button').getAttribute('aria-label')`, "Edit <b>work</b>", "a row's button says which row");
     await eq(`T.q('#panel strong b') === null`, true, "no markup from the label");
     await eq(`T.rows()[0].includes('Weekdays at')`, true, "repeat text");
     await eq(`T.text('#clocklist h3').startsWith('Alarms')`, true, "the list has a title and a count");

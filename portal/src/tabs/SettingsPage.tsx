@@ -141,7 +141,7 @@ function KeyRow(props: {
   return (
     <div class="srow" id="keyrow">
       <div class="slabel">
-        <label for="apikey">API key</label>
+        {showing ? <span class="ltitle">API key</span> : <label for="apikey">API key</label>}
         <p class="mut">
           {prov.id === "custom"
             ? "If the service needs one. It is checked, then kept on this device; only its first and last few characters are shown."
@@ -606,7 +606,7 @@ function Security(): JSX.Element {
         <h3>This browser</h3>
         <div class="srow">
           <div class="slabel">
-            <label>Sign out</label>
+            <span class="ltitle">Sign out</span>
             <p class="mut">You will need the password to come back.</p>
           </div>
           <div class="sctl">

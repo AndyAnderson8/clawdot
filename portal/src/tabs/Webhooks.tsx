@@ -74,7 +74,12 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
       </div>
       <p class="mut spokenas">
         The speaker says <q>From {e.spoken_name || e.name}</q> before its messages.{" "}
-        <button class="plain small" type="button" onClick={() => setRenaming(true)}>
+        <button
+          class="plain small"
+          type="button"
+          aria-label={"Change what the speaker says for " + e.name}
+          onClick={() => setRenaming(true)}
+        >
           Change what it says
         </button>
       </p>
@@ -111,10 +116,10 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
       <code>{url}</code>
       <div class="acts">
         <CopyButton text={url} label="Copy address" />
-        <button class="plain" type="button" onClick={rotate}>
+        <button class="plain" type="button" aria-label={"New token for " + e.name} onClick={rotate}>
           New token
         </button>
-        <button class="danger" type="button" onClick={remove}>
+        <button class="danger" type="button" aria-label={"Delete " + e.name} onClick={remove}>
           Delete
         </button>
       </div>

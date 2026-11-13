@@ -30,6 +30,7 @@ export async function toolsSourcesSkills(c: Ctx): Promise<void> {
     await T(`set('#tier-set_light', '')`);
     await b.until(`T.q('#tier-set_light').value === 'costly'`, "back to the usual level");
     assert.deepEqual(mock.log.filter((l) => l.path === "/api/tools/set_light/tier").pop()!.body, { tier: null });
+    await eq(`T.q('#on-set_light').getAttribute('aria-label')`, "set_light", "a switch is named, not told its state");
     await T(`click('#on-set_light')`);
     await b.until(`T.q('#on-set_light').checked === false && T.q('.toolrow.off') !== null`, "switched off");
     assert.deepEqual(mock.log.find((l) => l.path === "/api/tools/set_light/enabled")!.body, { enabled: false });

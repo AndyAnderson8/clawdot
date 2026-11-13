@@ -30,7 +30,7 @@ function Source(props: { s: McpServer }) {
         class="switch"
         type="checkbox"
         checked={s.enabled}
-        aria-label={s.name + (s.enabled ? " is on" : " is off")}
+        aria-label={s.name}
         onChange={() =>
           change(
             "POST",
@@ -83,7 +83,7 @@ function Source(props: { s: McpServer }) {
       </div>
       <div class="toolact">
         {s.deletable ? (
-          <button class="danger small" type="button" onClick={remove}>
+          <button class="danger small" type="button" aria-label={"Remove " + s.name} onClick={remove}>
             Remove
           </button>
         ) : (

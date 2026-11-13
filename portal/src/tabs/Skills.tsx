@@ -444,7 +444,7 @@ export function Skills(): JSX.Element {
                   checked={k.enabled}
                   disabled={k.needs_review === true}
                   title={k.needs_review ? "Read and accept this skill before turning it on." : undefined}
-                  aria-label={k.name + (k.needs_review ? " needs review" : k.enabled ? " is on" : " is off")}
+                  aria-label={k.name}
                   onChange={() => void toggle(k)}
                 />
                 <div class="toolmain">
@@ -458,11 +458,11 @@ export function Skills(): JSX.Element {
                 </div>
                 <div class="toolact">
                   {k.needs_review ? (
-                    <button type="button" class="small" onClick={() => setReviewing(k)}>
+                    <button type="button" class="small" aria-label={"Review " + k.name} onClick={() => setReviewing(k)}>
                       Review
                     </button>
                   ) : null}
-                  <button class="plain small" type="button" onClick={() => setEditing(k)}>
+                  <button class="plain small" type="button" aria-label={"Edit " + k.name} onClick={() => setEditing(k)}>
                     Edit
                   </button>
                 </div>

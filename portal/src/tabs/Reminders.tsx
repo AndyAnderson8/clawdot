@@ -168,10 +168,20 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
               </div>
               <div class="when">{data ? whenLine(i, data.now) : ""}</div>
               <div class="acts">
-                <button class="plain small" type="button" onClick={() => startEdit(i)}>
+                <button
+                  class="plain small"
+                  type="button"
+                  aria-label={"Edit " + (i.label || NAMES[i.kind])}
+                  onClick={() => startEdit(i)}
+                >
                   Edit
                 </button>
-                <button class="danger" type="button" onClick={() => cancel(i)}>
+                <button
+                  class="danger"
+                  type="button"
+                  aria-label={"Cancel " + (i.label || NAMES[i.kind])}
+                  onClick={() => cancel(i)}
+                >
                   Cancel
                 </button>
               </div>
@@ -236,7 +246,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
               </div>
               <div class="srow">
                 <div class="slabel">
-                  <label>Repeat on</label>
+                  <span class="ltitle">Repeat on</span>
                   <p class="mut">Leave every day off to ring once, at the next time it comes round.</p>
                 </div>
                 <div class="sctl">
