@@ -3,9 +3,11 @@
 //! Accumulators are `i32` with wrapping arithmetic, as in the reference; requantisation is the fixed-point
 //! "rounding doubling high multiply" followed by a rounding shift. Shapes and sizes are validated when the model
 //! is planned, so the loops here index within their slices; every index is still computed with checked bounds
-//! by the slice accessors, and a model that slips through validation can at worst abort the process under the
-//! release profile, never read outside the arena.
+//! by the slice accessors, so a model that slips through validation gets wrong numbers or a panic from a
+//! checked index, never a read outside the arena. Multipliers whose shift the kernels cannot apply are refused
+//! when the model is planned ([`checked_requant`]).
 
+use crate::error::Error;
 use crate::model::Padding;
 
 /// A multiplier and shift pair: `real ~= multiplier * 2^(shift - 31)`.
@@ -54,6 +56,26 @@ pub fn quantize_multiplier(real: f64) -> Requant {
         multiplier: q as i32,
         shift: exponent,
     }
+}
+
+/// Largest left shift [`multiply_by_quantized`] can apply exactly: `wrapping_shl` would take a larger count
+/// modulo 32.
+const MAX_LEFT_SHIFT: i32 = 31;
+
+/// [`quantize_multiplier`] for planning a layer: a model whose scales give a shift outside what the kernels can
+/// apply is refused instead of being computed with a silently masked shift.
+///
+/// # Errors
+/// [`Error::Invalid`] when the shift is above 31.
+pub fn checked_requant(real: f64) -> Result<Requant, Error> {
+    let r = quantize_multiplier(real);
+    if r.shift > MAX_LEFT_SHIFT {
+        return Err(Error::Invalid(format!(
+            "a layer's quantisation scales need a left shift of {}, over the supported {MAX_LEFT_SHIFT}",
+            r.shift
+        )));
+    }
+    Ok(r)
 }
 
 /// `SaturatingRoundingDoublingHighMul`.
@@ -406,6 +428,16 @@ pub fn logistic_table(input_scale: f32, input_zp: i32) -> [i8; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn req_wak_002_a_shift_the_kernels_cannot_apply_is_refused_when_planning() {
+        // 2^31 needs a left shift of 32, which wrapping_shl would silently take as 0.
+        let e = checked_requant(f64::from(1u32 << 31) * 1.5).unwrap_err();
+        assert!(matches!(e, Error::Invalid(_)), "{e:?}");
+        assert_eq!(quantize_multiplier(f64::from(1u32 << 31) * 1.5).shift, 32);
+        assert_eq!(checked_requant(0.5), Ok(quantize_multiplier(0.5)));
+        assert_eq!(checked_requant(1e-30), Ok(quantize_multiplier(1e-30)));
+    }
 
     #[test]
     fn quantize_multiplier_matches_known_values() {
