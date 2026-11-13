@@ -177,6 +177,26 @@ pub struct Resolved {
     pub hive_publish_name: bool,
 }
 
+/// One warning for each retired key the configuration file still sets. They are accepted so an older file loads,
+/// and nothing reads them, so without a warning a person who sets a fallback model believes they have one.
+fn retired_key_warnings(c: &Config) -> Vec<String> {
+    let present = [
+        ("llm.fallback_model", c.llm.fallback_model.is_some()),
+        ("llm.summary_model", c.llm.summary_model.is_some()),
+        (
+            "limits.max_requests_per_day",
+            c.limits.max_requests_per_day.is_some(),
+        ),
+    ];
+    present
+        .into_iter()
+        .filter(|(_, set)| *set)
+        .map(|(key, _)| {
+            format!("warning: `{key}` in the configuration file is retired and ignored; remove it")
+        })
+        .collect()
+}
+
 /// Combine defaults, the configuration file, saved settings, and flags (REQ-CFG-038) into the [`Resolved`] values
 /// the program starts with. Also returns the state the portal edits and any warnings.
 ///
@@ -206,7 +226,7 @@ pub fn resolve(
         };
         layer.insert("persona".into(), text.into());
     }
-    let (mut state, warnings) = SettingsState::open(
+    let (mut state, mut warnings) = SettingsState::open(
         Some(&data_dir),
         Sources {
             defaults: settings::built_in_defaults(),
@@ -216,6 +236,7 @@ pub fn resolve(
         file.speech.url.is_some(),
         env.lookup(),
     )?;
+    warnings.extend(retired_key_warnings(&file));
     // The machine's name is read here, once, for the address snippets print when `listen` is unspecified.
     state.set_machine_name(crate::hostguard::machine_name(env).as_deref());
     let text = |k: &str| state.get(k).as_str().map(str::to_owned);
@@ -340,6 +361,34 @@ mod tests {
         let (cli, _) = cli::parse(&argv(dir, flags)).unwrap();
         let (r, state, _) = resolve(cli, Config::parse(file).unwrap(), &Env::empty()).unwrap();
         (r, state)
+    }
+
+    // REQ-CFG-038: a retired key that the file still sets is named in a warning; a file without them has none.
+    #[test]
+    fn each_retired_key_in_the_file_gets_one_warning() {
+        let dir = TempDir::new("seed-retired");
+        let run = |file: &str| {
+            let (cli, _) = cli::parse(&argv(&dir, &[])).unwrap();
+            resolve(cli, Config::parse(file).unwrap(), &Env::empty())
+                .unwrap()
+                .2
+        };
+        assert!(run("{}").is_empty());
+        let all = run(
+            r#"{"llm": {"url": "https://x.test/v1", "model": "a", "fallback_model": "b", "summary_model": "c"},
+                "limits": {"max_requests_per_day": 40}}"#,
+        );
+        assert_eq!(
+            all,
+            [
+                "warning: `llm.fallback_model` in the configuration file is retired and ignored; remove it",
+                "warning: `llm.summary_model` in the configuration file is retired and ignored; remove it",
+                "warning: `limits.max_requests_per_day` in the configuration file is retired and ignored; remove it",
+            ]
+        );
+        let one = run(r#"{"limits": {"max_requests_per_day": 5}}"#);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].contains("limits.max_requests_per_day"));
     }
 
     // REQ-CFG-083
