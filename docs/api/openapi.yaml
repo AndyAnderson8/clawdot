@@ -524,12 +524,16 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [name, adapter, token]
+                required: [name, adapter, token, setup]
                 properties:
                   name: { type: string }
                   adapter: { type: string }
                   spoken_name: { type: [string, "null"] }
                   token: { type: string, description: "Shown once." }
+                  setup:
+                    type: array
+                    items: { type: string }
+                    description: "The adapter's set-up lines with `{public}`, `{endpoint}` and `{token}` unfilled, as in `Endpoint`."
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1809,7 +1813,7 @@ components:
         token: { type: string, description: "A session token (password mode)." }
     Endpoint:
       type: object
-      required: [name, adapter, enabled, created_at]
+      required: [name, adapter, enabled, created_at, setup]
       properties:
         name: { type: string }
         adapter: { type: string }
@@ -1818,6 +1822,14 @@ components:
         spoken_name:
           type: [string, "null"]
           description: What the speaker says as the origin; `null` means the speaker says `name`.
+        setup:
+          type: array
+          items: { type: string }
+          description: |
+            The adapter's set-up lines, as `--create-endpoint` prints them, with the placeholders `{public}` (the
+            address other programs use), `{endpoint}` (this endpoint's name) and `{token}` left for the caller
+            to fill. Blank lines separate the parts; the first line of a part says what it is for. Empty when the
+            adapter has none. No token is ever in them.
     AgentEvent:
       type: object
       required: [id, endpoint, source, origin, title, text, state, received_at]
@@ -2177,11 +2189,34 @@ components:
               name: { type: string }
     SettingField:
       type: object
-      required: [value, source]
+      required: [value, source, kind, live, group]
+      description: |
+        One setting: its value and where that came from, and what the setting is. The kind, limits, choices,
+        group and live status come from the table the core validates with, so a page draws its controls from
+        them and keeps only its own wording.
       properties:
         value: { type: [string, number, boolean, "null"] }
         source: { type: string, enum: [default, file, saved, flag] }
+        kind:
+          type: string
+          enum: [text, long_text, whole, money, flag, choice, time, zone, language, url, address, secret_name]
+          description: |
+            `text` and `long_text` (several lines) have `max_length`. `whole` (a whole number) and `money` (dollars)
+            have `min` and `max`. `choice` has `choices`. `flag` is true or false. `time` is `HH:MM`. `zone` is an
+            IANA time zone name. `language` is a code such as `pt-BR`. `url` is a web address, `address` is
+            `host:port`, and `secret_name` is the NAME of an environment variable that holds a key.
+        min: { type: number, description: "Smallest allowed value, for `whole` and `money`." }
+        max: { type: number, description: "Largest allowed value, for `whole` and `money`." }
+        max_length: { type: integer, description: "Longest allowed text in characters, for `text` and `long_text`." }
+        choices:
+          type: array
+          items: { type: string }
+          description: The allowed words, for `choice`.
         live: { type: boolean, description: "Whether a change applies without a restart." }
+        group:
+          type: string
+          enum: [own, llm, speech, agent, policy, quiet, realtime]
+          description: "Settings of one group are applied together; `own` is outside every group."
         saved: { type: boolean }
         ignored: { type: boolean, description: "A saved value hidden by a command-line flag." }
     Settings:
@@ -2228,6 +2263,7 @@ components:
           type: object
           properties:
             dialect: { type: string, enum: [openai, elevenlabs, deepgram], description: "The speech provider in use (`speech_provider`)." }
+            configured: { type: boolean, description: "A speech service address is set." }
             language: { type: string }
             stt_model: { type: string }
             tts_model: { type: string }

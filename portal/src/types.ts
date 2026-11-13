@@ -73,6 +73,8 @@ export interface Endpoint {
   created_at: number;
   /** What the speaker calls this webhook when it reads a message out; none means its name. */
   spoken_name?: string | null;
+  /** The adapter's set-up lines, as `clawdot --create-endpoint` prints them, with `{public}`, `{endpoint}` and `{token}` unfilled. */
+  setup: string[];
 }
 export interface Overview {
   now: number;
@@ -167,10 +169,35 @@ export interface Extensions {
   import?: { added: number; skipped: string[] } | null;
 }
 
+/** What a setting holds. The device decides this; the page draws the control from it. */
+export type SettingKind =
+  | "text"
+  | "long_text"
+  | "whole"
+  | "money"
+  | "flag"
+  | "choice"
+  | "time"
+  | "zone"
+  | "language"
+  | "url"
+  | "address"
+  | "secret_name";
 export interface SettingField {
   value: string | number | boolean | null;
   source: "default" | "file" | "saved" | "flag" | string;
-  live?: boolean;
+  kind: SettingKind;
+  /** Smallest and largest value, for a whole number or an amount of money. */
+  min?: number;
+  max?: number;
+  /** Longest text in characters, for text and long text. */
+  max_length?: number;
+  /** The allowed words, for a choice. */
+  choices?: string[];
+  /** A change applies without a restart. */
+  live: boolean;
+  /** Settings of one group are applied together. */
+  group: string;
   saved?: boolean;
   ignored?: boolean;
 }

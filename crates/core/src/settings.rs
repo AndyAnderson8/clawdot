@@ -101,8 +101,8 @@ pub enum Check {
         /// Largest allowed.
         hi: u64,
     },
-    /// A number from `lo` to `hi`; `err` is the whole message when it is not.
-    Number {
+    /// An amount of dollars from `lo` to `hi`; `err` is the whole message when it is not.
+    Money {
         /// Smallest allowed.
         lo: f64,
         /// Largest allowed.
@@ -121,8 +121,8 @@ pub enum Check {
         /// The message for any other word.
         err: &'static str,
     },
-    /// A named function, for rules of its own.
-    Custom(Validator),
+    /// A named function, for rules of its own, and what kind of value it accepts.
+    Custom(Validator, Kind),
 }
 
 impl Check {
@@ -130,7 +130,7 @@ impl Check {
         match self {
             Self::Text { what, max } => string(v, what, max).map(Value::from),
             Self::Whole { what, lo, hi } => whole(v, what, lo, hi),
-            Self::Number { lo, hi, err } => v
+            Self::Money { lo, hi, err } => v
                 .as_f64()
                 .filter(|n| n.is_finite() && (lo..=hi).contains(n))
                 .map(|n| json!(n))
@@ -146,7 +146,93 @@ impl Check {
                     .then(|| json!(t))
                     .ok_or_else(|| err.to_owned())
             }
-            Self::Custom(f) => f(v, lk),
+            Self::Custom(f, _) => f(v, lk),
+        }
+    }
+}
+
+/// The speech providers a person can choose, in the order of [`crate::speech::Dialect::ALL`]. A test keeps the
+/// two lists equal.
+const SPEECH_PROVIDERS: &[&str] = &["openai", "elevenlabs", "deepgram"];
+
+/// What kind of value a setting holds, as the portal needs to know it to draw the right control. This is a
+/// fact about the setting; the words around it (labels, hints) stay in the page.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    /// One line of text of at most `max_len` characters.
+    Text {
+        /// Longest allowed, in characters.
+        max_len: usize,
+    },
+    /// Text that may run over several lines.
+    LongText {
+        /// Longest allowed, in characters.
+        max_len: usize,
+    },
+    /// A whole number from `min` to `max`.
+    Whole {
+        /// Smallest allowed.
+        min: u64,
+        /// Largest allowed.
+        max: u64,
+    },
+    /// An amount of dollars from `min` to `max`.
+    Money {
+        /// Smallest allowed.
+        min: f64,
+        /// Largest allowed.
+        max: f64,
+    },
+    /// On or off.
+    Flag,
+    /// One of a fixed list of words.
+    Choice(&'static [&'static str]),
+    /// A time of day, `HH:MM`.
+    Time,
+    /// An IANA time zone name.
+    Zone,
+    /// A language code such as `en` or `pt-BR`.
+    Language,
+    /// A web address (`http`, `https`, `ws` or `wss`).
+    Url,
+    /// A network address with a port, such as `127.0.0.1:3335`.
+    Address,
+    /// The name of an environment variable that holds a key.
+    SecretName,
+}
+
+impl Kind {
+    /// The word the API uses.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::LongText { .. } => "long_text",
+            Self::Whole { .. } => "whole",
+            Self::Money { .. } => "money",
+            Self::Flag => "flag",
+            Self::Choice(_) => "choice",
+            Self::Time => "time",
+            Self::Zone => "zone",
+            Self::Language => "language",
+            Self::Url => "url",
+            Self::Address => "address",
+            Self::SecretName => "secret_name",
+        }
+    }
+}
+
+impl Check {
+    /// What kind of value this check accepts.
+    #[must_use]
+    pub fn kind(self) -> Kind {
+        match self {
+            Self::Text { max, .. } => Kind::Text { max_len: max },
+            Self::Whole { lo, hi, .. } => Kind::Whole { min: lo, max: hi },
+            Self::Money { lo, hi, .. } => Kind::Money { min: lo, max: hi },
+            Self::Flag => Kind::Flag,
+            Self::Choice { options, .. } => Kind::Choice(options),
+            Self::Custom(_, k) => k,
         }
     }
 }
@@ -202,6 +288,22 @@ pub enum Group {
     Realtime,
 }
 
+impl Group {
+    /// The word the API uses.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Own => "own",
+            Self::Llm => "llm",
+            Self::Speech => "speech",
+            Self::Agent => "agent",
+            Self::Policy => "policy",
+            Self::Quiet => "quiet",
+            Self::Realtime => "realtime",
+        }
+    }
+}
+
 /// One setting: everything the Rust side needs to know about it, in one place. Adding a setting is adding a
 /// row to [`FIELDS`] and the code that uses the value.
 #[derive(Debug, Clone, Copy)]
@@ -242,6 +344,35 @@ impl Field {
     const fn in_group(self, group: Group) -> Self {
         Self { group, ..self }
     }
+
+    /// What the API says about the setting besides its value: kind, limits, choices, group, and whether it is
+    /// live. The portal draws its controls from this, so none of it is repeated there.
+    #[must_use]
+    pub fn describe(&self) -> Map<String, Value> {
+        let kind = self.check.kind();
+        let mut m = Map::new();
+        m.insert("kind".into(), json!(kind.as_str()));
+        m.insert("live".into(), json!(self.live));
+        m.insert("group".into(), json!(self.group.as_str()));
+        match kind {
+            Kind::Text { max_len } | Kind::LongText { max_len } => {
+                m.insert("max_length".into(), json!(max_len));
+            }
+            Kind::Whole { min, max } => {
+                m.insert("min".into(), json!(min));
+                m.insert("max".into(), json!(max));
+            }
+            Kind::Money { min, max } => {
+                m.insert("min".into(), json!(min));
+                m.insert("max".into(), json!(max));
+            }
+            Kind::Choice(choices) => {
+                m.insert("choices".into(), json!(choices));
+            }
+            _ => {}
+        }
+        m
+    }
 }
 
 const fn text_of(what: &'static str, max: usize) -> Check {
@@ -254,14 +385,14 @@ const fn count(what: &'static str, lo: u64, hi: u64) -> Check {
 
 const PRICE_ERR: &str = "The price per minute of audio must be a number of dollars from 0 to 100.";
 
-const PRICE: Check = Check::Number {
+const PRICE: Check = Check::Money {
     lo: 0.0,
     hi: 100.0,
     err: PRICE_ERR,
 };
 
 /// The price of a million tokens of the language model, for the spend cap (REQ-AST-011).
-const TOKEN_PRICE: Check = Check::Number {
+const TOKEN_PRICE: Check = Check::Money {
     lo: 0.0,
     hi: 1000.0,
     err: "The price per million tokens must be a number of dollars from 0 to 1000. Leave it empty if you do not know it, and 0 if the model is free.",
@@ -274,42 +405,60 @@ pub const FIELDS: &[Field] = &[
         text_of("The device name", 40),
         Initial::Str("ClawDot"),
     ),
-    Field::live("zone", Check::Custom(zone_value), Initial::Str("UTC")),
+    Field::live(
+        "zone",
+        Check::Custom(zone_value, Kind::Zone),
+        Initial::Str("UTC"),
+    ),
     Field::live(
         "persona",
-        Check::Custom(persona_value),
+        Check::Custom(persona_value, Kind::LongText { max_len: 4000 }),
         Initial::Str(crate::assistant::DEFAULT_PERSONA),
     ),
-    Field::live("llm_url", Check::Custom(llm_url_value), Initial::None).in_group(Group::Llm),
-    Field::live("llm_model", Check::Custom(llm_model_value), Initial::None).in_group(Group::Llm),
+    Field::live(
+        "llm_url",
+        Check::Custom(llm_url_value, Kind::Url),
+        Initial::None,
+    )
+    .in_group(Group::Llm),
+    Field::live(
+        "llm_model",
+        Check::Custom(llm_model_value, Kind::Text { max_len: 200 }),
+        Initial::None,
+    )
+    .in_group(Group::Llm),
     Field::live(
         "llm_key_env",
-        Check::Custom(llm_key_env_value),
+        Check::Custom(llm_key_env_value, Kind::SecretName),
         Initial::Str("OPENROUTER_API_KEY"),
     )
     .in_group(Group::Llm),
     Field::live("voice", text_of("The voice", 64), Initial::None).in_group(Group::Speech),
     Field::live(
         "speech_language",
-        Check::Custom(speech_language_value),
+        Check::Custom(speech_language_value, Kind::Language),
         Initial::None,
     )
     .in_group(Group::Speech),
     // Which service's wire format the speech client speaks; the clients are built at start (REQ-VOI-021).
     Field::restart(
         "speech_provider",
-        Check::Custom(speech_provider_value),
+        Check::Custom(speech_provider_value, Kind::Choice(SPEECH_PROVIDERS)),
         Initial::Str("openai"),
     ),
     Field::restart(
         "listen",
-        Check::Custom(listen_value),
+        Check::Custom(listen_value, Kind::Address),
         Initial::Str(DEFAULT_LISTEN),
     ),
-    Field::restart("public_url", Check::Custom(public_url_value), Initial::None),
+    Field::restart(
+        "public_url",
+        Check::Custom(public_url_value, Kind::Url),
+        Initial::None,
+    ),
     Field::live(
         "daily_spend_usd",
-        Check::Number {
+        Check::Money {
             lo: 0.0,
             hi: 100_000.0,
             err: "The daily spend limit must be a number of dollars, zero or more. Leave it empty for no limit.",
@@ -391,26 +540,31 @@ pub const FIELDS: &[Field] = &[
     .in_group(Group::Policy),
     Field::live(
         "quiet_start",
-        Check::Custom(quiet_time_value),
+        Check::Custom(quiet_time_value, Kind::Time),
         Initial::None,
     )
     .in_group(Group::Quiet),
-    Field::live("quiet_end", Check::Custom(quiet_time_value), Initial::None).in_group(Group::Quiet),
+    Field::live(
+        "quiet_end",
+        Check::Custom(quiet_time_value, Kind::Time),
+        Initial::None,
+    )
+    .in_group(Group::Quiet),
     Field::live(
         "realtime_enabled",
-        Check::Custom(realtime_enabled_value),
+        Check::Custom(realtime_enabled_value, Kind::Flag),
         Initial::Bool(false),
     )
     .in_group(Group::Realtime),
     Field::live(
         "realtime_url",
-        Check::Custom(realtime_url_value),
+        Check::Custom(realtime_url_value, Kind::Url),
         Initial::None,
     )
     .in_group(Group::Realtime),
     Field::live(
         "realtime_model",
-        Check::Custom(realtime_model_value),
+        Check::Custom(realtime_model_value, Kind::Text { max_len: 100 }),
         Initial::None,
     )
     .in_group(Group::Realtime),
@@ -422,7 +576,7 @@ pub const FIELDS: &[Field] = &[
     .in_group(Group::Realtime),
     Field::live(
         "realtime_key_env",
-        Check::Custom(realtime_key_env_value),
+        Check::Custom(realtime_key_env_value, Kind::SecretName),
         Initial::Str(crate::rtvoice::DEFAULT_KEY_ENV),
     )
     .in_group(Group::Realtime),
@@ -1070,13 +1224,12 @@ impl SettingsState {
             if !f.live && self.running.get(f.key) != Some(v) {
                 restart.push(f.key);
             }
-            fields.insert(
-                f.key.to_owned(),
-                json!({
-                    "value": v, "source": src.as_str(), "live": f.live,
-                    "saved": saved, "ignored": saved && *src == Source::Flag,
-                }),
-            );
+            let mut entry = f.describe();
+            entry.insert("value".into(), v.clone());
+            entry.insert("source".into(), json!(src.as_str()));
+            entry.insert("saved".into(), json!(saved));
+            entry.insert("ignored".into(), json!(saved && *src == Source::Flag));
+            fields.insert(f.key.to_owned(), Value::Object(entry));
         }
         let key_env = eff["llm_key_env"].0.as_str().unwrap_or("");
         let rt = {

@@ -231,7 +231,8 @@ mod tests {
     }
 
     // REQ-CFG-016: the text printed for a new endpoint is pinned for both built-in adapters. It was once written in
-    // this file; it now comes from the adapter's own definition and must not change.
+    // this file; it now comes from the adapter's own definition and must not change. (The one change: the bridge line
+    // carries the real token like the hook lines do, instead of `<token>`, so the portal can fill the same line.)
     #[test]
     fn the_printed_snippet_for_claude_code_is_unchanged() {
         let hook = |event: &str| {
@@ -244,7 +245,7 @@ mod tests {
              Claude Code hooks: add to ~/.claude/settings.json (merge with what is already there):\n\
              {{\n  \"hooks\": {{\n{},\n{}\n  }}\n}}\n\n\
              Voice replies reach the agent through the bridge, on the machine where the agent runs:\n\
-             \x20 CLAWDOT_TOKEN=<token> clawdot-bridge --url http://dot:1 --endpoint ci\n\n",
+             \x20 CLAWDOT_TOKEN=TKN clawdot-bridge --url http://dot:1 --endpoint ci\n\n",
             hook("Stop"),
             hook("Notification")
         );

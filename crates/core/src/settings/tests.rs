@@ -678,3 +678,137 @@ fn the_export_holds_only_saved_values_and_loads_back_through_the_same_checks() {
     assert!(e.contains("1 to 20"));
     assert_eq!(st2.get("device_name"), "Den", "nothing applied");
 }
+
+// REQ-CFG-039, REQ-CFG-062: the listing says what each setting is, so the page repeats none of it.
+#[test]
+fn every_row_reports_its_kind_limits_group_and_live_status_and_they_match_its_check() {
+    let dir = TempDir::new("meta");
+    let st = open_in(&dir.0, Layer::new(), Layer::new());
+    let listing = st.json();
+    let secrets = Secrets::none();
+    let lk = Lookup {
+        env: &|_| Some("x".to_owned()),
+        secrets: &secrets,
+    };
+    for f in FIELDS {
+        let m = &listing["fields"][f.key];
+        assert_eq!(m["live"], json!(f.live), "{} live", f.key);
+        assert_eq!(m["group"], json!(f.group.as_str()), "{} group", f.key);
+        assert_eq!(m["kind"], json!(f.check.kind().as_str()), "{} kind", f.key);
+        let ok = |v: Value| normalize(f.key, &v, &lk).is_ok();
+        match f.check.kind() {
+            Kind::Whole { min, max } => {
+                assert_eq!(whole_range(f.key), Some((min, max)), "{}", f.key);
+                assert_eq!(
+                    (m["min"].as_u64(), m["max"].as_u64()),
+                    (Some(min), Some(max))
+                );
+                assert!(ok(json!(min)) && ok(json!(max)) && !ok(json!(max + 1)));
+                assert!(min == 0 || !ok(json!(min - 1)), "{} lower limit", f.key);
+            }
+            Kind::Money { min, max } => {
+                assert_eq!(
+                    (m["min"].as_f64(), m["max"].as_f64()),
+                    (Some(min), Some(max))
+                );
+                assert!(ok(json!(min)) && ok(json!(max)));
+                assert!(
+                    !ok(json!(max + 1.0)) && !ok(json!(min - 1.0)),
+                    "{} limits",
+                    f.key
+                );
+            }
+            Kind::Text { max_len } | Kind::LongText { max_len } => {
+                assert_eq!(m["max_length"].as_u64(), Some(max_len as u64));
+                assert!(ok(json!("a".repeat(max_len))), "{} at its limit", f.key);
+                assert!(
+                    !ok(json!("a".repeat(max_len + 1))),
+                    "{} over its limit",
+                    f.key
+                );
+            }
+            Kind::Choice(choices) => {
+                assert_eq!(m["choices"], json!(choices), "{} choices", f.key);
+                assert!(
+                    choices.iter().all(|c| ok(json!(c))),
+                    "{} choices valid",
+                    f.key
+                );
+                assert!(!ok(json!("no-such-choice")));
+            }
+            Kind::Flag => assert!(ok(json!(true)) && ok(json!(false)) && !ok(json!("yes"))),
+            Kind::Time => assert!(ok(json!("22:00")) && !ok(json!("25:00"))),
+            Kind::Zone => assert!(ok(json!("UTC"))),
+            Kind::Language => assert!(ok(json!("pt-BR")) && !ok(json!("en_US!"))),
+            Kind::Url | Kind::Address | Kind::SecretName => {}
+        }
+        if !matches!(f.check.kind(), Kind::Whole { .. } | Kind::Money { .. }) {
+            assert!(m.get("min").is_none(), "{} has no range", f.key);
+        }
+    }
+    assert_eq!(listing["fields"].as_object().unwrap().len(), FIELDS.len());
+}
+
+#[test]
+fn the_speech_provider_choices_are_the_dialects() {
+    let names: Vec<&str> = crate::speech::Dialect::ALL
+        .iter()
+        .map(|d| d.name())
+        .collect();
+    assert_eq!(SPEECH_PROVIDERS, names.as_slice());
+}
+
+#[test]
+fn rows_of_each_kind_report_what_the_portal_used_to_hold() {
+    let dir = TempDir::new("meta2");
+    let f = open_in(&dir.0, Layer::new(), Layer::new()).json()["fields"].clone();
+    assert_eq!(f["agent_max_rounds"]["kind"], "whole");
+    assert_eq!(
+        (
+            f["realtime_max_session_secs"]["min"].as_u64(),
+            f["realtime_max_session_secs"]["max"].as_u64()
+        ),
+        (Some(10), Some(3600))
+    );
+    assert_eq!(f["persona"]["kind"], "long_text");
+    assert_eq!(f["persona"]["max_length"], 4000);
+    assert_eq!(f["daily_spend_usd"]["kind"], "money");
+    assert_eq!(f["quiet_start"]["kind"], "time");
+    assert_eq!(f["llm_key_env"]["kind"], "secret_name");
+    assert_eq!(
+        f["speech_provider"]["choices"],
+        json!(["openai", "elevenlabs", "deepgram"])
+    );
+    assert_eq!(f["listen"]["live"], false);
+    assert_eq!(f["llm_url"]["group"], "llm");
+}
+
+// REQ-CFG-039: the portal's tests and its fake device take each setting's description from this file, so it must be
+// what the table says. To refresh it after a change to the table, run this test with CLAWDOT_UPDATE_FIXTURES=1.
+#[test]
+fn the_portal_fixture_describes_every_row_exactly_as_the_table_does() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("portal")
+        .join("test")
+        .join("fixtures")
+        .join("settings-meta.json");
+    let want: Map<String, Value> = FIELDS
+        .iter()
+        .map(|f| (f.key.to_owned(), Value::Object(f.describe())))
+        .collect();
+    if std::env::var_os("CLAWDOT_UPDATE_FIXTURES").is_some() {
+        let text = serde_json::to_string_pretty(&Value::Object(want.clone())).unwrap() + "\n";
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+    }
+    let have: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_default())
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        have,
+        Value::Object(want),
+        "{} is out of date; run this test with CLAWDOT_UPDATE_FIXTURES=1 to rewrite it",
+        path.display()
+    );
+}
