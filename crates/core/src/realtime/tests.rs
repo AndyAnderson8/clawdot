@@ -150,6 +150,33 @@ where
     F: FnOnce(Srv) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send,
 {
+    let (result, usage, audio) = session_on(&mut host, cfg, limits, mic, hang_up, server).await;
+    Run {
+        result,
+        host,
+        usage,
+        audio,
+    }
+}
+
+/// Run a session on any tool host: the result, the usage counters and what the speaker was sent.
+async fn session_on<H, F, Fut>(
+    host: &mut H,
+    cfg: RealtimeConfig,
+    limits: UsageLimits,
+    mic: Vec<Vec<u8>>,
+    hang_up: bool,
+    server: F,
+) -> (
+    Result<SessionEnd, RealtimeError>,
+    UsageTracker,
+    Vec<Speaker>,
+)
+where
+    H: ToolHost,
+    F: FnOnce(Srv) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
     let (a, b) = duplex(1 << 20);
     let srv = tokio::spawn(async move {
         let (ws, _) = accept(b).await.unwrap();
@@ -172,7 +199,7 @@ where
     let keep_open = (!hang_up).then_some(mic_tx);
     let result = {
         let mut env = Env {
-            host: &mut host,
+            host,
             conv: &mut conv,
             turn_cfg: &tcfg,
             usage: &mut usage,
@@ -192,12 +219,7 @@ where
     while let Ok(s) = spk_rx.try_recv() {
         audio.push(s);
     }
-    Run {
-        result,
-        host,
-        usage,
-        audio,
-    }
+    (result, usage, audio)
 }
 
 async fn expect_close(s: &mut Srv) {
@@ -582,6 +604,87 @@ async fn a_no_still_drops_a_held_action_after_other_calls() {
     .await;
     let names: Vec<&str> = r.host.ran.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["get_time"]);
+}
+
+// REQ-SEC-013, REQ-CFG-036, REQ-RTV-003: a skill the user names narrows a realtime session as it does a turn
+// of the model loop, through the same `WithPolicy::begin_turn`: the model is told the narrower list, a call
+// to another tool is refused, and the next utterance that names no skill lifts the limit.
+#[tokio::test(flavor = "current_thread")]
+async fn a_skill_the_user_names_narrows_the_tools_of_a_realtime_session() {
+    use crate::extensions::{ExtOp, Extensions, ToolSets, WithPolicy};
+    use crate::httptools::HttpTools;
+    use crate::mcp::McpClient;
+    let builtin = vec!["get_time".to_owned(), "send_money".to_owned()];
+    let env = |_: &str| -> Option<String> { None };
+    let mut http = HttpTools::new(Vec::new(), &builtin, env).unwrap();
+    let (mut mcp, _) = McpClient::connect(Vec::new(), &builtin, env).await.unwrap();
+    let mut ext = Extensions::in_memory();
+    ext.apply(
+        ExtOp::SkillAdd(
+            json!({"name":"Tea","instructions":"Brew.","tools":["get_time"],"enabled":true}),
+        ),
+        ToolSets::new(&mut http, &mut mcp, &builtin, &env),
+    )
+    .await
+    .unwrap();
+    let mut inner = Host::default();
+    let mut host = WithPolicy {
+        inner: &mut inner,
+        ext: &ext,
+        mcp: &mcp,
+        scope: None,
+    };
+    let names = |m: &Value| -> Vec<String> {
+        m["session"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (result, _, _) = session_on(
+        &mut host,
+        cfg(),
+        UsageLimits::default(),
+        vec![],
+        false,
+        move |mut s| async move {
+            let first = next(&mut s).await;
+            assert!(names(&first).contains(&"send_money".to_owned()));
+            // The user names the skill: the model is told the narrower list.
+            put(&mut s, spoke()).await;
+            put(&mut s, said("make some tea")).await;
+            let update = next(&mut s).await;
+            assert_eq!(update["type"], "session.update");
+            let narrowed = names(&update);
+            assert!(narrowed.contains(&"get_time".to_owned()), "{narrowed:?}");
+            assert!(!narrowed.contains(&"send_money".to_owned()), "{narrowed:?}");
+            // A call outside the skill is refused even if the model makes it anyway.
+            put(&mut s, calls_done(&[("c1", "send_money", "{}")])).await;
+            let out = next(&mut s).await;
+            let refused = out["item"]["output"].as_str().unwrap();
+            assert!(refused.contains("no tool called"), "{refused}");
+            next(&mut s).await;
+            put(&mut s, calls_done(&[("c2", "get_time", "{}")])).await;
+            let out = next(&mut s).await;
+            assert_eq!(out["item"]["output"], "get_time ok");
+            next(&mut s).await;
+            // The next utterance names no skill: everything is offered again.
+            put(&mut s, spoke()).await;
+            put(&mut s, said("what time is it")).await;
+            let update = next(&mut s).await;
+            assert!(names(&update).contains(&"send_money".to_owned()));
+            s.send_close().await.unwrap();
+        },
+    )
+    .await;
+    assert_eq!(result, Ok(SessionEnd::Closed));
+    let ran: Vec<&str> = inner.ran.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        ran,
+        ["get_time"],
+        "the call outside the skill never reached the tool"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -990,7 +1093,11 @@ async fn a_yes_for_a_held_tool_that_has_gone_runs_nothing_and_reports_the_error(
             withdrawn.store(true, Ordering::SeqCst);
             put(&mut s, spoke()).await;
             put(&mut s, said("yes")).await;
-            let rc = next(&mut s).await;
+            // The model may be told the shorter tool list first, depending on when the host saw it go.
+            let mut rc = next(&mut s).await;
+            while rc["type"] == "session.update" {
+                rc = next(&mut s).await;
+            }
             let tell = rc["response"]["instructions"].as_str().unwrap();
             assert!(tell.starts_with("Tell the user"), "{tell}");
             assert!(tell.contains("no longer available"), "{tell}");
