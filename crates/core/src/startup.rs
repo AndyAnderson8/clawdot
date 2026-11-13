@@ -79,7 +79,7 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
     migrate_admin_token(&args)?;
     let core = open_core(&args, &clock, env)?;
 
-    let public = announce_public_address(&args);
+    let public = announce_public_address(&args, core.machine_name());
     let failed = run_endpoint_commands(&core, &args.create, &args.rotate, &public);
     if args.manage {
         // A management command: the token is printed; do not start a server (REQ-CFG-015).
@@ -206,9 +206,9 @@ fn open_core(
 }
 
 /// The address snippets name for this server, with a note when it is only a guess. Returns it.
-fn announce_public_address(args: &Args) -> String {
+fn announce_public_address(args: &Args, machine: Option<&str>) -> String {
     let public = args.public_url.clone().unwrap_or_default();
-    let (derived, assumed) = public_url_from_listen(args.listen);
+    let (derived, assumed) = public_url_from_listen(args.listen, machine);
     if assumed && public == derived {
         eprintln!(
             "clawdot: {} is not reachable as written, so snippets use {derived}; set the public address to change that",
@@ -598,6 +598,7 @@ fn satellite_parts(
     if let Some(s) = args.satellite.follow_up_secs {
         settings.dialog.follow_up_secs = s;
     }
+    settings.dialog.vad = args.satellite.listening.apply(settings.dialog.vad);
     Ok((Arc::new(stt), Arc::new(tts), settings))
 }
 

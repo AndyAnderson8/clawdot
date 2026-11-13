@@ -4,6 +4,7 @@
 //! build keeps the section unparsed and refuses it unless it is empty; see `config.rs`). The Noise key is never
 //! in the file: `psk_env` names the environment variable that holds it.
 
+use crate::config::ListeningConfig;
 use serde::Deserialize;
 
 /// Most devices one core dials.
@@ -37,6 +38,9 @@ pub struct EsphomeDevice {
     /// sentence. See `docs/architecture/esphome-satellite.md`.
     #[serde(default)]
     pub reply: ReplyMode,
+    /// Endpointer tuning for this device. Its values win over the `satellite.listening` section's (REQ-VOI-025).
+    #[serde(default)]
+    pub listening: ListeningConfig,
 }
 
 impl EsphomeDevice {
@@ -146,6 +150,8 @@ impl EsphomeConfig {
                     ));
                 }
             }
+            d.listening
+                .validate(&format!("esphome.devices[{}].listening", d.name))?;
             if let Some(e) = &d.psk_env {
                 if e.is_empty() || !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
                     return Err(format!(
@@ -221,6 +227,26 @@ mod tests {
             modes,
             [ReplyMode::Whole, ReplyMode::Streamed, ReplyMode::Whole]
         );
+    }
+
+    #[test]
+    fn req_voi_025_a_device_may_carry_its_own_listening_values() {
+        let c = parse(
+            r#"{"devices":[{"name":"a","address":"h","listening":{"min_level":120,"silence_ms":1000}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(c.devices[0].listening.silence_ms, Some(1000));
+        for (text, needle) in [
+            (r#"{"min_level":0}"#, "devices[a].listening.min_level"),
+            (r#"{"preroll_ms":9999}"#, "preroll_ms"),
+            (r#"{"bogus":1}"#, "bogus"),
+        ] {
+            let e = parse(&format!(
+                r#"{{"devices":[{{"name":"a","address":"h","listening":{text}}}]}}"#
+            ))
+            .unwrap_err();
+            assert!(e.contains(needle), "{text}: {e}");
+        }
     }
 
     #[test]

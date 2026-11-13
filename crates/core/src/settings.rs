@@ -493,11 +493,14 @@ pub fn group_changed(group: Group, now: &Map<String, Value>, before: &Map<String
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:3335";
 
 /// The base URL printed in snippets when none is set, and whether the host was assumed because the listen
-/// address (`0.0.0.0`, `[::]`) cannot be dialled as written (REQ-CFG-016).
+/// address (`0.0.0.0`, `[::]`) cannot be dialled as written (REQ-CFG-016). An unspecified address becomes the
+/// machine's own `.local` name (`machine` is its host name as read at start-up), or `clawdot.local` when that
+/// is not known.
 #[must_use]
-pub fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
+pub fn public_url_from_listen(listen: SocketAddr, machine: Option<&str>) -> (String, bool) {
     if listen.ip().is_unspecified() {
-        (format!("http://clawdot.local:{}", listen.port()), true)
+        let name = crate::hostguard::local_name(machine);
+        (format!("http://{name}:{}", listen.port()), true)
     } else {
         (format!("http://{listen}"), false)
     }
@@ -671,6 +674,9 @@ fn realtime_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
     if u.contains(char::is_whitespace) || !(u.starts_with("wss://") || u.starts_with("ws://")) {
         return Err("The realtime voice address must start with wss:// (or ws:// on your own network), for example wss://api.openai.com/v1/realtime.".into());
     }
+    // The same rule the session applies when it connects (REQ-SEC-001).
+    crate::netpolicy::check_realtime_url(&u)
+        .map_err(|e| format!("The realtime voice address is refused: {e}."))?;
     Ok(json!(u))
 }
 
@@ -782,6 +788,8 @@ pub struct SettingsState {
     extra: Value,
     env: EnvFn,
     secrets: Secrets,
+    /// The machine's host name as read at start-up, for the address derived from `listen` (REQ-CFG-016).
+    machine: Option<String>,
 }
 
 impl std::fmt::Debug for SettingsState {
@@ -853,6 +861,7 @@ impl SettingsState {
             extra: Value::Null,
             env,
             secrets: Secrets::none(),
+            machine: None,
         };
         let eff = st.effective();
         check(&eff, speech_configured).map_err(|e| {
@@ -881,6 +890,7 @@ impl SettingsState {
             extra: Value::Null,
             env,
             secrets: Secrets::none(),
+            machine: None,
         };
         st.running = st.values_of(&st.effective());
         st
@@ -889,6 +899,14 @@ impl SettingsState {
     /// Where the keys pasted into the portal are looked up (the owning core hands over its own).
     pub fn set_secrets(&mut self, secrets: Secrets) {
         self.secrets = secrets;
+    }
+
+    /// Tell the state the machine's host name, read once at start-up, so the address derived from `listen` names this
+    /// machine (REQ-CFG-016). Call it straight after building the state: it also takes the running snapshot again, so
+    /// the derived address is not reported as a change that needs a restart.
+    pub fn set_machine_name(&mut self, name: Option<&str>) {
+        self.machine = name.map(str::to_owned);
+        self.running = self.values_of(&self.effective());
     }
 
     /// Facts shown next to the settings but not changeable here (for example the speech provider's models).
@@ -918,7 +936,10 @@ impl SettingsState {
         {
             out.insert(
                 "public_url",
-                (json!(public_url_from_listen(l).0), Source::Default),
+                (
+                    json!(public_url_from_listen(l, self.machine.as_deref()).0),
+                    Source::Default,
+                ),
             );
         }
         out
