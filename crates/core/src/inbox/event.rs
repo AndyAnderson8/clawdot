@@ -119,8 +119,13 @@ pub struct Rel {
 pub struct Event {
     /// Identifier, unique and increasing.
     pub id: u64,
-    /// The endpoint that received it.
+    /// The name of the endpoint that received it, as it was then. For display: what ties the event to its
+    /// endpoint is [`Event::endpoint_id`].
     pub endpoint: String,
+    /// The id of the endpoint that received it ([`crate::inbox::endpoint::Endpoint::id`]). Empty only in a file
+    /// saved before ids existed, until `Inbox::adopt_endpoint_ids` runs at load.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub endpoint_id: String,
     /// The label the sender gave itself, for example `Claude Code`. Untrusted: shown as text in the portal and
     /// recorded, never spoken as the origin and never given to the summariser as fact.
     pub source: String,
