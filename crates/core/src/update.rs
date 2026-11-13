@@ -702,7 +702,9 @@ impl Updater {
         self.lock().phase = p;
     }
 
-    async fn apply(&self, r: &Release) -> Result<(), String> {
+    /// Fetch the release's program and check it: the list of hashes against the project's key, then the program
+    /// against its entry in that list. Moves through the Verifying and Downloading phases.
+    async fn download_verified(&self, r: &Release) -> Result<Vec<u8>, String> {
         let key = self.cfg.public_key.ok_or("this build has no update key")?;
         let asset = |name: &str| {
             r.assets
@@ -738,6 +740,20 @@ impl Updater {
         if sha256_hex(&data) != expected {
             return Err("the downloaded file does not match its signed hash".into());
         }
+        Ok(data)
+    }
+
+    async fn apply(&self, r: &Release) -> Result<(), String> {
+        let data = self.download_verified(r).await?;
+        self.install(data, r).await?;
+        if self.exit_after && self.cfg.supervised {
+            self.restart().await;
+        }
+        Ok(())
+    }
+
+    /// Write the verified program in place of this one, then record the version as installed.
+    async fn install(&self, data: Vec<u8>, r: &Release) -> Result<(), String> {
         self.set_phase(Phase::Installing);
         // Writing, fsyncing and running the new program (`--version`) take real time and block; keep them off the
         // runtime thread, which also runs the voice loop, the timers and the portal.
@@ -764,23 +780,25 @@ impl Updater {
             "updated to {}; the previous program is kept as .prev",
             r.version
         ));
-        if self.exit_after && self.cfg.supervised {
-            self.set_phase(Phase::Restarting);
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-            match self.stop.clone() {
-                // An orderly stop: the owner flushes what it has queued, then exits with this code. It runs off
-                // the runtime thread (it may wait for the disk); if it takes too long the program exits anyway,
-                // because the supervisor must get its restart.
-                Some(stop) => {
-                    let asked = tokio::task::spawn_blocking(move || stop(0));
-                    if tokio::time::timeout(STOP_WAIT, asked).await.is_err() {
-                        std::process::exit(0);
-                    }
-                }
-                None => std::process::exit(0),
-            }
-        }
         Ok(())
+    }
+
+    /// Stop the program so the supervisor starts the new one.
+    async fn restart(&self) {
+        self.set_phase(Phase::Restarting);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        match self.stop.clone() {
+            // An orderly stop: the owner flushes what it has queued, then exits with this code. It runs off
+            // the runtime thread (it may wait for the disk); if it takes too long the program exits anyway,
+            // because the supervisor must get its restart.
+            Some(stop) => {
+                let asked = tokio::task::spawn_blocking(move || stop(0));
+                if tokio::time::timeout(STOP_WAIT, asked).await.is_err() {
+                    std::process::exit(0);
+                }
+            }
+            None => std::process::exit(0),
+        }
     }
 
     /// At start: an update that was just installed must run for a while before the old program is let go.
