@@ -86,47 +86,33 @@ pub fn decode_pcm16(bytes: &[u8]) -> Vec<i16> {
 }
 
 /// Linear resampling of 16-bit mono PCM, for example a 16 kHz microphone to 24 kHz.
+///
+/// The sample position is tracked in whole numbers (`i * from / to`, with the remainder as the blend), so the odd
+/// rates a speech provider may return (11 025, 22 050, 44 100 Hz) carry no floating-point drift in the position.
 #[must_use]
 pub fn resample(pcm: &[i16], from: u32, to: u32) -> Vec<i16> {
     if from == to || pcm.is_empty() || from == 0 || to == 0 {
         return pcm.to_vec();
     }
-    let n = (pcm.len() as u64 * u64::from(to) / u64::from(from)) as usize;
-    (0..n)
-        .map(|i| {
-            let pos = i as f64 * f64::from(from) / f64::from(to);
-            let i0 = (pos as usize).min(pcm.len() - 1);
-            let i1 = (i0 + 1).min(pcm.len() - 1);
-            let frac = pos - i0 as f64;
-            (f64::from(pcm[i0]) * (1.0 - frac) + f64::from(pcm[i1]) * frac).round() as i16
-        })
-        .collect()
-}
-
-/// Convert to 16 kHz by linear interpolation. Good enough for speech playback.
-///
-/// The same algorithm as [`resample`] with the output rate fixed, but the position is tracked in exact integer
-/// arithmetic, so the odd rates a speech provider may return (22 050, 44 100 Hz) carry no floating-point drift
-/// in the sample position. For the simple ratios (8, 24, 32, 48 kHz) the two give identical samples; for the others they can
-/// differ by one in the last bit at an exact tie, which is why they have not been merged (merging would change
-/// the bytes the speech providers' answers are turned into).
-#[must_use]
-pub fn resample_to_16k(samples: &[i16], from_rate: u32) -> Vec<i16> {
-    if from_rate == RATE || samples.is_empty() || from_rate == 0 {
-        return samples.to_vec();
-    }
-    let out_len = (samples.len() as u64 * u64::from(RATE) / u64::from(from_rate)) as usize;
+    let out_len = (pcm.len() as u64 * u64::from(to) / u64::from(from)) as usize;
+    let last = pcm.len() - 1;
     let mut out = Vec::with_capacity(out_len);
     for i in 0..out_len {
-        let pos = i as u64 * u64::from(from_rate);
-        let idx = (pos / u64::from(RATE)) as usize;
-        let frac = (pos % u64::from(RATE)) as f64 / f64::from(RATE);
-        let a = f64::from(samples[idx.min(samples.len() - 1)]);
-        let b = f64::from(samples[(idx + 1).min(samples.len() - 1)]);
+        let pos = i as u64 * u64::from(from);
+        let idx = (pos / u64::from(to)) as usize;
+        let frac = (pos % u64::from(to)) as f64 / f64::from(to);
+        let a = f64::from(pcm[idx.min(last)]);
+        let b = f64::from(pcm[(idx + 1).min(last)]);
         #[allow(clippy::cast_possible_truncation)]
         out.push((a + (b - a) * frac).round() as i16);
     }
     out
+}
+
+/// Convert to 16 kHz ([`RATE`]) by linear interpolation. Good enough for speech playback.
+#[must_use]
+pub fn resample_to_16k(samples: &[i16], from_rate: u32) -> Vec<i16> {
+    resample(samples, from_rate, RATE)
 }
 
 #[cfg(test)]
@@ -164,5 +150,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The sample at output index `i`, worked out in whole numbers: the position is `i * from / to`, the blend is
+    /// exact, and a tie rounds away from zero as `f64::round` does.
+    fn exact(pcm: &[i16], from: u32, to: u32) -> Vec<i16> {
+        let n = pcm.len() as u64 * u64::from(to) / u64::from(from);
+        (0..n)
+            .map(|i| {
+                let pos = i * u64::from(from);
+                let idx = (pos / u64::from(to)) as usize;
+                let r = i128::from(pos % u64::from(to));
+                let to = i128::from(to);
+                let a = i128::from(pcm[idx.min(pcm.len() - 1)]);
+                let b = i128::from(pcm[(idx + 1).min(pcm.len() - 1)]);
+                let num = a * (to - r) + b * r;
+                let q = (2 * num.abs() + to) / (2 * to);
+                (if num < 0 { -q } else { q }) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resampling_is_exact_at_every_rate_including_the_odd_ones() {
+        let mut seed = 99u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as i16
+        };
+        for (from, to) in [
+            (11_025, RATE),
+            (22_050, RATE),
+            (44_100, RATE),
+            (8_000, RATE),
+            (24_000, RATE),
+            (RATE, 24_000),
+            (RATE, 44_100),
+            (RATE, 11_025),
+        ] {
+            for len in [1usize, 2, 5, 441, 1001, 4410] {
+                let v: Vec<i16> = (0..len).map(|_| next()).collect();
+                assert_eq!(
+                    resample(&v, from, to),
+                    exact(&v, from, to),
+                    "{from}->{to} {len}"
+                );
+            }
+        }
+        // The speech path uses the same function with the output fixed at 16 kHz.
+        let v: Vec<i16> = (0..2205).map(|_| next()).collect();
+        assert_eq!(resample_to_16k(&v, 11_025), exact(&v, 11_025, RATE));
     }
 }

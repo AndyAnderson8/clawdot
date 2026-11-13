@@ -974,3 +974,130 @@ async fn a_silent_server_times_out_instead_of_hanging() {
     .unwrap();
     assert!(s.synthesize("x").await.unwrap_err().contains("no response"));
 }
+
+#[test]
+fn only_openai_itself_has_a_fixed_voice_list() {
+    let openai = Dialect::OpenAi.provider();
+    let v = openai.builtin_voices("https://api.openai.com/v1").unwrap();
+    assert_eq!(v.len(), 11);
+    assert!(v.iter().any(|x| x.id == "alloy") && v.iter().all(|x| x.id == x.label));
+    assert!(
+        openai
+            .builtin_voices("http://192.168.1.9:8880/v1")
+            .is_none()
+    );
+    assert!(
+        openai
+            .builtin_voices("https://api.openai.com.evil.example/v1")
+            .is_none()
+    );
+    for other in [Dialect::ElevenLabs, Dialect::Deepgram] {
+        assert!(
+            other
+                .provider()
+                .builtin_voices("https://api.openai.com/v1")
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_client_reads_the_stored_secret_it_is_told_to_and_no_other() {
+    let dir = std::env::temp_dir().join(format!("clawdot-client-key-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let secrets = crate::secrets::Secrets::in_dir(&dir);
+    secrets.set("other_key", "stored-other").unwrap();
+    secrets
+        .set(crate::secrets::SPEECH_KEY, "stored-speech")
+        .unwrap();
+    for (name, want) in [
+        ("other_key", "Bearer stored-other"),
+        (crate::secrets::SPEECH_KEY, "Bearer stored-speech"),
+        ("never_set", "Bearer from-config"),
+    ] {
+        let (port, server) = serve_once("200 OK", "application/json", b"{}".to_vec()).await;
+        let mut c = crate::apiclient::Client::new(
+            &format!("http://127.0.0.1:{port}"),
+            "from-config",
+            T,
+            &crate::apiclient::Bearer,
+        )
+        .unwrap();
+        c.set_stored_key(secrets.clone(), name);
+        c.send(crate::apiclient::Call::get("/x")).await.unwrap();
+        let (head, _) = server.await.unwrap();
+        assert!(
+            head.to_lowercase().contains(&want.to_lowercase()),
+            "{name}: {head}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_model_list_words_its_own_refusals_and_the_speech_clients_keep_theirs() {
+    // Plain http across the internet: the model list names the key only, speech names the key and the audio.
+    let e = list_models("http://api.openai.com/v1", "k")
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("the key must not cross"), "{e}");
+    assert!(!e.to_string().contains("audio"), "{e}");
+    let e = HttpTranscriber::new("http://speech.example.com/v1", "", "m", None, T).unwrap_err();
+    assert!(e.contains("the key and audio must not cross"), "{e}");
+    // The model list's wire names the language model server and the model settings, not the speech ones.
+    let wire = crate::apiclient::ModelList;
+    assert_eq!(wire.title(), "the language model server");
+    assert!(wire.key_hint().contains("model settings"));
+    assert_eq!(crate::apiclient::Bearer.title(), "the speech server");
+    assert!(
+        crate::apiclient::Bearer
+            .key_hint()
+            .contains("voice settings")
+    );
+}
+
+#[tokio::test]
+async fn the_no_key_message_uses_the_wire_s_title_and_hint() {
+    struct KeyedModels;
+    impl Wire for KeyedModels {
+        fn title(&self) -> &'static str {
+            crate::apiclient::ModelList.title()
+        }
+        fn key_hint(&self) -> &'static str {
+            crate::apiclient::ModelList.key_hint()
+        }
+        fn needs_key(&self) -> bool {
+            true
+        }
+        fn auth_header(&self, key: &str) -> (&'static str, String) {
+            crate::apiclient::ModelList.auth_header(key)
+        }
+    }
+    let c = crate::apiclient::Client::new("http://127.0.0.1:1", "", T, &KeyedModels).unwrap();
+    let e = c.send(crate::apiclient::Call::get("/x")).await.unwrap_err();
+    assert!(matches!(e, ProviderError::NoKey(_)), "{e}");
+    let text = e.to_string();
+    assert!(
+        text.contains("the language model server") && text.contains("model settings"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("speech") && !text.contains("voice"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_response_over_four_mebibytes_is_refused_and_one_at_the_cap_is_kept() {
+    const CAP: usize = 4 * 1024 * 1024;
+    let (port, _s) = serve_once("200 OK", "audio/pcm", vec![0u8; CAP + 2]).await;
+    let s =
+        HttpSynthesizer::new(&format!("http://127.0.0.1:{port}"), "", "m", "v", 24_000, T).unwrap();
+    let e = s.synthesize("x").await.unwrap_err();
+    assert!(e.contains("response too large"), "{e}");
+    let (port, _s) = serve_once("200 OK", "audio/pcm", vec![0u8; CAP]).await;
+    let s =
+        HttpSynthesizer::new(&format!("http://127.0.0.1:{port}"), "", "m", "v", 24_000, T).unwrap();
+    assert!(s.synthesize("x").await.is_ok());
+}

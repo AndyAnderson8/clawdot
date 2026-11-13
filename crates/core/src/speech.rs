@@ -120,6 +120,12 @@ pub trait Provider: Sync {
 
     /// The voices the service offers to the key at `base_url`.
     fn voices<'a>(&'a self, base_url: &'a str, key: &'a str) -> VoiceList<'a>;
+
+    /// A fixed list of voices to offer when [`Provider::voices`] fails, for a service at `base_url` that has a set
+    /// of voices but no list to ask for. `None` when there is no such list.
+    fn builtin_voices(&self, _base_url: &str) -> Option<Vec<VoiceInfo>> {
+        None
+    }
 }
 
 /// Which service's wire format is spoken (`speech.provider`, REQ-VOI-021): the small, copyable name of a
@@ -284,7 +290,8 @@ impl HttpTranscriber {
     /// Use the key pasted into the portal when there is one (REQ-VOI-023).
     #[must_use]
     pub fn with_stored_key(mut self, secrets: Secrets) -> Self {
-        self.client.set_stored_key(secrets);
+        self.client
+            .set_stored_key(secrets, crate::secrets::SPEECH_KEY);
         self
     }
 }
@@ -384,7 +391,8 @@ impl HttpSynthesizer {
     /// Use the key pasted into the portal when there is one (REQ-VOI-023).
     #[must_use]
     pub fn with_stored_key(mut self, secrets: Secrets) -> Self {
-        self.client.set_stored_key(secrets);
+        self.client
+            .set_stored_key(secrets, crate::secrets::SPEECH_KEY);
         self
     }
 }

@@ -2,10 +2,28 @@
 //!
 //! OpenAI itself, Kokoro, Piper helpers, Whisper servers and most self-hosted speech servers copy it. There is no
 //! default address (the address says which server it is) and a key is only sent when there is one.
+//!
+//! OpenAI's own service has a fixed set of voices and no list to ask for, so it is recognised by its host and
+//! answers with that set ([`Provider::builtin_voices`]).
 
 use super::{Defaults, Provider, Speak, VoiceInfo, VoiceList};
 use crate::apiclient::{Bearer, Call, ProviderError, Wire, list_names};
 use serde_json::json;
+
+#[cfg(test)]
+mod openai_host_tests;
+
+/// The voices of OpenAI's speech service, which has a fixed set and no list to ask for.
+const OPENAI_VOICES: [&str; 11] = [
+    "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
+];
+
+/// Whether `url` is OpenAI's own service. The host is compared, not the text: a server whose path or query merely
+/// mentions `api.openai.com`, or whose name only starts with it, is not OpenAI.
+fn is_openai(url: &str) -> bool {
+    crate::transport::Endpoint::parse(url)
+        .is_ok_and(|e| e.host.eq_ignore_ascii_case("api.openai.com"))
+}
 
 /// The OpenAI-style speech API.
 #[derive(Debug, Clone, Copy, Default)]
@@ -67,6 +85,19 @@ impl Provider for OpenAi {
             ))
         })
     }
+
+    fn builtin_voices(&self, base_url: &str) -> Option<Vec<VoiceInfo>> {
+        is_openai(base_url).then(|| {
+            OPENAI_VOICES
+                .iter()
+                .map(|n| VoiceInfo {
+                    id: (*n).to_owned(),
+                    label: (*n).to_owned(),
+                    category: None,
+                })
+                .collect()
+        })
+    }
 }
 
 /// The voices a speech server offers, from `GET <base>/audio/voices` or the other places servers put them (not every server has a list).
@@ -78,7 +109,7 @@ pub async fn list_voices(base_url: &str, key: &str) -> Result<Vec<String>, Provi
     // /audio/voices (Kokoro, the Piper helper), others at /voices or /audio/speech/voices.
     let mut first = None;
     for path in ["/audio/voices", "/voices", "/audio/speech/voices"] {
-        match list_names(base_url, key, path, "voices").await {
+        match list_names(base_url, key, path, "voices", &Bearer).await {
             Ok(v) => return Ok(v),
             Err(e) => {
                 first.get_or_insert(e);
