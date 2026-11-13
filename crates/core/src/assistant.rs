@@ -389,9 +389,15 @@ impl Assistant {
             .collect()
     }
 
-    /// The local calendar day (days since the epoch), for daily usage limits.
+    /// The local calendar day (days since the epoch), for daily usage limits, or 0 while the wall clock is
+    /// not set. 0 means "unknown": the counters keep counting on the day they have rather than rolling to
+    /// 1970 and back, which would reset the daily caps on every boot of a device with no battery clock
+    /// (REQ-AST-011, REQ-SEC-015).
     #[must_use]
     pub fn local_day(&self) -> i64 {
+        if !self.clock.wall_clock_valid() {
+            return 0;
+        }
         self.zone.local_day(self.clock.now())
     }
 

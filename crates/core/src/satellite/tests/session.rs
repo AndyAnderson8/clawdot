@@ -379,3 +379,14 @@ async fn a_satellite_that_stops_reading_ends_the_session_instead_of_wedging_it()
     let why = ended.expect_err("a peer that does not read is a dead peer");
     assert!(why.contains("write"), "{why}");
 }
+
+// REQ-SEC-011: every connection has its own speaker id. (A failure of the system's random source cannot be
+// forced here; it makes the id an error and the handshake answers `unavailable`.)
+#[test]
+fn session_ids_are_random_and_differ() {
+    let a = crate::satellite::wire::new_session_id().unwrap();
+    let b = crate::satellite::wire::new_session_id().unwrap();
+    assert_eq!(a.len(), 16);
+    assert_ne!(a, "0".repeat(16));
+    assert_ne!(a, b);
+}

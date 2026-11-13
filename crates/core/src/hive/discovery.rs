@@ -95,6 +95,9 @@ impl Peers {
     /// Add or refresh a peer. Returns false when the table is full and `p` is new, or when a live record for the
     /// same id came from a different address (the first one is kept until it expires).
     fn upsert(&mut self, p: Peer) -> bool {
+        // Records that ran out go first, or 32 stale entries would keep every new peer out until someone asked
+        // for the list.
+        self.map.retain(|_, q| q.expires > p.last_seen);
         match self.map.get(&p.id) {
             Some(known) if known.address != p.address && known.expires > p.last_seen => {
                 let known = known.address;
@@ -186,15 +189,18 @@ fn apply_response(
         let announced_port = get("p")
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(*port);
+        // The name from the TXT record, else the instance label; both come from the network, so both lose
+        // control characters and are cut to the same length.
+        let plain = |n: &str| {
+            n.chars()
+                .filter(|c| !c.is_control())
+                .take(40)
+                .collect::<String>()
+        };
         let name = get("n")
-            .map(|n| {
-                n.chars()
-                    .filter(|c| !c.is_control())
-                    .take(40)
-                    .collect::<String>()
-            })
+            .map(plain)
             .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| inst.split('.').next().unwrap_or("").to_owned());
+            .unwrap_or_else(|| plain(inst.split('.').next().unwrap_or("")));
         peers.upsert(Peer {
             id: id.to_owned(),
             name,
@@ -572,6 +578,44 @@ mod tests {
             );
         }
         assert_eq!(peers.live(t0).len(), MAX_PEERS);
+    }
+
+    #[test]
+    fn stale_entries_do_not_keep_new_peers_out() {
+        let t0 = Instant::now();
+        let mut peers = Peers::default();
+        let src = IpAddr::from([192, 0, 2, 10]);
+        for n in 0..u8::try_from(MAX_PEERS).unwrap() {
+            let (ad, _) = advert(n, 1, None);
+            let msg = dns::parse(&ad.response(10).unwrap()).unwrap();
+            apply_response(&mut peers, &msg, src, None, t0);
+        }
+        // Nobody has asked for the list since; a new peer arrives after the others ran out.
+        let (ad, id) = advert(200, 1, None);
+        let msg = dns::parse(&ad.response(100).unwrap()).unwrap();
+        let later = t0 + Duration::from_secs(20);
+        apply_response(&mut peers, &msg, src, None, later);
+        let live = peers.live(later);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].id, id);
+    }
+
+    #[test]
+    fn the_fallback_name_from_the_instance_label_loses_control_characters() {
+        let (mut ad, _) = advert(9, 1, None);
+        ad.instance = format!("evil\u{1b}[31m{}", "x".repeat(50));
+        let t0 = Instant::now();
+        let mut peers = Peers::default();
+        let msg = dns::parse(&ad.response(100).unwrap()).unwrap();
+        apply_response(&mut peers, &msg, IpAddr::from([192, 0, 2, 11]), None, t0);
+        let live = peers.live(t0);
+        assert_eq!(live.len(), 1);
+        assert!(
+            !live[0].name.chars().any(char::is_control),
+            "{:?}",
+            live[0].name
+        );
+        assert!(live[0].name.chars().count() <= 40);
     }
 
     #[test]

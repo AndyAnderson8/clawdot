@@ -86,11 +86,13 @@ pub(super) async fn send<W: AsyncWrite + Unpin>(w: &mut W, m: &Message) -> Resul
     w.write_all(&bytes).await.map_err(|e| format!("write: {e}"))
 }
 
-pub(super) fn new_session_id() -> String {
+/// A random identifier for one connection. The speaker id made from it is the key that keeps one speaker's
+/// "yes" from answering another's question (REQ-SEC-011), so an id that cannot be made at random is an error
+/// and the connection is refused; it is never replaced by a fixed one that every speaker would share.
+pub(super) fn new_session_id() -> Result<String, String> {
     let mut b = [0u8; 8];
-    // Falling back to zeros only weakens an identifier that is not a secret.
-    let _ = getrandom::fill(&mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    getrandom::fill(&mut b).map_err(|e| format!("no random session id: {e}"))?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 /// Read the next message, or `None` when the peer closed the connection.

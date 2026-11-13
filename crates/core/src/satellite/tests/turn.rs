@@ -153,3 +153,22 @@ async fn anything_else_said_after_the_wake_word_while_thinking_is_dropped() {
     );
     assert_eq!(samples(&seen), "Finished.".len() * 100, "{seen:?}");
 }
+
+#[tokio::test]
+async fn a_turn_is_cancelled_when_the_speaker_goes_away() {
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut p = start_with(
+        Ears("check the runs"),
+        wait_for_stop(Duration::from_secs(5), Arc::clone(&cancelled)),
+    )
+    .await;
+    ask_and_wait_for_thinking(&mut p).await;
+    drop(p);
+    for _ in 0..40 {
+        if cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the model call kept running after the session ended");
+}
