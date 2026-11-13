@@ -528,7 +528,11 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             401,
             "The service did not accept that key. Check that it is the whole key and that it is for this service.",
           );
-        return send(200, { models: ["model-b", "model-a", "free/model-c"] });
+        const models = () => send(200, { models: ["model-b", "model-a", "free/model-c"] });
+        const wait = Number(st["modelsDelay"] ?? 0);
+        if (!wait) return models();
+        setTimeout(models, wait); // a slow provider
+        return;
       }
       if (m === "PUT" && path === "/api/llm/key") {
         const k = String(body.key ?? "");

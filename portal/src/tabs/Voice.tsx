@@ -114,6 +114,8 @@ export function ModelSelect(props: {
   useEffect(() => {
     setModels(null);
     setWhy("");
+    // An address that cannot be asked about any more (changed while an answer was awaited) is not "loading".
+    setBusy(false);
     if (!askable || props.blocked) return;
     let live = true;
     setBusy(true);
