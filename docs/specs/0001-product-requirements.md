@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.55 |
+| **Version** | 0.56 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -243,6 +243,7 @@ ClawDot is a voice assistant harness for smart speakers. It listens for a wake w
 | REQ-CFG-082 | **The provider key is pasted, checked and kept on the device.** `PUT /api/llm/key` MUST keep a key in a private file in the data directory (readable only by the service user), `DELETE` MUST forget it, and `POST /api/models` MUST be able to try a key against the service before it is kept. A stored key wins over the environment variable. The key MUST never be returned, logged, put in a settings export or a diagnostics file; the page MAY be given only a masked hint of its first and last few characters. The model list MUST NOT be asked for until a key is in place (custom addresses excepted). There is no backup or summary model setting. | Must | A5b | T |
 | REQ-CFG-083 | **The device is looked at, not guessed, and the core names no device.** The status MUST include what the device is (its own model string, processor, memory) and which parts were found (lights, Bluetooth, Wi-Fi, screen, a USB serial adapter), read from the operating system's own files, with no brand, product or board name in the code. What the device is CALLED (a short `board` identifier and a `label`), and any part the system cannot show, come from the configured preset (the `device` section of the configuration file) and are reported as configured; without one the board is `unknown`. The portal MUST leave out settings pages for parts that were not found, and for features not built yet, unless the person turns on "Show settings this device cannot use"; a page opened that way MUST say why it cannot be used. | Should | A6 | T |
 | REQ-CFG-084 | **Themes.** The portal MUST offer a few built-in themes and matching the system, remembered by the browser only. A person MAY upload their own theme as a small JSON file of colour variables; the page MUST accept only known colour names with colour values (nothing that can load or run anything), and keep it only in the browser. | Could | A6 | T |
+| REQ-CFG-085 | **Stopping on a signal.** On SIGTERM (how a service manager stops the program) or SIGINT, and on Ctrl-C on Windows, the program MUST do the same orderly stop as the console's `quit` (REQ-CFG-017): save the usage counters, wait until every write queued on the background writer is on disk, and exit with code 0. The wait MUST be bounded (5 seconds), so that a disk which does not answer cannot keep the program from stopping; when the bound is reached the program MUST say so on standard error and exit anyway. A change saved just before the signal MUST be on disk afterwards. | Must | A6 | T |
 
 ### 4.7 Non-functional (`NFR`)
 
@@ -472,3 +473,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.53 | 2026-11-11 | Durations are monotonic and calendar points are wall time (REQ-TMR-002, 003, 006, 009; REQ-AST-007, 021; REQ-SEC-004, 011; REQ-CFG-019, 069). A countdown timer works before the clock is set (REQ-TMR-009). |
 | 0.54 | 2026-11-11 | REQ-INB-006: an event waits while a configured satellite is not connected, instead of being summarised and marked as announced unheard |
 | 0.55 | 2026-11-12 | REQ-AST-015, REQ-SEC-011, REQ-INB-017: a held `instruct` reply names the agent it goes to and is bound to that event when it is proposed; the yes sends to it or, if it is no longer open, sends nothing. |
+| 0.56 | 2026-11-12 | REQ-CFG-085: SIGTERM, SIGINT and Ctrl-C end the program with the same orderly stop as `quit`, with a bounded wait for queued writes. |
