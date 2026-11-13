@@ -6,6 +6,24 @@
 //! not do: probing for name conflicts (the instance name comes from the device id, so a clash means the same key),
 //! random response delays, unicast responses, IPv6, or more than one network interface. Nothing it hears is
 //! trusted; peers are advisory until a later milestone pins their keys.
+//!
+//! What is checked on what arrives:
+//!
+//! * A packet whose source address is not loopback, private (RFC 1918) or link-local is dropped before it is
+//!   parsed, so an answer from the internet is never looked at.
+//! * A peer's address is the packet's source address, never a value taken from the packet. If the response
+//!   carries an address record for the service's host name that differs from the source, the peer is dropped.
+//! * The first address to announce an id keeps it until its record runs out, and only that address can say
+//!   goodbye for it.
+//! * The table holds at most [`MAX_PEERS`] peers and TTLs are capped.
+//!
+//! What is **not** checked: which network interface a packet arrived on, whether the sender used the
+//! multicast group or the unicast address, and the IP time-to-live of 255 that RFC 6762 asks a receiver to
+//! require (which shows that the packet did not cross a router). All three need socket options that the workspace's ban on `unsafe` code
+//! excludes, so a host with several interfaces (a wired and a wireless network, a VPN, a bridge to virtual
+//! machines) accepts answers from any private network it is attached to, and a device on a guest network that
+//! is routed to this one can answer too. The source-address checks above do not stop a device that has a
+//! private address on the network and lies about its id or name; peers stay advisory for that reason.
 
 use super::dns::{self, Advert, Rdata, SERVICE};
 use super::identity::is_device_id;
@@ -113,6 +131,22 @@ impl Peers {
     }
 }
 
+/// Whether the response carries an address record for the service's host name that is not the address the packet
+/// came from. A speaker announces its own address, so a mismatch is a forwarded or forged answer, and the
+/// peer is not recorded. A response with no address record is accepted; the packet's source stands in.
+fn advertises_another_address(msg: &dns::Message, target: &str, src: IpAddr) -> bool {
+    msg.records.iter().any(|r| match &r.data {
+        Rdata::A(a) => r.name == target && IpAddr::V4(*a) != src,
+        _ => false,
+    })
+}
+
+/// Whether a packet from `from` is looked at at all: only loopback, private and link-local senders are, since
+/// mDNS never legitimately crosses the internet. This is a check on the sender's address only.
+fn source_is_local(from: IpAddr) -> bool {
+    crate::netpolicy::is_private_ip(from)
+}
+
 /// Turn one received response into peer updates. Pure so it can be tested without a socket.
 fn apply_response(
     peers: &mut Peers,
@@ -138,12 +172,15 @@ fn apply_response(
                 .find(|r| &r.name == inst && want(&r.data))
                 .map(|r| &r.data)
         };
-        let (Some(Rdata::Srv { port, .. }), Some(Rdata::Txt(txt))) = (
+        let (Some(Rdata::Srv { port, target }), Some(Rdata::Txt(txt))) = (
             find(|d| matches!(d, Rdata::Srv { .. })),
             find(|d| matches!(d, Rdata::Txt(_))),
         ) else {
             continue;
         };
+        if advertises_another_address(msg, target, src) {
+            continue;
+        }
         let get = |k: &str| {
             txt.iter()
                 .find(|(key, _)| key == k)
@@ -317,6 +354,9 @@ async fn run(
             () = sleep => {}
             got = sock.recv_from(&mut buf) => {
                 let Ok((n, from)) = got else { continue };
+                if !source_is_local(from.ip()) {
+                    continue;
+                }
                 let Some(msg) = buf.get(..n).and_then(dns::parse) else { continue };
                 let now = Instant::now();
                 if msg.response {
@@ -431,6 +471,54 @@ mod tests {
         apply_response(&mut peers, &msg, other, None, t0 + Duration::from_secs(200));
         assert_eq!(peers.live(t0 + Duration::from_secs(200))[0].address, other);
         assert_eq!(peers.conflicts(), 2);
+    }
+
+    // REQ-CFG-009: only senders on this machine or the private network are listened to.
+    #[test]
+    fn only_loopback_private_and_link_local_senders_are_listened_to() {
+        for ok in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.7",
+            "169.254.3.4",
+            "::1",
+            "fd00::5",
+        ] {
+            assert!(source_is_local(ok.parse().unwrap()), "{ok}");
+        }
+        for bad in [
+            "8.8.8.8",
+            "203.0.113.9",
+            "172.32.0.1",
+            "100.64.0.1",
+            "2001:db8::1",
+        ] {
+            assert!(!source_is_local(bad.parse().unwrap()), "{bad}");
+        }
+    }
+
+    // REQ-CFG-009: an address record that is not the sender's own address means the peer is not recorded.
+    #[test]
+    fn a_peer_whose_advertised_address_is_not_the_packet_source_is_dropped() {
+        let (mut ad, id) = advert(7, 3335, Some("Den"));
+        ad.addr = Some(Ipv4Addr::new(192, 168, 1, 50));
+        let msg = dns::parse(&ad.response(100).unwrap()).unwrap();
+        let t0 = Instant::now();
+        let mut peers = Peers::default();
+        // Sent by some other host: dropped.
+        apply_response(&mut peers, &msg, IpAddr::from([192, 168, 1, 66]), None, t0);
+        assert!(peers.live(t0).is_empty());
+        // Sent from the address it names: recorded.
+        apply_response(&mut peers, &msg, IpAddr::from([192, 168, 1, 50]), None, t0);
+        let live = peers.live(t0);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].id, id);
+        // A response with no address record is accepted, with the source as the address.
+        let (bare, _) = advert(8, 1, None);
+        let m = dns::parse(&bare.response(100).unwrap()).unwrap();
+        apply_response(&mut peers, &m, IpAddr::from([192, 168, 1, 51]), None, t0);
+        assert_eq!(peers.live(t0).len(), 2);
     }
 
     #[test]

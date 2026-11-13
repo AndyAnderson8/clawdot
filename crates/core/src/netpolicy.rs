@@ -20,10 +20,16 @@ pub fn is_private_host(host: &str) -> bool {
     if h.eq_ignore_ascii_case("localhost") || h.to_ascii_lowercase().ends_with(".local") {
         return true;
     }
-    match h.parse::<IpAddr>() {
-        Ok(IpAddr::V4(a)) => a.is_loopback() || a.is_private() || a.is_link_local(),
-        Ok(IpAddr::V6(a)) => a.is_loopback() || (a.segments()[0] & 0xfe00) == 0xfc00,
-        Err(_) => false,
+    h.parse::<IpAddr>().is_ok_and(is_private_ip)
+}
+
+/// Whether an address is loopback, private (RFC 1918, or unique-local for IPv6) or IPv4 link-local: the
+/// addresses that plain HTTP may go to, and the only ones local-network discovery listens to.
+#[must_use]
+pub fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => a.is_loopback() || a.is_private() || a.is_link_local(),
+        IpAddr::V6(a) => a.is_loopback() || (a.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
 
