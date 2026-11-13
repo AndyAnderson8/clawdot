@@ -9,7 +9,7 @@ pub mod bridge;
 pub mod frame;
 pub mod message;
 
-pub use frame::{Decoder, Frame, FrameError, Limits, encode};
+pub use frame::{Decoder, Frame, FrameError, Limits, encode, encode_checked};
 pub use message::{
     AudioCodec, AudioFormat, Button, Capabilities, ErrorReport, Hello, Indicator, Message,
     MessageError, PROTOCOL_VERSION, Reject, Version, Wake, Welcome, kind,
