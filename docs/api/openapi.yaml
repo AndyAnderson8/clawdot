@@ -2263,6 +2263,7 @@ components:
           type: object
           properties:
             dialect: { type: string, enum: [openai, elevenlabs, deepgram], description: "The speech provider in use (`speech_provider`)." }
+            configured: { type: boolean, description: "A speech service address is set." }
             language: { type: string }
             stt_model: { type: string }
             tts_model: { type: string }

@@ -300,7 +300,8 @@ function seed(mode: string): Json {
 /**
  * Every API route the fake device answers, written as in docs/api/openapi.yaml (`{name}` for a path parameter).
  * Keep it next to the handlers in startMock: test/unit/mock-routes.test.ts fails when a route here is not in the
- * description, or when a handler below matches an exact path that is not listed here.
+ * description, or when a handler below matches an exact path that is not listed here. test/unit/mock-shapes.test.ts
+ * checks the top-level keys of the answers against the description as well.
  */
 export const MOCK_ROUTES: readonly { method: string; path: string }[] = [
   { method: "GET", path: "/api/auth" },
