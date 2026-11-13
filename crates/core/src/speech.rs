@@ -284,7 +284,8 @@ impl HttpTranscriber {
     /// Use the key pasted into the portal when there is one (REQ-VOI-023).
     #[must_use]
     pub fn with_stored_key(mut self, secrets: Secrets) -> Self {
-        self.client.set_stored_key(secrets);
+        self.client
+            .set_stored_key(secrets, crate::secrets::SPEECH_KEY);
         self
     }
 }
@@ -384,7 +385,8 @@ impl HttpSynthesizer {
     /// Use the key pasted into the portal when there is one (REQ-VOI-023).
     #[must_use]
     pub fn with_stored_key(mut self, secrets: Secrets) -> Self {
-        self.client.set_stored_key(secrets);
+        self.client
+            .set_stored_key(secrets, crate::secrets::SPEECH_KEY);
         self
     }
 }

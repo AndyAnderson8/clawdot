@@ -78,7 +78,7 @@ pub async fn list_voices(base_url: &str, key: &str) -> Result<Vec<String>, Provi
     // /audio/voices (Kokoro, the Piper helper), others at /voices or /audio/speech/voices.
     let mut first = None;
     for path in ["/audio/voices", "/voices", "/audio/speech/voices"] {
-        match list_names(base_url, key, path, "voices").await {
+        match list_names(base_url, key, path, "voices", &Bearer).await {
             Ok(v) => return Ok(v),
             Err(e) => {
                 first.get_or_insert(e);

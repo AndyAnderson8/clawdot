@@ -78,6 +78,17 @@ pub trait Wire: Sync {
     /// How messages name the service.
     fn title(&self) -> &'static str;
 
+    /// What is sent to the service that must not cross the internet unencrypted, as the refusal of plain `http://`
+    /// words it.
+    fn carries(&self) -> &'static str {
+        "the key and audio"
+    }
+
+    /// Where to put a key, for the message that says none is set.
+    fn key_hint(&self) -> &'static str {
+        "Paste one in the voice settings, or name an environment variable that holds it."
+    }
+
     /// Whether a call without a key is refused before it is sent.
     fn needs_key(&self) -> bool {
         false
@@ -153,6 +164,29 @@ impl Wire for Bearer {
     }
 }
 
+/// The OpenAI style as the language-model server's list of models speaks it: the same bearer key, but no audio is
+/// sent, and the key is kept in the model settings.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelList;
+
+impl Wire for ModelList {
+    fn title(&self) -> &'static str {
+        "the language model server"
+    }
+
+    fn carries(&self) -> &'static str {
+        "the key"
+    }
+
+    fn key_hint(&self) -> &'static str {
+        "Paste one in the model settings, or name an environment variable that holds it."
+    }
+
+    fn auth_header(&self, key: &str) -> (&'static str, String) {
+        ("authorization", format!("Bearer {key}"))
+    }
+}
+
 /// One request: where, what it carries and how it is labelled.
 #[derive(Debug)]
 pub struct Call {
@@ -221,12 +255,20 @@ pub(crate) fn multipart(boundary: &str, fields: &[(&str, &str)], file: &[u8]) ->
     body
 }
 
-/// Parse `url` and refuse plain http to a host outside the private network ([`crate::netpolicy`]).
+/// Parse `url` and refuse plain http to a host outside the private network ([`crate::netpolicy`]), in the words of
+/// the speech services ([`Bearer`]).
+#[cfg(test)]
 pub(crate) fn check_url(url: &str) -> Result<Endpoint, String> {
+    check_url_for(url, &Bearer)
+}
+
+/// [`check_url`] with the refusal worded for `wire`.
+pub(crate) fn check_url_for(url: &str, wire: &dyn Wire) -> Result<Endpoint, String> {
     let ep = Endpoint::parse(url)?;
     if crate::netpolicy::crosses_internet_unencrypted(&ep) {
         return Err(format!(
-            "{url}: the key and audio must not cross the internet unencrypted; use https:// (plain http:// is for localhost and the home network)"
+            "{url}: {} must not cross the internet unencrypted; use https:// (plain http:// is for localhost and the home network)",
+            wire.carries()
         ));
     }
     Ok(ep)
@@ -236,8 +278,8 @@ pub(crate) fn check_url(url: &str) -> Result<Endpoint, String> {
 pub struct Client {
     endpoint: Endpoint,
     key: String,
-    /// Prefer the key pasted into the portal over `key` (REQ-VOI-023).
-    stored: Option<Secrets>,
+    /// Prefer the secret of this name, pasted into the portal, over `key` (REQ-VOI-023).
+    stored: Option<(Secrets, &'static str)>,
     deadline: Duration,
     connector: Connector,
     wire: &'static dyn Wire,
@@ -265,7 +307,7 @@ impl Client {
         wire: &'static dyn Wire,
     ) -> Result<Self, String> {
         Ok(Self {
-            endpoint: check_url(base_url)?,
+            endpoint: check_url_for(base_url, wire)?,
             key: key.to_owned(),
             stored: None,
             deadline,
@@ -279,18 +321,15 @@ impl Client {
         self.wire = wire;
     }
 
-    /// Use the key pasted into the portal when there is one (REQ-VOI-023).
-    pub fn set_stored_key(&mut self, secrets: Secrets) {
-        self.stored = Some(secrets);
+    /// Use the secret called `name` (see [`crate::secrets`]) when there is one, for a key pasted into the portal
+    /// (REQ-VOI-023).
+    pub fn set_stored_key(&mut self, secrets: Secrets, name: &'static str) {
+        self.stored = Some((secrets, name));
     }
 
     /// The key to send now: one pasted into the portal wins, so it takes effect without a restart.
     fn current_key(&self) -> String {
-        if let Some(k) = self
-            .stored
-            .as_ref()
-            .and_then(|s| s.get(crate::secrets::SPEECH_KEY))
-        {
+        if let Some(k) = self.stored.as_ref().and_then(|(s, name)| s.get(name)) {
             return k;
         }
         self.key.clone()
@@ -316,8 +355,9 @@ impl Client {
         let key = self.current_key();
         if key.is_empty() && self.wire.needs_key() {
             return Err(ProviderError::NoKey(format!(
-                "No key is set for {}. Paste one in the voice settings, or name an environment variable that holds it.",
-                self.wire.title()
+                "No key is set for {}. {}",
+                self.wire.title(),
+                self.wire.key_hint()
             )));
         }
         if !key.is_empty() {
@@ -394,8 +434,9 @@ pub fn names_in(v: &Value) -> Vec<String> {
     names
 }
 
-/// `GET base_url + path` from an OpenAI-style server (`Authorization: Bearer`) and read the names in the list it
-/// returns. `what` is the plural noun used in messages ("voices", "models").
+/// `GET base_url + path` from an OpenAI-style server (`Authorization: Bearer`, worded as `wire` words it) and read
+/// the names in the list it returns. `what` is the plural noun used in messages ("voices", "models"). No stored key
+/// is used; the caller passes the one in force.
 ///
 /// # Errors
 /// A plain description of why the list could not be had.
@@ -404,8 +445,9 @@ pub async fn list_names(
     key: &str,
     path: &str,
     what: &str,
+    wire: &'static dyn Wire,
 ) -> Result<Vec<String>, ProviderError> {
-    let c = Client::new(base_url, key, Duration::from_secs(10), &Bearer)?;
+    let c = Client::new(base_url, key, Duration::from_secs(10), wire)?;
     let raw = c.send(Call::get(path)).await?;
     let v: Value = serde_json::from_slice(&raw).map_err(|_| {
         ProviderError::Other(format!("the server's list of {what} is not readable"))

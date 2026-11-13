@@ -478,7 +478,14 @@ pub async fn list_models(
     base_url: &str,
     key: &str,
 ) -> Result<Vec<String>, crate::apiclient::ProviderError> {
-    crate::apiclient::list_names(base_url, key, "/models", "models").await
+    crate::apiclient::list_names(
+        base_url,
+        key,
+        "/models",
+        "models",
+        &crate::apiclient::ModelList,
+    )
+    .await
 }
 
 #[cfg(test)]
