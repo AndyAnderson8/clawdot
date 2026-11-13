@@ -52,6 +52,9 @@ pub struct Voice {
     /// none is connected (a speaker that is off, or its network link down) an event waits in the queue; it is
     /// not summarised and marked as announced with nobody to hear it.
     pub waits_for_satellite: bool,
+    /// Where the rung lines that are waiting for a satellite are kept, so a restart does not lose them
+    /// (REQ-TMR-015). `None` keeps them in memory only.
+    pub rung_store: Option<JsonStore>,
     /// Some satellite could speak right now, as of the last poll (read by the loop for the portal).
     pub available: AtomicBool,
     /// A poll is queued or running; the loop sends another only when this is false.
@@ -81,6 +84,111 @@ struct Waiting {
     since: i64,
 }
 
+/// Schema version of the file of waiting rung lines.
+pub const RUNG_SCHEMA: u32 = 1;
+
+/// One waiting line as it is saved: the item, how late it was when the file was written, and the wall time of
+/// that write, so the time the program was off can be added when it is read back.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SavedLine {
+    id: u64,
+    kind: crate::sched::Kind,
+    label: String,
+    repeats: bool,
+    late_secs: i64,
+    /// Wall time of the save, when the clock was set then.
+    saved_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SavedLines {
+    lines: Vec<SavedLine>,
+}
+
+/// The waiting lines as they go to disk, with the wait so far counted into each one's lateness.
+fn to_saved(waiting: &VecDeque<Waiting>, now_mono: i64, wall: Option<i64>) -> SavedLines {
+    SavedLines {
+        lines: waiting
+            .iter()
+            .map(|w| SavedLine {
+                id: w.fired.id,
+                kind: w.fired.kind,
+                label: w.fired.label.clone(),
+                repeats: w.fired.repeats,
+                late_secs: w
+                    .fired
+                    .late_secs
+                    .saturating_add(now_mono.saturating_sub(w.since).max(0)),
+                saved_at: wall,
+            })
+            .collect(),
+    }
+}
+
+/// Saved lines back as waiting ones. The time the program was off is added to the lateness when the wall
+/// clock can tell it (set now, set at the save, and not behind the save); otherwise nothing is added, the
+/// same rule a saved countdown follows.
+fn from_saved(saved: SavedLines, now_mono: i64, wall: Option<i64>) -> VecDeque<Waiting> {
+    let mut out: VecDeque<Waiting> = saved
+        .lines
+        .into_iter()
+        .map(|l| {
+            let off = match (wall, l.saved_at) {
+                (Some(now), Some(then)) => now.saturating_sub(then).max(0),
+                _ => 0,
+            };
+            Waiting {
+                fired: Fired {
+                    id: l.id,
+                    kind: l.kind,
+                    label: l.label,
+                    repeats: l.repeats,
+                    late_secs: l.late_secs.saturating_add(off),
+                    missed: false,
+                },
+                since: now_mono,
+            }
+        })
+        .collect();
+    while out.len() > MAX_WAITING_LINES {
+        out.pop_front();
+    }
+    out
+}
+
+/// The wall time, when the clock is set.
+fn wall_now(v: &Voice) -> Option<i64> {
+    v.core.wall_clock_valid().then(|| v.core.now())
+}
+
+/// Write the waiting lines down (through the background writer when there is one). A failure is logged: the
+/// lines are still in memory and will be spoken.
+fn save_waiting(v: &Voice, waiting: &VecDeque<Waiting>) {
+    let Some(store) = &v.rung_store else { return };
+    let saved = to_saved(waiting, v.core.monotonic_secs(), wall_now(v));
+    let done = match v.core.writer() {
+        Some(w) => w.submit_with(store, || store.encode(&saved)).map(|_| ()),
+        None => store.save(&saved).ok(),
+    };
+    if done.is_none() {
+        crate::diag::error("could not save the timer lines that are waiting to be spoken");
+    }
+}
+
+/// The lines that were waiting when the program last stopped.
+fn load_waiting(v: &Voice) -> VecDeque<Waiting> {
+    let Some(store) = &v.rung_store else {
+        return VecDeque::new();
+    };
+    match store.load::<SavedLines>() {
+        Ok(saved) => from_saved(saved, v.core.monotonic_secs(), wall_now(v)),
+        Err(e) => {
+            crate::diag::error(&format!("could not read the waiting timer lines: {e}"));
+            VecDeque::new()
+        }
+    }
+}
+
 /// Keep a rung line for later, within [`MAX_WAITING_LINES`].
 fn keep_line(waiting: &mut VecDeque<Waiting>, fired: Fired, now_mono: i64) {
     while waiting.len() >= MAX_WAITING_LINES {
@@ -107,13 +215,18 @@ fn line_after_wait(w: &Waiting, now_mono: i64) -> String {
 /// Speak the waiting lines, oldest first, while a satellite takes them. The first one that nobody could take
 /// (none connected, or busy or muted) ends the attempt and stays kept.
 async fn speak_waiting(v: &Voice, waiting: &mut VecDeque<Waiting>) {
+    let mut spoke = false;
     while v.announcer.connected() > 0 {
-        let Some(front) = waiting.front() else { return };
+        let Some(front) = waiting.front() else { break };
         let line = line_after_wait(front, v.core.monotonic_secs());
         if !v.announcer.announce(&line).await {
-            return;
+            break;
         }
         waiting.pop_front();
+        spoke = true;
+    }
+    if spoke {
+        save_waiting(v, waiting);
     }
 }
 
@@ -122,7 +235,7 @@ async fn speak_waiting(v: &Voice, waiting: &mut VecDeque<Waiting>) {
 /// is busy or muted simply does not speak it (best effort).
 pub async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
     let v = &*voice;
-    let mut waiting: VecDeque<Waiting> = VecDeque::new();
+    let mut waiting = load_waiting(v);
     while let Some(job) = rx.recv().await {
         match job {
             Say::Phrase { text, preview } => {
@@ -144,6 +257,7 @@ pub async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
                     // Behind any line already waiting, so they are said in the order they rang. Nothing here
                     // waits for a satellite to appear: the next poll tries again.
                     keep_line(&mut waiting, fired, v.core.monotonic_secs());
+                    save_waiting(v, &waiting);
                     speak_waiting(v, &mut waiting).await;
                 } else if v.announcer.connected() > 0 {
                     v.announcer.announce(&describe_fired(&fired)).await;
@@ -267,6 +381,7 @@ mod tests {
             usage_store: JsonStore::new("unused-usage.json", 1),
             echo: false,
             waits_for_satellite,
+            rung_store: None,
             available: AtomicBool::new(false),
             polling: AtomicBool::new(false),
         });
@@ -310,6 +425,42 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(150), rx.recv())
             .await
             .is_err()
+    }
+
+    // REQ-TMR-015: lines that are waiting are written down, and the time the program was off counts as lateness.
+    #[test]
+    fn waiting_lines_survive_a_restart_with_the_time_off_counted() {
+        let mut waiting = VecDeque::new();
+        keep_line(&mut waiting, rang(Kind::Timer, "tea"), 100);
+        keep_line(&mut waiting, rang(Kind::Reminder, "call"), 130);
+        // Saved 40 s after the first rang, with the clock set.
+        let saved = to_saved(&waiting, 140, Some(1_800_000_000));
+        assert_eq!(
+            saved.lines.iter().map(|l| l.late_secs).collect::<Vec<_>>(),
+            [40, 10]
+        );
+        let text = serde_json::to_string(&saved).unwrap();
+        let back: SavedLines = serde_json::from_str(&text).unwrap();
+        // Read 100 s later by the wall clock, on a monotonic clock that started over.
+        let again = from_saved(back.clone(), 5, Some(1_800_000_100));
+        assert_eq!(again.len(), 2);
+        assert_eq!(again[0].fired.label, "tea");
+        assert_eq!((again[0].fired.late_secs, again[0].since), (140, 5));
+        assert_eq!(again[1].fired.late_secs, 110);
+        assert!(
+            line_after_wait(&again[0], 5).contains("tea"),
+            "still inside the grace period, so it rings"
+        );
+        // Off for longer than the grace period: said as missed.
+        let late = from_saved(back.clone(), 5, Some(1_800_000_400));
+        assert!(late[0].fired.late_secs > MISSED_GRACE_SECS);
+        assert_ne!(line_after_wait(&late[0], 5), line_after_wait(&again[0], 5));
+        // A clock that is not set, or is behind the save, adds nothing; it never takes time off.
+        assert_eq!(from_saved(back.clone(), 5, None)[0].fired.late_secs, 40);
+        assert_eq!(
+            from_saved(back, 5, Some(1_700_000_000))[0].fired.late_secs,
+            40
+        );
     }
 
     // REQ-TMR-015: a timer that rings with no speaker connected is said when one connects.

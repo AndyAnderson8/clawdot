@@ -149,6 +149,10 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
         announcer,
         r.console || r.echo_speech,
         has_satellites(r) && !r.console,
+        Some(JsonStore::new(
+            r.data_dir.join("rung.json"),
+            crate::speaker::RUNG_SCHEMA,
+        )),
     );
     let app = App::new(
         running.brain,
@@ -314,6 +318,7 @@ fn spawn_speaker(
     announcer: satellite::Announcer,
     console: bool,
     waits_for_satellite: bool,
+    rung_store: Option<JsonStore>,
 ) -> SpeakerHandle {
     let (usage, usage_store) = brain.usage_handles();
     let voice = Arc::new(Voice {
@@ -323,6 +328,7 @@ fn spawn_speaker(
         usage_store,
         echo: console,
         waits_for_satellite,
+        rung_store,
         available: AtomicBool::new(false),
         polling: AtomicBool::new(false),
     });
