@@ -45,12 +45,14 @@ use std::sync::Arc;
 
 use self::auth::{admin_error, change_password, login, recover_window, setup};
 use self::common::{
-    KeyBody, MAX_BODY, MAX_SKILL_BODY, MAX_TOOL_BODY, Resp, attachment, bearer, error, fail_reply,
-    json_reply, query_param, read_json, read_json_limit, saved,
+    KeyBody, MAX_BODY, MAX_SKILL_BODY, MAX_TOOL_BODY, Resp, bearer, error, fail_reply, json_reply,
+    query_param, read_json, read_json_limit, saved,
 };
 use self::endpoints::{EndpointUpdate, create, endpoint_error, endpoint_json};
 use self::notes::{notes_add, notes_edit, notes_forget, notes_list, notes_search};
 use self::page::page;
+use self::schedule::schedule;
+use self::settings::{change_settings, export_settings};
 use self::status::{audit, diagnostics, hive_peers, logs, overview};
 use self::tools::{accept_choice, enabled_flag, ext, skill_action, tier_choice};
 
@@ -59,6 +61,8 @@ mod common;
 mod endpoints;
 mod notes;
 mod page;
+mod schedule;
+mod settings;
 mod status;
 mod tools;
 
@@ -732,41 +736,6 @@ async fn update_apply(core: &Core, body: Incoming) -> Resp {
 #[cfg(not(feature = "tls"))]
 async fn update_apply(core: &Core, _body: Incoming) -> Resp {
     update_status(core)
-}
-
-/// `GET /api/settings/export`: the saved settings as a file the page offers for download (REQ-CFG-065).
-fn export_settings(core: &Core) -> Resp {
-    let v = core.export_settings();
-    if v.is_null() {
-        return error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Settings are not available yet.",
-        );
-    }
-    attachment(json_reply(StatusCode::OK, &v), "clawdot-settings.json")
-}
-
-/// Timers, alarms, and reminders: the main loop does the work, so both the voice path and the portal use
-/// one scheduler (REQ-CFG-027).
-async fn schedule(core: &Core, op: SchedOp) -> Resp {
-    match core.portal_call(Op::Sched(op)).await {
-        Ok(v) => json_reply(StatusCode::OK, &v),
-        Err(f) => fail_reply(&f),
-    }
-}
-
-/// Save a change to settings, then tell the main loop to apply what can apply now (REQ-CFG-037..040).
-async fn change_settings(core: &Core, patch: &Value) -> Resp {
-    let (mut listing, live) = match core.change_settings(patch) {
-        Ok(r) => r,
-        Err(f) => return fail_reply(&f),
-    };
-    if let Err(f) = core.portal_call(Op::Settings(live)).await {
-        listing["note"] = json!(format!(
-            "Saved. {f} The live settings will apply the next time ClawDot starts."
-        ));
-    }
-    json_reply(StatusCode::OK, &listing)
 }
 
 #[derive(Deserialize)]
