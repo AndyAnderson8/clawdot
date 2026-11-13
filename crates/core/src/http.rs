@@ -323,6 +323,73 @@ fn host_is_ours(core: &Core, headers: &HeaderMap) -> bool {
     crate::hostguard::host_is_ours(host, public.as_str().unwrap_or(""), core.machine_name())
 }
 
+/// Refuse a request before it is routed: a write or read that another site's page could have caused, or a
+/// request for the device under a name that is not its own. `Some` is the answer to send.
+fn refuse_before_routing(
+    core: &Core,
+    method: &hyper::Method,
+    segs: &[&str],
+    headers: &HeaderMap,
+) -> Option<Resp> {
+    if cross_site_write(method, segs, headers) || fetched_from_another_site(segs, headers) {
+        return Some(json(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"cross-site request refused"}"#,
+        ));
+    }
+    if answers_without_a_token(method, segs, headers) && !host_is_ours(core, headers) {
+        return Some(json(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"this name does not belong to the device: open the portal by its IP address, localhost, its .local name, or set the public address in the settings"}"#,
+        ));
+    }
+    None
+}
+
+/// The answer for a request: first whether the path names a real resource (invalid endpoint names are simply
+/// 404), then whether the method is allowed on it (405).
+async fn respond(
+    core: &Arc<Core>,
+    streams: Arc<AtomicUsize>,
+    opts: ServeOptions,
+    peer: IpAddr,
+    parts: &hyper::http::request::Parts,
+    segs: &[&str],
+    body: Incoming,
+) -> Resp {
+    let headers = &parts.headers;
+    match find(ROUTES, parts.method.as_str(), segs) {
+        Some((row, [name, id])) => match row.id {
+            Id::Page => crate::ui::serve_page(headers),
+            Id::Health => json(StatusCode::OK, r#"{"status":"ok"}"#),
+            Id::Hook => hook(core, headers, peer, name, body, opts.body_timeout).await,
+            Id::Announce => {
+                crate::announce_api::handle(core, headers, peer, body, opts.body_timeout).await
+            }
+            Id::Mcp => {
+                crate::mcp_server::handle(core, headers, peer, body, opts.body_timeout).await
+            }
+            Id::Replies => replies_stream(Arc::clone(core), streams, opts, headers, peer, name),
+            Id::Ack => ack(core, headers, peer, name, id),
+        },
+        None => match path_row(ROUTES, segs) {
+            Some(row) if row.auth == Page => crate::ui::method_not_allowed(),
+            Some(_) => method_not_allowed(),
+            None => crate::ui::handle(
+                core,
+                &parts.method,
+                segs,
+                parts.uri.query(),
+                headers,
+                peer,
+                body,
+            )
+            .await
+            .unwrap_or_else(|| json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#)),
+        },
+    }
+}
+
 async fn route(
     core: Arc<Core>,
     streams: Arc<AtomicUsize>,
@@ -333,55 +400,13 @@ async fn route(
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_owned();
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
-    let headers = &parts.headers;
-    if cross_site_write(&parts.method, &segs, headers) || fetched_from_another_site(&segs, headers)
-    {
-        return Ok(json(
-            StatusCode::FORBIDDEN,
-            r#"{"error":"cross-site request refused"}"#,
-        ));
-    }
-    if answers_without_a_token(&parts.method, &segs, headers) && !host_is_ours(&core, headers) {
-        return Ok(json(
-            StatusCode::FORBIDDEN,
-            r#"{"error":"this name does not belong to the device: open the portal by its IP address, localhost, its .local name, or set the public address in the settings"}"#,
-        ));
+    if let Some(refused) = refuse_before_routing(&core, &parts.method, &segs, &parts.headers) {
+        return Ok(refused);
     }
     // Where the saves stand before this request changes anything, so that afterwards we can tell whether what
     // it changed reached the disk.
     let mark = core.save_mark();
-    // First decide whether the path names a real resource (invalid endpoint names are simply 404),
-    // then whether the method is allowed on it (405).
-    let mut resp = match find(ROUTES, parts.method.as_str(), &segs) {
-        Some((row, [name, id])) => match row.id {
-            Id::Page => crate::ui::serve_page(headers),
-            Id::Health => json(StatusCode::OK, r#"{"status":"ok"}"#),
-            Id::Hook => hook(&core, headers, peer, name, body, opts.body_timeout).await,
-            Id::Announce => {
-                crate::announce_api::handle(&core, headers, peer, body, opts.body_timeout).await
-            }
-            Id::Mcp => {
-                crate::mcp_server::handle(&core, headers, peer, body, opts.body_timeout).await
-            }
-            Id::Replies => replies_stream(Arc::clone(&core), streams, opts, headers, peer, name),
-            Id::Ack => ack(&core, headers, peer, name, id),
-        },
-        None => match path_row(ROUTES, &segs) {
-            Some(row) if row.auth == Page => crate::ui::method_not_allowed(),
-            Some(_) => method_not_allowed(),
-            None => crate::ui::handle(
-                &core,
-                &parts.method,
-                &segs,
-                parts.uri.query(),
-                headers,
-                peer,
-                body,
-            )
-            .await
-            .unwrap_or_else(|| json(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#)),
-        },
-    };
+    let mut resp = respond(&core, streams, opts, peer, &parts, &segs, body).await;
     // A webhook, announcement or acknowledgement is reported as accepted only once it is on disk (REQ-INB-004),
     // and one that could not be saved is not reported as accepted. The event is kept in memory (it is still
     // announced, answered or delivered), so a sender that retries is coalesced; the answer says it will not
