@@ -251,8 +251,6 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         self.answer_held(user_text).await
     }
 
-    /// Drop a held action whose window has run out, for a turn that cannot answer it (the calls of a model
-    /// outside the turn loop). One still inside its window is left alone.
     /// Whether an action is waiting for the user's answer and its window is still open. One whose window has
     /// run out is dropped here, so it does not stand in the way of a new one.
     fn held_and_fresh(&mut self) -> bool {
@@ -260,6 +258,8 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         self.conv.pending.is_some()
     }
 
+    /// Drop a held action whose window has run out, for a turn that cannot answer it (the calls of a model
+    /// outside the turn loop). One still inside its window is left alone.
     fn drop_held_if_stale(&mut self) {
         let mono = self.mono;
         if let Some(old) = self
