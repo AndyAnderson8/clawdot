@@ -11,6 +11,7 @@ import {
   reminderBody,
   restartText,
   settingsChanges,
+  peerLink,
   settingsPatch,
   skillSendProblem,
   skillImports,
@@ -185,6 +186,17 @@ test("a skill import the device would refuse is caught before it is sent", () =>
   const tools = Array.from({ length: 17 }, (_, i) => "t" + i);
   assert.match(skillSendProblem([], [{ name: "Many", tools }]), /more than 16 tools/);
   assert.equal(skillSendProblem([], [{ name: "Few", tools: tools.slice(0, 16) }]), "");
+});
+
+test("another speaker's page is linked only from a literal IP address and a real port", () => {
+  assert.equal(peerLink("192.0.2.7", 3335), "http://192.0.2.7:3335/");
+  assert.equal(peerLink("fe80::1", 3335), "http://[fe80::1]:3335/", "IPv6 goes in brackets");
+  assert.equal(peerLink("192.0.2.300", 3335), null);
+  assert.equal(peerLink("192.0.2.7", 0), null);
+  assert.equal(peerLink("192.0.2.7", 70000), null);
+  assert.equal(peerLink("evil.example/x", 3335), null, "a name is not turned into a link");
+  assert.equal(peerLink("fe80::1%eth0", 3335), null);
+  assert.equal(peerLink("java" + "script:alert(1)//", 3335), null);
 });
 
 test("a number that is not a number is refused, not sent as null (which would reset the setting)", () => {

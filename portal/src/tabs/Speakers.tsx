@@ -2,6 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { fail, usePolled } from "../store.ts";
+import { peerLink } from "../forms.ts";
 import { span } from "../time.ts";
 
 interface Peer {
@@ -68,9 +69,11 @@ export function Speakers(): JSX.Element {
                       {p.address}, seen {p.last_seen_secs < 5 ? "just now" : span(p.last_seen_secs) + " ago"}
                     </div>
                   </div>
-                  <a href={"http://" + p.address + ":" + p.port + "/"} rel="noreferrer">
-                    Open its page
-                  </a>
+                  {peerLink(p.address, p.port) ? (
+                    <a href={peerLink(p.address, p.port) ?? undefined} rel="noreferrer">
+                      Open its page
+                    </a>
+                  ) : null}
                 </li>
               ))}
             </ul>

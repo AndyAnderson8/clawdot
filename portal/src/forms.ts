@@ -143,6 +143,25 @@ export function skillSendProblem(
     : "";
 }
 
+/**
+ * The address of another speaker's own page, or null when what the network announced is not a literal IP address and
+ * a port from 1 to 65535 (a name from the network is never turned into a link). An IPv6 address is put in brackets.
+ */
+export function peerLink(address: string, port: number): string | null {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address);
+  if (v4) return v4.slice(1).every((o) => Number(o) <= 255) ? "http://" + address + ":" + port + "/" : null;
+  if (address.includes(":") && /^[0-9a-f:.]+$/i.test(address)) {
+    try {
+      new URL("http://[" + address + "]/");
+    } catch {
+      return null;
+    }
+    return "http://[" + address + "]:" + port + "/";
+  }
+  return null;
+}
+
 export function skillBody(
   name: string,
   instructions: string,

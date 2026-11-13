@@ -52,11 +52,13 @@ export function Updates(): JSX.Element | null {
 
   // While an install runs, watch it; after a restart the page comes back to a new version.
   const working = !!u && WORKING.includes(u.phase);
+  // Installed on a device nothing restarts: there is nothing more to watch for until a person restarts it.
+  const watching = !!u && working && !(u.phase === "installed" && !u.supervised);
   useEffect(() => {
-    if (!working) return;
+    if (!watching) return;
     const t = setInterval(() => void load(), 2000);
     return () => clearInterval(t);
-  }, [working]);
+  }, [watching]);
   useEffect(() => {
     // After an install and a restart, this page is talking to the new version: start over with it.
     if (before.current && u && u.current !== before.current) location.reload();
@@ -124,7 +126,7 @@ export function Updates(): JSX.Element | null {
                   <pre class="pre">{latest.notes}</pre>
                 </details>
               ) : null}
-              {latest.page ? (
+              {latest.page.startsWith("https://") ? (
                 <p class="mut">
                   <a href={latest.page} target="_blank" rel="noopener noreferrer">
                     Release page
