@@ -197,6 +197,43 @@ fn retired_key_warnings(c: &Config) -> Vec<String> {
         .collect()
 }
 
+/// Read the persona file, if one is named, into `persona`. A persona file given as a flag beats one named in the
+/// file, and its text joins the layer it came from.
+fn add_persona_file(
+    flag: Option<&PathBuf>,
+    named: Option<&PathBuf>,
+    from_file: &mut Layer,
+    from_flags: &mut Layer,
+) -> Result<(), String> {
+    let persona_flag = flag.is_some();
+    if let Some(p) = flag.or(named) {
+        let text = std::fs::read_to_string(p)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| format!("cannot use persona file {}", p.display()))?;
+        let layer = if persona_flag { from_flags } else { from_file };
+        layer.insert("persona".into(), text.into());
+    }
+    Ok(())
+}
+
+/// The speech section with the effective voice, language and provider from the settings, and the provider's
+/// defaults filled in.
+fn effective_speech(
+    mut speech: SpeechConfig,
+    text: &dyn Fn(&str) -> Option<String>,
+) -> SpeechConfig {
+    if let Some(v) = text("voice") {
+        speech.voice = Some(v);
+    }
+    // The language is empty when detected, which is not the same as unset in the configuration file.
+    speech.language = text("speech_language").filter(|l| !l.is_empty());
+    // ElevenLabs and Deepgram bring their own address, models and voice (REQ-VOI-021).
+    speech.provider = text("speech_provider");
+    speech.apply_provider_defaults();
+    speech
+}
+
 /// Combine defaults, the configuration file, saved settings, and flags (REQ-CFG-038) into the [`Resolved`] values
 /// the program starts with. Also returns the state the portal edits and any warnings.
 ///
@@ -212,20 +249,12 @@ pub fn resolve(
     let manage = !cli.create.is_empty() || !cli.rotate.is_empty();
     let mut from_file = file_layer(&file);
     let mut from_flags = cli.flags;
-    // A persona file given as a flag beats one named in the file, and its text joins the layer it came from.
-    let persona_flag = cli.persona_file.is_some();
-    if let Some(p) = cli.persona_file.as_ref().or(file.persona_file.as_ref()) {
-        let text = std::fs::read_to_string(p)
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| format!("cannot use persona file {}", p.display()))?;
-        let layer = if persona_flag {
-            &mut from_flags
-        } else {
-            &mut from_file
-        };
-        layer.insert("persona".into(), text.into());
-    }
+    add_persona_file(
+        cli.persona_file.as_ref(),
+        file.persona_file.as_ref(),
+        &mut from_file,
+        &mut from_flags,
+    )?;
     let (mut state, mut warnings) = SettingsState::open(
         Some(&data_dir),
         Sources {
@@ -243,15 +272,7 @@ pub fn resolve(
     let listen = text("listen")
         .and_then(|l| l.parse().ok())
         .ok_or("internal: bad listen address")?;
-    let mut speech = file.speech;
-    if let Some(v) = text("voice") {
-        speech.voice = Some(v);
-    }
-    // The language is empty when detected, which is not the same as unset in the configuration file.
-    speech.language = text("speech_language").filter(|l| !l.is_empty());
-    // ElevenLabs and Deepgram bring their own address, models and voice (REQ-VOI-021).
-    speech.provider = text("speech_provider");
-    speech.apply_provider_defaults();
+    let speech = effective_speech(file.speech, &text);
     let live = state.live_values();
     let mut create = file.endpoints;
     create.extend(cli.create);
