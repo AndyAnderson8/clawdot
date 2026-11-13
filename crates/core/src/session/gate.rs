@@ -243,6 +243,13 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Drop a held action whose window has run out, for a turn that cannot answer it (the calls of a model
     /// outside the turn loop). One still inside its window is left alone.
+    /// Whether an action is waiting for the user's answer and its window is still open. One whose window has
+    /// run out is dropped here, so it does not stand in the way of a new one.
+    fn held_and_fresh(&mut self) -> bool {
+        self.drop_held_if_stale();
+        self.conv.pending.is_some()
+    }
+
     fn drop_held_if_stale(&mut self) {
         let mono = self.mono;
         if let Some(old) = self
@@ -600,6 +607,21 @@ impl<'a, H: ToolHost> Turn<'a, H> {
                 note: Some("destructive tools are not offered"),
             });
             format!("Error: there is no tool called `{}`.", call.name)
+        } else if !self.by_user && risk.tier != Tier::ReadOnly && self.held_and_fresh() {
+            // The user is deciding on an action already. A turn that outside text started must not put its own
+            // proposal in that action's place, where a yes meant for the first would run the second
+            // (REQ-SEC-011, REQ-SEC-012).
+            self.note_act(&Act {
+                tool: &call.name,
+                tier: Some(risk.tier),
+                args: &args,
+                decision: decision::SKIPPED,
+                held_id: None,
+                outcome: None,
+                note: Some("another action is waiting for the user's answer"),
+            });
+            "Not run and not proposed: an action is already waiting for the user's answer. Say in your reply what you would suggest."
+                .to_owned()
         } else if !self.by_user && risk.tier != Tier::ReadOnly {
             // Nobody is here to ask: keep it as a proposal for the user's next turn.
             let args = self.host.pin_args(&call.name, args).await;
