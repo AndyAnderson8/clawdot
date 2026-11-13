@@ -104,6 +104,14 @@ export async function settingsNumbers(c: Ctx): Promise<void> {
       `T.all('.errtext').some((e) => e.textContent.startsWith('Set both the quiet hours'))`,
       "needs both ends",
     );
+    // a time with only one box filled is not taken for "no time", and is not sent
+    await eq(`T.q('#f-quiet_end').getAttribute('aria-label')`, "Quiet until, hour", "the box is named for what it is");
+    await T(`set('#f-quiet_end', '7')`);
+    await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
+    await b.until(
+      `T.all('.errtext').some((e) => e.textContent.startsWith('Finish the time for'))`,
+      "a half-filled time is refused",
+    );
     await setTime("f-quiet_end", "07:00");
     await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
     await b.until(`T.text('#msg') === 'Saved.'`, "quiet hours saved");

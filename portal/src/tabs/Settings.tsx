@@ -47,8 +47,10 @@ function Control(props: {
   /** The time zones to offer, or null where the browser cannot list them. */
   zones: string[] | null;
   browserZone: string;
+  /** A time is half typed, so "no time" would be a wrong reading of the box. */
+  unfinished: (yes: boolean) => void;
 }): JSX.Element {
-  const { sp, field, id, saved, put, url, hasKey, keyRev, zones, browserZone } = props;
+  const { sp, field, id, saved, put, url, hasKey, keyRev, zones, browserZone, unfinished } = props;
   const v = props.value;
   const input = (e: Event) => put((e.currentTarget as HTMLInputElement).value);
   if (sp.widget === "model") {
@@ -117,7 +119,19 @@ function Control(props: {
     );
   }
   if (field.kind === "time") {
-    return <TimeField id={id} value={v} disabled={sp.off} clearable onChange={put} />;
+    return (
+      <TimeField
+        id={id}
+        label={labelOf(sp.key)}
+        value={v}
+        disabled={sp.off}
+        clearable
+        onChange={(x, partial) => {
+          unfinished(partial === true);
+          put(x);
+        }}
+      />
+    );
   }
   if (field.kind === "money") {
     return (
@@ -220,12 +234,17 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
     Object.fromEntries(specs.filter((sp) => sp.optional).map((sp) => [sp.key, (start0[sp.key] ?? "") !== ""])),
   );
   const [err, setErr] = useState("");
+  // The settings whose time boxes hold something that is not yet a time.
+  const [halfTimes, setHalfTimes] = useState<Record<string, boolean>>({});
   const errRef = useRef<HTMLParagraphElement>(null);
 
   const submit = async (ev: Event) => {
     ev.preventDefault();
     setErr("");
-    const body = settingsPatch(settings.fields, specs, current, vals);
+    const half = specs.find((sp) => halfTimes[sp.key] && !sp.hideWhen?.(vals) && (!sp.optional || shown[sp.key]));
+    const body = half
+      ? "Finish the time for “" + labelOf(half.key) + "” (an hour and a minute), or empty both boxes."
+      : settingsPatch(settings.fields, specs, current, vals);
     if (typeof body === "string") {
       setErr(body);
       errRef.current?.scrollIntoView({ block: "nearest" });
@@ -319,6 +338,7 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
                 keyRev={keyRev}
                 zones={zs ? zones : null}
                 browserZone={bz}
+                unfinished={(yes) => setHalfTimes((h) => (h[sp.key] === yes ? h : { ...h, [sp.key]: yes }))}
               />
               {sp.optional ? (
                 <button
@@ -327,6 +347,7 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
                   onClick={() => {
                     setVals({ ...vals, [sp.key]: "" });
                     setShown({ ...shown, [sp.key]: false });
+                    setHalfTimes({ ...halfTimes, [sp.key]: false });
                   }}
                 >
                   Remove

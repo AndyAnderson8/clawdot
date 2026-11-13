@@ -30,6 +30,15 @@ export async function clock(c: Ctx): Promise<void> {
       "INPUTINPUT",
       "the hour and minute are plain boxes you can type in",
     );
+    await eq(`T.q('#rtime').getAttribute('aria-label')`, "Alarm time, hour", "the box is named for what it is");
+    // emptying one box leaves no time: the form must not still send the old one
+    await T(`set('#rtime-m', '')`);
+    const posts = () => mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").length;
+    const before = posts();
+    await T(`submit('#clockdialog form')`);
+    await eq(`T.text('#msg')`, "Pick a time for the alarm.", "an incomplete time is refused");
+    assert.equal(posts(), before, "nothing was sent");
+    await setTime("rtime", "06:30");
     await T(`set('#rlabel', 'gym')`);
     await T(`click('.days input[value="0"]')`);
     await T(`click('.days input[value="2"]')`);

@@ -227,7 +227,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
                   <label for="rtime">Time</label>
                 </div>
                 <div class="sctl">
-                  <TimeField id="rtime" value={time} onChange={setTime} />
+                  <TimeField id="rtime" label="Alarm time" value={time} onChange={setTime} />
                 </div>
               </div>
               <div class="srow">
@@ -271,7 +271,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
                   <label for="rtime2">Time</label>
                 </div>
                 <div class="sctl">
-                  <TimeField id="rtime2" value={time2} onChange={setTime2} />
+                  <TimeField id="rtime2" label="Reminder time" value={time2} onChange={setTime2} />
                 </div>
               </div>
             </div>

@@ -40,11 +40,18 @@ export function joined(h: string, m: string, pm: boolean, h12: boolean): string 
 export function TimeField(props: {
   id: string;
   value: string;
-  onChange: (v: string) => void;
+  /**
+   * Called on every edit with the time, or "" when the boxes do not make one. `partial` is true when "" comes from a
+   * half-filled or impossible time, so the caller can refuse it instead of taking it as "no time".
+   */
+  onChange: (v: string, partial?: boolean) => void;
   disabled?: boolean;
   /** Offer a button that empties it (for a time that is optional). */
   clearable?: boolean;
+  /** What the time is for ("Quiet from"), so the boxes can be named for someone who cannot see the page. */
+  label?: string;
 }): JSX.Element {
+  const label = props.label ?? "Time";
   const h12 = wants12();
   const start = boxes(props.value, h12);
   const [h, setH] = useState(start.h);
@@ -63,7 +70,7 @@ export function TimeField(props: {
 
   const emit = (nh: string, nm: string, np: boolean) => {
     const v = joined(nh, nm, np, h12);
-    if (v || (!nh && !nm)) props.onChange(v);
+    props.onChange(v, !v && (nh !== "" || nm !== ""));
   };
   const digits = (s: string) => s.replace(/\D/g, "").slice(0, 2);
   const step = (ev: KeyboardEvent, cur: string, lo: number, hi: number, set: (v: string) => void, which: "h" | "m") => {
@@ -78,7 +85,7 @@ export function TimeField(props: {
   const hourRange: [number, number] = h12 ? [1, 12] : [0, 23];
 
   return (
-    <div class="timefield" role="group" aria-label="Time">
+    <div class="timefield" role="group" aria-label={label}>
       <input
         id={props.id}
         type="text"
@@ -86,7 +93,7 @@ export function TimeField(props: {
         autoComplete="off"
         maxLength={2}
         placeholder="--"
-        aria-label="Hour"
+        aria-label={label + ", hour"}
         disabled={props.disabled}
         value={h}
         onFocus={(e) => e.currentTarget.select()}
@@ -108,7 +115,7 @@ export function TimeField(props: {
         autoComplete="off"
         maxLength={2}
         placeholder="--"
-        aria-label="Minute"
+        aria-label={label + ", minute"}
         disabled={props.disabled}
         value={m}
         onFocus={(e) => e.currentTarget.select()}
@@ -125,7 +132,7 @@ export function TimeField(props: {
       {h12 ? (
         <select
           id={props.id + "-p"}
-          aria-label="AM or PM"
+          aria-label={label + ", AM or PM"}
           disabled={props.disabled}
           value={pm ? "pm" : "am"}
           onChange={(e) => {
