@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ADAPTERS, adapterName, snippets } from "../../src/snippets.ts";
 
@@ -38,4 +39,27 @@ test("the adapter list is neutral: plain JSON first, and coding agent hooks are 
   assert.equal(ADAPTERS.length, 2);
   assert.equal(adapterName("generic"), "Plain JSON");
   assert.equal(adapterName("claude-code"), "Coding agent hooks");
+});
+
+// The CLI (`clawdot --create-endpoint`) prints the adapter's `setup` lines; the page builds the same hook JSON and
+// bridge line by hand. This keeps the two from drifting apart. The wording around them may differ.
+test("the coding agent snippets match the adapter file's setup lines", () => {
+  const file = new URL("../../../crates/core/adapters/claude-code.json", import.meta.url);
+  const setup = (JSON.parse(readFileSync(file, "utf8")) as { setup: string[] }).setup;
+  const fill = (s: string) =>
+    s
+      .replaceAll("{public}", "http://dot:3335")
+      .replaceAll("{endpoint}", "agent")
+      .replaceAll("{token}", "abc123")
+      .replaceAll("<token>", "abc123");
+
+  const first = setup.indexOf("{");
+  const last = setup.indexOf("}");
+  assert.ok(first >= 0 && last > first, "the adapter's setup has a JSON block");
+  const adapterHooks: unknown = JSON.parse(fill(setup.slice(first, last + 1).join("\n")));
+  const adapterBridge = fill(setup.find((l) => l.includes("clawdot-bridge")) ?? "").trim();
+
+  const list = snippets("http://dot:3335", "agent", "claude-code", "abc123");
+  assert.deepEqual(JSON.parse(list[4]![1]), adapterHooks);
+  assert.equal(list[5]![1], adapterBridge);
 });
