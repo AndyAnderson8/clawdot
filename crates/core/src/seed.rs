@@ -624,16 +624,15 @@ mod tests {
     #[test]
     fn saved_settings_sit_between_the_file_and_the_flags() {
         let dir = TempDir::new("seed-saved");
-        let file =
-            r#"{"zone": "America/Chicago", "llm": {"url": "http://x/v1", "model": "from-file"}}"#;
+        let file = r#"{"limits": {"daily_spend_usd": 1.5}, "llm": {"url": "http://x/v1", "model": "from-file"}}"#;
         let (_, mut state) = resolved(&dir, file, &[]);
         state
-            .change(&serde_json::json!({"zone": "Europe/Paris", "llm_model": "saved"}))
+            .change(&serde_json::json!({"daily_spend_usd": 2.5, "llm_model": "saved"}))
             .unwrap();
         drop(state);
         let (a, _) = resolved(&dir, file, &["--llm-model", "from-flag"]);
-        // The saved zone beats the file, and the flag beats the saved model.
-        assert_eq!(a.zone.as_deref(), Some("Europe/Paris"));
+        // The saved spend beats the file, and the flag beats the saved model.
+        assert_eq!(a.daily_spend, Some(2.5));
         assert_eq!(a.llm_model.as_deref(), Some("from-flag"));
     }
 
