@@ -374,45 +374,47 @@ impl Brain {
     /// Start a realtime voice session for a speaker (REQ-RTV-009) as a task beside this loop (ADR-0021). The
     /// tools run through the same gate, audit log and notes as any turn; the cap is checked before the
     /// connection opens and audio cost is added while it runs. The session lasts at most `max_session_secs`
-    /// and nothing else waits for it.
-    #[cfg(feature = "realtime")]
+    /// and nothing else waits for it. Without the `realtime` feature no session can be configured; a stray job
+    /// is answered at once.
     pub fn start_realtime(&mut self, job: rtvoice::Job, core: &Core, hub: &mut Hub) {
-        self.rt.set_error(None);
-        core.patch_ui_status("realtime", self.rt.status());
-        // A fresh conversation per session: it holds the transcript and any held action in memory only.
-        let mut conv = Conversation::standard(self.persona.clone());
-        if let Some(a) = core.audit() {
-            conv.set_audit(a);
+        #[cfg(feature = "realtime")]
+        {
+            self.rt.set_error(None);
+            core.patch_ui_status("realtime", self.rt.status());
+            // A fresh conversation per session: it holds the transcript and any held action in memory only.
+            let mut conv = Conversation::standard(self.persona.clone());
+            if let Some(a) = core.audit() {
+                conv.set_audit(a);
+            }
+            if let Some(n) = core.notes() {
+                conv.set_notes(n);
+            }
+            let kit = crate::turns::RtKit {
+                settings: self.rt.settings(),
+                key: self.rt.key(),
+                persona: self.persona.clone(),
+                cfg: self.llm.as_ref().map(|l| l.cfg.clone()).unwrap_or_default(),
+                usage: self.usage.clone(),
+                http: Arc::clone(&self.http_tools),
+                mcp: Arc::clone(&self.mcp),
+                ext: Arc::clone(&self.ext_view),
+                builtin: ToolHost::tool_specs(&self.assistant),
+                day: self.assistant.local_day(),
+                clock: Arc::clone(&self.clock),
+                conv,
+                rt: self.rt.clone(),
+            };
+            hub.spawn_realtime(kit, job);
         }
-        if let Some(n) = core.notes() {
-            conv.set_notes(n);
+        #[cfg(not(feature = "realtime"))]
+        {
+            let _ = (core, hub);
+            let _ = job.done.send(rtvoice::Done {
+                speak: Some("This build has no realtime voice.".into()),
+                failed: true,
+                effects: Vec::new(),
+            });
         }
-        let kit = crate::turns::RtKit {
-            settings: self.rt.settings(),
-            key: self.rt.key(),
-            persona: self.persona.clone(),
-            cfg: self.llm.as_ref().map(|l| l.cfg.clone()).unwrap_or_default(),
-            usage: self.usage.clone(),
-            http: Arc::clone(&self.http_tools),
-            mcp: Arc::clone(&self.mcp),
-            ext: Arc::clone(&self.ext_view),
-            builtin: ToolHost::tool_specs(&self.assistant),
-            day: self.assistant.local_day(),
-            clock: Arc::clone(&self.clock),
-            conv,
-            rt: self.rt.clone(),
-        };
-        hub.spawn_realtime(kit, job);
-    }
-
-    /// Without the `realtime` feature no session can be configured; a stray job is answered at once.
-    #[cfg(not(feature = "realtime"))]
-    pub fn start_realtime(&mut self, job: rtvoice::Job, _core: &Core, _hub: &mut Hub) {
-        let _ = job.done.send(rtvoice::Done {
-            speak: Some("This build has no realtime voice.".into()),
-            failed: true,
-            effects: Vec::new(),
-        });
     }
 
     /// Answer locally if the fast path can (timers, alarms, music). `None` means the model is needed.
