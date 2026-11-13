@@ -86,6 +86,21 @@ fn name_unnamed_calls(calls: &mut [ToolCall]) {
     for c in calls.iter_mut().filter(|c| c.id.is_empty()) {
         c.id = fresh_call_id("call", &mut next, |id| sent.iter().any(|s| s == id));
     }
+    // A provider that repeats an id would have two results answer one call: the repeat gets a suffix.
+    for i in 1..calls.len() {
+        if calls[..i].iter().any(|p| p.id == calls[i].id) {
+            let base = calls[i].id.clone();
+            let mut n = 2;
+            let fresh = loop {
+                let candidate = format!("{base}_{n}");
+                if !calls.iter().any(|p| p.id == candidate) {
+                    break candidate;
+                }
+                n += 1;
+            };
+            calls[i].id = fresh;
+        }
+    }
 }
 
 /// One message in a conversation.
@@ -490,20 +505,31 @@ impl StreamAccumulator {
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 for c in calls {
-                    let index = c
-                        .get("index")
-                        .and_then(Value::as_u64)
-                        .and_then(|i| usize::try_from(i).ok())
-                        .unwrap_or(0);
-                    if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
-                        return Err(LlmError::Malformed("too many tool calls".into()));
-                    }
                     let id = c
                         .get("id")
                         .and_then(Value::as_str)
                         .filter(|i| !i.is_empty());
                     let name = c.pointer("/function/name").and_then(Value::as_str);
                     let args = c.pointer("/function/arguments").and_then(Value::as_str);
+                    let index = match c
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .and_then(|i| usize::try_from(i).ok())
+                    {
+                        Some(i) => i,
+                        // No index: the chunk belongs to the newest call, unless it opens another one
+                        // (a new id, or a second name).
+                        None => self.calls.iter().next_back().map_or(0, |(i, last)| {
+                            let new_id = id.is_some_and(|id| !last.id.is_empty() && id != last.id);
+                            let new_name = name
+                                .is_some_and(|n| !n.is_empty() && !last.name.is_empty())
+                                && id.is_none_or(|id| id != last.id);
+                            if new_id || new_name { i + 1 } else { *i }
+                        }),
+                    };
+                    if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
+                        return Err(LlmError::Malformed("too many tool calls".into()));
+                    }
                     self.keep(
                         id.map_or(0, str::len)
                             + name.map_or(0, str::len)
@@ -1035,5 +1061,39 @@ mod tests {
         ));
         let text_only = r#"{"choices":[{"message":{"content":"long"},"finish_reason":"length"}]}"#;
         assert!(parse_completion(text_only).is_ok());
+    }
+
+    // Some servers send tool-call deltas with no `index`; each new id or name starts a new call.
+    #[test]
+    fn streamed_tool_calls_without_an_index_are_not_merged() {
+        let mut acc = StreamAccumulator::default();
+        for l in [
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"set_timer","arguments":""}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"s\":1}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"b","function":{"name":"get_time","arguments":"{}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"stop","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            acc.feed_line(l).unwrap();
+        }
+        let c = acc.finish();
+        let got: Vec<(&str, &str, &str)> = c
+            .tool_calls
+            .iter()
+            .map(|t| (t.id.as_str(), t.name.as_str(), t.arguments.as_str()))
+            .collect();
+        assert_eq!(got[0], ("a", "set_timer", "{\"s\":1}"));
+        assert_eq!(got[1], ("b", "get_time", "{}"));
+        assert_eq!((got[2].1, got.len()), ("stop", 3));
+    }
+
+    #[test]
+    fn repeated_tool_call_ids_are_made_unique() {
+        let body = r#"{"choices":[{"message":{"tool_calls":[
+            {"id":"x","function":{"name":"a","arguments":"{}"}},
+            {"id":"x","function":{"name":"b","arguments":"{}"}},
+            {"id":"x_2","function":{"name":"c","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let c = parse_completion(body).unwrap();
+        let ids: Vec<&str> = c.tool_calls.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["x", "x_3", "x_2"]);
     }
 }
