@@ -20,8 +20,9 @@ tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots", "dep:ring"]
 # Client for ESPHome voice satellites (spec 0004): dials a Dot or other ESPHome device with no Home Assistant.
 # Plaintext API only; adds no dependency. Off by default.
 esphome-satellite = []
-# Noise encryption for the ESPHome client (REQ-ESP-014), built on `ring`, which the tls feature already pulls in.
-esphome-noise = ["esphome-satellite", "dep:ring"]
+# Noise encryption for the ESPHome client (REQ-ESP-014), built on `ring`, which the tls feature already pulls in. Keys
+# are wiped on drop with `zeroize`, which the tls feature also already links (through rustls).
+esphome-noise = ["esphome-satellite", "dep:ring", "dep:zeroize"]
 
 # Optional realtime (speech-to-speech) voice (ADR-0020, REQ-RTV-001): one streaming WebSocket to a provider
 # instead of separate listen, think and speak steps. Meant for a PC or Pi. Adds no crate (a minimal
@@ -54,6 +55,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = { version = "1", optional = true }
 ring = { version = "0.17", default-features = false, features = ["alloc"], optional = true }
 socket2 = { version = "0.6", features = ["all"], optional = true }
+zeroize = { version = "1", optional = true }
 
 # Build time only: compresses the portal page (REQ-CFG-043). Not linked into the program.
 [build-dependencies]
