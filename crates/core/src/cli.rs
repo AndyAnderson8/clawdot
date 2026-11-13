@@ -1,20 +1,10 @@
 //! Command-line arguments and help text for the `clawdot` binary.
 //!
-//! [`parse`] turns an argument list into [`Args`]; values from the configuration file and from flags are kept
-//! in separate settings layers so saved settings can sit between them (REQ-CFG-038).
+//! [`parse`] turns an argument list into a [`Cli`] (what the line said) and reads the `--config` file into a
+//! [`Config`] (what the file said). Neither is what the program runs with: [`crate::seed::resolve`] combines them
+//! with saved settings and the defaults into a `Resolved` (REQ-CFG-038).
 
-use crate::assistant::DEFAULT_PERSONA;
-use crate::audit::ActionPolicy;
-use crate::config::{
-    AgentConfig, Config, DeviceConfig, SatelliteConfig, SpeechConfig, UpdatesConfig,
-};
-#[cfg(feature = "esphome-satellite")]
-use crate::esphome_cfg::EsphomeConfig;
-use crate::httptools::ToolDef;
-use crate::inbox::endpoint::QuietHours;
-use crate::mcp::ServerDef;
-use crate::media::Station;
-use crate::seed::seed_from_config;
+use crate::config::Config;
 use crate::settings::Layer;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -58,118 +48,64 @@ LANGUAGE MODEL (optional; without it only the local fast path and fallback summa
     -h, --help                 Show this help
 ";
 
-#[derive(Debug)]
-pub struct Args {
-    /// Values from the configuration file and from flags, kept apart so saved settings can sit between them
-    /// (REQ-CFG-038).
-    pub file_layer: Layer,
-    pub flag_layer: Layer,
-    /// The persona file came from a flag, not the configuration file.
-    pub persona_flag: bool,
-    /// The system prompt in effect.
-    pub persona: String,
-    pub data_dir: PathBuf,
-    pub listen: SocketAddr,
-    pub public_url: Option<String>,
-    pub zone: Option<String>,
+/// What the command line said, and nothing else: no default is filled in and nothing from the configuration file
+/// is mixed in. A value the line did not give is `None` or empty. The configuration file is a [`Config`], and what
+/// the program runs with is built from the two in [`crate::seed::resolve`].
+#[derive(Debug, Default)]
+pub struct Cli {
+    /// `--data-dir`.
+    pub data_dir: Option<PathBuf>,
+    /// The settings the flags give (`--listen`, `--public-url`, `--zone`, `--name`, the language model and spend
+    /// flags, `--dry-run`), kept apart so saved settings can sit between the file and them (REQ-CFG-038).
+    pub flags: Layer,
+    /// `--persona-file`.
+    pub persona_file: Option<PathBuf>,
+    /// `--create-endpoint`, in the order given.
     pub create: Vec<String>,
+    /// `--rotate-endpoint`, in the order given.
     pub rotate: Vec<String>,
     pub reset_admin: bool,
-    /// An endpoint command was given on the command line: print and exit instead of serving.
-    pub manage: bool,
-    pub console: bool,
-    /// Echo spoken text to stdout even without the console (diagnosis only).
+    /// `--no-console` was given.
+    pub no_console: bool,
+    /// `--echo-speech`: echo spoken text to stdout even without the console (diagnosis only).
     pub echo_speech: bool,
-    pub llm_url: Option<String>,
-    pub llm_model: Option<String>,
-    pub key_env: String,
-    pub persona_file: Option<PathBuf>,
-    pub tools: Vec<ToolDef>,
-    pub mcp: Vec<ServerDef>,
-    pub stations: Vec<Station>,
-    pub speech: SpeechConfig,
-    pub satellite: SatelliteConfig,
-    pub updates: UpdatesConfig,
-    /// What the device is called and which parts it has that cannot be seen (the `device` section).
-    pub device: DeviceConfig,
-    #[cfg(feature = "esphome-satellite")]
-    pub esphome: EsphomeConfig,
+    pub voice_in: Option<PathBuf>,
+    pub voice_out: Option<PathBuf>,
     /// Hive discovery mode (`--hive-discovery`); `None` leaves the hive unstarted.
     #[cfg(feature = "hive")]
     pub hive: Option<crate::hive::Mode>,
     #[cfg(feature = "hive")]
     pub hive_publish_name: bool,
-    pub voice_in: Option<PathBuf>,
-    pub voice_out: Option<PathBuf>,
-    pub daily_spend: Option<f64>,
-    /// Daily action caps and the dry-run switch (REQ-SEC-015, REQ-SEC-016); the effective settings (REQ-CFG-062).
-    pub actions: ActionPolicy,
-    /// Turn limits, speech while working and notes (REQ-AST-019..025); the effective settings (REQ-CFG-062).
-    pub agent: AgentConfig,
-    /// The device-wide quiet-hours window (REQ-INB-040).
-    pub quiet: Option<QuietHours>,
 }
 
-/// Parse `argv` (without the program name), reading the `--config` file first so flags override it.
-/// An empty error means help was asked for.
-pub fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut a = defaults()?;
+impl Cli {
+    /// Where state is kept: the flag, else the configuration file, else `clawdot-data`.
+    #[must_use]
+    pub fn data_dir(&self, file: &Config) -> PathBuf {
+        self.data_dir
+            .clone()
+            .or_else(|| file.data_dir.clone())
+            .unwrap_or_else(|| PathBuf::from("clawdot-data"))
+    }
+}
+
+/// Parse `argv` (without the program name), reading the `--config` file first so a problem with it is reported
+/// before one with a flag. Returns what the line said and what the file said (an empty [`Config`] without
+/// `--config`). An empty error means help was asked for.
+pub fn parse(argv: &[String]) -> Result<(Cli, Config), String> {
+    let mut file = Config::default();
     if let Some(i) = argv.iter().position(|x| x == "--config") {
         let path = argv.get(i + 1).ok_or("--config needs a value")?;
         let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        seed_from_config(&mut a, &Config::parse(&text)?)?;
+        file = Config::parse(&text)?;
     }
-    apply_flags(&mut a, argv)?;
-    Ok(a)
+    let mut cli = Cli::default();
+    apply_flags(&mut cli, argv)?;
+    Ok((cli, file))
 }
 
-/// The arguments as they are with no file and no flags.
-fn defaults() -> Result<Args, String> {
-    Ok(Args {
-        file_layer: Layer::new(),
-        flag_layer: Layer::new(),
-        persona_flag: false,
-        persona: DEFAULT_PERSONA.to_owned(),
-        data_dir: PathBuf::from("clawdot-data"),
-        listen: "127.0.0.1:3335"
-            .parse()
-            .map_err(|_| "internal: bad default address".to_owned())?,
-        public_url: None,
-        zone: None,
-        create: Vec::new(),
-        rotate: Vec::new(),
-        reset_admin: false,
-        manage: false,
-        console: true,
-        echo_speech: false,
-        llm_url: None,
-        llm_model: None,
-        key_env: "OPENROUTER_API_KEY".into(),
-        persona_file: None,
-        tools: Vec::new(),
-        mcp: Vec::new(),
-        stations: Vec::new(),
-        speech: SpeechConfig::default(),
-        satellite: SatelliteConfig::default(),
-        updates: UpdatesConfig::default(),
-        device: DeviceConfig::default(),
-        #[cfg(feature = "esphome-satellite")]
-        esphome: EsphomeConfig::default(),
-        #[cfg(feature = "hive")]
-        hive: None,
-        #[cfg(feature = "hive")]
-        hive_publish_name: false,
-        voice_in: None,
-        voice_out: None,
-        quiet: None,
-        daily_spend: None,
-        actions: ActionPolicy::default(),
-        agent: AgentConfig::default(),
-    })
-}
-
-/// Apply the command-line flags over `a`, so a flag overrides the file. An empty error means help was asked for.
-fn apply_flags(a: &mut Args, argv: &[String]) -> Result<(), String> {
+/// Record the command-line flags in `cli`. An empty error means help was asked for.
+fn apply_flags(cli: &mut Cli, argv: &[String]) -> Result<(), String> {
     let mut it = argv.iter().cloned();
     while let Some(flag) = it.next() {
         let mut value = |n: &str| it.next().ok_or_else(|| format!("{n} needs a value"));
@@ -178,43 +114,36 @@ fn apply_flags(a: &mut Args, argv: &[String]) -> Result<(), String> {
             "--config" => {
                 value("--config")?;
             }
-            "--data-dir" => a.data_dir = PathBuf::from(value("--data-dir")?),
+            "--data-dir" => cli.data_dir = Some(PathBuf::from(value("--data-dir")?)),
             #[cfg(feature = "hive")]
             "--hive-discovery" => {
-                a.hive = Some(
+                cli.hive = Some(
                     crate::hive::Mode::parse(&value("--hive-discovery")?)
                         .map_err(|e| format!("bad --hive-discovery: {e}"))?,
                 );
             }
             #[cfg(feature = "hive")]
-            "--hive-publish-name" => a.hive_publish_name = true,
+            "--hive-publish-name" => cli.hive_publish_name = true,
             "--listen" => {
-                a.listen = value("--listen")?
+                let listen: SocketAddr = value("--listen")?
                     .parse()
                     .map_err(|e| format!("bad --listen: {e}"))?;
-                a.flag_layer
-                    .insert("listen".into(), a.listen.to_string().into());
+                cli.flags.insert("listen".into(), listen.to_string().into());
             }
             "--public-url" => {
-                a.flag_layer
+                cli.flags
                     .insert("public_url".into(), value("--public-url")?.into());
             }
             "--zone" => {
-                a.flag_layer.insert("zone".into(), value("--zone")?.into());
+                cli.flags.insert("zone".into(), value("--zone")?.into());
             }
             "--name" => {
-                a.flag_layer
+                cli.flags
                     .insert("device_name".into(), value("--name")?.into());
             }
-            "--create-endpoint" => {
-                a.create.push(value("--create-endpoint")?);
-                a.manage = true;
-            }
-            "--rotate-endpoint" => {
-                a.rotate.push(value("--rotate-endpoint")?);
-                a.manage = true;
-            }
-            "--reset-admin" => a.reset_admin = true,
+            "--create-endpoint" => cli.create.push(value("--create-endpoint")?),
+            "--rotate-endpoint" => cli.rotate.push(value("--rotate-endpoint")?),
+            "--reset-admin" => cli.reset_admin = true,
             "--rotate-admin-token" => {
                 return Err(
                     "--rotate-admin-token was removed: the web UI now asks for a password on first run; \
@@ -222,34 +151,31 @@ fn apply_flags(a: &mut Args, argv: &[String]) -> Result<(), String> {
                         .into(),
                 );
             }
-            "--voice-in" => a.voice_in = Some(PathBuf::from(value("--voice-in")?)),
-            "--voice-out" => a.voice_out = Some(PathBuf::from(value("--voice-out")?)),
-            "--no-console" => a.console = false,
-            "--echo-speech" => a.echo_speech = true,
+            "--voice-in" => cli.voice_in = Some(PathBuf::from(value("--voice-in")?)),
+            "--voice-out" => cli.voice_out = Some(PathBuf::from(value("--voice-out")?)),
+            "--no-console" => cli.no_console = true,
+            "--echo-speech" => cli.echo_speech = true,
             "--llm-url" => {
-                a.flag_layer
+                cli.flags
                     .insert("llm_url".into(), value("--llm-url")?.into());
             }
             "--llm-model" => {
-                a.flag_layer
+                cli.flags
                     .insert("llm_model".into(), value("--llm-model")?.into());
             }
             "--llm-key-env" => {
-                a.flag_layer
+                cli.flags
                     .insert("llm_key_env".into(), value("--llm-key-env")?.into());
             }
-            "--persona-file" => {
-                a.persona_file = Some(PathBuf::from(value("--persona-file")?));
-                a.persona_flag = true;
-            }
+            "--persona-file" => cli.persona_file = Some(PathBuf::from(value("--persona-file")?)),
             "--dry-run" => {
-                a.flag_layer.insert("dry_run".into(), true.into());
+                cli.flags.insert("dry_run".into(), true.into());
             }
             "--daily-spend-usd" => {
                 let x: f64 = value("--daily-spend-usd")?
                     .parse()
                     .map_err(|e| format!("bad number: {e}"))?;
-                a.flag_layer.insert("daily_spend_usd".into(), x.into());
+                cli.flags.insert("daily_spend_usd".into(), x.into());
             }
             other => return Err(format!("unknown option `{other}`")),
         }
@@ -268,8 +194,8 @@ mod tests {
 
     // REQ-CFG-038: flags go in their own layer, above the configuration file and saved settings.
     #[test]
-    fn good_flags_fill_the_arguments_and_the_flag_layer() {
-        let a = parse(&argv(&[
+    fn good_flags_fill_the_command_line_and_the_flag_layer() {
+        let (a, file) = parse(&argv(&[
             "--data-dir",
             "/var/lib/dot",
             "--listen",
@@ -292,30 +218,31 @@ mod tests {
             "ci",
         ]))
         .unwrap();
-        assert_eq!(a.data_dir, PathBuf::from("/var/lib/dot"));
-        assert_eq!(a.listen, "127.0.0.1:4000".parse().unwrap());
-        assert!(!a.console && a.manage && !a.reset_admin);
+        assert_eq!(a.data_dir, Some(PathBuf::from("/var/lib/dot")));
+        assert!(a.no_console && !a.reset_admin);
         assert_eq!(
-            (a.create, a.rotate),
+            (a.create.clone(), a.rotate.clone()),
             (vec!["ci:generic".into()], vec!["ci".into()])
         );
-        let f = &a.flag_layer;
+        let f = &a.flags;
         assert_eq!(f["device_name"], "Kitchen");
         assert_eq!(f["listen"], "127.0.0.1:4000");
         assert_eq!(f["zone"], "America/Chicago");
         assert_eq!(f["llm_url"], "http://127.0.0.1:1/v1");
         assert_eq!(f["daily_spend_usd"], 2.5);
         assert_eq!(f["dry_run"], true);
-        assert!(a.file_layer.is_empty());
+        // The file said nothing, so it is an empty configuration.
+        assert_eq!(file, Config::default());
     }
 
+    // The command line records only what was given: no default of the program is in it.
     #[test]
-    fn no_flags_leaves_the_defaults() {
-        let a = parse(&[]).unwrap();
-        assert_eq!(a.data_dir, PathBuf::from("clawdot-data"));
-        assert_eq!(a.listen, "127.0.0.1:3335".parse().unwrap());
-        assert!(a.console && !a.manage && a.flag_layer.is_empty());
-        assert_eq!(a.key_env, "OPENROUTER_API_KEY");
+    fn no_flags_says_nothing() {
+        let (a, file) = parse(&[]).unwrap();
+        assert_eq!(a.data_dir, None);
+        assert!(!a.no_console && a.create.is_empty() && a.rotate.is_empty());
+        assert!(a.flags.is_empty() && a.persona_file.is_none());
+        assert_eq!(a.data_dir(&file), PathBuf::from("clawdot-data"));
     }
 
     #[test]
@@ -385,16 +312,24 @@ mod tests {
         )
         .unwrap();
         let p = path.display().to_string();
-        let a = parse(&argv(&["--config", &p])).unwrap();
-        assert_eq!(a.listen, "127.0.0.1:4100".parse().unwrap());
-        assert_eq!(a.file_layer["device_name"], "Hall");
-        assert_eq!(a.create, vec!["ci".to_owned()]);
-        assert!(a.flag_layer.is_empty());
+        let (a, file) = parse(&argv(&["--config", &p])).unwrap();
+        assert_eq!(file.listen.as_deref(), Some("127.0.0.1:4100"));
+        assert_eq!(file.name.as_deref(), Some("Hall"));
+        assert_eq!(file.endpoints, vec!["ci".to_owned()]);
+        assert!(a.flags.is_empty() && a.create.is_empty());
 
-        let a = parse(&argv(&["--config", &p, "--listen", "127.0.0.1:4200"])).unwrap();
-        assert_eq!(a.listen, "127.0.0.1:4200".parse().unwrap());
-        assert_eq!(a.flag_layer["listen"], "127.0.0.1:4200");
-        assert_eq!(a.file_layer["listen"], "127.0.0.1:4100");
+        let (a, file) = parse(&argv(&["--config", &p, "--listen", "127.0.0.1:4200"])).unwrap();
+        assert_eq!(a.flags["listen"], "127.0.0.1:4200");
+        assert_eq!(file.listen.as_deref(), Some("127.0.0.1:4100"));
+    }
+
+    // A problem with the file is reported before one with a flag, as it always was.
+    #[test]
+    fn the_configuration_file_is_read_before_the_flags() {
+        let e = parse(&argv(&["--config", "/no/such/clawdot.json", "--bogus"])).unwrap_err();
+        assert!(e.starts_with("cannot read /no/such/clawdot.json"), "{e}");
+        let e = parse(&argv(&["--config", "/no/such/clawdot.json", "--help"])).unwrap_err();
+        assert!(e.starts_with("cannot read"), "{e}");
     }
 
     #[test]

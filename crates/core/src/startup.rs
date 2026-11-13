@@ -9,8 +9,9 @@ use crate::app::{Adapters, Core, Limits, Stores};
 use crate::app_loop::{App, Sources, SpeakerHandle};
 use crate::assistant::Assistant;
 use crate::audit::{AuditConfig, AuditLog};
-use crate::cli::Args;
+use crate::cli::Cli;
 use crate::commands::{announce_admin, bind_error, run_endpoint_commands, spawn_console};
+use crate::config::Config;
 use crate::connects::Connects;
 use crate::env::Env;
 use crate::extensions::Extensions;
@@ -22,6 +23,7 @@ use crate::rtvoice::{Realtime, RtSettings};
 use crate::runtime::{Brain, build_llm, settings_extra, zone_for};
 use crate::satellite::{self, Ask};
 use crate::sched::{Clock, Scheduler, SystemClock, Zone};
+use crate::seed::{Resolved, resolve};
 use crate::session::{Conversation, ToolHost};
 use crate::settings::{SettingsState, public_url_from_listen};
 use crate::speaker::{Say, Voice, speak};
@@ -66,44 +68,44 @@ struct Running {
     realtime_rx: mpsc::Receiver<crate::rtvoice::Job>,
 }
 
-/// Run the start-up sequence for `args`: settings, clock, core, management commands, brain, a recorded
-/// utterance if asked for, the bound socket, satellites, hive, the admin announcement and the server.
-pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
-    let (settings, warnings) =
-        crate::seed::resolve_settings(&mut args, &env).map_err(|e| fail(2, e))?;
+/// Run the start-up sequence for what the command line and the configuration file said: resolve the settings,
+/// then clock, core, management commands, brain, a recorded utterance if asked for, the bound socket,
+/// satellites, hive, the admin announcement and the server. Everything after the first step reads the
+/// [`Resolved`] values and changes none of them.
+pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure> {
+    let (resolved, settings, warnings) = resolve(cli, file, &env).map_err(|e| fail(2, e))?;
+    let r = &resolved;
     for w in warnings {
         eprintln!("clawdot: {w}");
     }
-    let zone = zone_for(args.zone.as_deref()).map_err(|e| fail(2, e))?;
+    let zone = zone_for(r.zone.as_deref()).map_err(|e| fail(2, e))?;
     let clock = check_clock();
-    migrate_admin_token(&args)?;
-    let core = open_core(&args, &clock, env)?;
+    migrate_admin_token(r)?;
+    let core = open_core(r, &clock, env)?;
 
-    let public = announce_public_address(&args, core.machine_name());
-    let failed = run_endpoint_commands(&core, &args.create, &args.rotate, &public);
-    if args.manage {
+    let public = announce_public_address(r, core.machine_name());
+    let failed = run_endpoint_commands(&core, &r.create, &r.rotate, &public);
+    if r.manage {
         // A management command: the token is printed; do not start a server (REQ-CFG-015).
         return Ok(Started::Done(ExitCode::from(u8::from(failed))));
     }
 
-    let stations: Vec<String> = args.stations.iter().map(|s| s.name.clone()).collect();
-    let running = build_running(&mut args, settings, zone, &clock, core).await?;
-    if let Some(input) = args.voice_in.clone() {
-        return one_utterance(running, &args, &input)
-            .await
-            .map(Started::Done);
+    let stations: Vec<String> = r.stations.iter().map(|s| s.name.clone()).collect();
+    let running = build_running(r, settings, zone, &clock, core).await?;
+    if let Some(input) = r.voice_in.clone() {
+        return one_utterance(running, r, &input).await.map(Started::Done);
     }
 
     // Bind before anything is created or printed, so a server that cannot start never reveals a token
     // (REQ-CFG-015).
-    let listener = TcpListener::bind(args.listen)
+    let listener = TcpListener::bind(r.listen)
         .await
-        .map_err(|e| fail(1, bind_error(args.listen, &e)))?;
+        .map_err(|e| fail(1, bind_error(r.listen, &e)))?;
     // Satellites (speakers) connect here; their questions come back to the loop through `asks`.
     let (ask_tx, asks) = mpsc::channel::<Ask>(8);
     let announcer = satellite::Announcer::default();
     start_satellites(
-        &args,
+        r,
         &running.core,
         running.brain.realtime(),
         &announcer,
@@ -112,13 +114,13 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
     .await
     .map_err(|e| fail(1, e))?;
     #[cfg(feature = "hive")]
-    start_hive(&args, &running.core);
+    start_hive(r, &running.core);
 
-    running.core.set_listen_ip(args.listen.ip());
+    running.core.set_listen_ip(r.listen.ip());
     announce_admin(&running.core, &public);
     println!(
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
-        args.listen,
+        r.listen,
         running.core.endpoints().len(),
         if running.brain.has_model() {
             "connected"
@@ -129,7 +131,7 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
     spawn_server(&running.core, listener);
 
     let (line_tx, lines) = mpsc::channel::<String>(8);
-    if args.console {
+    if r.console {
         spawn_console(line_tx);
         println!("clawdot: console ready. Type what you would say; \"quit\" or Ctrl-D to leave.");
     }
@@ -139,14 +141,14 @@ pub async fn start(mut args: Args, env: Env) -> Result<Started, Failure> {
         realtime: running.realtime_rx,
         asks,
         lines,
-        console: args.console,
+        console: r.console,
     };
     let speaker_task = spawn_speaker(
         &running.brain,
         &running.core,
         announcer,
-        args.console || args.echo_speech,
-        has_satellites(&args) && !args.console,
+        r.console || r.echo_speech,
+        has_satellites(r) && !r.console,
     );
     let app = App::new(
         running.brain,
@@ -173,8 +175,8 @@ fn check_clock() -> Arc<dyn Clock + Send + Sync> {
 }
 
 /// Convert an administrator token from before passwords, if one is on disk.
-fn migrate_admin_token(args: &Args) -> Result<(), Failure> {
-    match crate::admin::migrate_legacy(&args.data_dir) {
+fn migrate_admin_token(r: &Resolved) -> Result<(), Failure> {
+    match crate::admin::migrate_legacy(&r.data_dir) {
         Ok(true) => println!(
             "clawdot: the old administrator token still works: sign in with it, then set a password in the web UI"
         ),
@@ -191,7 +193,7 @@ fn migrate_admin_token(args: &Args) -> Result<(), Failure> {
 
 /// Open the core over the data directory, keeping the process environment it was started with.
 fn open_core(
-    args: &Args,
+    r: &Resolved,
     clock: &Arc<dyn Clock + Send + Sync>,
     env: Env,
 ) -> Result<Arc<Core>, Failure> {
@@ -199,20 +201,20 @@ fn open_core(
         clock.clone(),
         Adapters::builtin(),
         Limits::default(),
-        Stores::in_dir(&args.data_dir),
+        Stores::in_dir(&r.data_dir),
     )
     .map(|c| Arc::new(c.with_env(env)))
-    .map_err(|e| fail(1, format!("cannot open {}: {e}", args.data_dir.display())))
+    .map_err(|e| fail(1, format!("cannot open {}: {e}", r.data_dir.display())))
 }
 
 /// The address snippets name for this server, with a note when it is only a guess. Returns it.
-fn announce_public_address(args: &Args, machine: Option<&str>) -> String {
-    let public = args.public_url.clone().unwrap_or_default();
-    let (derived, assumed) = public_url_from_listen(args.listen, machine);
+fn announce_public_address(r: &Resolved, machine: Option<&str>) -> String {
+    let public = r.public_url.clone().unwrap_or_default();
+    let (derived, assumed) = public_url_from_listen(r.listen, machine);
     if assumed && public == derived {
         eprintln!(
             "clawdot: {} is not reachable as written, so snippets use {derived}; set the public address to change that",
-            args.listen.ip()
+            r.listen.ip()
         );
     }
     public
@@ -220,13 +222,13 @@ fn announce_public_address(args: &Args, machine: Option<&str>) -> String {
 
 /// Build the brain and hub, claim the channels that report to them, and publish what the web UI shows.
 async fn build_running(
-    args: &mut Args,
+    r: &Resolved,
     mut settings: SettingsState,
     zone: Box<dyn Zone + Send + Sync>,
     clock: &Arc<dyn Clock + Send + Sync>,
     core: Arc<Core>,
 ) -> Result<Running, Failure> {
-    let (mut brain, hub) = build_brain(args, &settings.live_values(), zone, clock, &core).await?;
+    let (mut brain, hub) = build_brain(r, &settings.live_values(), zone, clock, &core).await?;
     let realtime_rx = brain.attach_realtime();
     let mcp_rx = brain.attach_connects().ok_or_else(|| {
         fail(
@@ -237,16 +239,16 @@ async fn build_running(
 
     core.set_ui_tools(brain.listing());
     let applied = settings.live_values();
-    if let Some(url) = &args.speech.url {
+    if let Some(url) = &r.speech.url {
         core.set_speech_origin(crate::speech::SpeechOrigin::new(
             url,
-            args.speech.key_env.as_deref(),
-            args.speech.dialect(),
+            r.speech.key_env.as_deref(),
+            r.speech.dialect(),
         ));
     }
     #[cfg(feature = "tls")]
-    start_updates(args, &applied, &core);
-    settings.set_extra(settings_extra(args));
+    start_updates(r, &applied, &core);
+    settings.set_extra(settings_extra(r));
     core.set_settings(settings);
     Ok(Running {
         brain,
@@ -261,19 +263,19 @@ async fn build_running(
 /// Answer one recorded utterance and leave. There is no loop to serve meanwhile, so wait for the MCP sources
 /// to answer first, as the single turn should have their tools.
 async fn one_utterance(
-    r: Running,
-    args: &Args,
+    running: Running,
+    r: &Resolved,
     input: &std::path::Path,
 ) -> Result<ExitCode, Failure> {
     let mut app = App::one_shot(
-        r.brain,
-        r.hub,
-        r.core,
-        r.applied,
-        Sources::mcp_only(r.mcp_rx),
+        running.brain,
+        running.hub,
+        running.core,
+        running.applied,
+        Sources::mcp_only(running.mcp_rx),
     );
     app.wait_for_connections().await;
-    voice_once(&mut app, &args.speech, input, args.voice_out.as_deref())
+    voice_once(&mut app, &r.speech, input, r.voice_out.as_deref())
         .await
         .map(|()| ExitCode::SUCCESS)
         .map_err(|e| fail(1, e))
@@ -297,12 +299,12 @@ fn spawn_server(core: &Arc<Core>, listener: TcpListener) {
 }
 
 /// Whether the configuration names a satellite: a listener for them, or ESPHome devices to dial.
-fn has_satellites(args: &Args) -> bool {
+fn has_satellites(r: &Resolved) -> bool {
     #[cfg(feature = "esphome-satellite")]
-    if !args.esphome.is_empty() {
+    if !r.esphome.is_empty() {
         return true;
     }
-    args.satellite.listen.is_some()
+    r.satellite.listen.is_some()
 }
 
 /// Start the speaker task and return the loop's side of it.
@@ -336,10 +338,10 @@ fn spawn_speaker(
 }
 
 /// Open the stores and build the [`Brain`] and the per-speaker conversation [`Hub`] (REQ-AST-026) from the
-/// effective settings in `args` and the live values. Moves the tools, MCP servers and stations out of `args`.
+/// effective settings in `r` and the live values. Reads `r` and changes nothing in it.
 /// Each step fails with its own message and exit code.
 pub async fn build_brain(
-    args: &mut Args,
+    r: &Resolved,
     live: &serde_json::Map<String, serde_json::Value>,
     zone: Box<dyn Zone + Send + Sync>,
     clock: &Arc<dyn Clock + Send + Sync>,
@@ -347,29 +349,29 @@ pub async fn build_brain(
 ) -> Result<(Brain, Hub), Failure> {
     let (llm_usd_per_mtok_in, llm_usd_per_mtok_out) = crate::runtime::model_prices(live);
     let limits = UsageLimits {
-        daily_spend_cap_usd: args.daily_spend,
+        daily_spend_cap_usd: r.daily_spend,
         llm_usd_per_mtok_in,
         llm_usd_per_mtok_out,
         ..UsageLimits::default()
     };
-    let usage_store = JsonStore::new(args.data_dir.join("usage.json"), crate::usage::SCHEMA);
+    let usage_store = JsonStore::new(r.data_dir.join("usage.json"), crate::usage::SCHEMA);
     let usage = UsageTracker::load(&usage_store, limits)
         .map_err(|e| fail(1, format!("cannot load usage counters: {e}")))?;
 
     let llm = build_llm(
-        args.llm_url.as_deref(),
-        args.llm_model.as_deref(),
+        r.llm_url.as_deref(),
+        r.llm_model.as_deref(),
         core.secrets(),
         core.env(),
-        &args.key_env,
+        &r.key_env,
         limits.max_output_tokens_per_turn,
-        &args.agent,
+        &r.agent,
     )
     .map_err(|e| fail(2, e))?;
-    let persona = args.persona.clone();
-    let (audit, notes) = open_records(args, core)?;
-    let assistant = open_assistant(args, zone, clock, core)?;
-    let tools = declare_tools(args, core, &assistant)?;
+    let persona = r.persona.clone();
+    let (audit, notes) = open_records(r, core)?;
+    let assistant = open_assistant(r, zone, clock, core)?;
+    let tools = declare_tools(r, core, &assistant)?;
     let hub = make_hub(&persona, audit, notes);
 
     let ext_view = Arc::new(tools.ext.snapshot());
@@ -386,11 +388,9 @@ pub async fn build_brain(
         ext_view,
         builtin: tools.builtin,
         persona,
-        agent: args.agent.clone(),
-        hardware: crate::hardware::detected()
-            .clone()
-            .with_device(&args.device),
-        voice_configured: args.speech.url.is_some() && args.speech.tts_model.is_some(),
+        agent: r.agent.clone(),
+        hardware: crate::hardware::detected().clone().with_device(&r.device),
+        voice_configured: r.speech.url.is_some() && r.speech.tts_model.is_some(),
         rt: Realtime::with_env_and_secrets(
             RtSettings::from_live(live),
             core.env().lookup(),
@@ -407,12 +407,12 @@ pub async fn build_brain(
 }
 
 /// Open the audit log and the notes, hand them to the core, and return the handles every conversation shares.
-fn open_records(args: &Args, core: &Core) -> Result<(Arc<AuditLog>, Arc<NoteStore>), Failure> {
+fn open_records(r: &Resolved, core: &Core) -> Result<(Arc<AuditLog>, Arc<NoteStore>), Failure> {
     // Every action is recorded in the data directory and held to the daily caps (REQ-SEC-014..016).
     let audit = AuditLog::open(
-        &args.data_dir,
+        &r.data_dir,
         AuditConfig {
-            policy: args.actions,
+            policy: r.actions,
             ..AuditConfig::default()
         },
     )
@@ -420,45 +420,42 @@ fn open_records(args: &Args, core: &Core) -> Result<(Arc<AuditLog>, Arc<NoteStor
     .map_err(|e| {
         fail(
             1,
-            format!(
-                "cannot open the audit log in {}: {e}",
-                args.data_dir.display()
-            ),
+            format!("cannot open the audit log in {}: {e}", r.data_dir.display()),
         )
     })?;
     audit.set_writer(core.writer());
     let audit_for_conv = Arc::clone(&audit);
     core.set_audit(audit);
-    core.set_quiet_hours(args.quiet);
+    core.set_quiet_hours(r.quiet);
     // Notes the user asks for (REQ-AST-023); off unless the `agent` section turns them on.
     let notes = NoteStore::open(
         crate::lang::DEFAULT,
-        &args.data_dir,
-        args.agent.notes.unwrap_or(false),
+        &r.data_dir,
+        r.agent.notes.unwrap_or(false),
     )
     .map(Arc::new)
     .map_err(|e| {
         fail(
             1,
-            format!("cannot open the notes in {}: {e}", args.data_dir.display()),
+            format!("cannot open the notes in {}: {e}", r.data_dir.display()),
         )
     })?;
     let notes_for_conv = Arc::clone(&notes);
     core.set_notes(notes);
-    if args.actions.dry_run {
+    if r.actions.dry_run {
         eprintln!("clawdot: dry-run mode: actions are described and recorded, not run");
     }
     Ok((audit_for_conv, notes_for_conv))
 }
 
-/// Load the timers and build the assistant with its built-in tools. Takes the stations out of `args`.
+/// Load the timers and build the assistant with its built-in tools.
 fn open_assistant(
-    args: &mut Args,
+    r: &Resolved,
     zone: Box<dyn Zone + Send + Sync>,
     clock: &Arc<dyn Clock + Send + Sync>,
     core: &Arc<Core>,
 ) -> Result<Assistant, Failure> {
-    let sched_store = JsonStore::new(args.data_dir.join("timers.json"), crate::sched::SCHEMA);
+    let sched_store = JsonStore::new(r.data_dir.join("timers.json"), crate::sched::SCHEMA);
     let sched = Scheduler::load(&sched_store, 64, &**clock)
         .map_err(|e| fail(1, format!("cannot load timers: {e}")))?;
     Ok(Assistant::new(
@@ -469,7 +466,7 @@ fn open_assistant(
         Some(sched_store),
         Some(Arc::clone(core)),
     )
-    .with_stations(std::mem::take(&mut args.stations)))
+    .with_stations(r.stations.clone()))
 }
 
 /// The tools beyond the built-in ones, and the MCP connections to make.
@@ -481,22 +478,22 @@ struct Tools {
     connects: Connects,
 }
 
-/// Load the portal's saved tools and skills, define the HTTP tools, and declare the MCP sources. Takes the
-/// tool and server definitions out of `args`.
-fn declare_tools(args: &mut Args, core: &Core, assistant: &Assistant) -> Result<Tools, Failure> {
+/// Load the portal's saved tools and skills, define the HTTP tools, and declare the MCP sources from the
+/// definitions in `r`.
+fn declare_tools(r: &Resolved, core: &Core, assistant: &Assistant) -> Result<Tools, Failure> {
     let builtin: Vec<String> = ToolHost::tool_specs(assistant)
         .into_iter()
         .map(|t| t.name)
         .collect();
     // What the portal saved (tools, connections, skills) loads after what the configuration file defines.
-    let mut ext = Extensions::open(&args.data_dir).map_err(|e| {
+    let mut ext = Extensions::open(&r.data_dir).map_err(|e| {
         fail(
             1,
             format!("cannot load the portal's saved tools and skills: {e}"),
         )
     })?;
-    let mut tool_defs = std::mem::take(&mut args.tools);
-    let mut server_defs = std::mem::take(&mut args.mcp);
+    let mut tool_defs = r.tools.clone();
+    let mut server_defs = r.mcp.clone();
     ext.set_config(
         tool_defs.iter().map(|t| t.name.clone()),
         server_defs.iter().map(|s| s.name.clone()),
@@ -540,10 +537,10 @@ fn make_hub(persona: &str, audit: Arc<AuditLog>, notes: Arc<NoteStore>) -> Hub {
 
 /// Start the optional update check (`tls` builds only); a failure is reported and the speaker carries on.
 #[cfg(feature = "tls")]
-pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Value>, core: &Core) {
+pub fn start_updates(r: &Resolved, live: &serde_json::Map<String, serde_json::Value>, core: &Core) {
     match crate::update::UpdateConfig::new(
-        args.updates.url.as_deref(),
-        args.updates.public_key.as_deref(),
+        r.updates.url.as_deref(),
+        r.updates.public_key.as_deref(),
         core.env(),
     ) {
         Ok(cfg) => {
@@ -560,7 +557,7 @@ pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Val
                 }
                 std::process::exit(code);
             });
-            match crate::update::start(cfg, on, Some(args.data_dir.clone()), stop) {
+            match crate::update::start(cfg, on, Some(r.data_dir.clone()), stop) {
                 Ok(u) => core.set_updater(u),
                 Err(e) => crate::diag::error(&format!("updates are not available: {e}")),
             }
@@ -572,7 +569,7 @@ pub fn start_updates(args: &Args, live: &serde_json::Map<String, serde_json::Val
 /// What every kind of satellite shares: the speech to text and text to speech clients (registered for the
 /// portal's status), and the settings that carry the announcer, the realtime voice and the follow-up window.
 fn satellite_parts(
-    args: &Args,
+    r: &Resolved,
     core: &Core,
     rt: &Realtime,
     announcer: &satellite::Announcer,
@@ -584,40 +581,36 @@ fn satellite_parts(
     ),
     String,
 > {
-    let (stt, tts) = build_registered_speech(
-        &args.speech,
-        core.secrets(),
-        core.env(),
-        core.speech_handles(),
-    )?;
+    let (stt, tts) =
+        build_registered_speech(&r.speech, core.secrets(), core.env(), core.speech_handles())?;
     let mut settings = satellite::Settings {
         announcer: announcer.clone(),
         realtime: Some(rt.clone()),
         lang: crate::lang::DEFAULT,
         ..satellite::Settings::default()
     };
-    if let Some(s) = args.satellite.follow_up_secs {
+    if let Some(s) = r.satellite.follow_up_secs {
         settings.dialog.follow_up_secs = s;
     }
-    settings.dialog.vad = args.satellite.listening.apply(settings.dialog.vad);
+    settings.dialog.vad = r.satellite.listening.apply(settings.dialog.vad);
     Ok((Arc::new(stt), Arc::new(tts), settings))
 }
 
 /// Start the satellite listener (`satellite.listen`) and the ESPHome satellites, when configured. Their
 /// questions come back through `ask_tx`. The error is the message to print.
 pub async fn start_satellites(
-    args: &Args,
+    r: &Resolved,
     core: &Arc<Core>,
     rt: &Realtime,
     announcer: &satellite::Announcer,
     ask_tx: &mpsc::Sender<Ask>,
 ) -> Result<(), String> {
-    if let Some(listen) = &args.satellite.listen {
+    if let Some(listen) = &r.satellite.listen {
         let addr: SocketAddr = listen
             .parse()
             .map_err(|e| format!("satellite.listen: {e}"))?;
-        let (stt, tts, mut settings) = satellite_parts(args, core, rt, announcer)?;
-        if let Some(var) = &args.satellite.token_env {
+        let (stt, tts, mut settings) = satellite_parts(r, core, rt, announcer)?;
+        if let Some(var) = &r.satellite.token_env {
             let token = core.env().get(var).unwrap_or_default();
             if token.is_empty() {
                 return Err(format!(
@@ -657,40 +650,32 @@ pub async fn start_satellites(
 
     // ESPHome voice satellites (optional feature; spec 0004) share the satellite pipeline and announcer.
     #[cfg(feature = "esphome-satellite")]
-    if !args.esphome.is_empty() {
-        let (stt, tts, settings) = satellite_parts(args, core, rt, announcer)?;
-        crate::esphome::start(
-            &args.esphome,
-            core.env(),
-            stt,
-            tts,
-            ask_tx.clone(),
-            settings,
-        )
-        .await?;
+    if !r.esphome.is_empty() {
+        let (stt, tts, settings) = satellite_parts(r, core, rt, announcer)?;
+        crate::esphome::start(&r.esphome, core.env(), stt, tts, ask_tx.clone(), settings).await?;
     }
     Ok(())
 }
 
 /// Hive milestone H0: identity and discovery. A failure is reported and the speaker carries on without it.
 #[cfg(feature = "hive")]
-pub fn start_hive(args: &Args, core: &Core) {
-    if let Some(mode) = args.hive.clone() {
+pub fn start_hive(r: &Resolved, core: &Core) {
+    if let Some(mode) = r.hive.clone() {
         let opts = crate::hive::Options {
             mode,
-            port: args.listen.port(),
-            addr: match args.listen.ip() {
+            port: r.listen.port(),
+            addr: match r.listen.ip() {
                 std::net::IpAddr::V4(a) if !a.is_unspecified() => Some(a),
                 _ => None,
             },
-            publish_name: args.hive_publish_name,
+            publish_name: r.hive_publish_name,
             name: core
                 .setting("device_name")
                 .as_str()
                 .unwrap_or("ClawDot")
                 .to_owned(),
         };
-        let started = crate::hive::start(&args.data_dir, &opts);
+        let started = crate::hive::start(&r.data_dir, &opts);
         if let Some(e) = started.problem {
             eprintln!("clawdot: hive: {e}");
         }

@@ -163,10 +163,17 @@ impl App {
         self
     }
 
-    /// Serve events until the terminal asks to leave.
-    pub async fn run(mut self) -> ExitCode {
+    /// Serve events until the terminal asks to leave, or until `stop` completes (a stop signal, see
+    /// [`crate::shutdown`]). A stop does the same orderly exit as `quit`: the usage counters are queued and every
+    /// queued write is waited for, but only for [`crate::shutdown::FLUSH_LIMIT`] (REQ-CFG-085).
+    pub async fn run(mut self, stop: impl std::future::Future<Output = ()>) -> ExitCode {
+        tokio::pin!(stop);
         loop {
             let flow = tokio::select! {
+                () = &mut stop => {
+                    self.stop_on_signal();
+                    Flow::Exit
+                }
                 Some(job) = self.sources.portal.recv() => {
                     self.on_portal_job(job).await;
                     Flow::Continue
@@ -274,6 +281,20 @@ impl App {
     fn save_all(&self) {
         self.brain.save_usage();
         self.core.flush_blocking();
+    }
+
+    /// The orderly stop for a signal: [`App::save_all`] with a bound on the wait. When the writes are not on disk
+    /// by then the program leaves at once without running the destructors, since the writer's would wait for the
+    /// same disk, and says so.
+    pub(crate) fn stop_on_signal(&self) {
+        self.brain.save_usage();
+        if !self.core.flush_within(crate::shutdown::FLUSH_LIMIT) {
+            eprintln!(
+                "clawdot: stopping with changes not yet written: the disk did not answer within {} seconds",
+                crate::shutdown::FLUSH_LIMIT.as_secs()
+            );
+            std::process::exit(0);
+        }
     }
 }
 

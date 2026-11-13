@@ -11,8 +11,8 @@ type Map = serde_json::Map<String, serde_json::Value>;
 async fn started(dir: &TempDir, extra: &[&str]) -> (Brain, Arc<Core>, Map) {
     let mut argv = vec!["--data-dir".to_owned(), dir.0.display().to_string()];
     argv.extend(extra.iter().map(|s| (*s).to_owned()));
-    let mut args = cli::parse(&argv).unwrap();
-    let (state, _) = seed::resolve_settings(&mut args, &crate::env::Env::empty()).unwrap();
+    let (cli, file) = cli::parse(&argv).unwrap();
+    let (args, state, _) = seed::resolve(cli, file, &crate::env::Env::empty()).unwrap();
     let live = state.live_values();
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
     let core = Arc::new(
@@ -25,7 +25,7 @@ async fn started(dir: &TempDir, extra: &[&str]) -> (Brain, Arc<Core>, Map) {
         .unwrap(),
     );
     let zone = zone_for(None).unwrap();
-    let (brain, _hub) = build_brain(&mut args, &live, zone, &clock, &core)
+    let (brain, _hub) = build_brain(&args, &live, zone, &clock, &core)
         .await
         .unwrap();
     (brain, core, live)

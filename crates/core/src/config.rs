@@ -4,12 +4,12 @@
 //! Unknown keys are errors, so a typo is reported at startup instead of silently ignored. Secrets are never
 //! stored here: the provider key comes from an environment variable named by `llm.key_env`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Language-model settings.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LlmConfig {
     /// OpenAI-compatible base URL, for example `https://openrouter.ai/api/v1`.
@@ -25,7 +25,7 @@ pub struct LlmConfig {
 }
 
 /// Usage caps.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
     /// Retired: there is no cap on the number of requests any more. Still accepted so an older file loads, and ignored.
@@ -42,7 +42,7 @@ pub struct LimitsConfig {
 
 /// How a turn behaves (REQ-AST-019 to REQ-AST-025). Every value can be lowered; a value above the ceiling is
 /// clamped to it.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     /// Most model rounds in one turn (default 8, ceiling 20).
@@ -64,7 +64,7 @@ pub struct AgentConfig {
 }
 
 /// Update checks (REQ-UPD-001 to REQ-UPD-010).
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct UpdatesConfig {
     /// Look for a newer release about once a day (default true; the person can change it in the portal).
@@ -77,7 +77,7 @@ pub struct UpdatesConfig {
 }
 
 /// Speech-to-text and text-to-speech provider (OpenAI-compatible).
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechConfig {
     /// Whose wire format to speak: `openai` (the default, and every OpenAI-compatible server), `elevenlabs` or
@@ -102,7 +102,7 @@ pub struct SpeechConfig {
 /// Optional realtime (speech-to-speech) voice (ADR-0020, REQ-RTV-008). Needs a build with the `realtime`
 /// feature. The key is never here: it is read from the environment variable `key_env` names, or the key pasted
 /// into the portal.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RealtimeSection {
     /// Use realtime voice for a turn after the wake word (default false).
@@ -129,7 +129,7 @@ pub struct RealtimeSection {
 }
 
 /// Voice settings beyond the speech provider.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceConfig {
     /// Realtime voice (optional feature `realtime`).

@@ -35,8 +35,8 @@ async fn rig(dir: &TempDir, extra: &[&str]) -> Rig {
 async fn rig_with(dir: &TempDir, extra: &[&str], clock: Arc<dyn Clock + Send + Sync>) -> Rig {
     let mut argv = vec!["--data-dir".to_owned(), dir.0.display().to_string()];
     argv.extend(extra.iter().map(|s| (*s).to_owned()));
-    let mut args = cli::parse(&argv).unwrap();
-    let (state, _) = seed::resolve_settings(&mut args, &crate::env::Env::empty()).unwrap();
+    let (cli, file) = cli::parse(&argv).unwrap();
+    let (args, state, _) = seed::resolve(cli, file, &crate::env::Env::empty()).unwrap();
     let live = state.live_values();
     let core = Arc::new(
         Core::open(
@@ -48,7 +48,7 @@ async fn rig_with(dir: &TempDir, extra: &[&str], clock: Arc<dyn Clock + Send + S
         .unwrap(),
     );
     let zone = crate::runtime::zone_for(None).unwrap();
-    let (brain, hub) = build_brain(&mut args, &live, zone, &clock, &core)
+    let (brain, hub) = build_brain(&args, &live, zone, &clock, &core)
         .await
         .unwrap();
     let (usage, usage_store) = brain.usage_handles();
