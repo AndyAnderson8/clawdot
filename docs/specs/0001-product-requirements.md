@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.61 |
+| **Version** | 0.62 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -481,3 +481,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.59 | 2026-11-12 | REQ-CFG-085: SIGTERM, SIGINT and Ctrl-C end the program with the same orderly stop as `quit`, with a bounded wait for queued writes. |
 | 0.60 | 2026-11-11 | REQ-TMR-015: rung lines that are waiting for a satellite are saved, so a restart does not lose them |
 | 0.61 | 2026-11-11 | REQ-TMR-011, REQ-TMR-012: the stopwatch is measured on the monotonic clock while the program runs, so a step of the wall clock no longer changes it; the time the program was off is added at load only from a wall clock that is valid, was valid at the save and is not behind it; the clock-went-back refusal is removed |
+| 0.62 | 2026-11-11 | REQ-SEC-011: a call that needs no hold runs even after a hold in the same batch, in every path, and a call that would itself be held is refused. REQ-SEC-012: ask_user is not offered to the model in a turn the user did not start |
