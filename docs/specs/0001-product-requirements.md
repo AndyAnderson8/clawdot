@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.63 |
+| **Version** | 0.64 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -483,3 +483,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.61 | 2026-11-11 | REQ-TMR-011, REQ-TMR-012: the stopwatch is measured on the monotonic clock while the program runs, so a step of the wall clock no longer changes it; the time the program was off is added at load only from a wall clock that is valid, was valid at the save and is not behind it; the clock-went-back refusal is removed |
 | 0.62 | 2026-11-11 | REQ-SEC-011: a call that needs no hold runs even after a hold in the same batch, in every path, and a call that would itself be held is refused. REQ-SEC-012: ask_user is not offered to the model in a turn the user did not start |
 | 0.63 | 2026-11-11 | REQ-TMR-009: the portal and its API set a reminder after a delay (seconds) as well as at a time, and accept the first with the clock unset |
+| 0.64 | 2026-11-11 | REQ-VOI-025: the stop-while-working window follows the tuned no-speech value, at most 4 seconds. REQ-SEC-001: IPv6 link-local addresses count as private. REQ-CFG-009: a hive peer is listed under the packet source address and an advertised address record is ignored. REQ-UPD-004: the release file is named from the build target, so an ARMv6 build looks for a file no release carries |
