@@ -42,15 +42,19 @@ function whenWords(tier: string): string {
 function WhenItRuns(props: { t: Tool }): JSX.Element {
   const { t } = props;
   const id = "tier-" + t.name;
-  const pick = async (to: string) => {
+  // The box shows the pick at once, so a pick that is declined or does not save is put back to the real level.
+  const pick = async (sel: HTMLSelectElement) => {
+    const to = sel.value;
     const warn = relaxWarning(t.name, t.tier ?? "costly", to);
-    if (warn && !(await ask(warn, "Change it"))) return;
-    void change(
-      "POST",
-      "/api/tools/" + t.name + "/tier",
-      { tier: to === "" ? null : to },
-      to === "" ? "Back to the usual level." : "Saved. It applies from the next request.",
-    );
+    const saved =
+      !(warn && !(await ask(warn, "Change it"))) &&
+      (await change(
+        "POST",
+        "/api/tools/" + t.name + "/tier",
+        { tier: to === "" ? null : to },
+        to === "" ? "Back to the usual level." : "Saved. It applies from the next request.",
+      ));
+    if (!saved) sel.value = t.tier ?? "";
   };
   if (!(t.tier && t.tier_options?.length)) {
     return (
@@ -64,7 +68,7 @@ function WhenItRuns(props: { t: Tool }): JSX.Element {
       <label class="sr" for={id}>
         How {t.name} runs
       </label>
-      <select id={id} class="whensel" value={t.tier} onChange={(e) => pick(e.currentTarget.value)}>
+      <select id={id} class="whensel" value={t.tier} onChange={(e) => void pick(e.currentTarget)}>
         {(t.tier_options ?? []).map((o) => (
           <option key={o} value={o}>
             {whenWords(o)}

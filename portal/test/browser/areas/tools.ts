@@ -19,6 +19,7 @@ export async function toolsSourcesSkills(c: Ctx): Promise<void> {
     await b.ev(`window.__answer = () => false`);
     await T(`set('#tier-set_light', 'read_only')`);
     assert.ok(!mock.log.some((l) => l.path === "/api/tools/set_light/tier"), "declining the warning sends nothing");
+    await eq(`T.q('#tier-set_light').value`, "costly", "declining puts the box back to the real level");
     await b.ev(`window.__answer = () => true`);
     await T(`set('#tier-set_light', 'reversible')`);
     await b.until(
