@@ -80,6 +80,23 @@ pub(crate) fn host_is_ours(host_header: &str, public_url: &str, machine: Option<
     host == machine || host == first || host == format!("{first}.local")
 }
 
+/// The name other machines on the network use for this one, as printed in snippets (REQ-CFG-016): the first label
+/// of the machine's host name with `.local` added, which is what mDNS answers for (the same form `host_is_ours`
+/// accepts). `clawdot.local` only when the machine's name is not known or is not a usable name.
+#[must_use]
+pub(crate) fn local_name(machine: Option<&str>) -> String {
+    machine
+        .and_then(host_of)
+        .filter(|h| h.parse::<IpAddr>().is_err())
+        .and_then(|h| h.split('.').next().map(str::to_owned))
+        .filter(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+        .map_or_else(|| "clawdot.local".to_owned(), |l| format!("{l}.local"))
+}
+
 /// The machine's host name, from the system's host name files and then the start-up `env` snapshot (`None` when it
 /// cannot be found, so only the other forms match). Called once at start-up (`Core::with_env`); the request path uses
 /// the kept value and does no file or environment access.
@@ -199,5 +216,27 @@ mod tests {
         assert!(yes("dot.local"));
         assert!(!yes("example.lan"));
         assert!(!host_is_ours("dot", "", None), "no machine name, no match");
+    }
+
+    // REQ-CFG-016: the printed name is the first label plus .local, which the portal also answers to.
+    #[test]
+    fn the_printed_local_name_is_the_first_label_or_the_default() {
+        assert_eq!(local_name(Some("Dot.Example.Lan")), "dot.local");
+        assert_eq!(local_name(Some("kitchen-pi")), "kitchen-pi.local");
+        assert!(host_is_ours(
+            &local_name(Some("Dot.Example.Lan")),
+            "",
+            Some("Dot.Example.Lan")
+        ));
+        for unusable in [
+            None,
+            Some(""),
+            Some("."),
+            Some("192.168.1.5"),
+            Some("a b"),
+            Some("my_box"),
+        ] {
+            assert_eq!(local_name(unusable), "clawdot.local", "{unusable:?}");
+        }
     }
 }

@@ -27,7 +27,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 |---|---|---|
 | `data_dir` | Where state is kept | `./clawdot-data` |
 | `listen` | HTTP address; bind to the LAN only (REQ-CFG-005) | `127.0.0.1:3335` |
-| `public_url` | URL printed in integration snippets | derived from `listen` (`0.0.0.0` and `[::]` become `clawdot.local`) |
+| `public_url` | URL printed in integration snippets | derived from `listen` (`0.0.0.0` and `[::]` become the machine's own name with `.local`, for example `kitchen.local`, or `clawdot.local` when the name is not known) |
 | `zone` | IANA time zone | UTC |
 | `name` | Device name shown in the portal header | the host name |
 | `persona_file` | Replaces the default system prompt | built-in persona |

@@ -416,6 +416,10 @@ fn the_public_address_follows_the_listen_address_until_set() {
     assert_eq!(st.get("public_url"), "http://127.0.0.1:3335");
     st.change(&json!({"listen": "0.0.0.0:4000"})).unwrap();
     assert_eq!(st.get("public_url"), "http://clawdot.local:4000");
+    // With the machine's name known, the derived address uses it, and that is not a change needing a restart.
+    st.set_machine_name(Some("Speaker.Example.Lan"));
+    assert_eq!(st.get("public_url"), "http://speaker.local:4000");
+    assert_eq!(st.json()["restart_needed"], json!([]));
     st.change(&json!({"public_url": "http://dot.local:4000/"}))
         .unwrap();
     assert_eq!(st.get("public_url"), "http://dot.local:4000");
