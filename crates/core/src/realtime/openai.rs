@@ -74,6 +74,22 @@ impl Dialect for OpenAi {
         })
     }
 
+    fn tools_update(&self, tools: &[ToolSpec]) -> Value {
+        json!({
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "tools": tools.iter().map(|t| json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })).collect::<Vec<_>>(),
+                "tool_choice": "auto",
+            }
+        })
+    }
+
     fn audio_append(&self, pcm: &[u8]) -> Value {
         json!({"type": "input_audio_buffer.append", "audio": b64::encode(pcm)})
     }

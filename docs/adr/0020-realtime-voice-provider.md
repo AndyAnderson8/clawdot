@@ -35,7 +35,7 @@ Forces:
 **Negative and limits:**
 - Audio leaves the device while the user speaks, to a third party, for the whole session (the microphone streams continuously while a session is open). The guide says so.
 - The host's question for a held action is spoken by the realtime model from an instruction ("say exactly this"). The model could word it differently. What runs is still exactly the stored action, but a paraphrased read-back could mislead. Speaking the host's text with ClawDot's own text to speech is future work.
-- The user's transcript arrives after the model starts replying. If the model calls a function before the transcript of the user's "yes" arrives, a held action is dropped as an unrelated request and the user has to ask again. This fails safe.
+- The user's transcript arrives after the model starts replying. If the model calls a function before the transcript of the user's "yes" arrives, the held action stays held (a read-only call runs, a call that would need holding is refused) until the transcript answers it or 120 seconds pass. Nothing runs without the yes.
 - No stop-word handling during a reply beyond the provider's own interruption.
 - At the time of this ADR it has not been run against the real service; only against a fake server that follows the documented events. The protocol assumptions that are not verified are listed in the guide.
 
