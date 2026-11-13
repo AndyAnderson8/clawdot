@@ -1,6 +1,7 @@
 //! Tests of the portal's JSON API against a real listener (REQ-CFG-005, 027, 029, 030).
 #![allow(clippy::unwrap_used)]
 
+use super::page::{PAGE, PAGE_GZ, accepts_gzip};
 use super::*;
 use crate::app::{Adapters, Limits};
 use crate::assistant::Assistant;
