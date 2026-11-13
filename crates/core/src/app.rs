@@ -3,6 +3,7 @@
 //! testable without sockets or audio.
 
 use crate::admin::{Admin, AdminError, Mode as AdminMode};
+use crate::inbox::Moment;
 use crate::inbox::adapter::Adapter;
 use crate::inbox::endpoint::{self, Endpoint, Endpoints, QuietHours};
 use crate::inbox::event::{Event, EventState};
@@ -304,11 +305,12 @@ impl Core {
         stores: Stores,
     ) -> Result<Self, StoreError> {
         let endpoints: Endpoints = stores.endpoints.load()?;
-        let inbox = Inbox::load(&stores.inbox, InboxLimits::default())?;
+        let inbox = Inbox::load(&stores.inbox, InboxLimits::default(), &*clock)?;
         let replies = ReplyQueue::load(
             &stores.replies,
             limits.max_pending_replies,
             limits.reply_ttl_secs,
+            &*clock,
         )?;
         let admin = crate::admin::Admin::open(stores.admin.clone())?;
         let mut core = Self::build(
@@ -512,10 +514,10 @@ impl Core {
             self.queue_write(&s.endpoints, s.endpoints.encode(&inner.endpoints));
         }
         if dirty.inbox {
-            self.queue_write(&s.inbox, inner.inbox.encode(&s.inbox));
+            self.queue_write(&s.inbox, inner.inbox.encode(&s.inbox, &*self.clock));
         }
         if dirty.replies {
-            self.queue_write(&s.replies, inner.replies.encode(&s.replies));
+            self.queue_write(&s.replies, inner.replies.encode(&s.replies, &*self.clock));
         }
     }
 
@@ -718,7 +720,7 @@ impl Core {
             serde_json::from_slice(body).map_err(|_| HookError::BadJson)?;
         let adapter = self.adapters.get(&ep.adapter).ok_or(HookError::NoAdapter)?;
         let mapped = adapter.map(&payload).ok_or(HookError::Unmappable)?;
-        let outcome = match g.inbox.ingest(now, &ep, mapped) {
+        let outcome = match g.inbox.ingest(Moment { wall: now, mono }, &ep, mapped) {
             Ingest::Accepted(id) => HookOutcome::Accepted(id),
             Ingest::Coalesced(id) => HookOutcome::Coalesced(id),
             Ingest::Filtered(r) => HookOutcome::Filtered(r),
@@ -743,10 +745,10 @@ impl Core {
         peer: IpAddr,
         after: u64,
     ) -> Result<Vec<Reply>, HookError> {
-        let (now, mono) = (self.clock.now(), self.clock.monotonic_secs());
+        let mono = self.clock.monotonic_secs();
         let mut g = self.lock();
         let ep = self.authenticate(&mut g, name, token, peer, mono)?;
-        g.replies.expire(now);
+        g.replies.expire(Moment::of(&*self.clock));
         Ok(g.replies
             .pending_for(&ep.name, after)
             .into_iter()
@@ -1130,7 +1132,7 @@ impl Core {
         device_idle: bool,
         minute_of_day: u16,
     ) -> Option<NextAnnouncement> {
-        let now = self.clock.now();
+        let now = Moment::of(&*self.clock);
         let g = self.lock();
         let plan = g
             .inbox
@@ -1212,7 +1214,7 @@ impl Core {
         kind: ReplyKind,
         text: &str,
     ) -> Result<Replied, ReplyError> {
-        let now = self.clock.now();
+        let now = Moment::of(&*self.clock);
         // A question an agent asked out loud (REQ-EXT-012): the answer goes to the one waiting caller, as
         // data, and to no bridge.
         let end = if kind == ReplyKind::Ack {
@@ -1262,12 +1264,12 @@ impl Core {
 
     /// Postpone the current event.
     pub fn snooze_current(&self, secs: i64) -> bool {
-        let now = self.clock.now();
+        let now = Moment::of(&*self.clock);
         let mut g = self.lock();
         let Some(id) = g.inbox.reply_target().map(|e| e.id) else {
             return false;
         };
-        let done = g.inbox.snooze(id, now.saturating_add(secs));
+        let done = g.inbox.snooze(id, now, secs);
         self.persist(&g, Dirty::INBOX);
         done
     }
@@ -1292,7 +1294,7 @@ impl Core {
 
     /// Housekeeping: drop expired replies and old handled events.
     pub fn maintain(&self) {
-        let now = self.clock.now();
+        let now = Moment::of(&*self.clock);
         let mut g = self.lock();
         let expired = g.replies.expire(now);
         let pruned = g.inbox.prune(now, 24 * 3600);

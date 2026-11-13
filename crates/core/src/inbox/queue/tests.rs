@@ -1,5 +1,6 @@
 use super::*;
 use crate::inbox::endpoint::QuietHours;
+use crate::sched::testclock::StepClock;
 use crate::store::testutil::TempDir;
 
 fn mapped(kind: EventKind, priority: Priority, title: &str, session: Option<&str>) -> Mapped {
@@ -461,7 +462,7 @@ fn a_reply_goes_to_the_event_spoken_last_not_the_one_that_arrived_last() {
     ) else {
         panic!("accepted")
     };
-    inbox.snooze(old, 10);
+    inbox.snooze(old, 4, 6);
     inbox.mark_announced(&[newer]);
     inbox.mark_announced(&[old]);
     assert_eq!(inbox.reply_target().unwrap().id, old);
@@ -505,7 +506,7 @@ fn announcing_acknowledging_dismissing_and_snoozing() {
     let plan = inbox.plan(10, true, 600, &eps).unwrap();
     inbox.mark_announced(&[plan.lead]);
     assert_eq!(inbox.reply_target().unwrap().id, plan.lead);
-    assert!(inbox.snooze(plan.lead, 1000));
+    assert!(inbox.snooze(plan.lead, 10, 990));
     assert_eq!(
         inbox.plan(10, true, 600, &eps).unwrap().lead,
         2,
@@ -598,8 +599,9 @@ fn the_inbox_survives_a_restart() {
             Some("s"),
         ),
     );
-    inbox.save(&store).unwrap();
-    let mut restored = Inbox::load(&store, InboxLimits::default()).unwrap();
+    let clock = StepClock::at(1_800_000_000);
+    inbox.save(&store, &clock).unwrap();
+    let mut restored = Inbox::load(&store, InboxLimits::default(), &clock).unwrap();
     assert_eq!(restored.events().len(), 1);
     assert_eq!(
         restored.ingest(
@@ -609,5 +611,211 @@ fn the_inbox_survives_a_restart() {
         ),
         Ingest::Accepted(2),
         "ids keep counting"
+    );
+}
+
+// ---- durations are monotonic; calendar points are wall time (REQ-INB-004, REQ-INB-014, REQ-INB-023) ----
+
+/// Five years, in seconds: what the network time arriving on a device with no battery clock can add.
+const JUMP: i64 = 5 * 365 * 86_400;
+const T0: Ts = 1_800_000_000;
+
+fn at(wall: Ts, mono: i64) -> Moment {
+    Moment { wall, mono }
+}
+
+fn with_ttl(ttl: i64) -> Mapped {
+    Mapped {
+        ttl_secs: Some(ttl),
+        ..mapped(EventKind::Info, Priority::Normal, "ttl", None)
+    }
+}
+
+// REQ-INB-023
+#[test]
+fn a_time_to_live_runs_on_the_monotonic_clock() {
+    let (mut inbox, eps) = setup();
+    inbox.ingest(at(100, 1000), &ep(&eps), with_ttl(600));
+    // The wall clock jumps forward by years while ten seconds pass: the event has not expired.
+    let after_jump = at(100 + JUMP, 1010);
+    assert_eq!(inbox.expire(after_jump), 0);
+    assert!(inbox.plan(after_jump, true, 600, &eps).is_some());
+    // And a jump backward does not keep it alive once its time has passed.
+    assert_eq!(inbox.expire(at(5, 1601)), 1);
+}
+
+// REQ-INB-023
+#[test]
+fn a_snooze_runs_on_the_monotonic_clock() {
+    let (mut inbox, eps) = setup();
+    let e = ep(&eps);
+    inbox.ingest(
+        at(100, 1000),
+        &e,
+        mapped(EventKind::Done, Priority::Normal, "a", Some("a")),
+    );
+    inbox.mark_announced(&[1]);
+    assert!(inbox.snooze(1, at(100, 1000), 300));
+    assert!(
+        inbox.plan(at(100 + JUMP, 1010), true, 600, &eps).is_none(),
+        "a jump of the wall clock does not bring it back early"
+    );
+    assert!(
+        inbox.plan(at(100, 1300), true, 600, &eps).is_some(),
+        "and a wall clock that went back does not hold it"
+    );
+}
+
+// REQ-INB-014
+#[test]
+fn the_coalesce_window_runs_on_the_monotonic_clock() {
+    let (mut inbox, eps) = setup();
+    let e = ep(&eps);
+    let hook = |t: &str| mapped(EventKind::Done, Priority::Normal, t, Some("s1"));
+    assert_eq!(
+        inbox.ingest(at(100, 1000), &e, hook("t1")),
+        Ingest::Accepted(1)
+    );
+    assert_eq!(
+        inbox.ingest(at(100 + JUMP, 1010), &e, hook("t2")),
+        Ingest::Coalesced(1),
+        "ten seconds apart, whatever the wall clock says"
+    );
+    assert_eq!(
+        inbox.ingest(at(100 + JUMP, 1011 + 30), &e, hook("t3")),
+        Ingest::Accepted(2),
+        "outside the window"
+    );
+    assert_eq!(
+        inbox.get(1).unwrap().received_at,
+        100 + JUMP,
+        "the time shown is the wall time"
+    );
+}
+
+// REQ-INB-004
+#[test]
+fn the_prune_age_runs_on_the_monotonic_clock() {
+    let (mut inbox, eps) = setup();
+    let e = ep(&eps);
+    inbox.ingest(
+        at(100, 1000),
+        &e,
+        mapped(EventKind::Done, Priority::Normal, "handled", Some("a")),
+    );
+    inbox.dismiss(1);
+    assert_eq!(inbox.prune(at(100 + JUMP, 1010), 86_400), 0);
+    assert_eq!(inbox.prune(at(100, 1000 + 86_401), 86_400), 1);
+}
+
+fn reopen(store: &JsonStore, clock: &StepClock) -> Inbox {
+    Inbox::load(store, InboxLimits::default(), clock).unwrap()
+}
+
+// REQ-INB-004, REQ-INB-023: what is left of a time to live and a snooze survives a restart, and the time the
+// program was off counts when the wall clock can be trusted.
+#[test]
+fn time_to_live_and_snooze_survive_a_restart() {
+    let dir = TempDir::new("inbox-durations");
+    let store = JsonStore::new(dir.0.join("inbox.json"), SCHEMA);
+    let (mut inbox, eps) = setup();
+    let e = ep(&eps);
+    let clock = StepClock::at(T0);
+    inbox.ingest(Moment::of(&clock), &e, with_ttl(600));
+    inbox.ingest(
+        Moment::of(&clock),
+        &e,
+        mapped(EventKind::Done, Priority::Normal, "later", Some("a")),
+    );
+    inbox.mark_announced(&[2]);
+    inbox.snooze(2, Moment::of(&clock), 300);
+    clock.advance(100);
+    inbox.save(&store, &clock).unwrap();
+
+    // Restart after 50 s off: a new process has a new monotonic origin.
+    let later = StepClock::with_mono(T0 + 150, 7);
+    let mut back = reopen(&store, &later);
+    assert_eq!(back.expire(Moment::of(&later)), 0);
+    assert!(back.plan(Moment::of(&later), true, 600, &eps).is_some());
+    // 500 s of its 600 were left at the save, minus 50 s off: gone after 450 more seconds.
+    later.advance(449);
+    assert_eq!(back.expire(Moment::of(&later)), 0);
+    later.advance(2);
+    assert_eq!(back.expire(Moment::of(&later)), 1);
+    // The snooze had 200 s left at the save and 50 s were off: it has ended by now.
+    assert_eq!(
+        back.plan(Moment::of(&later), true, 600, &eps).unwrap().lead,
+        2
+    );
+
+    // Restart where the wall clock is not set: nothing is taken off, and the wall clock stepping later
+    // changes nothing.
+    let unset = StepClock::with_mono(5, 7);
+    let mut back = reopen(&store, &unset);
+    unset.step_wall(T0 + JUMP);
+    assert_eq!(
+        back.expire(Moment::of(&unset)),
+        0,
+        "500 s left, none passed"
+    );
+    assert_eq!(
+        back.plan(Moment::of(&unset), true, 600, &eps).unwrap().lead,
+        1,
+        "the snooze still has 200 s to run"
+    );
+    unset.advance(201);
+    let plan = back.plan(Moment::of(&unset), true, 600, &eps).unwrap();
+    assert_eq!((plan.lead, plan.rest), (1, vec![2]));
+}
+
+// REQ-NFR-010: a file written before durations were kept apart still loads, read from its wall-clock times.
+#[test]
+fn an_inbox_file_from_before_durations_were_kept_apart_still_loads() {
+    let dir = TempDir::new("inbox-legacy");
+    let store = JsonStore::new(dir.0.join("inbox.json"), SCHEMA);
+    let old = format!(
+        r#"{{"schema":1,"data":{{"next_id":2,"events":[
+        {{"id":1,"endpoint":"cc","source":"s","kind":"info","title":"a","text":"x","priority":"normal",
+          "expires_at":{exp},"received_at":{recv},"state":{{"state":"new"}}}},
+        {{"id":2,"endpoint":"cc","source":"s","kind":"done","title":"b","text":"x","priority":"normal",
+          "received_at":{recv},"state":{{"state":"snoozed","until":{until}}}}}]}}}}"#,
+        exp = T0 + 600,
+        recv = T0 - 60,
+        until = T0 + 300,
+    );
+    std::fs::write(store.path(), old).unwrap();
+    let eps = setup().1;
+    let clock = StepClock::at(T0);
+    let mut inbox = reopen(&store, &clock);
+    assert_eq!(inbox.events().len(), 2);
+    assert_eq!(
+        inbox.events()[0].timing.received,
+        clock.monotonic_secs() - 60
+    );
+    assert_eq!(
+        inbox
+            .plan(Moment::of(&clock), true, 600, &eps)
+            .unwrap()
+            .rest,
+        Vec::<u64>::new(),
+        "the snooze has 300 s to run"
+    );
+    clock.advance(601);
+    assert_eq!(
+        inbox.expire(Moment::of(&clock)),
+        1,
+        "the old time to live applies"
+    );
+    // With the wall clock not set the old wall times mean nothing: the time to live starts over from arrival
+    // and the snooze ends at once.
+    let unset = StepClock::with_mono(10, 1);
+    let mut inbox = reopen(&store, &unset);
+    assert_eq!(inbox.expire(Moment::of(&unset)), 0);
+    assert_eq!(
+        inbox
+            .plan(Moment::of(&unset), true, 600, &eps)
+            .unwrap()
+            .rest,
+        vec![2]
     );
 }

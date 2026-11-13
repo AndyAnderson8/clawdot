@@ -729,6 +729,52 @@ fn stepping_core() -> (Core, Arc<crate::sched::testclock::StepClock>) {
     (core, clock)
 }
 
+// REQ-INB-023: a snooze is real time, whatever the wall clock does (network time can arrive years late).
+#[test]
+fn a_snooze_does_not_end_when_the_wall_clock_steps_forward() {
+    let (c, clock) = stepping_core();
+    let (_, token) = c.create_endpoint("x", "generic").unwrap();
+    c.ingest_hook(
+        "x",
+        &token,
+        LOCALHOST_PEER,
+        br#"{"title":"one","session_ref":"1"}"#,
+    )
+    .unwrap();
+    let id = c.next_announcement(true, 0).unwrap().event.id;
+    c.mark_announced(&[id]);
+    assert!(c.snooze_current(300));
+    clock.step_wall(5 * 365 * 86_400);
+    clock.advance(10);
+    assert!(c.next_announcement(true, 0).is_none(), "ten seconds of 300");
+    clock.advance(291);
+    assert!(c.next_announcement(true, 0).is_some());
+}
+
+// REQ-INB-004: a handled event is pruned by its real age, not by a wall clock that stepped.
+#[test]
+fn a_handled_event_is_not_pruned_early_when_the_wall_clock_steps_forward() {
+    let (c, clock) = stepping_core();
+    let (_, token) = c.create_endpoint("x", "generic").unwrap();
+    c.ingest_hook(
+        "x",
+        &token,
+        LOCALHOST_PEER,
+        br#"{"title":"one","session_ref":"1"}"#,
+    )
+    .unwrap();
+    let id = c.next_announcement(true, 0).unwrap().event.id;
+    c.mark_announced(&[id]);
+    assert!(c.dismiss_current());
+    clock.step_wall(5 * 365 * 86_400);
+    clock.advance(60);
+    c.maintain();
+    assert_eq!(c.events().len(), 1);
+    clock.advance(24 * 3600);
+    c.maintain();
+    assert!(c.events().is_empty());
+}
+
 // REQ-CFG-019: a sign-in lasts 12 hours of real time, whatever the wall clock does.
 #[test]
 fn an_administrator_session_does_not_get_longer_or_shorter_when_the_wall_clock_steps() {
