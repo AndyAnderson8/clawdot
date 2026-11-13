@@ -8,16 +8,16 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-const STOP: &str = r#"{"session_id":"s1","cwd":"/home/a/clawdot","hook_event_name":"Stop","last_assistant_message":"Done."}"#;
+pub(in crate::http::tests) const STOP: &str = r#"{"session_id":"s1","cwd":"/home/a/clawdot","hook_event_name":"Stop","last_assistant_message":"Done."}"#;
 
-struct Harness {
-    core: Arc<Core>,
-    addr: SocketAddr,
-    token: String,
-    _shutdown: oneshot::Sender<()>,
+pub(in crate::http::tests) struct Harness {
+    pub(in crate::http::tests) core: Arc<Core>,
+    pub(in crate::http::tests) addr: SocketAddr,
+    pub(in crate::http::tests) token: String,
+    pub(in crate::http::tests) _shutdown: oneshot::Sender<()>,
 }
 
-async fn start(limits: Limits, opts: ServeOptions) -> Harness {
+pub(in crate::http::tests) async fn start(limits: Limits, opts: ServeOptions) -> Harness {
     start_with_clock(Arc::new(SystemClock), limits, opts).await
 }
 
@@ -32,7 +32,7 @@ impl crate::sched::Clock for FrozenClock {
     }
 }
 
-async fn start_with_clock(
+pub(in crate::http::tests) async fn start_with_clock(
     clock: Arc<dyn crate::sched::Clock + Send + Sync>,
     limits: Limits,
     opts: ServeOptions,
@@ -41,7 +41,7 @@ async fn start_with_clock(
     start_core(core, opts).await
 }
 
-async fn start_core(core: Arc<Core>, opts: ServeOptions) -> Harness {
+pub(in crate::http::tests) async fn start_core(core: Arc<Core>, opts: ServeOptions) -> Harness {
     let (_, token) = core.create_endpoint("claude-code", "claude-code").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -62,7 +62,7 @@ async fn start_core(core: Arc<Core>, opts: ServeOptions) -> Harness {
 }
 
 /// One request, one response, then the connection closes.
-async fn call(
+pub(in crate::http::tests) async fn call(
     addr: SocketAddr,
     method: &str,
     path: &str,
@@ -73,7 +73,7 @@ async fn call(
 }
 
 /// Like [`call`], with the `Host` header the request is addressed to.
-async fn call_for(
+pub(in crate::http::tests) async fn call_for(
     addr: SocketAddr,
     host: &str,
     method: &str,
@@ -86,7 +86,7 @@ async fn call_for(
 
 /// Like [`call_for`], sent from the local address `source` (any 127.x.y.z address is this machine), so a test can
 /// be several different clients.
-async fn call_from(
+pub(in crate::http::tests) async fn call_from(
     source: &str,
     addr: SocketAddr,
     host: &str,
@@ -123,7 +123,7 @@ async fn call_from(
     (status, head.to_owned(), body.to_owned())
 }
 
-fn bearer(token: &str) -> String {
+pub(in crate::http::tests) fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 
@@ -332,7 +332,7 @@ async fn a_flood_gets_429s() {
 }
 
 /// Read from an SSE connection until `needle` appears or time runs out.
-async fn read_until(s: &mut TcpStream, buf: &mut String, needle: &str) {
+pub(in crate::http::tests) async fn read_until(s: &mut TcpStream, buf: &mut String, needle: &str) {
     let mut chunk = [0_u8; 1024];
     timeout(Duration::from_secs(5), async {
         while !buf.contains(needle) {
@@ -345,7 +345,7 @@ async fn read_until(s: &mut TcpStream, buf: &mut String, needle: &str) {
     .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}; got {buf:?}"));
 }
 
-async fn open_stream(addr: SocketAddr, token: &str) -> TcpStream {
+pub(in crate::http::tests) async fn open_stream(addr: SocketAddr, token: &str) -> TcpStream {
     let mut s = TcpStream::connect(addr).await.unwrap();
     let req = format!(
         "GET /bridge/claude-code/replies HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nAccept: text/event-stream\r\n\r\n"
@@ -634,10 +634,8 @@ async fn the_server_stops_when_asked() {
     );
 }
 
-// ----- web UI (REQ-CFG-001, 003, 005, 006) -----
-
 /// Complete setup with a password and return the signed-in session as an Authorization value.
-fn admin(h: &Harness) -> String {
+pub(in crate::http::tests) fn admin(h: &Harness) -> String {
     let hash = crate::admin::hash_password("adm-secret").unwrap();
     let token = h
         .core
@@ -1007,13 +1005,16 @@ async fn test_speak_says_why_it_stayed_silent() {
     assert_eq!(call(h.addr, "POST", "/api/speak", &[], say).await.0, 401);
 }
 
-// ----- first-run setup, sign-in, open mode (REQ-CFG-018..024) -----
-
-fn json_of(body: &str) -> serde_json::Value {
+pub(in crate::http::tests) fn json_of(body: &str) -> serde_json::Value {
     serde_json::from_str(body).unwrap()
 }
 
-async fn post(h: &Harness, path: &str, auth: &str, body: &str) -> (u16, serde_json::Value) {
+pub(in crate::http::tests) async fn post(
+    h: &Harness,
+    path: &str,
+    auth: &str,
+    body: &str,
+) -> (u16, serde_json::Value) {
     let hdrs: Vec<(&str, &str)> = if auth.is_empty() {
         Vec::new()
     } else {
