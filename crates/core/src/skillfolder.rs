@@ -221,6 +221,19 @@ fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The header's description with its whitespace squashed, cut to `MAX_DESCRIPTION` characters (with a note on
+/// `said` when it was).
+fn clamp_description(description: Option<String>, where_: &str, said: &mut Vec<String>) -> String {
+    let mut description = squash(&description.unwrap_or_default());
+    if description.chars().count() > MAX_DESCRIPTION {
+        description = description.chars().take(MAX_DESCRIPTION).collect();
+        said.push(format!(
+            "{where_}: the description was shortened to {MAX_DESCRIPTION} characters"
+        ));
+    }
+    description
+}
+
 /// The helper files that belong to the skill whose `SKILL.md` is `skill`, with the reason for each skipped one
 /// pushed onto `said`.
 fn helper_files(
@@ -304,13 +317,7 @@ pub fn read(files: &[SkillFile]) -> (Vec<Draft>, Vec<String>) {
             file.rsplit_once('.').map_or(file, |(s, _)| s).to_owned()
         };
         let name = squash(&name.filter(|n| !n.is_empty()).unwrap_or(stem));
-        let mut description = squash(&description.unwrap_or_default());
-        if description.chars().count() > MAX_DESCRIPTION {
-            description = description.chars().take(MAX_DESCRIPTION).collect();
-            said.push(format!(
-                "{where_}: the description was shortened to {MAX_DESCRIPTION} characters"
-            ));
-        }
+        let description = clamp_description(description, &where_, &mut said);
         let kept = if is_skill_md {
             helper_files(files, f, folder, &roots, &mut said)
         } else {

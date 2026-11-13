@@ -217,6 +217,37 @@ fn add_persona_file(
     Ok(())
 }
 
+/// Open the saved settings over the defaults, the configuration file and the flags, and collect the warnings.
+fn open_settings(
+    mut from_flags: Layer,
+    persona_flag: Option<&PathBuf>,
+    file: &Config,
+    data_dir: &std::path::Path,
+    env: &Env,
+) -> Result<(SettingsState, Vec<String>), String> {
+    let mut from_file = file_layer(file);
+    add_persona_file(
+        persona_flag,
+        file.persona_file.as_ref(),
+        &mut from_file,
+        &mut from_flags,
+    )?;
+    let (mut state, mut warnings) = SettingsState::open(
+        Some(data_dir),
+        Sources {
+            defaults: settings::built_in_defaults(),
+            file: from_file,
+            flags: from_flags,
+        },
+        file.speech.url.is_some(),
+        env.lookup(),
+    )?;
+    warnings.extend(retired_key_warnings(file));
+    // The machine's name is read here, once, for the address snippets print when `listen` is unspecified.
+    state.set_machine_name(crate::hostguard::machine_name(env).as_deref());
+    Ok((state, warnings))
+}
+
 /// The speech section with the effective voice, language and provider from the settings, and the provider's
 /// defaults filled in.
 fn effective_speech(
@@ -247,27 +278,8 @@ pub fn resolve(
 ) -> Result<(Resolved, SettingsState, Vec<String>), String> {
     let data_dir = cli.data_dir(&file);
     let manage = !cli.create.is_empty() || !cli.rotate.is_empty();
-    let mut from_file = file_layer(&file);
-    let mut from_flags = cli.flags;
-    add_persona_file(
-        cli.persona_file.as_ref(),
-        file.persona_file.as_ref(),
-        &mut from_file,
-        &mut from_flags,
-    )?;
-    let (mut state, mut warnings) = SettingsState::open(
-        Some(&data_dir),
-        Sources {
-            defaults: settings::built_in_defaults(),
-            file: from_file,
-            flags: from_flags,
-        },
-        file.speech.url.is_some(),
-        env.lookup(),
-    )?;
-    warnings.extend(retired_key_warnings(&file));
-    // The machine's name is read here, once, for the address snippets print when `listen` is unspecified.
-    state.set_machine_name(crate::hostguard::machine_name(env).as_deref());
+    let (state, warnings) =
+        open_settings(cli.flags, cli.persona_file.as_ref(), &file, &data_dir, env)?;
     let text = |k: &str| state.get(k).as_str().map(str::to_owned);
     let listen = text("listen")
         .and_then(|l| l.parse().ok())
