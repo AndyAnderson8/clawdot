@@ -120,6 +120,12 @@ pub trait Provider: Sync {
 
     /// The voices the service offers to the key at `base_url`.
     fn voices<'a>(&'a self, base_url: &'a str, key: &'a str) -> VoiceList<'a>;
+
+    /// A fixed list of voices to offer when [`Provider::voices`] fails, for a service at `base_url` that has a set
+    /// of voices but no list to ask for. `None` when there is no such list.
+    fn builtin_voices(&self, _base_url: &str) -> Option<Vec<VoiceInfo>> {
+        None
+    }
 }
 
 /// Which service's wire format is spoken (`speech.provider`, REQ-VOI-021): the small, copyable name of a

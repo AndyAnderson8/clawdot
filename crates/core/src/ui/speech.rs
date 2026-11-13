@@ -8,9 +8,6 @@ use hyper::body::Incoming;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[cfg(test)]
-mod openai_host_tests;
-
 /// `PUT /api/speech/key`: keep the speech-service key pasted on the page. It is read on every request, so it applies at
 /// once (REQ-VOI-023). Only the masked hint comes back.
 pub(super) async fn speech_key_set(core: &Core, body: Incoming) -> Resp {
@@ -59,18 +56,6 @@ pub(super) fn realtime_key_clear(core: &Core) -> Resp {
     json_reply(StatusCode::OK, &json!({ "hint": null }))
 }
 
-/// The voices of OpenAI's speech service, which has a fixed set and no list to ask for.
-const OPENAI_VOICES: [&str; 11] = [
-    "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
-];
-
-/// Whether `url` is OpenAI's own service. The host is compared, not the text: a server whose path or query merely
-/// mentions `api.openai.com`, or whose name only starts with it, is not OpenAI.
-pub(super) fn is_openai(url: &str) -> bool {
-    crate::transport::Endpoint::parse(url)
-        .is_ok_and(|e| e.host.eq_ignore_ascii_case("api.openai.com"))
-}
-
 /// `GET /api/voices`: the voices the speech server offers (REQ-CFG-081): its own list when it has one, OpenAI's fixed
 /// set for OpenAI, otherwise a plain statement that the voice has to be typed.
 pub(super) async fn voices(core: &Core) -> Resp {
@@ -81,43 +66,44 @@ pub(super) async fn voices(core: &Core) -> Resp {
         );
     };
     let (url, dialect) = (src.url.as_str(), src.dialect);
-    match crate::speech::list_voice_details(dialect, url, &src.key).await {
-        Ok((v, source)) => {
-            // `voices` stays the plain list of values to send; `details` adds the name to show and the category, so a
-            // cloned voice can be shown by its name while its id is sent (REQ-VOI-022).
-            let ids: Vec<&str> = v.iter().map(|x| x.id.as_str()).collect();
-            let details: Vec<Value> = v
-                .iter()
-                .map(|x| json!({ "id": x.id, "label": x.label, "category": x.category }))
-                .collect();
-            json_reply(
-                StatusCode::OK,
-                &json!({ "voices": ids, "details": details, "source": source }),
-            )
-        }
-        Err(_) if is_openai(url) => json_reply(
+    // `voices` stays the plain list of values to send; `details` adds the name to show and the category, so a
+    // cloned voice can be shown by its name while its id is sent (REQ-VOI-022).
+    let listed = |v: &[crate::speech::VoiceInfo], source: &str| {
+        let ids: Vec<&str> = v.iter().map(|x| x.id.as_str()).collect();
+        let details: Vec<Value> = v
+            .iter()
+            .map(|x| json!({ "id": x.id, "label": x.label, "category": x.category }))
+            .collect();
+        json_reply(
             StatusCode::OK,
-            &json!({
-                "voices": OPENAI_VOICES,
-                "details": OPENAI_VOICES.iter().map(|n| json!({ "id": n, "label": n, "category": null })).collect::<Vec<_>>(),
-                "source": "builtin",
-            }),
-        ),
-        Err(e) if dialect != crate::speech::Dialect::OpenAi => {
-            let status = if e.is_key_problem() {
-                StatusCode::UNAUTHORIZED
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
-            error(status, &format!("Could not get the list of voices: {e}."))
-        }
-        Err(e) => error(
-            StatusCode::BAD_GATEWAY,
-            &format!(
-                "This speech server does not share a list of its voices ({e}). Type the name of one it accepts; its documentation lists them."
-            ),
-        ),
+            &json!({ "voices": ids, "details": details, "source": source }),
+        )
+    };
+    match crate::speech::list_voice_details(dialect, url, &src.key).await {
+        Ok((v, source)) => listed(&v, source),
+        Err(e) => match dialect.provider().builtin_voices(url) {
+            Some(v) => listed(&v, "builtin"),
+            None => voices_error(dialect, &e),
+        },
     }
+}
+
+/// Why the voice list could not be had, in words for the person who has to type a voice instead.
+fn voices_error(dialect: crate::speech::Dialect, e: &crate::speech::ProviderError) -> Resp {
+    if dialect != crate::speech::Dialect::OpenAi {
+        let status = if e.is_key_problem() {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        return error(status, &format!("Could not get the list of voices: {e}."));
+    }
+    error(
+        StatusCode::BAD_GATEWAY,
+        &format!(
+            "This speech server does not share a list of its voices ({e}). Type the name of one it accepts; its documentation lists them."
+        ),
+    )
 }
 
 #[derive(Deserialize)]

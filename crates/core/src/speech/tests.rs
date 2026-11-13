@@ -975,6 +975,32 @@ async fn a_silent_server_times_out_instead_of_hanging() {
     assert!(s.synthesize("x").await.unwrap_err().contains("no response"));
 }
 
+#[test]
+fn only_openai_itself_has_a_fixed_voice_list() {
+    let openai = Dialect::OpenAi.provider();
+    let v = openai.builtin_voices("https://api.openai.com/v1").unwrap();
+    assert_eq!(v.len(), 11);
+    assert!(v.iter().any(|x| x.id == "alloy") && v.iter().all(|x| x.id == x.label));
+    assert!(
+        openai
+            .builtin_voices("http://192.168.1.9:8880/v1")
+            .is_none()
+    );
+    assert!(
+        openai
+            .builtin_voices("https://api.openai.com.evil.example/v1")
+            .is_none()
+    );
+    for other in [Dialect::ElevenLabs, Dialect::Deepgram] {
+        assert!(
+            other
+                .provider()
+                .builtin_voices("https://api.openai.com/v1")
+                .is_none()
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_client_reads_the_stored_secret_it_is_told_to_and_no_other() {
     let dir = std::env::temp_dir().join(format!("clawdot-client-key-{}", std::process::id()));
