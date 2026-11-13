@@ -142,7 +142,7 @@ pub struct Capabilities {
 }
 
 /// First message from a satellite.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     /// Protocol version the satellite speaks.
     pub protocol: Version,
@@ -157,6 +157,19 @@ pub struct Hello {
     /// What the device can do.
     #[serde(default)]
     pub capabilities: Capabilities,
+}
+
+// The token is a secret: a debug print shows only whether one is set.
+impl std::fmt::Debug for Hello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hello")
+            .field("protocol", &self.protocol)
+            .field("device_id", &self.device_id)
+            .field("name", &self.name)
+            .field("token", &self.token.as_ref().map(|_| "<set>"))
+            .field("capabilities", &self.capabilities)
+            .finish()
+    }
 }
 
 /// Core's acceptance of a [`Hello`].
@@ -560,6 +573,16 @@ impl Message {
 mod tests {
     use super::*;
     use crate::frame::{Decoder, Limits, encode};
+
+    #[test]
+    fn hello_debug_does_not_print_the_token() {
+        let Message::Hello(h) = all_messages().remove(0) else {
+            panic!("first message is a hello")
+        };
+        let shown = format!("{h:?} {:?}", Message::Hello(h.clone()));
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("<set>"), "{shown}");
+    }
 
     fn round_trip(msg: &Message) -> Message {
         let bytes = encode(&msg.to_frame()).unwrap();
