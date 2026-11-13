@@ -228,11 +228,8 @@ impl HttpBackend {
         }
     }
 
-    async fn exchange(
-        &self,
-        req: &ChatRequest,
-        on_text: &mut (dyn FnMut(&str) + Send),
-    ) -> Result<Completion, LlmError> {
+    /// The POST for one chat request: the body, headers and, when set, the bearer key.
+    fn build_request(&self, req: &ChatRequest) -> Result<Request<Full<Bytes>>, LlmError> {
         let mut json = req.to_json(true);
         if self.plain_stream.load(Ordering::Relaxed)
             && let Some(o) = json.as_object_mut()
@@ -252,9 +249,17 @@ impl HttpBackend {
         if !self.api_key.is_empty() {
             builder = builder.header(AUTHORIZATION, format!("Bearer {}", self.api_key));
         }
-        let request = builder
+        builder
             .body(Full::new(Bytes::from(body)))
-            .map_err(|e| LlmError::Malformed(e.to_string()))?;
+            .map_err(|e| LlmError::Malformed(e.to_string()))
+    }
+
+    async fn exchange(
+        &self,
+        req: &ChatRequest,
+        on_text: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<Completion, LlmError> {
+        let request = self.build_request(req)?;
         let response = self
             .connector
             .request(&self.endpoint, request)
@@ -267,74 +272,92 @@ impl HttpBackend {
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.contains("text/event-stream"));
-        let mut body = response.into_body();
+        let body = response.into_body();
 
         if !status.is_success() {
-            let mut kept = Vec::new();
-            while let Some(frame) = body.frame().await {
-                let Ok(frame) = frame else { break };
-                if let Some(data) = frame.data_ref() {
-                    kept.extend_from_slice(data);
-                    if kept.len() >= MAX_ERROR_BODY {
-                        break;
-                    }
-                }
-            }
-            let text =
-                String::from_utf8_lossy(&kept[..kept.len().min(MAX_ERROR_BODY)]).into_owned();
-            // A JSON error body carries the provider's own message; otherwise show the status.
-            return Err(match parse_completion(&text) {
-                Err(e @ LlmError::Provider(_)) => e,
-                _ => LlmError::Provider(format!("HTTP {status}")),
-            });
+            return Err(read_error(body, status).await);
         }
-
         if !streaming {
-            let mut all = Vec::new();
-            while let Some(frame) = body.frame().await {
-                let frame = frame.map_err(|e| LlmError::Transport(format!("read: {e}")))?;
-                if let Some(data) = frame.data_ref() {
-                    all.extend_from_slice(data);
-                    if all.len() > MAX_BODY {
-                        return Err(LlmError::Malformed("response too large".into()));
-                    }
-                }
-            }
-            let completion = parse_completion(&String::from_utf8_lossy(&all))?;
-            if !completion.text.is_empty() {
-                on_text(&completion.text);
-            }
-            return Ok(completion);
+            return read_whole(body, on_text).await;
         }
-
-        let mut acc = StreamAccumulator::default();
-        let mut buf: Vec<u8> = Vec::new();
-        let mut done = false;
-        while !done {
-            let Some(frame) = body.frame().await else {
-                break;
-            };
-            let frame = frame.map_err(|e| LlmError::Transport(format!("read: {e}")))?;
-            let Some(data) = frame.data_ref() else {
-                continue;
-            };
-            buf.extend_from_slice(data);
-            if buf.len() > MAX_BODY {
-                return Err(LlmError::Malformed("stream line too long".into()));
-            }
-            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                let line: Vec<u8> = buf.drain(..=pos).collect();
-                let line = String::from_utf8_lossy(&line);
-                for ev in acc.feed_line(line.trim_end_matches(['\n', '\r']))? {
-                    match ev {
-                        StreamEvent::Text(t) => on_text(&t),
-                        StreamEvent::Done => done = true,
-                    }
-                }
-            }
-        }
-        Ok(acc.finish())
+        read_stream(body, on_text).await
     }
+}
+
+/// The error for a non-success reply: the provider's own message from a JSON error body, else the status.
+async fn read_error(mut body: hyper::body::Incoming, status: hyper::StatusCode) -> LlmError {
+    let mut kept = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else { break };
+        if let Some(data) = frame.data_ref() {
+            kept.extend_from_slice(data);
+            if kept.len() >= MAX_ERROR_BODY {
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&kept[..kept.len().min(MAX_ERROR_BODY)]).into_owned();
+    // A JSON error body carries the provider's own message; otherwise show the status.
+    match parse_completion(&text) {
+        Err(e @ LlmError::Provider(_)) => e,
+        _ => LlmError::Provider(format!("HTTP {status}")),
+    }
+}
+
+/// A reply that is not streamed: read it whole (capped), parse it, and pass its text on at once.
+async fn read_whole(
+    mut body: hyper::body::Incoming,
+    on_text: &mut (dyn FnMut(&str) + Send),
+) -> Result<Completion, LlmError> {
+    let mut all = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| LlmError::Transport(format!("read: {e}")))?;
+        if let Some(data) = frame.data_ref() {
+            all.extend_from_slice(data);
+            if all.len() > MAX_BODY {
+                return Err(LlmError::Malformed("response too large".into()));
+            }
+        }
+    }
+    let completion = parse_completion(&String::from_utf8_lossy(&all))?;
+    if !completion.text.is_empty() {
+        on_text(&completion.text);
+    }
+    Ok(completion)
+}
+
+/// A server-sent-events reply: parse it line by line as it arrives.
+async fn read_stream(
+    mut body: hyper::body::Incoming,
+    on_text: &mut (dyn FnMut(&str) + Send),
+) -> Result<Completion, LlmError> {
+    let mut acc = StreamAccumulator::default();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut done = false;
+    while !done {
+        let Some(frame) = body.frame().await else {
+            break;
+        };
+        let frame = frame.map_err(|e| LlmError::Transport(format!("read: {e}")))?;
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+        buf.extend_from_slice(data);
+        if buf.len() > MAX_BODY {
+            return Err(LlmError::Malformed("stream line too long".into()));
+        }
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            for ev in acc.feed_line(line.trim_end_matches(['\n', '\r']))? {
+                match ev {
+                    StreamEvent::Text(t) => on_text(&t),
+                    StreamEvent::Done => done = true,
+                }
+            }
+        }
+    }
+    Ok(acc.finish())
 }
 
 /// Opens a connection (with TLS when the URL asks for it) and performs one HTTP/1.1 request.

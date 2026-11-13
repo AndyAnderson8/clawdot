@@ -97,6 +97,22 @@ pub struct Device {
     pub psk: Option<[u8; 32]>,
 }
 
+#[cfg(feature = "esphome-noise")]
+impl Device {
+    /// Overwrite the Noise key with zeros.
+    fn wipe_key(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.psk);
+    }
+}
+
+/// Every clone of a device carries a copy of the key, so each one wipes its own when it is dropped.
+#[cfg(feature = "esphome-noise")]
+impl Drop for Device {
+    fn drop(&mut self) {
+        self.wipe_key();
+    }
+}
+
 impl std::fmt::Debug for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The key is a secret and never printed.
@@ -1151,5 +1167,24 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Bridge<IO> {
             self.silence(100).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "esphome-noise"))]
+mod wipe_tests {
+    use super::Device;
+
+    // REQ-ESP-014: the wipe function leaves no key bytes behind (this tests the function, not freed memory).
+    #[test]
+    fn req_esp_014_wiping_a_device_clears_its_key() {
+        let mut d = Device {
+            name: "dot".into(),
+            addr: "dot.local:6053".into(),
+            psk: Some([9; 32]),
+        };
+        let copy = d.clone();
+        d.wipe_key();
+        assert_eq!(d.psk, None);
+        assert_eq!(copy.psk, Some([9; 32]), "a clone keeps its own copy");
     }
 }

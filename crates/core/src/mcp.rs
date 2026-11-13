@@ -337,6 +337,48 @@ impl From<RpcError> for String {
     }
 }
 
+/// What one reply carries: the status, a new `mcp-session-id` if sent, the content type, and the body text.
+type RpcReply = (hyper::StatusCode, Option<String>, String, String);
+
+/// The POST for one JSON-RPC message to server `s`, with the protocol, session and bearer headers.
+fn rpc_request(
+    s: &Server,
+    id: Option<u64>,
+    method: &str,
+    params: Value,
+) -> Result<hyper::Request<Full<Bytes>>, String> {
+    let mut msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+    if let Some(id) = id {
+        msg["id"] = json!(id);
+    }
+    let path = if s.endpoint.base.is_empty() {
+        "/"
+    } else {
+        s.endpoint.base.as_str()
+    };
+    let mut req = s
+        .endpoint
+        .request_builder(Method::POST, path, "clawdot")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream");
+    if method != "initialize" {
+        req = req.header("mcp-protocol-version", PROTOCOL_REVISION);
+    }
+    if let Some(sid) = s
+        .session
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+    {
+        req = req.header("mcp-session-id", sid);
+    }
+    if let Some(secret) = &s.secret {
+        req = req.header("authorization", format!("Bearer {secret}"));
+    }
+    req.body(Full::new(Bytes::from(msg.to_string())))
+        .map_err(|e| e.to_string())
+}
+
 impl McpClient {
     /// Validate the definitions, connect to each server, and list its tools.
     ///
@@ -507,70 +549,9 @@ impl McpClient {
         params: Value,
     ) -> Result<Value, RpcError> {
         let s = &self.servers[i];
-        let mut msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        if let Some(id) = id {
-            msg["id"] = json!(id);
-        }
-        let path = if s.endpoint.base.is_empty() {
-            "/"
-        } else {
-            s.endpoint.base.as_str()
-        };
-        let mut req = s
-            .endpoint
-            .request_builder(Method::POST, path, "clawdot")
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream");
-        if method != "initialize" {
-            req = req.header("mcp-protocol-version", PROTOCOL_REVISION);
-        }
-        if let Some(sid) = s
-            .session
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-        {
-            req = req.header("mcp-session-id", sid);
-        }
-        if let Some(secret) = &s.secret {
-            req = req.header("authorization", format!("Bearer {secret}"));
-        }
-        let request = req
-            .body(Full::new(Bytes::from(msg.to_string())))
-            .map_err(|e| e.to_string())?;
+        let request = rpc_request(s, id, method, params)?;
         let secs = s.def.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
-        let work = async {
-            let response = self.connector.request(&s.endpoint, request).await?;
-            let status = response.status();
-            let sid = response
-                .headers()
-                .get("mcp-session-id")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
-            let ctype = response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_owned();
-            let mut body = response.into_body();
-            let mut all = Vec::new();
-            while let Some(frame) = body.frame().await {
-                let frame = frame.map_err(|e| format!("read: {e}"))?;
-                if let Some(d) = frame.data_ref() {
-                    all.extend_from_slice(d);
-                    if all.len() > MAX_RESPONSE {
-                        return Err("response too large".to_owned());
-                    }
-                }
-            }
-            Ok::<_, String>((
-                status,
-                sid,
-                ctype,
-                String::from_utf8_lossy(&all).into_owned(),
-            ))
-        };
+        let work = self.send_capped(s, request);
         let (status, sid, ctype, body) = timeout(Duration::from_secs(secs), work)
             .await
             .map_err(|_| format!("no response within {secs} s"))??;
@@ -591,6 +572,44 @@ impl McpClient {
             Some(id) => find_response(&ctype, &body, id).map_err(RpcError::Other),
             None => Ok(Value::Null),
         }
+    }
+
+    /// Send `request` to `s` and read the whole reply, capped at `MAX_RESPONSE` bytes.
+    async fn send_capped(
+        &self,
+        s: &Server,
+        request: hyper::Request<Full<Bytes>>,
+    ) -> Result<RpcReply, String> {
+        let response = self.connector.request(&s.endpoint, request).await?;
+        let status = response.status();
+        let sid = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let ctype = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let mut body = response.into_body();
+        let mut all = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| format!("read: {e}"))?;
+            if let Some(d) = frame.data_ref() {
+                all.extend_from_slice(d);
+                if all.len() > MAX_RESPONSE {
+                    return Err("response too large".to_owned());
+                }
+            }
+        }
+        Ok((
+            status,
+            sid,
+            ctype,
+            String::from_utf8_lossy(&all).into_owned(),
+        ))
     }
 
     async fn handshake(&self, i: usize) -> Result<(), String> {

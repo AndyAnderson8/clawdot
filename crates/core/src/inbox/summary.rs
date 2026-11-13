@@ -137,6 +137,14 @@ pub fn short_announcement(event: &Event) -> Option<String> {
 /// to whatever the model returns, because a model can ignore its instructions.
 #[must_use]
 pub fn clamp_for_speech(text: &str, cfg: &SummaryConfig) -> String {
+    let cleaned = strip_markup(text);
+    let sentences = split_sentences(&cleaned);
+    fit_sentences(&sentences, cfg)
+}
+
+/// Remove markdown marks, turn `[label](url)` into `label`, collapse whitespace and say "a link" for a bare
+/// URL.
+fn strip_markup(text: &str) -> String {
     let mut cleaned = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -163,7 +171,7 @@ pub fn clamp_for_speech(text: &str, cfg: &SummaryConfig) -> String {
             c => cleaned.push(c),
         }
     }
-    let cleaned = cleaned
+    cleaned
         .split_whitespace()
         .map(|w| {
             if w.starts_with("http://") || w.starts_with("https://") {
@@ -173,9 +181,11 @@ pub fn clamp_for_speech(text: &str, cfg: &SummaryConfig) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+}
 
-    // Sentence split on . ! ? followed by a space or the end.
+/// Sentence split on . ! ? followed by a space or the end.
+fn split_sentences(cleaned: &str) -> Vec<&str> {
     let mut sentences: Vec<&str> = Vec::new();
     let mut start = 0;
     let bytes = cleaned.as_bytes();
@@ -188,10 +198,16 @@ pub fn clamp_for_speech(text: &str, cfg: &SummaryConfig) -> String {
     if start < cleaned.len() {
         sentences.push(cleaned[start..].trim());
     }
+    sentences
+}
 
+/// The first sentences that fit the limits. A first sentence that is too long on its own is cut at a word
+/// boundary.
+fn fit_sentences(sentences: &[&str], cfg: &SummaryConfig) -> String {
     let mut out = String::new();
     for s in sentences
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|s| !s.is_empty())
         .take(cfg.max_sentences)
     {

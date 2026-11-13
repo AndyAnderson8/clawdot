@@ -118,6 +118,15 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
 
     running.core.set_listen_ip(r.listen.ip());
     announce_admin(&running.core, &public);
+    announce_listening(r, &running);
+    spawn_server(&running.core, listener);
+    Ok(Started::Run(Box::new(assemble_app(
+        r, running, announcer, asks, stations,
+    ))))
+}
+
+/// Print where the server listens, how many endpoints it has and whether a language model is connected.
+fn announce_listening(r: &Resolved, running: &Running) {
     println!(
         "clawdot: listening on http://{}  (endpoints: {}; language model: {})",
         r.listen,
@@ -128,8 +137,16 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
             "not configured"
         }
     );
-    spawn_server(&running.core, listener);
+}
 
+/// Start the console and the speaker task, and put the brain, hub and event sources together as the [`App`].
+fn assemble_app(
+    r: &Resolved,
+    running: Running,
+    announcer: satellite::Announcer,
+    asks: mpsc::Receiver<Ask>,
+    stations: Vec<String>,
+) -> App {
     let (line_tx, lines) = mpsc::channel::<String>(8);
     if r.console {
         spawn_console(line_tx);
@@ -154,7 +171,7 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
             crate::speaker::RUNG_SCHEMA,
         )),
     );
-    let app = App::new(
+    App::new(
         running.brain,
         running.hub,
         running.core,
@@ -162,8 +179,7 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
         sources,
         speaker_task,
     )
-    .with_stations(stations);
-    Ok(Started::Run(Box::new(app)))
+    .with_stations(stations)
 }
 
 /// Warn when the wall clock is not set: alarms and reminders at a time wait until it is (REQ-TMR-006); a countdown
@@ -397,19 +413,25 @@ pub async fn build_brain(
         agent: r.agent.clone(),
         hardware: crate::hardware::detected().clone().with_device(&r.device),
         voice_configured: r.speech.url.is_some() && r.speech.tts_model.is_some(),
-        rt: Realtime::with_env_and_secrets(
-            RtSettings::from_live(live),
-            core.env().lookup(),
-            core.secrets().clone(),
-        ),
+        rt: build_realtime(live, core),
         connects: tools.connects,
     };
-    if brain.rt.settings().enabled && !RtSettings::built() {
-        brain.rt.set_error(Some(
+    Ok((brain, hub))
+}
+
+/// The realtime voice settings from the live values, with an error noted when it is on but not built in.
+fn build_realtime(live: &serde_json::Map<String, serde_json::Value>, core: &Core) -> Realtime {
+    let rt = Realtime::with_env_and_secrets(
+        RtSettings::from_live(live),
+        core.env().lookup(),
+        core.secrets().clone(),
+    );
+    if rt.settings().enabled && !RtSettings::built() {
+        rt.set_error(Some(
             "Realtime voice is turned on, but this build of ClawDot does not include it.".into(),
         ));
     }
-    Ok((brain, hub))
+    rt
 }
 
 /// Open the audit log and the notes, hand them to the core, and return the handles every conversation shares.
