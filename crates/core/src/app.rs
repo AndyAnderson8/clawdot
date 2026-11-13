@@ -484,6 +484,12 @@ impl Core {
         self.clock.monotonic_secs()
     }
 
+    /// Whether the wall clock has been set ([`Clock::wall_clock_valid`]).
+    #[must_use]
+    pub fn wall_clock_valid(&self) -> bool {
+        self.clock.wall_clock_valid()
+    }
+
     /// Whether an adapter with this name exists.
     #[must_use]
     pub fn has_adapter(&self, name: &str) -> bool {
