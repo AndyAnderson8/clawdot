@@ -74,6 +74,12 @@ const CHARGE_STEP_USD: f64 = 0.000_1;
 const MAX_CHUNK: usize = 32 * 1024;
 /// How long connecting may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The longest a write to the service may take (audio, a pong, the close frame). A connection that has gone
+/// half dead accepts no more bytes and says nothing, so without a limit the session would never end.
+#[cfg(not(test))]
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const WRITE_TIMEOUT: Duration = Duration::from_millis(300);
 /// The most characters of a provider's error message that are ever spoken.
 const MAX_SPOKEN_ERROR_CHARS: usize = 160;
 
@@ -518,13 +524,13 @@ where
     H: ToolHost,
 {
     async fn send(&mut self, msg: &Value) -> Result<(), RealtimeError> {
-        self.ws
-            .send_text(&msg.to_string())
+        let sent = tokio::time::timeout(WRITE_TIMEOUT, self.ws.send_text(&msg.to_string()))
             .await
-            .map_err(|e| match e {
-                WsError::Io(_) | WsError::Eof => RealtimeError::Dropped,
-                other => other.into(),
-            })
+            .map_err(|_| RealtimeError::Dropped)?;
+        sent.map_err(|e| match e {
+            WsError::Io(_) | WsError::Eof => RealtimeError::Dropped,
+            other => other.into(),
+        })
     }
 
     /// The end of a session: write the audio cost not yet counted and close the socket if it is still usable.
@@ -537,7 +543,7 @@ where
             outcome,
             Err(RealtimeError::Dropped | RealtimeError::Unreachable(_))
         ) {
-            let _ = self.ws.send_close().await;
+            let _ = tokio::time::timeout(WRITE_TIMEOUT, self.ws.send_close()).await;
         }
     }
 
@@ -566,7 +572,9 @@ where
                             return Ok(end);
                         }
                     }
-                    Msg::Ping(p) => self.ws.send_pong(&p).await?,
+                    Msg::Ping(p) => tokio::time::timeout(WRITE_TIMEOUT, self.ws.send_pong(&p))
+                        .await
+                        .map_err(|_| RealtimeError::Dropped)??,
                     Msg::Close => return Ok(SessionEnd::Closed),
                 },
                 chunk = self.io.mic.recv() => {
