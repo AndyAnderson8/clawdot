@@ -203,17 +203,22 @@ mod tests {
     #[test]
     fn snippet_urls_follow_the_listen_address() {
         assert_eq!(
-            public_url_from_listen(addr("192.168.1.20:9000")),
+            public_url_from_listen(addr("192.168.1.20:9000"), Some("kitchen")),
             ("http://192.168.1.20:9000".to_owned(), false)
         );
         assert_eq!(
-            public_url_from_listen(addr("[fe80::1]:9000")),
+            public_url_from_listen(addr("[fe80::1]:9000"), None),
             ("http://[fe80::1]:9000".to_owned(), false)
         );
         for unspecified in ["0.0.0.0:9000", "[::]:9000"] {
+            // REQ-CFG-016: the machine's own name when known, the default only when not.
             assert_eq!(
-                public_url_from_listen(addr(unspecified)),
+                public_url_from_listen(addr(unspecified), None),
                 ("http://clawdot.local:9000".to_owned(), true)
+            );
+            assert_eq!(
+                public_url_from_listen(addr(unspecified), Some("Kitchen-Pi.example.lan")),
+                ("http://kitchen-pi.local:9000".to_owned(), true)
             );
         }
     }

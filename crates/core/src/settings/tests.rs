@@ -416,6 +416,10 @@ fn the_public_address_follows_the_listen_address_until_set() {
     assert_eq!(st.get("public_url"), "http://127.0.0.1:3335");
     st.change(&json!({"listen": "0.0.0.0:4000"})).unwrap();
     assert_eq!(st.get("public_url"), "http://clawdot.local:4000");
+    // With the machine's name known, the derived address uses it, and that is not a change needing a restart.
+    st.set_machine_name(Some("Speaker.Example.Lan"));
+    assert_eq!(st.get("public_url"), "http://speaker.local:4000");
+    assert_eq!(st.json()["restart_needed"], json!([]));
     st.change(&json!({"public_url": "http://dot.local:4000/"}))
         .unwrap();
     assert_eq!(st.get("public_url"), "http://dot.local:4000");
@@ -617,6 +621,25 @@ fn bad_realtime_values_are_refused_with_what_to_fix_and_change_nothing() {
         assert!(e.contains(needle), "{patch}: {e}");
     }
     assert!(st.get("realtime_url").is_null() && st.get("realtime_enabled").is_null());
+}
+
+// REQ-SEC-001, REQ-RTV-008: plain ws:// beyond the private network is refused when saved, not later.
+#[test]
+fn a_plain_realtime_address_beyond_the_private_network_is_refused_when_saved() {
+    let mut st = SettingsState::in_memory(defaults(), false, env_with(&[]));
+    let e = st
+        .change(&json!({"realtime_url": "ws://api.openai.com/v1/realtime", "realtime_model": "m"}))
+        .unwrap_err();
+    assert!(e.contains("must not cross the internet unencrypted"), "{e}");
+    assert!(st.get("realtime_url").is_null());
+    for ok in [
+        "ws://192.168.1.9:8000/v1",
+        "ws://localhost:8000",
+        "wss://x.example/v1",
+    ] {
+        st.change(&json!({"realtime_url": ok, "realtime_model": "m"}))
+            .unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
 }
 
 // REQ-CFG-065

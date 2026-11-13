@@ -1631,8 +1631,17 @@ fn snippets_follow_the_listen_address() {
     );
     assert!(!lan.contains("127.0.0.1:8080"));
     let any = run(2, "0.0.0.0:9000", &[]);
+    // The host is this machine's own name when it can be read (REQ-CFG-016), so only its shape is pinned here;
+    // the choice of name is unit-tested.
+    let named = any
+        .split("/hook/claude-code")
+        .next()
+        .and_then(|head| head.rsplit("http://").next())
+        .unwrap_or("");
     assert!(
-        any.contains("http://clawdot.local:9000/hook/claude-code"),
+        any.contains(&format!("http://{named}/hook/claude-code"))
+            && named.ends_with(".local:9000")
+            && !named.contains('/'),
         "{any}"
     );
     let explicit = run(3, "0.0.0.0:9000", &["--public-url", "http://dot:1"]);
