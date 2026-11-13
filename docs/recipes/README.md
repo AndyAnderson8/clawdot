@@ -10,6 +10,7 @@ A recipe is a tested configuration that gives ClawDot one more ability, with no 
 | [Repository host (GitHub)](github.md) | CI status, open pull requests, re-run failed jobs, open a pull request | Free; re-runs use build minutes | `read_only`, `costly` |
 | [Calendar (read-only)](calendar.md) | "What is on tomorrow" | Free | `read_only` |
 | [Claude Code hook](claude-code-hook.md) | Claude Code tells the speaker when it finishes or needs you | Free | (inbox events, not tools) |
+| [Hermes Agent as the model](hermes-brain.md) | Use Hermes Agent as the brain through its OpenAI-compatible server (written from docs, not run) | Free; your model provider | (a model setting, not a tool; keep Hermes read-only) |
 
 The example files are in [`examples/recipes/`](../../examples/recipes/). Each is a fragment of the configuration file (`tools` or `mcp` keys): merge it into your file, or add the tools in the portal's Tools and Connections tabs.
 
