@@ -9,6 +9,8 @@ import {
   SKILL_HELPER,
   readSkillFiles,
   skillImports,
+  skillSendProblem,
+  SKILL_TOOLS_MAX,
   skillBody,
   type SkillDraft,
   type SkillFile,
@@ -18,7 +20,7 @@ import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { Skill } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
-const MAX_FILE_BYTES = 70000;
+const MAX_FILE_BYTES = 64 * 1024;
 const MAX_FILES = 300;
 
 /** Make a skill, or change one in place. `skill` is the one being changed; none means a new one. */
@@ -30,6 +32,11 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
   const [busy, run] = useBusy();
   const submit = async (ev: Event) => {
     ev.preventDefault();
+    const sent = skillBody(name, text, tools, k ? k.enabled : true);
+    if (sent.tools.length > SKILL_TOOLS_MAX) {
+      say("A skill may use at most " + SKILL_TOOLS_MAX + " tools; this one lists " + sent.tools.length + ".", true);
+      return;
+    }
     await run(async () => {
       const ok = k
         ? await change(
@@ -114,7 +121,8 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
   const [busy, run] = useBusy();
   const [raw, setRaw] = useState<SkillFile[]>([]);
 
-  const read = async (files: FileList | null) => {
+  const read = async (input: HTMLInputElement) => {
+    const files = input.files;
     if (!files?.length) return;
     const all = Array.from(files).filter((f) => SKILL_HELPER.test(f.name));
     if (all.length > MAX_FILES) {
@@ -126,8 +134,15 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     for (const f of all) {
       const path = f.webkitRelativePath || f.name;
       if (f.size > MAX_FILE_BYTES) skippedBig.push(path + ": it is larger than 64 KB");
-      else read.push({ path, text: await f.text() });
+      else
+        try {
+          read.push({ path, text: await f.text() });
+        } catch {
+          skippedBig.push(path + ": it could not be read");
+        }
     }
+    // So that choosing the same folder again, after a change, is noticed.
+    input.value = "";
     setRaw(read);
     // A folder with a SKILL.md is one skill; its other text files are helper files, not skills of their own.
     const isSkillMd = (p: string) => /(^|\/)SKILL\.md$/i.test(p);
@@ -148,6 +163,11 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     const skills = list.found.filter((s) => !off.includes(s.name));
     try {
       const { folders, plain } = skillImports(skills, raw);
+      const tooBig = skillSendProblem(folders, plain);
+      if (tooBig) {
+        say(tooBig, true);
+        return;
+      }
       let added = 0;
       const left: string[] = [];
       const send = async (body: unknown) => {
@@ -190,7 +210,7 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
             type="file"
             class="sr"
             ref={(el) => el?.setAttribute("webkitdirectory", "")}
-            onChange={(e) => void read(e.currentTarget.files)}
+            onChange={(e) => void read(e.currentTarget)}
           />
         </label>
         <label class="plain small filebtn">
@@ -201,7 +221,7 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
             class="sr"
             multiple
             accept=".md,.json,text/markdown,application/json"
-            onChange={(e) => void read(e.currentTarget.files)}
+            onChange={(e) => void read(e.currentTarget)}
           />
         </label>
       </div>

@@ -12,6 +12,7 @@ import {
   restartText,
   settingsChanges,
   settingsPatch,
+  skillSendProblem,
   skillImports,
   shownValue,
   skillBody,
@@ -172,6 +173,18 @@ test("settings patch sends only what changed", () => {
     {},
     "a disabled field is never sent",
   );
+});
+
+test("a skill import the device would refuse is caught before it is sent", () => {
+  const file = (text: string) => ({ path: "a/" + text.length, text });
+  const one = (n: number) => Array.from({ length: n }, (_, i) => file("x".repeat(i + 1)));
+  assert.equal(skillSendProblem(one(64), []), "");
+  assert.match(skillSendProblem(one(65), []), /at most 64/);
+  const big = [file("y".repeat(200 * 1024)), file("z".repeat(200 * 1024))];
+  assert.match(skillSendProblem(big, []), /at most 384 KB/);
+  const tools = Array.from({ length: 17 }, (_, i) => "t" + i);
+  assert.match(skillSendProblem([], [{ name: "Many", tools }]), /more than 16 tools/);
+  assert.equal(skillSendProblem([], [{ name: "Few", tools: tools.slice(0, 16) }]), "");
 });
 
 test("a number that is not a number is refused, not sent as null (which would reset the setting)", () => {

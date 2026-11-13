@@ -59,6 +59,7 @@ export function About(): JSX.Element {
   const choose = async (ev: Event) => {
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
+    input.value = "";
     setPicked(null);
     setImportErr("");
     if (!file) return;
@@ -66,7 +67,14 @@ export function About(): JSX.Element {
       setImportErr("That file is too big to be a ClawDot settings file.");
       return;
     }
-    const parsed = parseSettingsFile(await file.text());
+    let content: string;
+    try {
+      content = await file.text();
+    } catch {
+      setImportErr("That file could not be read. Choose it again.");
+      return;
+    }
+    const parsed = parseSettingsFile(content);
     if (typeof parsed === "string") {
       setImportErr(parsed);
       return;

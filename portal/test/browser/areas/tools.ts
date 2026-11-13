@@ -236,6 +236,28 @@ export async function toolsSourcesSkills(c: Ctx): Promise<void> {
       ["skills/tidy/SKILL.md", "skills/tidy/rooms.txt"],
       "the skill and its text file; the script is never sent",
     );
+    // more files than the device takes at once is refused before anything is sent
+    const imports = () => mock.log.filter((l) => l.path === "/api/skills/import").length;
+    const sentBefore = imports();
+    await T(`click('#addskill')`);
+    await T(`clickText('#skilladddialog .seg', 'From a folder or files')`);
+    await b.until(`!!T.q('#skillfiles')`, "the file chooser again");
+    await b.ev(`(() => {
+    const dt = new DataTransfer();
+    for (let i = 0; i < 65; i++) {
+      const f = new File(['---\\nname: Bulk ' + i + '\\n---\\nDo it.'], 'SKILL.md');
+      Object.defineProperty(f, 'webkitRelativePath', { value: 'bulk/s' + i + '/SKILL.md' });
+      dt.items.add(f);
+    }
+    const input = document.getElementById('skillfiles');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+    await b.until(`!!T.q('#skillfound .picklist')`, "the many skills are found");
+    await T(`click('#skilladd')`);
+    await b.until(`T.text('#msg').includes('at most 64')`, "too many files are refused with the limit");
+    assert.equal(imports(), sentBefore, "nothing was sent");
+    await b.ev(`T.q('#skilladddialog').close()`);
     // an imported skill waits: it cannot be turned on until it has been read and accepted
     await eq(`T.rows('${rows}')[2].includes('Needs review')`, true, "marked as waiting for review");
     await eq(`T.q('${rows}:nth-child(3) input.switch').disabled`, true, "and its switch does nothing yet");

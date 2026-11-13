@@ -109,6 +109,40 @@ export function connectionDefinition(f: ConnectionForm): ConnectionDefinition {
   return d;
 }
 
+/** What the device takes in one skill import or one skill (docs/api/openapi.yaml, `/api/skills/import`, SkillBody). */
+export const SKILL_IMPORT_FILES = 64;
+export const SKILL_IMPORT_BYTES = 384 * 1024;
+export const SKILL_TOOLS_MAX = 16;
+
+/** A plain sentence when the device would refuse what is about to be sent, or "" when it would take it. */
+export function skillSendProblem(
+  folders: SkillFile[],
+  plain: { name: string; tools: string[] }[],
+  encode: (text: string) => number = (t) => new TextEncoder().encode(t).length,
+): string {
+  if (folders.length > SKILL_IMPORT_FILES)
+    return (
+      "That is " +
+      folders.length +
+      " files and the device takes at most " +
+      SKILL_IMPORT_FILES +
+      " at once. Choose fewer skills, or add them in batches."
+    );
+  const bytes = folders.reduce((n, f) => n + encode(f.text), 0);
+  if (bytes > SKILL_IMPORT_BYTES)
+    return (
+      "Those files add up to " +
+      Math.ceil(bytes / 1024) +
+      " KB and the device takes at most " +
+      SKILL_IMPORT_BYTES / 1024 +
+      " KB at once. Choose fewer skills, or add them in batches."
+    );
+  const many = plain.find((p) => p.tools.length > SKILL_TOOLS_MAX);
+  return many
+    ? "The skill " + many.name + " lists more than " + SKILL_TOOLS_MAX + " tools, which is the most one may use."
+    : "";
+}
+
 export function skillBody(
   name: string,
   instructions: string,

@@ -52,7 +52,15 @@ export function Themes(): JSX.Element {
       setMsg("That file is too big to be a theme.");
       return;
     }
-    const t = parseTheme(await f.text());
+    let content: string;
+    try {
+      content = await f.text();
+    } catch {
+      setBad(true);
+      setMsg("That file could not be read. Choose it again.");
+      return;
+    }
+    const t = parseTheme(content);
     if (typeof t === "string") {
       setBad(true);
       setMsg(t);
