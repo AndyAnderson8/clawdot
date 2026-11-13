@@ -39,6 +39,9 @@ pub trait Device {
     fn set_volume(&mut self, level: u8);
     /// Mute or unmute the microphone as the core asked.
     fn set_mute(&mut self, muted: bool);
+    /// The core accepted the satellite: `welcome` arrived. Called once per session, before anything else is sent.
+    /// A reconnect loop uses it to tell a core that answered from one that only accepted the connection.
+    fn session_open(&mut self) {}
     /// Whether this device can fetch and play an audio stream from a URL itself (internet radio). If false, the
     /// core never sends stream commands.
     fn supports_streams(&self) -> bool {
@@ -280,6 +283,7 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
             None => {}
         }
     }
+    device.session_open();
     if cfg.wake_on_connect {
         send(
             &mut sock,
@@ -834,6 +838,63 @@ mod tests {
             assert!(e.chars().count() < 300, "{}", e.chars().count());
             h.join().unwrap();
         }
+    }
+
+    #[test]
+    fn session_open_is_called_after_welcome_and_not_after_a_refusal() {
+        struct Counting(FileDevice, usize);
+        impl Device for Counting {
+            fn read_mic(&mut self) -> Option<Vec<i16>> {
+                self.0.read_mic()
+            }
+            fn begin_playback(&mut self) {}
+            fn play(&mut self, _: &[i16]) {}
+            fn end_playback(&mut self) {}
+            fn stop_playback(&mut self) {}
+            fn indicator(&mut self, _: Indicator) {}
+            fn set_volume(&mut self, _: u8) {}
+            fn set_mute(&mut self, _: bool) {}
+            fn session_open(&mut self) {
+                self.1 += 1;
+            }
+            fn finished(&self) -> bool {
+                true
+            }
+        }
+        let (port, h) = fake_core(|s, _| send(s, &welcome()).unwrap());
+        let mut dev = Counting(FileDevice::new(vec![]), 0);
+        let cfg = Config {
+            wake_on_connect: false,
+            ..cfg()
+        };
+        run(
+            TcpStream::connect(("127.0.0.1", port)).unwrap(),
+            &mut dev,
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(dev.1, 1);
+        h.join().unwrap();
+        let (port, h) = fake_core(|s, _| {
+            send(
+                s,
+                &Message::Reject(Reject {
+                    reason: "no".into(),
+                }),
+            )
+            .unwrap();
+        });
+        let mut dev = Counting(FileDevice::new(vec![]), 0);
+        assert!(
+            run(
+                TcpStream::connect(("127.0.0.1", port)).unwrap(),
+                &mut dev,
+                &cfg
+            )
+            .is_err()
+        );
+        assert_eq!(dev.1, 0, "a core that refused never opened a session");
+        h.join().unwrap();
     }
 
     #[test]
