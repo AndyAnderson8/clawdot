@@ -35,7 +35,6 @@ use crate::admin;
 use crate::app::{Core, Op, SchedOp};
 use crate::extensions::{self, ExtOp};
 use crate::http::{BODY_TIMEOUT, read_body};
-use crate::inbox::endpoint::EndpointError;
 use hyper::body::Incoming;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode};
@@ -50,10 +49,12 @@ use self::common::{
     bearer, error, fail_reply, json_reply, query_decode, query_param, read_json, read_json_limit,
     saved,
 };
+use self::endpoints::{EndpointUpdate, create, endpoint_error, endpoint_json};
 use self::page::page;
 
 mod auth;
 mod common;
+mod endpoints;
 mod page;
 
 #[cfg(test)]
@@ -69,16 +70,6 @@ const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 const MAX_EVENTS: usize = 50;
 /// Longest event text sent to the page.
 const MAX_TEXT: usize = 600;
-
-fn endpoint_error(e: &EndpointError) -> Resp {
-    let status = match e {
-        EndpointError::Exists => StatusCode::CONFLICT,
-        EndpointError::NotFound => StatusCode::NOT_FOUND,
-        EndpointError::InvalidName | EndpointError::InvalidSpokenName => StatusCode::BAD_REQUEST,
-        EndpointError::NoRandomness => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    error(status, &e.to_string())
-}
 
 fn clip(s: &str) -> String {
     if s.chars().count() <= MAX_TEXT {
@@ -98,14 +89,6 @@ fn state_label(s: &crate::inbox::event::EventState) -> &'static str {
         Dismissed => "dismissed",
         Snoozed { .. } => "snoozed",
     }
-}
-
-/// An endpoint as the portal lists it. `spoken_name` is `null` when none is set (the speaker then says `name`).
-fn endpoint_json(e: &crate::inbox::endpoint::Endpoint) -> Value {
-    json!({
-        "name": e.name, "adapter": e.adapter, "enabled": e.enabled, "created_at": e.created_at,
-        "spoken_name": e.spoken_name,
-    })
 }
 
 fn overview(core: &Core) -> Resp {
@@ -147,28 +130,6 @@ fn hive_peers(core: &Core) -> Resp {
         StatusCode::NOT_FOUND,
         "the hive is not enabled on this speaker",
     )
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NewEndpoint {
-    name: String,
-    adapter: String,
-    #[serde(default)]
-    spoken_name: Option<String>,
-}
-
-/// Deserialises a field that must be present, even when it is `null` (a plain `Option` would accept its absence).
-fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    Option::<String>::deserialize(d)
-}
-
-/// `PUT /api/endpoints/{name}`: `spoken_name` is text, or `null` (or blank) to clear it.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EndpointUpdate {
-    #[serde(deserialize_with = "present")]
-    spoken_name: Option<String>,
 }
 
 /// What a route does. The dispatch in `handle` matches on this with no catch-all arm, so a handler without a route,
@@ -1333,35 +1294,4 @@ fn speak_refusal(status: &Value) -> Option<(StatusCode, &'static str, &'static s
         ));
     }
     None
-}
-
-async fn create(core: &Core, body: Incoming) -> Resp {
-    let Some(bytes) = read_body(body, MAX_BODY, BODY_TIMEOUT).await else {
-        return error(StatusCode::PAYLOAD_TOO_LARGE, "body too large or too slow");
-    };
-    let Ok(req) = serde_json::from_slice::<NewEndpoint>(&bytes) else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "expected {\"name\":..,\"adapter\":..}",
-        );
-    };
-    if !core.has_adapter(&req.adapter) {
-        return error(StatusCode::BAD_REQUEST, "unknown adapter");
-    }
-    let mark = core.save_mark();
-    match core.create_endpoint_with(&req.name, &req.adapter, req.spoken_name.as_deref()) {
-        Ok((e, token)) => {
-            if let Err(why) = core.saved_since(mark).await {
-                // The token would be shown only in this answer, which says it failed. Take the endpoint back, so
-                // that trying again makes it afresh instead of meeting "already exists".
-                let _ = core.revoke_endpoint(&e.name);
-                return crate::http::not_saved(why);
-            }
-            json_reply(
-                StatusCode::CREATED,
-                &json!({ "name": e.name, "adapter": e.adapter, "spoken_name": e.spoken_name, "token": token }),
-            )
-        }
-        Err(e) => endpoint_error(&e),
-    }
 }
