@@ -816,3 +816,61 @@ fn an_unwritable_counts_file_still_counts() {
     assert_eq!(log.today(5), (2, 2));
     assert_eq!(log.query(&Query::default()).records.len(), 2);
 }
+
+// REQ-SEC-015: a device with no battery clock boots in 1970 (day 0 here). The caps must not reset for that.
+#[test]
+fn an_unset_clock_does_not_reset_the_daily_caps() {
+    let dir = TempDir::new("audit-clock");
+    let c = AuditConfig {
+        policy: ActionPolicy {
+            max_actions_per_day: 2,
+            ..ActionPolicy::default()
+        },
+        ..AuditConfig::default()
+    };
+    let none = json!({});
+    {
+        let log = AuditLog::open(&dir.0, c.clone()).unwrap();
+        for _ in 0..2 {
+            log.record(
+                1,
+                20_000,
+                1,
+                "voice",
+                None,
+                &act("t", Tier::Reversible, &none, decision::RAN),
+            );
+        }
+    }
+    let log = AuditLog::open(&dir.0, c).unwrap();
+    // Booted with the clock unset (day 0), or set to a day in 1970.
+    for day in [0, 3] {
+        assert_eq!(
+            log.gate(day, Tier::Reversible),
+            Gate::Capped(CapHit::Actions(2)),
+            "day {day}"
+        );
+    }
+    // The clock arrives on the same day: still capped. A real new day starts clean.
+    assert_eq!(
+        log.gate(20_000, Tier::Reversible),
+        Gate::Capped(CapHit::Actions(2))
+    );
+    assert_eq!(log.gate(20_001, Tier::Reversible), Gate::Run);
+}
+
+#[test]
+fn actions_run_before_the_clock_is_set_count_on_the_first_real_day() {
+    let log = AuditLog::in_memory(AuditConfig {
+        policy: ActionPolicy {
+            max_actions_per_day: 2,
+            ..ActionPolicy::default()
+        },
+        ..AuditConfig::default()
+    });
+    let none = json!({});
+    let ran = act("t", Tier::Reversible, &none, decision::RAN);
+    log.record(1, 0, 1, "voice", None, &ran);
+    assert_eq!(log.today(0), (1, 0));
+    assert_eq!(log.today(20_000), (1, 0));
+}

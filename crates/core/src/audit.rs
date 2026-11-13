@@ -466,6 +466,8 @@ impl AuditLog {
     ) -> Option<u64> {
         let mut s = lock(&self.state);
         let id = s.next_id;
+        // The day the counts are for, which is not the day asked for while the clock is unset (see load_counts).
+        let day = s.load_counts(day);
         let (status, result) = match a.outcome {
             None => (None, None),
             Some(Ok(text)) => (Some("ok"), Some(excerpt(text))),
@@ -513,7 +515,6 @@ impl AuditLog {
         // must not turn the caps off (REQ-SEC-016).
         let counted = a.decision == decision::RAN || a.decision == decision::APPROVED;
         if counted && a.tier.is_some_and(|t| t != Tier::ReadOnly) {
-            s.load_counts(day);
             s.counts.actions = s.counts.actions.saturating_add(1);
             if a.tier >= Some(Tier::Costly) {
                 s.counts.costly = s.counts.costly.saturating_add(1);
@@ -739,11 +740,38 @@ impl State {
         }
     }
 
-    /// Make the day's counters match the log (it is the record of what ran), the first time a day is seen.
-    /// After that [`AuditLog::record`] keeps them up to date, so this does not run again for the same day.
-    fn load_counts(&mut self, day: i64) {
-        if self.counts.known && self.counts.day == day {
-            return;
+    /// Make the day's counters match the log (it is the record of what ran), the first time a day is seen, and
+    /// return the day they are for. After that [`AuditLog::record`] keeps them up to date, so this does not run
+    /// again for the same day.
+    ///
+    /// The day asked for is not always the day used. 0 means the wall clock is not set, and a day below the one
+    /// already held means the clock stepped back: both keep counting on the day held (or, on the first call, on
+    /// the newest day the log or the counts file holds), so a device with no battery clock cannot reset the
+    /// daily caps by booting in 1970 (REQ-SEC-015).
+    fn load_counts(&mut self, day: i64) -> i64 {
+        if self.counts.known {
+            if day <= self.counts.day {
+                return self.counts.day;
+            }
+            if self.counts.day == 0 {
+                // Counted before any real day was known: keep it, on the first real day.
+                self.counts.day = day;
+                return day;
+            }
+        }
+        let saved = self
+            .counts_store
+            .as_ref()
+            .and_then(|st| st.load::<SavedCounts>().ok());
+        let mut day = day;
+        if !self.counts.known {
+            let mut newest = saved.map_or(0, |s| s.day);
+            self.source().each_line(|line| {
+                if let Some(r) = parse_line(line) {
+                    newest = newest.max(r.day);
+                }
+            });
+            day = day.max(newest);
         }
         let mut c = Counts {
             day,
@@ -767,16 +795,12 @@ impl State {
         });
         // The log may have rotated away some of the day; the counts file has not forgotten them. Take the larger.
         // A missing or unreadable file changes nothing: the recount stands.
-        if let Some(saved) = self
-            .counts_store
-            .as_ref()
-            .and_then(|st| st.load::<SavedCounts>().ok())
-            .filter(|saved| saved.day == day)
-        {
+        if let Some(saved) = saved.filter(|saved| saved.day == day) {
             c.actions = c.actions.max(saved.actions);
             c.costly = c.costly.max(saved.costly);
         }
         self.counts = c;
+        day
     }
 
     /// Write the day's counts to their own file. A failure is reported, never fatal: the counts in memory still
