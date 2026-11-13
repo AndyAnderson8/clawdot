@@ -368,6 +368,17 @@ impl UsageTracker {
         self.record_sized(day, None, req.sent_bytes(), 0);
     }
 
+    /// Count a request that failed with `err`. A refusal before any answer (an HTTP error status, no
+    /// connection) was not billed and costs nothing; an answer that was cut off part way may have been, so
+    /// the prompt is priced as for [`Self::record_abandoned`] (REQ-AST-011).
+    pub fn record_failed(&self, day: i64, req: &ChatRequest, err: &crate::llm::LlmError) {
+        if err.may_be_billed() {
+            self.record_abandoned(day, req);
+        } else {
+            self.record_request(day);
+        }
+    }
+
     /// Add spend that is not a model request, such as the audio time of a realtime voice session
     /// (REQ-RTV-004). The request count is not changed; the daily spend cap sees the cost. It is the
     /// measured time at the configured rates, so it counts as priced.

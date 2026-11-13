@@ -459,3 +459,22 @@ fn a_tiny_reported_cost_is_rounded_up() {
     let (micro, basis) = price_request(&UsageLimits::default(), Some(&usage(Some(4e-7))), 0, 0);
     assert_eq!((micro, basis), (1, Basis::Reported));
 }
+
+// REQ-AST-011: an answer that is cut off was received by the provider and may be billed; a refusal is free.
+#[test]
+fn a_cut_off_answer_costs_its_prompt_and_a_refusal_costs_nothing() {
+    use crate::llm::LlmError;
+    let req = ChatRequest {
+        model: "m".into(),
+        messages: vec![Message::user("x".repeat(3000))],
+        tools: vec![],
+        max_tokens: 100,
+    };
+    let t = UsageTracker::new(UsageLimits::default());
+    t.record_failed(1, &req, &LlmError::Provider("HTTP 429".into()));
+    t.record_failed(1, &req, &LlmError::Transport("refused".into()));
+    assert_eq!((t.requests_today(), t.spend_today()), (2, 0.0));
+    t.record_failed(1, &req, &LlmError::Interrupted("cut".into()));
+    assert_eq!(t.requests_today(), 3);
+    assert!(t.spend_today() > 0.009, "{}", t.spend_today());
+}

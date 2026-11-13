@@ -325,7 +325,7 @@ pub async fn summarise(llm: &Llm, usage: &mut UsageTracker, day: i64, event: &Ev
         let outcome = llm.backend.complete(&req).await;
         match &outcome {
             Ok(c) => usage.record_reply(day, &req, c),
-            Err(_) => usage.record_request(day),
+            Err(e) => usage.record_failed(day, &req, e),
         }
         if let Ok(c) = outcome {
             let spoken = clamp_for_speech(&c.text, &cfg);

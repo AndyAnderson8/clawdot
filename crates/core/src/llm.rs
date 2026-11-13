@@ -308,11 +308,25 @@ pub enum LlmError {
     Provider(String),
     /// The response was not understood.
     Malformed(String),
+    /// The provider started to answer and the answer did not arrive whole: the stream was cut, the reply
+    /// was larger than allowed, or a line of it could not be read. The prompt was received, so the provider
+    /// may have billed it (see [`LlmError::may_be_billed`]).
+    Interrupted(String),
+}
+
+impl LlmError {
+    /// Whether the provider may have charged for the request that failed with this error. A refusal before
+    /// any answer (an HTTP error status, no connection) is free; an answer cut off part way is not.
+    #[must_use]
+    pub const fn may_be_billed(&self) -> bool {
+        matches!(self, Self::Interrupted(_))
+    }
 }
 
 impl fmt::Display for LlmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Interrupted(e) => write!(f, "the language model's answer was cut off: {e}"),
             Self::Transport(e) => write!(f, "could not reach the language model: {e}"),
             Self::Provider(e) => write!(f, "the language model reported an error: {e}"),
             Self::Malformed(e) => write!(f, "unexpected response from the language model: {e}"),
@@ -385,6 +399,12 @@ pub fn parse_completion(body: &str) -> Result<Completion, LlmError> {
         })
         .unwrap_or_default();
     name_unnamed_calls(&mut tool_calls);
+    let finish_reason = choice.get("finish_reason").and_then(Value::as_str);
+    if finish_reason == Some("length") && !tool_calls.is_empty() {
+        return Err(LlmError::Malformed(
+            "the reply reached the length limit in the middle of a tool call".into(),
+        ));
+    }
     Ok(Completion {
         text: msg
             .get("content")
@@ -510,6 +530,28 @@ impl StreamAccumulator {
         self.kept = self.kept.saturating_add(n);
         if self.kept > MAX_STREAMED {
             return Err(LlmError::Malformed("response too large".into()));
+        }
+        Ok(())
+    }
+
+    /// Whether what arrived is a whole reply. `done` is whether the stream's `[DONE]` line was seen.
+    ///
+    /// # Errors
+    /// A stream that ended with neither `[DONE]` nor a finish reason was cut off: its text is a truncated
+    /// answer and its tool calls may carry half an argument list. A reply that stopped at the length limit
+    /// while calling a tool has arguments that were cut off at the limit.
+    pub fn check_whole(&self, done: bool) -> Result<(), LlmError> {
+        if !done && self.finish_reason.is_none() {
+            return Err(LlmError::Malformed(
+                "the stream ended before the reply was finished".into(),
+            ));
+        }
+        if self.finish_reason.as_deref() == Some("length")
+            && self.calls.values().any(|c| !c.name.is_empty())
+        {
+            return Err(LlmError::Malformed(
+                "the reply reached the length limit in the middle of a tool call".into(),
+            ));
         }
         Ok(())
     }
@@ -960,5 +1002,38 @@ mod tests {
             acc.feed_line(&line).is_err()
         });
         assert!(failed, "1000 tool calls were accepted");
+    }
+
+    #[test]
+    fn a_stream_that_ends_before_it_is_finished_is_an_error() {
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(r#"data: {"choices":[{"delta":{"content":"The answer is"}}]}"#)
+            .unwrap();
+        assert!(matches!(
+            acc.check_whole(false),
+            Err(LlmError::Malformed(_))
+        ));
+        // [DONE] or a finish reason makes it whole.
+        assert!(acc.check_whole(true).is_ok());
+        acc.feed_line(r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+            .unwrap();
+        assert!(acc.check_whole(false).is_ok());
+    }
+
+    #[test]
+    fn a_reply_cut_at_the_length_limit_in_a_tool_call_is_an_error() {
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"f","arguments":"{\"x\":"}}]},"finish_reason":"length"}]}"#,
+        )
+        .unwrap();
+        assert!(acc.check_whole(true).is_err());
+        let body = r#"{"choices":[{"message":{"tool_calls":[{"id":"a","function":{"name":"f","arguments":"{"}}]},"finish_reason":"length"}]}"#;
+        assert!(matches!(
+            parse_completion(body),
+            Err(LlmError::Malformed(_))
+        ));
+        let text_only = r#"{"choices":[{"message":{"content":"long"},"finish_reason":"length"}]}"#;
+        assert!(parse_completion(text_only).is_ok());
     }
 }
