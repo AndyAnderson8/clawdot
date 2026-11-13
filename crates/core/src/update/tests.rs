@@ -484,6 +484,20 @@ fn the_configuration_is_checked() {
     assert!(asset_name().starts_with("clawdot-"));
 }
 
+// REQ-UPD-004: the file is named from the build target, so an ARMv6 build is not offered armv7.
+#[test]
+fn the_asset_is_named_from_the_architecture_the_program_was_built_for() {
+    let name = |arch, v7| asset_name_for("linux", arch, v7, false);
+    assert_eq!(name("arm", true), "clawdot-linux-armv7");
+    assert_eq!(name("arm", false), "clawdot-linux-armv6");
+    assert_eq!(name("aarch64", false), "clawdot-linux-aarch64");
+    assert_eq!(name("x86_64", false), "clawdot-linux-x86_64");
+    assert_eq!(
+        asset_name_for("windows", "x86_64", false, true),
+        "clawdot-windows-x86_64.exe"
+    );
+}
+
 #[test]
 fn supervision_is_read_from_the_environment_snapshot() {
     let on = |pairs: &[(&str, &str)]| {

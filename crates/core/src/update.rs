@@ -161,15 +161,33 @@ pub fn parse_release(body: &str) -> Result<Release, String> {
     })
 }
 
-/// The name of the program file for this machine in a release, for example `clawdot-linux-armv7`.
+/// The architecture word in a release file name. 32-bit ARM is `armv7` only when the program was built with the
+/// ARMv7 feature; an older ARM build (ARMv6) gets `armv6`, which no release ships, so it is never offered an
+/// `armv7` file it cannot run. Other architectures keep the name the compiler gives them.
+fn arch_label(arch: &str, v7: bool) -> &str {
+    match (arch, v7) {
+        ("arm", true) => "armv7",
+        ("arm", false) => "armv6",
+        (a, _) => a,
+    }
+}
+
+/// The file name from its parts, for example `clawdot-linux-armv7`. Split out so any machine can be tested.
+fn asset_name_for(os: &str, arch: &str, v7: bool, windows: bool) -> String {
+    let ext = if windows { ".exe" } else { "" };
+    format!("clawdot-{os}-{}{ext}", arch_label(arch, v7))
+}
+
+/// The name of the program file for this machine in a release, for example `clawdot-linux-armv7`. It is named
+/// from the architecture the program was built for, not from what the machine reports.
 #[must_use]
 pub fn asset_name() -> String {
-    let arch = match std::env::consts::ARCH {
-        "arm" => "armv7",
-        a => a,
-    };
-    let ext = if cfg!(windows) { ".exe" } else { "" };
-    format!("clawdot-{}-{arch}{ext}", std::env::consts::OS)
+    asset_name_for(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(all(target_arch = "arm", target_feature = "v7")),
+        cfg!(windows),
+    )
 }
 
 /// Read a `SHA256SUMS` file: lines of `<64 hex digits>  <file name>`.
