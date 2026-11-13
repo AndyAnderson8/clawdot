@@ -71,12 +71,13 @@ struct Call<'a> {
     held_id: Option<u64>,
 }
 
-/// How an action that waits for the user is recorded: the audit decision and its note, and its line in the
-/// recent-actions list.
+/// How an action that waits for the user is recorded: the audit decision and its note, its line in the
+/// recent-actions list, and what the model is told.
 struct Kept {
     decision: &'static str,
     why: &'static str,
     recent: &'static str,
+    told: &'static str,
 }
 
 /// A costly or destructive call in a turn the user started: held, and the user is asked.
@@ -84,6 +85,7 @@ const HOLD: Kept = Kept {
     decision: decision::HELD,
     why: "asked the user to confirm",
     recent: "waiting for the user's yes",
+    told: "Not run. The user is being asked to confirm; the answer arrives in their next turn.",
 };
 
 /// A call in a turn the user did not start: kept as a proposal for the user's next turn.
@@ -91,6 +93,7 @@ const PROPOSE: Kept = Kept {
     decision: decision::PROPOSED,
     why: "turn not started by the user",
     recent: "proposed, waiting for the user",
+    told: "Not run: this turn was not started by the user, so it can only read. The action was saved as a proposal and the user will be asked.",
 };
 
 /// Take the result out of a turn that is ending, leaving a blank one behind.
@@ -608,16 +611,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
         // An action of this batch is already held, or one from an earlier batch is still waiting.
         let batch_holds = d.held.is_some();
         if risk.tier == Tier::Destructive && !self.cfg.allow_destructive {
-            self.note_act(&Act {
-                tool: &call.name,
-                tier: Some(risk.tier),
-                args: &args,
-                decision: decision::INVALID,
-                held_id: None,
-                outcome: None,
-                note: Some("destructive tools are not offered"),
-            });
-            format!("Error: there is no tool called `{}`.", call.name)
+            self.refuse_destructive(call, &args, risk.tier)
         } else if !self.by_user
             && risk.tier != Tier::ReadOnly
             && (batch_holds || self.held_and_fresh())
@@ -625,69 +619,90 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             // The user is deciding on an action already. A turn that outside text started must not put its own
             // proposal in that action's place, where a yes meant for the first would run the second
             // (REQ-SEC-011, REQ-SEC-012).
-            self.note_act(&Act {
-                tool: &call.name,
-                tier: Some(risk.tier),
-                args: &args,
-                decision: decision::SKIPPED,
-                held_id: None,
-                outcome: None,
-                note: Some("another action is waiting for the user's answer"),
-            });
+            self.note_skipped_for_waiting(call, &args, risk.tier);
             "Not run and not proposed: an action is already waiting for the user's answer. Say in your reply what you would suggest."
                 .to_owned()
         } else if !self.by_user && risk.tier != Tier::ReadOnly {
             // Nobody is here to ask: keep it as a proposal for the user's next turn.
-            let args = self.host.pin_args(&call.name, args).await;
-            match self.keep_pending(call, &args, risk.tier, &PROPOSE) {
-                Ok(p) => {
-                    d.held = Some(p);
-                    "Not run: this turn was not started by the user, so it can only read. The action was saved as a proposal and the user will be asked."
-                        .to_owned()
-                }
-                Err(refusal) => refusal,
-            }
+            self.keep(call, args, risk.tier, &PROPOSE, d).await
         } else if gate != Gate::Run {
             // Dry-run or a daily cap: nothing is asked and nothing runs.
-            self.conv
-                .note_recent(&call.name, Some(risk.tier), &args, "not run");
-            self.blocked(
-                &Call {
-                    name: &call.name,
-                    args: &args,
-                    tier: risk.tier,
-                    held_id: None,
-                },
-                gate,
-            )
+            self.block_call(call, &args, risk.tier, gate)
         } else if risk.needs_hold() && (batch_holds || self.conv.pending.is_some()) {
             // An action is already waiting for the user's yes or no, held earlier in this batch or by an earlier
             // call. A second one must not replace it and a call must not cancel it: only the user's own words
             // end it (REQ-SEC-011). A realtime session reaches this across batches, because its model keeps
             // calling tools while the question is open; a turn of the model loop reaches it within a batch.
-            self.note_act(&Act {
-                tool: &call.name,
-                tier: Some(risk.tier),
-                args: &args,
-                decision: decision::SKIPPED,
-                held_id: None,
-                outcome: None,
-                note: Some("another action is waiting for the user's answer"),
-            });
+            self.note_skipped_for_waiting(call, &args, risk.tier);
             "Not run: an action is already waiting for the user's answer, so this one was not held. Do not retry it until the user has answered; they will say yes or no."
                 .to_owned()
         } else if risk.needs_hold() {
-            let args = self.host.pin_args(&call.name, args).await;
-            match self.keep_pending(call, &args, risk.tier, &HOLD) {
-                Ok(p) => {
-                    d.held = Some(p);
-                    "Not run. The user is being asked to confirm; the answer arrives in their next turn."
-                        .to_owned()
-                }
-                Err(refusal) => refusal,
-            }
+            self.keep(call, args, risk.tier, &HOLD, d).await
         } else {
             self.run_call(batch, call, &args, risk.tier, d).await
+        }
+    }
+
+    /// A destructive call when destructive tools are not offered: refused as if the tool did not exist.
+    fn refuse_destructive(&self, call: &ToolCall, args: &Value, tier: Tier) -> String {
+        self.note_act(&Act {
+            tool: &call.name,
+            tier: Some(tier),
+            args,
+            decision: decision::INVALID,
+            held_id: None,
+            outcome: None,
+            note: Some("destructive tools are not offered"),
+        });
+        format!("Error: there is no tool called `{}`.", call.name)
+    }
+
+    /// Record a call that was passed over because another action waits for the user's answer.
+    fn note_skipped_for_waiting(&self, call: &ToolCall, args: &Value, tier: Tier) {
+        self.note_act(&Act {
+            tool: &call.name,
+            tier: Some(tier),
+            args,
+            decision: decision::SKIPPED,
+            held_id: None,
+            outcome: None,
+            note: Some("another action is waiting for the user's answer"),
+        });
+    }
+
+    /// Dry-run or a daily cap: the recent-actions line, then what the model is told.
+    fn block_call(&mut self, call: &ToolCall, args: &Value, tier: Tier, gate: Gate) -> String {
+        self.conv
+            .note_recent(&call.name, Some(tier), args, "not run");
+        self.blocked(
+            &Call {
+                name: &call.name,
+                args,
+                tier,
+                held_id: None,
+            },
+            gate,
+        )
+    }
+
+    /// Keep a call for the user to answer, as a hold or a proposal (`how`): the host pins its arguments, the
+    /// action is built and recorded, and the batch ends up holding it. What the model is told is `how.told`,
+    /// or the refusal when the read-back is too long.
+    async fn keep(
+        &mut self,
+        call: &ToolCall,
+        args: Value,
+        tier: Tier,
+        how: &Kept,
+        d: &mut Dispatched,
+    ) -> String {
+        let args = self.host.pin_args(&call.name, args).await;
+        match self.keep_pending(call, &args, tier, how) {
+            Ok(p) => {
+                d.held = Some(p);
+                how.told.to_owned()
+            }
+            Err(refusal) => refusal,
         }
     }
 
