@@ -103,6 +103,12 @@ impl EsphomeConfig {
         if self.is_empty() {
             return Ok(());
         }
+        self.validate_devices()?;
+        self.validate_media()
+    }
+
+    /// The device list: how many, then each entry, with names unique.
+    fn validate_devices(&self) -> Result<(), String> {
         if self.devices.is_empty() {
             return Err("config: `esphome.media_listen` and `media_url` need at least one `esphome.devices` entry".into());
         }
@@ -113,54 +119,23 @@ impl EsphomeConfig {
         }
         let mut seen = std::collections::HashSet::new();
         for d in &self.devices {
-            let ok_name = !d.name.is_empty()
-                && d.name.len() <= 64
-                && d.name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-            if !ok_name {
-                return Err(format!(
-                    "config: `esphome.devices` name {:?} must be 1 to 64 letters, digits, `.`, `_` or `-`",
-                    d.name
-                ));
-            }
+            d.validate_name()?;
             if !seen.insert(d.name.as_str()) {
                 return Err(format!(
                     "config: `esphome.devices` name {:?} is used twice",
                     d.name
                 ));
             }
-            let (host, port) = split_port(&d.address);
-            if host.is_empty()
-                || host.len() > 253
-                || host
-                    .bytes()
-                    .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-            {
-                return Err(format!(
-                    "config: `esphome.devices` {:?} has a bad `address`",
-                    d.name
-                ));
-            }
-            if let Some(p) = port {
-                if p.parse::<u16>().ok().filter(|p| *p != 0).is_none() {
-                    return Err(format!(
-                        "config: `esphome.devices` {:?} has a bad port in `address`",
-                        d.name
-                    ));
-                }
-            }
+            d.validate_address()?;
             d.listening
                 .validate(&format!("esphome.devices[{}].listening", d.name))?;
-            if let Some(e) = &d.psk_env {
-                if e.is_empty() || !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                    return Err(format!(
-                        "config: `esphome.devices` {:?} `psk_env` must be an environment variable name",
-                        d.name
-                    ));
-                }
-            }
+            d.validate_psk_env()?;
         }
+        Ok(())
+    }
+
+    /// The audio file server pair: both or neither.
+    fn validate_media(&self) -> Result<(), String> {
         match (&self.media_listen, &self.media_url) {
             (Some(l), Some(u)) => {
                 l.parse::<std::net::SocketAddr>().map_err(|e| {
@@ -182,6 +157,60 @@ impl EsphomeConfig {
                 return Err(
                     "config: `esphome.media_listen` and `esphome.media_url` go together".into(),
                 );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl EsphomeDevice {
+    fn validate_name(&self) -> Result<(), String> {
+        let ok_name = !self.name.is_empty()
+            && self.name.len() <= 64
+            && self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if ok_name {
+            return Ok(());
+        }
+        Err(format!(
+            "config: `esphome.devices` name {:?} must be 1 to 64 letters, digits, `.`, `_` or `-`",
+            self.name
+        ))
+    }
+
+    fn validate_address(&self) -> Result<(), String> {
+        let (host, port) = split_port(&self.address);
+        if host.is_empty()
+            || host.len() > 253
+            || host
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        {
+            return Err(format!(
+                "config: `esphome.devices` {:?} has a bad `address`",
+                self.name
+            ));
+        }
+        if let Some(p) = port {
+            if p.parse::<u16>().ok().filter(|p| *p != 0).is_none() {
+                return Err(format!(
+                    "config: `esphome.devices` {:?} has a bad port in `address`",
+                    self.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_psk_env(&self) -> Result<(), String> {
+        if let Some(e) = &self.psk_env {
+            if e.is_empty() || !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                return Err(format!(
+                    "config: `esphome.devices` {:?} `psk_env` must be an environment variable name",
+                    self.name
+                ));
             }
         }
         Ok(())
