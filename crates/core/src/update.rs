@@ -161,31 +161,37 @@ pub fn parse_release(body: &str) -> Result<Release, String> {
     })
 }
 
-/// The architecture word in a release file name. 32-bit ARM is `armv7` only when the program was built with the
-/// ARMv7 feature; an older ARM build (ARMv6) gets `armv6`, which no release ships, so it is never offered an
-/// `armv7` file it cannot run. Other architectures keep the name the compiler gives them.
-fn arch_label(arch: &str, v7: bool) -> &str {
-    match (arch, v7) {
-        ("arm", true) => "armv7",
-        ("arm", false) => "armv6",
-        (a, _) => a,
+/// The architecture word in a release file name, from the compiler's name for the build target
+/// (`armv7-unknown-linux-musleabihf`, `aarch64-unknown-linux-gnu`) and the architecture the standard library
+/// reports. 32-bit ARM is `armv7` only when the target says so; any other 32-bit ARM target (an ARMv6 board) is
+/// `armv6`, which no release ships, so such a build is never offered an `armv7` file it cannot run. Other
+/// architectures keep the name the compiler gives them.
+fn arch_label<'a>(arch: &'a str, target: &str) -> &'a str {
+    if arch != "arm" {
+        return arch;
+    }
+    let first = target.split('-').next().unwrap_or("");
+    if first.starts_with("armv7") || first.starts_with("thumbv7") {
+        "armv7"
+    } else {
+        "armv6"
     }
 }
 
 /// The file name from its parts, for example `clawdot-linux-armv7`. Split out so any machine can be tested.
-fn asset_name_for(os: &str, arch: &str, v7: bool, windows: bool) -> String {
+fn asset_name_for(os: &str, arch: &str, target: &str, windows: bool) -> String {
     let ext = if windows { ".exe" } else { "" };
-    format!("clawdot-{os}-{}{ext}", arch_label(arch, v7))
+    format!("clawdot-{os}-{}{ext}", arch_label(arch, target))
 }
 
 /// The name of the program file for this machine in a release, for example `clawdot-linux-armv7`. It is named
-/// from the architecture the program was built for, not from what the machine reports.
+/// from the target the program was built for, not from what the machine reports.
 #[must_use]
 pub fn asset_name() -> String {
     asset_name_for(
         std::env::consts::OS,
         std::env::consts::ARCH,
-        cfg!(all(target_arch = "arm", target_feature = "v7")),
+        env!("CLAWDOT_BUILD_TARGET"),
         cfg!(windows),
     )
 }
