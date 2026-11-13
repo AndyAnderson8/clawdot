@@ -1214,3 +1214,35 @@ async fn a_half_dead_connection_that_takes_no_audio_ends_the_session() {
     drop(mic_tx);
     srv.abort();
 }
+
+// REQ-SEC-011: a transcript that never arrives must not leave the held-action barrier behind for good.
+#[test]
+fn a_lost_transcript_does_not_block_the_users_yes() {
+    use tokio::time::Instant;
+    let t0 = Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    let mut u = Utterances::default();
+    // The request starts; its transcript is lost. The action is held.
+    u.start(at(0));
+    u.hold();
+    // The user says yes 15 s later and its transcript arrives.
+    u.start(at(15));
+    assert!(u.heard_one(at(17)), "the yes answers the hold");
+
+    // Normal order: the request's own transcript arrives after the hold and cannot answer it.
+    let mut u = Utterances::default();
+    u.start(at(0));
+    u.hold();
+    assert!(!u.heard_one(at(1)), "the transcript of the request itself");
+    u.start(at(3));
+    assert!(u.heard_one(at(4)));
+
+    // A late transcript of the lost one cannot push `heard` past `started`.
+    let mut u = Utterances::default();
+    u.start(at(0));
+    u.start(at(1));
+    u.hold();
+    assert!(!u.heard_one(at(2)));
+    assert!(!u.heard_one(at(3)));
+    assert!(!u.heard_one(at(4)));
+}
