@@ -3,7 +3,7 @@ import { Field, useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { useEffect, useState } from "preact/hooks";
 import { api, ApiError, enc } from "../api.ts";
-import { fail, say, usePolled, zone } from "../store.ts";
+import { deviceNow, fail, say, usePolled, zone } from "../store.ts";
 import { whenText } from "../time.ts";
 import type { Note, NotesList } from "../types.ts";
 import { ask } from "../confirm.tsx";
@@ -40,7 +40,7 @@ export function Notes(): JSX.Element {
       live = false;
       clearTimeout(t);
     };
-  }, [query, data?.notes.length]);
+  }, [query, data]);
 
   const load = async () => {
     try {
@@ -103,7 +103,7 @@ export function Notes(): JSX.Element {
   };
 
   const max = data?.limits.max_note_chars ?? 200;
-  const now = Math.floor(Date.now() / 1000);
+  const now = deviceNow();
   return (
     <>
       <p class="lead">

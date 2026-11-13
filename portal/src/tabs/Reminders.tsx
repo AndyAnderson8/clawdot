@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, ApiError, enc } from "../api.ts";
 import { reminderBody } from "../forms.ts";
-import { fail, say, usePolled, zone } from "../store.ts";
+import { deviceNow, fail, say, usePolled, zone } from "../store.ts";
 import { TimeField } from "../timefield.tsx";
 import { useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
@@ -23,7 +23,7 @@ const EMPTY: Record<ScheduleKind, string> = {
   reminder: "No reminders set. Add one below, or ask the speaker.",
 };
 const ADD: Record<ScheduleKind, string> = { timer: "Add a timer", alarm: "Add an alarm", reminder: "Add a reminder" };
-const today = () => parts(Math.floor(Date.now() / 1000), zone()).date;
+const today = () => parts(deviceNow(), zone()).date;
 
 export function whenLine(i: ScheduleItem, now: number): string {
   const z = zone();

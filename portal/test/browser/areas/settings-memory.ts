@@ -60,6 +60,11 @@ export async function memory(c: Ctx): Promise<void> {
       "the match",
     );
     await eq(`T.text('#notehits')`, "1 of 6 match", "and how many matched");
+    // changing a memory that is on show updates the search result too
+    await T(`click("#notelist > li:nth-child(1) button[title='Change this memory']")`);
+    await T(`set("#note-text", "mom's birthday is June 4")`);
+    await T(`submit("#noteform")`);
+    await b.until(`T.rows("#notelist > li")[0]?.includes("June 4") === true`, "the search shows the changed text");
     assert.ok(
       mock.log.some((l) => l.method === "GET" && l.path === "/api/notes"),
       "the device was asked",

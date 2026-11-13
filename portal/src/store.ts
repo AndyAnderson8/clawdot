@@ -95,6 +95,11 @@ export function sv(key: string): string | number | boolean | null {
   return f ? f.value : null;
 }
 
+/** The device's clock, in seconds: what it last reported, or this browser's clock before it has. */
+export function deviceNow(): number {
+  return state.overview?.now ?? Math.floor(Date.now() / 1000);
+}
+
 /** The device's time zone. */
 export function zone(): string {
   return String(sv("zone") || "UTC");
