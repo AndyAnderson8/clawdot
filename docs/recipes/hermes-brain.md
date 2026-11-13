@@ -31,7 +31,7 @@ Risk tier: not applicable to this recipe as such (it is a model, not a tool). Wh
      }
    }
    ```
-   The model name is the server's `API_SERVER_MODEL_NAME` (default: the profile name, or `hermes-agent`); `GET /v1/models` shows the exact value. The same fields are in the portal's Settings. There is no fallback or summary model unless you also set `llm.fallback_model` and `llm.summary_model`; leave them unset to keep summaries on Hermes too, or point them at a small ordinary model to keep announcements cheap and tool-free.
+   The model name is the server's `API_SERVER_MODEL_NAME` (default: the profile name, or `hermes-agent`); `GET /v1/models` shows the exact value. The same fields are in the portal's Settings. There is no fallback or summary model: the `llm.fallback_model` and `llm.summary_model` keys are retired and ignored, so spoken summaries of agent events also go to Hermes.
 
 No example JSON file is shipped for this recipe: the recipe tests (`crates/core/tests/recipes.rs`) load every file in `examples/recipes/` as a tool or connection fragment, and this is a model setting.
 
