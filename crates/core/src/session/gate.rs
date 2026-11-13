@@ -184,7 +184,11 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// End the turn because the user cancelled it: discard what was held, record it, and say what was and was
     /// not done (REQ-AST-022).
-    fn cancelled(&mut self, not_run: &[String], sent: Option<&str>) -> TurnResult {
+    pub(in crate::session::gate) fn cancelled(
+        &mut self,
+        not_run: &[String],
+        sent: Option<&str>,
+    ) -> TurnResult {
         let mut discarded = false;
         if let Some(p) = self.conv.pending.take() {
             self.resolved(&p, decision::CANCELLED, "the user cancelled");
@@ -212,7 +216,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// End the turn at a limit.
-    fn stopped(&mut self, why: Stop) -> TurnResult {
+    pub(in crate::session::gate) fn stopped(&mut self, why: Stop) -> TurnResult {
         stopped_turn(
             self.conv,
             take(&mut self.result),
@@ -224,27 +228,30 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// End the turn with words the host chose.
-    fn finish(&mut self, speech: &str) -> TurnResult {
+    pub(in crate::session::gate) fn finish(&mut self, speech: &str) -> TurnResult {
         finish_with(self.conv, take(&mut self.result), speech)
     }
 
     /// End a turn on a call that was refused for being too long to read back. It counts as a stop for a failed
     /// call, not as an answer, so a caller that waits for the model to speak (the realtime voice) is told to
     /// say the host's words.
-    fn finish_too_long(&mut self, tool: &str) -> TurnResult {
+    pub(in crate::session::gate) fn finish_too_long(&mut self, tool: &str) -> TurnResult {
         let mut r = take(&mut self.result);
         r.end = TurnEnd::Stopped(Stop::Failures);
         finish_with(self.conv, r, &too_long_speech(tool))
     }
 
     /// End the turn because calls keep failing (REQ-AST-025).
-    fn failed(&mut self) -> TurnResult {
+    pub(in crate::session::gate) fn failed(&mut self) -> TurnResult {
         failed_turn(self.conv, take(&mut self.result), &self.st)
     }
 
     /// The answers the host reads from the user's own words before anything else: to "forget all my notes?"
     /// and to a held action. `Some` ends the turn.
-    async fn answer_first(&mut self, user_text: &str) -> Option<TurnResult> {
+    pub(in crate::session::gate) async fn answer_first(
+        &mut self,
+        user_text: &str,
+    ) -> Option<TurnResult> {
         if let Some(r) = self.answer_forget_all(user_text) {
             return Some(r);
         }
@@ -253,14 +260,14 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Whether an action is waiting for the user's answer and its window is still open. One whose window has
     /// run out is dropped here, so it does not stand in the way of a new one.
-    fn held_and_fresh(&mut self) -> bool {
+    pub(in crate::session::gate) fn held_and_fresh(&mut self) -> bool {
         self.drop_held_if_stale();
         self.conv.pending.is_some()
     }
 
     /// Drop a held action whose window has run out, for a turn that cannot answer it (the calls of a model
     /// outside the turn loop). One still inside its window is left alone.
-    fn drop_held_if_stale(&mut self) {
+    pub(in crate::session::gate) fn drop_held_if_stale(&mut self) {
         let mono = self.mono;
         if let Some(old) = self
             .conv
@@ -273,7 +280,10 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// The user's answer to "forget all my notes?" is read here, by the host. `Some` ends the turn.
-    fn answer_forget_all(&mut self, user_text: &str) -> Option<TurnResult> {
+    pub(in crate::session::gate) fn answer_forget_all(
+        &mut self,
+        user_text: &str,
+    ) -> Option<TurnResult> {
         let (by_user, mono) = (self.by_user, self.mono);
         let conv = &mut *self.conv;
         let result = &mut self.result;
@@ -298,7 +308,10 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// The user's answer to a held action is read here, by the host, from the user's own words. It is the
     /// only way a held action runs (REQ-SEC-011). An event is never an answer. `Some` ends the turn.
-    async fn answer_held(&mut self, user_text: &str) -> Option<TurnResult> {
+    pub(in crate::session::gate) async fn answer_held(
+        &mut self,
+        user_text: &str,
+    ) -> Option<TurnResult> {
         if !self.by_user {
             return None;
         }
@@ -337,7 +350,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// End the turn by dropping a held action without running it: the audit record, the recent-actions line,
     /// and the words to say.
-    fn drop_held(
+    pub(in crate::session::gate) fn drop_held(
         &mut self,
         held: PendingAction,
         outcome: HeldOutcome,
@@ -354,7 +367,10 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// The user said yes in time: run the stored action, put the call and its result into the history as a
     /// model's call would have been, and end the turn only if the user cancelled meanwhile.
-    async fn release_held(&mut self, held: PendingAction) -> Option<TurnResult> {
+    pub(in crate::session::gate) async fn release_held(
+        &mut self,
+        held: PendingAction,
+    ) -> Option<TurnResult> {
         let offered_now = offered(&*self.host, &self.cfg)
             .into_iter()
             .any(|t| t.name == held.tool);
@@ -423,7 +439,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Put each of the calls through the gate, in order, and say what is left to settle. `backend` is used
     /// only to summarise long results (REQ-AST-024); a caller with `None` gets them whole.
-    async fn dispatch<B: ChatBackend>(
+    pub(in crate::session::gate) async fn dispatch<B: ChatBackend>(
         &mut self,
         backend: Option<&B>,
         calls: &[ToolCall],
@@ -456,7 +472,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Phase 1 of a call: does it run at all? What came before it in the batch (a question or a held action
     /// to ask about, a limit) and the turn's own limits can stop it. Returns the text the model sees.
-    async fn admit<B: ChatBackend>(
+    pub(in crate::session::gate) async fn admit<B: ChatBackend>(
         &mut self,
         batch: &Batch<'_, B>,
         call: &ToolCall,
@@ -532,7 +548,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Phase 2: is it a well-formed call to a tool that is offered? The two pseudo-tools that read the
     /// conversation itself are answered here; every other call goes on to be sorted by tier.
-    async fn validate<B: ChatBackend>(
+    pub(in crate::session::gate) async fn validate<B: ChatBackend>(
         &mut self,
         batch: &Batch<'_, B>,
         call: &ToolCall,
@@ -571,7 +587,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// The full text of a stored long result, framed as untrusted data.
-    fn read_stored_result(&self, args: &Value) -> String {
+    pub(in crate::session::gate) fn read_stored_result(&self, args: &Value) -> String {
         let found = args
             .get("id")
             .and_then(Value::as_u64)
@@ -600,7 +616,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// Phase 3: what the host decides for a valid call, by its tier. It is refused (destructive and not
     /// offered), kept as a proposal (the turn is not the user's), blocked (dry-run or a cap), held for the
     /// user's yes, or run.
-    async fn sort_by_tier<B: ChatBackend>(
+    pub(in crate::session::gate) async fn sort_by_tier<B: ChatBackend>(
         &mut self,
         batch: &Batch<'_, B>,
         call: &ToolCall,
@@ -645,7 +661,12 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// A destructive call when destructive tools are not offered: refused as if the tool did not exist.
-    fn refuse_destructive(&self, call: &ToolCall, args: &Value, tier: Tier) -> String {
+    pub(in crate::session::gate) fn refuse_destructive(
+        &self,
+        call: &ToolCall,
+        args: &Value,
+        tier: Tier,
+    ) -> String {
         self.note_act(&Act {
             tool: &call.name,
             tier: Some(tier),
@@ -659,7 +680,12 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// Record a call that was passed over because another action waits for the user's answer.
-    fn note_skipped_for_waiting(&self, call: &ToolCall, args: &Value, tier: Tier) {
+    pub(in crate::session::gate) fn note_skipped_for_waiting(
+        &self,
+        call: &ToolCall,
+        args: &Value,
+        tier: Tier,
+    ) {
         self.note_act(&Act {
             tool: &call.name,
             tier: Some(tier),
@@ -672,7 +698,13 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// Dry-run or a daily cap: the recent-actions line, then what the model is told.
-    fn block_call(&mut self, call: &ToolCall, args: &Value, tier: Tier, gate: Gate) -> String {
+    pub(in crate::session::gate) fn block_call(
+        &mut self,
+        call: &ToolCall,
+        args: &Value,
+        tier: Tier,
+        gate: Gate,
+    ) -> String {
         self.conv
             .note_recent(&call.name, Some(tier), args, "not run");
         self.blocked(
@@ -689,7 +721,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// Keep a call for the user to answer, as a hold or a proposal (`how`): the host pins its arguments, the
     /// action is built and recorded, and the batch ends up holding it. What the model is told is `how.told`,
     /// or the refusal when the read-back is too long.
-    async fn keep(
+    pub(in crate::session::gate) async fn keep(
         &mut self,
         call: &ToolCall,
         args: Value,
@@ -710,7 +742,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// Write the audit record for an action that is waiting for the user, and build it. The read-back must be
     /// short enough to say (REQ-SEC-011): if it is not, nothing is held and nothing runs, and the refusal
     /// (what the model is told) says how far over the limit it is.
-    fn keep_pending(
+    pub(in crate::session::gate) fn keep_pending(
         &mut self,
         call: &ToolCall,
         args: &Value,
@@ -758,7 +790,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Phase 4: run an allowed call and record how it ended: the progress phrase before a slow one, the
     /// summary of a long result, the hint after a failure that lacked a required argument.
-    async fn run_call<B: ChatBackend>(
+    pub(in crate::session::gate) async fn run_call<B: ChatBackend>(
         &mut self,
         batch: &Batch<'_, B>,
         call: &ToolCall,
@@ -801,7 +833,12 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// A phrase before a call that will take a while, never read from tool output.
-    fn say_before_slow_call<B>(&mut self, batch: &Batch<'_, B>, call: &ToolCall, tier: Tier) {
+    pub(in crate::session::gate) fn say_before_slow_call<B>(
+        &mut self,
+        batch: &Batch<'_, B>,
+        call: &ToolCall,
+        tier: Tier,
+    ) {
         if self.cfg.progress_speech
             && !self.st.spoke_round
             && batch.spaced
@@ -823,7 +860,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// A result longer than the summary threshold is stored whole and replaced by a summary for the model
     /// (REQ-AST-024), when there is a model to ask; any other result is returned as it is.
-    async fn summarise_if_long<B: ChatBackend>(
+    pub(in crate::session::gate) async fn summarise_if_long<B: ChatBackend>(
         &mut self,
         batch: &Batch<'_, B>,
         call: &ToolCall,
@@ -853,7 +890,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// After a failed call that lacked a required argument, point the model at `ask_user`.
-    fn hint_missing_arguments<B>(
+    pub(in crate::session::gate) fn hint_missing_arguments<B>(
         batch: &Batch<'_, B>,
         call: &ToolCall,
         args: &Value,
@@ -870,7 +907,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// What follows a batch of calls: cancel, a question for the user, a held action to ask about, a limit,
     /// or calls that keep failing. `Some` ends the turn; `None` means the turn may go on.
-    fn settle(&mut self, d: Dispatched) -> Option<TurnResult> {
+    pub(in crate::session::gate) fn settle(&mut self, d: Dispatched) -> Option<TurnResult> {
         let Dispatched {
             mut held,
             ask,
@@ -935,7 +972,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// What the model is told when dry-run mode or a daily cap stops a call, and the matching audit record
     /// (REQ-SEC-015, REQ-SEC-016).
-    fn blocked(&self, call: &Call<'_>, gate: Gate) -> String {
+    pub(in crate::session::gate) fn blocked(&self, call: &Call<'_>, gate: Gate) -> String {
         let Call {
             name,
             args,
@@ -972,7 +1009,11 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// budget is an error result, not a hang (REQ-AST-019); a read-only or reversible call is dropped if the
     /// user says stop, while a costly or destructive one is allowed to finish because it cannot be recalled
     /// (REQ-AST-022).
-    async fn execute(&mut self, call: &Call<'_>, gate: Gate) -> Executed {
+    pub(in crate::session::gate) async fn execute(
+        &mut self,
+        call: &Call<'_>,
+        gate: Gate,
+    ) -> Executed {
         if gate != Gate::Run {
             return Executed {
                 text: self.blocked(call, gate),
@@ -993,7 +1034,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
 
     /// Call the tool, but for no longer than `budget`. `None` is a call dropped because the user said stop,
     /// which only a call that `can_drop` is.
-    async fn call_tool_within(
+    pub(in crate::session::gate) async fn call_tool_within(
         &mut self,
         call: &Call<'_>,
         budget: Duration,
@@ -1011,7 +1052,12 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// The audit record of a call that ran: approved when the user's yes released it, otherwise run.
-    fn note_ran(&self, call: &Call<'_>, outcome: Option<Result<&str, &str>>, note: Option<&str>) {
+    pub(in crate::session::gate) fn note_ran(
+        &self,
+        call: &Call<'_>,
+        outcome: Option<Result<&str, &str>>,
+        note: Option<&str>,
+    ) {
         let decision = if call.held_id.is_some() {
             decision::APPROVED
         } else {
@@ -1029,7 +1075,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// The user said stop while a read-only or reversible call ran: it was dropped.
-    fn cancelled_while_running(&self, call: &Call<'_>) -> Executed {
+    pub(in crate::session::gate) fn cancelled_while_running(&self, call: &Call<'_>) -> Executed {
         self.note_act(&Act {
             tool: call.name,
             tier: Some(call.tier),
@@ -1047,7 +1093,11 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// The tool did not answer within `budget`.
-    fn timed_out(&self, call: &Call<'_>, budget: Duration) -> Executed {
+    pub(in crate::session::gate) fn timed_out(
+        &self,
+        call: &Call<'_>,
+        budget: Duration,
+    ) -> Executed {
         let secs = budget.as_secs().max(1);
         self.note_ran(
             call,
@@ -1065,7 +1115,12 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     }
 
     /// The tool answered, with a result or an error.
-    fn returned(&self, call: &Call<'_>, out: Result<String, String>, can_drop: bool) -> Executed {
+    pub(in crate::session::gate) fn returned(
+        &self,
+        call: &Call<'_>,
+        out: Result<String, String>,
+        can_drop: bool,
+    ) -> Executed {
         self.note_ran(
             call,
             Some(out.as_ref().map(String::as_str).map_err(String::as_str)),
@@ -1081,7 +1136,7 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// End a turn whose calls came from somewhere other than a model round that could answer next: the words
     /// are what an empty model reply would have been (REQ-AST-025), "Done." unless the last thing was a
     /// failure.
-    fn close_after_calls(&mut self) -> TurnResult {
+    pub(in crate::session::gate) fn close_after_calls(&mut self) -> TurnResult {
         if let Some(tool) = self.st.too_long.take() {
             return self.finish_too_long(&tool);
         }
