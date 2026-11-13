@@ -83,9 +83,9 @@ impl Word {
         if cfg.window == 0 || cfg.window > 64 {
             return Err(Error::Invalid("sliding window size must be 1 to 64".into()));
         }
-        if !(cfg.cutoff > 0.0 && cfg.cutoff <= 1.0) {
+        if !(0.5..=0.999).contains(&cfg.cutoff) {
             return Err(Error::Invalid(
-                "probability cutoff must be above 0 and at most 1".into(),
+                "probability cutoff must be from 0.5 to 0.999".into(),
             ));
         }
         let hash = sha256(&cfg.model);
