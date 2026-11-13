@@ -3,3 +3,5 @@ lint/node_modules
 package-lock.json
 # index.html holds the /*@css*/ and /*@js*/ build markers, which Prettier would rewrite.
 src/index.html
+# Written by crates/core/src/settings/tests.rs.
+test/fixtures

@@ -1,5 +1,7 @@
 // The longest realistic content for every list and field, so a layout that only fits short text shows itself.
 // Merged into the mock device's state (objects one level deep, arrays replaced).
+import { settingMeta } from "./mock-api.ts";
+
 const t = Math.floor(Date.now() / 1000);
 const longName = "extremely_long_tool_name_for_the_hallway_light_controller_v2";
 const longUrl =
@@ -8,11 +10,24 @@ const inputName = "a-very-long-input-name-of-32-chars";
 
 export const STRESS: Record<string, unknown> = {
   settings: {
-    public_url: { value: longUrl, source: "saved", live: true, saved: true },
-    persona: { value: "Averyveryverylongwordwithoutanybreaks".repeat(4), source: "saved", live: true, saved: true },
-    llm_url: { value: longUrl, source: "file", live: true },
-    llm_key_env: { value: "A_VERY_LONG_ENVIRONMENT_VARIABLE_NAME_FOR_THE_KEY", source: "file", live: true },
-    device_name: { value: "A device name that is as long as the box allows it to be", source: "saved", live: true },
+    public_url: { ...settingMeta("public_url"), value: longUrl, source: "saved", saved: true },
+    persona: {
+      ...settingMeta("persona"),
+      value: "Averyveryverylongwordwithoutanybreaks".repeat(4),
+      source: "saved",
+      saved: true,
+    },
+    llm_url: { ...settingMeta("llm_url"), value: longUrl, source: "file" },
+    llm_key_env: {
+      ...settingMeta("llm_key_env"),
+      value: "A_VERY_LONG_ENVIRONMENT_VARIABLE_NAME_FOR_THE_KEY",
+      source: "file",
+    },
+    device_name: {
+      ...settingMeta("device_name"),
+      value: "A device name that is as long as the box allows it to be",
+      source: "saved",
+    },
   },
   schedule: [
     {
