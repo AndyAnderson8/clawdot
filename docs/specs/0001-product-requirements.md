@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft |
-| **Version** | 0.60 |
+| **Version** | 0.61 |
 | **Created** | 2026-11-07 |
 | **Related** | [Research notes](../research/README.md), [0002 Resource budget](0002-resource-budget.md), [0003 Satellite protocol](0003-satellite-protocol.md), ADR-0003, ADR-0005, ADR-0006, ADR-0012 |
 
@@ -480,3 +480,4 @@ A speaker that can only be updated by plugging it into a computer does not get u
 | 0.58 | 2026-11-12 | REQ-SEC-015: the day's action counts are kept in their own file and survive a rotated audit log. REQ-TMR-015: a rung timer, alarm or reminder waits for a satellite and is said as missed after five minutes. REQ-INB-023: inbox durations (time to live, snooze, coalesce window, prune age, reply expiry) run on the monotonic clock. REQ-TMR-006, REQ-TMR-009: a reminder after a delay is a countdown and works before the clock is set. |
 | 0.59 | 2026-11-12 | REQ-CFG-085: SIGTERM, SIGINT and Ctrl-C end the program with the same orderly stop as `quit`, with a bounded wait for queued writes. |
 | 0.60 | 2026-11-11 | REQ-TMR-015: rung lines that are waiting for a satellite are saved, so a restart does not lose them |
+| 0.61 | 2026-11-11 | REQ-TMR-011, REQ-TMR-012: the stopwatch is measured on the monotonic clock while the program runs, so a step of the wall clock no longer changes it; the time the program was off is added at load only from a wall clock that is valid, was valid at the save and is not behind it; the clock-went-back refusal is removed |
