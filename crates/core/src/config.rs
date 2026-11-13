@@ -16,9 +16,9 @@ pub struct LlmConfig {
     pub url: Option<String>,
     /// Model used for conversation and tool calls.
     pub model: Option<String>,
-    /// Model to try when the main one fails.
+    /// Retired: nothing uses a second model any more. Still accepted so an older file loads, and ignored.
     pub fallback_model: Option<String>,
-    /// Cheaper model for spoken summaries.
+    /// Retired: summaries use `model`. Still accepted so an older file loads, and ignored.
     pub summary_model: Option<String>,
     /// Name of the environment variable that holds the API key.
     pub key_env: Option<String>,

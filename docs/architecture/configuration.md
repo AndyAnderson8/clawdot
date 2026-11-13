@@ -15,8 +15,6 @@ flags override the file. Unknown keys and impossible values stop startup with a 
   "llm": {
     "url": "https://openrouter.ai/api/v1",
     "model": "provider/model",
-    "fallback_model": "provider/cheaper-model",
-    "summary_model": "provider/cheap-model",
     "key_env": "OPENROUTER_API_KEY"
   },
   "limits": { "daily_spend_usd": 2.0 }
@@ -33,7 +31,7 @@ flags override the file. Unknown keys and impossible values stop startup with a 
 | `persona_file` | Replaces the default system prompt | built-in persona |
 | `endpoints` | Inbox endpoints to create at startup (`NAME` or `NAME:ADAPTER`) | none |
 | `llm.url`, `llm.model` | Language model; set together or not at all. `https://` is required unless the host is localhost, `.local` or a private-network address (REQ-SEC-001) | none (fast path only) |
-| `llm.fallback_model`, `llm.summary_model` | Optional; need `llm.url` and `llm.model` | none |
+| `llm.fallback_model`, `llm.summary_model` | Retired. Still accepted so an older file loads, and ignored: every request uses `llm.model` | none |
 | `llm.key_env` | Name of the environment variable holding the key | `OPENROUTER_API_KEY` |
 | `limits.daily_spend_usd` | Stop calling the model after this much spend. Counted from the cost the provider reports, else from its token counts times the portal settings `llm_usd_per_mtok_in` and `llm_usd_per_mtok_out`, else estimated from sizes at built-in prices of $10 and $40 per million tokens, so enter your prices (REQ-AST-011) | none |
 | `limits.max_actions_per_day` | Calls that are not read-only allowed per local day; 0 stops all actions (REQ-SEC-015) | 100 |
@@ -71,7 +69,7 @@ warning so a headless device still starts.
 | Setting | Key in `settings.json` | Applies |
 |---|---|---|
 | Device name, time zone, personality (the text itself) | `device_name`, `zone`, `persona` | right away |
-| Language model address, model, backup model, summary model, key variable name | `llm_url`, `llm_model`, `llm_fallback_model`, `summary_model`, `llm_key_env` | right away (the model client is rebuilt) |
+| Language model address, model, key variable name | `llm_url`, `llm_model`, `llm_key_env` | right away (the model client is rebuilt) |
 | Daily spend | `daily_spend_usd` | right away |
 | Model prices, in dollars per million tokens in and out (0 means free; empty means unknown) | `llm_usd_per_mtok_in`, `llm_usd_per_mtok_out` | right away |
 | Voice | `voice` | after a restart (needs the `speech` section of the configuration file) |
