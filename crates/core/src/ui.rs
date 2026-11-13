@@ -55,6 +55,7 @@ use self::schedule::schedule;
 use self::settings::{change_settings, export_settings};
 use self::status::{audit, diagnostics, hive_peers, logs, overview};
 use self::tools::{accept_choice, enabled_flag, ext, skill_action, tier_choice};
+use self::update::{update_apply, update_check, update_status};
 
 mod auth;
 mod common;
@@ -65,6 +66,7 @@ mod schedule;
 mod settings;
 mod status;
 mod tools;
+mod update;
 
 #[cfg(test)]
 mod openai_host_tests;
@@ -674,68 +676,6 @@ async fn voices(core: &Core) -> Resp {
             ),
         ),
     }
-}
-
-/// `GET /api/update`: whether a newer version exists, when it was last looked for, and whether it can be installed
-/// here (REQ-UPD-005).
-#[cfg(feature = "tls")]
-fn update_status(core: &Core) -> Resp {
-    match core.updater() {
-        Some(u) => json_reply(StatusCode::OK, &u.status()),
-        None => error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Updates are not running on this device.",
-        ),
-    }
-}
-
-#[cfg(not(feature = "tls"))]
-fn update_status(_core: &Core) -> Resp {
-    error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "This build does not check for updates.",
-    )
-}
-
-/// `POST /api/update/check`: look for a newer version now. The answer is the same document as `GET /api/update`;
-/// a failed look is in its `error` field, not an HTTP error.
-#[cfg(feature = "tls")]
-async fn update_check(core: &Core) -> Resp {
-    let Some(u) = core.updater() else {
-        return update_status(core);
-    };
-    let _ = u.check().await;
-    json_reply(StatusCode::OK, &u.status())
-}
-
-#[cfg(not(feature = "tls"))]
-async fn update_check(core: &Core) -> Resp {
-    update_status(core)
-}
-
-/// `POST /api/update/apply` with `{"version": "1.2.3"}`: install the version the person confirmed (REQ-UPD-006).
-/// It starts at once and the page watches `GET /api/update`.
-#[cfg(feature = "tls")]
-async fn update_apply(core: &Core, body: Incoming) -> Resp {
-    let Some(u) = core.updater() else {
-        return update_status(core);
-    };
-    let v = match read_json::<Value>(body).await {
-        Ok(v) => v,
-        Err((s, m)) => return error(s, m),
-    };
-    let Some(version) = v["version"].as_str() else {
-        return error(StatusCode::BAD_REQUEST, "Say which version to install.");
-    };
-    match u.start_apply(version) {
-        Ok(()) => json_reply(StatusCode::ACCEPTED, &u.status()),
-        Err(why) => error(StatusCode::CONFLICT, &why),
-    }
-}
-
-#[cfg(not(feature = "tls"))]
-async fn update_apply(core: &Core, _body: Incoming) -> Resp {
-    update_status(core)
 }
 
 #[derive(Deserialize)]
