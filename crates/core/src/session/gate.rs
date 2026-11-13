@@ -14,6 +14,7 @@ use crate::notes;
 use crate::sched::Ts;
 use crate::usage::{LimitReached, UsageTracker};
 use serde_json::Value;
+use std::time::Duration;
 
 mod rounds;
 
@@ -946,12 +947,6 @@ impl<'a, H: ToolHost> Turn<'a, H> {
     /// user says stop, while a costly or destructive one is allowed to finish because it cannot be recalled
     /// (REQ-AST-022).
     async fn execute(&mut self, call: &Call<'_>, gate: Gate) -> Executed {
-        let Call {
-            name,
-            args,
-            tier,
-            held_id,
-        } = *call;
         if gate != Gate::Run {
             return Executed {
                 text: self.blocked(call, gate),
@@ -960,75 +955,100 @@ impl<'a, H: ToolHost> Turn<'a, H> {
             };
         }
         // Whatever it returns is now in the context the model reads.
-        self.conv.tainted |= self.host.returns_untrusted_text(name);
+        self.conv.tainted |= self.host.returns_untrusted_text(call.name);
         let budget = self.st.call_budget(self.ctl, &self.cfg);
-        let can_drop = tier < Tier::Costly;
-        let finished = {
-            let fut = tokio::time::timeout(budget, self.host.call_tool(name, args));
-            if can_drop {
-                tokio::select! {
-                    r = fut => Some(r),
-                    () = self.ctl.cancel.cancelled() => None,
-                }
-            } else {
-                Some(fut.await)
+        let can_drop = call.tier < Tier::Costly;
+        match self.call_tool_within(call, budget, can_drop).await {
+            None => self.cancelled_while_running(call),
+            Some(Err(_)) => self.timed_out(call, budget),
+            Some(Ok(out)) => self.returned(call, out, can_drop),
+        }
+    }
+
+    /// Call the tool, but for no longer than `budget`. `None` is a call dropped because the user said stop,
+    /// which only a call that `can_drop` is.
+    async fn call_tool_within(
+        &mut self,
+        call: &Call<'_>,
+        budget: Duration,
+        can_drop: bool,
+    ) -> Option<Result<Result<String, String>, tokio::time::error::Elapsed>> {
+        let fut = tokio::time::timeout(budget, self.host.call_tool(call.name, call.args));
+        if can_drop {
+            tokio::select! {
+                r = fut => Some(r),
+                () = self.ctl.cancel.cancelled() => None,
             }
-        };
-        let decision_name = if held_id.is_some() {
+        } else {
+            Some(fut.await)
+        }
+    }
+
+    /// The audit record of a call that ran: approved when the user's yes released it, otherwise run.
+    fn note_ran(&self, call: &Call<'_>, outcome: Option<Result<&str, &str>>, note: Option<&str>) {
+        let decision = if call.held_id.is_some() {
             decision::APPROVED
         } else {
             decision::RAN
         };
-        let act = |decision, outcome, note| Act {
-            tool: name,
-            tier: Some(tier),
-            args,
+        self.note_act(&Act {
+            tool: call.name,
+            tier: Some(call.tier),
+            args: call.args,
             decision,
-            held_id,
+            held_id: call.held_id,
             outcome,
             note,
-        };
-        match finished {
-            None => {
-                self.note_act(&act(
-                    decision::CANCELLED,
-                    None,
-                    Some("cancelled while it was running"),
-                ));
-                Executed {
-                    text: "Cancelled by the user before it finished.".to_owned(),
-                    kind: Kind::Cancelled,
-                    sent: false,
-                }
-            }
-            Some(Err(_)) => {
-                let secs = budget.as_secs().max(1);
-                self.note_act(&act(
-                    decision_name,
-                    Some(Err("timed out")),
-                    Some("the tool did not answer in time"),
-                ));
-                Executed {
-                    text: format!(
-                        "Error: the tool did not answer within {secs} second{}. It may or may not have done anything.",
-                        if secs == 1 { "" } else { "s" }
-                    ),
-                    kind: Kind::TimedOut,
-                    sent: false,
-                }
-            }
-            Some(Ok(out)) => {
-                self.note_act(&act(
-                    decision_name,
-                    Some(out.as_ref().map(String::as_str).map_err(String::as_str)),
-                    None,
-                ));
-                Executed {
-                    kind: if out.is_ok() { Kind::Ok } else { Kind::Failed },
-                    text: out.unwrap_or_else(|e| format!("Error: {e}")),
-                    sent: !can_drop && self.ctl.cancel.is_cancelled(),
-                }
-            }
+        });
+    }
+
+    /// The user said stop while a read-only or reversible call ran: it was dropped.
+    fn cancelled_while_running(&self, call: &Call<'_>) -> Executed {
+        self.note_act(&Act {
+            tool: call.name,
+            tier: Some(call.tier),
+            args: call.args,
+            decision: decision::CANCELLED,
+            held_id: call.held_id,
+            outcome: None,
+            note: Some("cancelled while it was running"),
+        });
+        Executed {
+            text: "Cancelled by the user before it finished.".to_owned(),
+            kind: Kind::Cancelled,
+            sent: false,
+        }
+    }
+
+    /// The tool did not answer within `budget`.
+    fn timed_out(&self, call: &Call<'_>, budget: Duration) -> Executed {
+        let secs = budget.as_secs().max(1);
+        self.note_ran(
+            call,
+            Some(Err("timed out")),
+            Some("the tool did not answer in time"),
+        );
+        Executed {
+            text: format!(
+                "Error: the tool did not answer within {secs} second{}. It may or may not have done anything.",
+                if secs == 1 { "" } else { "s" }
+            ),
+            kind: Kind::TimedOut,
+            sent: false,
+        }
+    }
+
+    /// The tool answered, with a result or an error.
+    fn returned(&self, call: &Call<'_>, out: Result<String, String>, can_drop: bool) -> Executed {
+        self.note_ran(
+            call,
+            Some(out.as_ref().map(String::as_str).map_err(String::as_str)),
+            None,
+        );
+        Executed {
+            kind: if out.is_ok() { Kind::Ok } else { Kind::Failed },
+            text: out.unwrap_or_else(|e| format!("Error: {e}")),
+            sent: !can_drop && self.ctl.cancel.is_cancelled(),
         }
     }
 
