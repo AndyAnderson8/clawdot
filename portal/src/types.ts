@@ -93,6 +93,8 @@ export interface ScheduleItem {
   label: string;
   fire_at: number;
   seconds_left: number;
+  /** Runs as a countdown (a timer, or a reminder after a delay). Absent from older programs. */
+  countdown?: boolean;
   repeat?: Repeat | null;
 }
 export interface ScheduleList {

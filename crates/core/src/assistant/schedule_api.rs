@@ -20,14 +20,15 @@ struct Spec {
     kind: String,
     #[serde(default)]
     label: String,
-    /// Timer length in seconds.
+    /// Timer length in seconds, or the delay of a reminder after a delay.
     seconds: Option<i64>,
     /// Alarm local hour and minute.
     hour: Option<u8>,
     minute: Option<u8>,
     /// Alarm weekdays, 0 = Monday to 6 = Sunday. Empty or missing: rings once.
     days: Option<Vec<u8>>,
-    /// Reminder local date `YYYY-MM-DD` and time `HH:MM`, in the device time zone.
+    /// Reminder local date `YYYY-MM-DD` and time `HH:MM`, in the device time zone. A reminder
+    /// takes these or `seconds`, not both.
     date: Option<String>,
     time: Option<String>,
 }
@@ -98,7 +99,7 @@ fn item_json(i: &Item, clock: &dyn Clock) -> Value {
     });
     json!({
         "id": i.id, "kind": kind, "label": i.label, "fire_at": i.due_wall(clock),
-        "seconds_left": i.secs_left(clock), "repeat": repeat,
+        "seconds_left": i.secs_left(clock), "repeat": repeat, "countdown": i.is_countdown(),
     })
 }
 
@@ -144,10 +145,12 @@ impl Assistant {
     fn add_item(&mut self, v: &Value) -> Result<u64, Fail> {
         let spec: Spec = serde_json::from_value(v.clone())
             .map_err(|_| invalid("The request is not a valid timer, alarm, or reminder."))?;
-        // A countdown timer needs no calendar, so it can be set before the wall clock is.
-        if !self.clock.wall_clock_valid() && spec.kind != "timer" {
+        // A countdown (a timer, or a reminder after a delay) needs no calendar, so it can be set before the wall
+        // clock is (REQ-TMR-009).
+        let countdown = spec.kind == "timer" || (spec.kind == "reminder" && spec.seconds.is_some());
+        if !self.clock.wall_clock_valid() && !countdown {
             return Err(invalid(
-                "The device clock is not set yet, so no alarm or reminder can be set. It needs to get the time from the network.",
+                "The device clock is not set yet, so no alarm or reminder at a time can be set. It needs to get the time from the network. A timer or a reminder after a delay still works.",
             ));
         }
         let label = spec.label.trim();
@@ -177,8 +180,19 @@ impl Assistant {
                 if label.is_empty() {
                     return Err(invalid("A reminder needs some text to say."));
                 }
+                if let Some(secs) = spec.seconds {
+                    if spec.date.is_some() || spec.time.is_some() {
+                        return Err(invalid(
+                            "Give a reminder either a delay or a date and a time, not both.",
+                        ));
+                    }
+                    return self
+                        .sched
+                        .set_reminder_in(&*self.clock, secs, label)
+                        .map_err(|e| sched_fail(&e));
+                }
                 let (Some(date), Some(time)) = (spec.date.as_deref(), spec.time.as_deref()) else {
-                    return Err(invalid("A reminder needs a date and a time."));
+                    return Err(invalid("A reminder needs a delay, or a date and a time."));
                 };
                 let (Some((y, mo, d)), Some((h, mi))) = (parse_date(date), parse_time(time)) else {
                     return Err(invalid("Use a date like 2026-11-09 and a time like 15:30."));
@@ -337,6 +351,81 @@ mod tests {
             assert!(matches!(e, Err(Fail::Invalid(_))), "{body}: {e:?}");
         }
         assert_eq!(ids(&a.admin_sched(SchedOp::List).unwrap()).len(), 0);
+    }
+
+    // REQ-TMR-009: a reminder after a delay is a countdown, set from the portal with `seconds`.
+    #[test]
+    fn a_reminder_after_a_delay_is_a_countdown_and_works_without_the_clock() {
+        let mut a = assistant(5);
+        let r = a
+            .admin_sched(SchedOp::Add(
+                json!({"kind":"reminder","seconds":600,"label":"stand up"}),
+            ))
+            .unwrap();
+        assert_eq!(r["clock_valid"], false);
+        assert_eq!(r["items"][0]["kind"], "reminder");
+        assert_eq!(r["items"][0]["seconds_left"], 600);
+        assert_eq!(r["items"][0]["countdown"], true);
+        // The same with a set clock.
+        let mut b = assistant(NOW);
+        let r = b
+            .admin_sched(SchedOp::Add(
+                json!({"kind":"reminder","seconds":90,"label":"x"}),
+            ))
+            .unwrap();
+        assert_eq!(r["items"][0]["fire_at"], NOW + 90);
+        // A reminder at a time is not a countdown.
+        let r = b
+            .admin_sched(SchedOp::Add(
+                json!({"kind":"reminder","date":"2026-11-10","time":"09:15","label":"y"}),
+            ))
+            .unwrap();
+        let at = r["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["label"] == "y")
+            .unwrap();
+        assert_eq!(at["countdown"], false);
+    }
+
+    // REQ-TMR-009, REQ-CFG-027: a reminder after a delay needs text, a sane delay, and not a date as well; an
+    // edit can switch between the two forms.
+    #[test]
+    fn a_reminder_after_a_delay_is_checked_and_can_be_edited() {
+        let mut a = assistant(NOW);
+        for body in [
+            json!({"kind":"reminder","seconds":60}),
+            json!({"kind":"reminder","seconds":0,"label":"x"}),
+            json!({"kind":"reminder","seconds":-5,"label":"x"}),
+            json!({"kind":"reminder","seconds":60,"date":"2026-11-10","time":"09:00","label":"x"}),
+        ] {
+            let e = a.admin_sched(SchedOp::Add(body.clone()));
+            assert!(matches!(e, Err(Fail::Invalid(_))), "{body}: {e:?}");
+        }
+        let id = a
+            .admin_sched(SchedOp::Add(
+                json!({"kind":"reminder","seconds":60,"label":"a"}),
+            ))
+            .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let r = a
+            .admin_sched(SchedOp::Edit(
+                id,
+                json!({"kind":"reminder","date":"2026-11-10","time":"09:15","label":"a"}),
+            ))
+            .unwrap();
+        assert_eq!(ids(&r), vec![id]);
+        assert_eq!(r["items"][0]["countdown"], false);
+        let r = a
+            .admin_sched(SchedOp::Edit(
+                id,
+                json!({"kind":"reminder","seconds":300,"label":"a"}),
+            ))
+            .unwrap();
+        assert_eq!(r["items"][0]["countdown"], true);
+        assert_eq!(r["items"][0]["seconds_left"], 300);
     }
 
     // REQ-TMR-006, REQ-TMR-009: a point on the calendar needs the calendar; a countdown does not.

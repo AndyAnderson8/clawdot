@@ -411,6 +411,9 @@ impl Scheduler {
             };
             item.due_mono = Some(mono.saturating_add(left));
         }
+        if let Some(sw) = &mut state.stopwatch {
+            sw.resume(wall, mono, valid);
+        }
         Ok(Self { state, max_items })
     }
 
@@ -442,6 +445,9 @@ impl Scheduler {
             item.remaining_secs = Some(left);
             item.saved_at = valid.then_some(wall);
             item.fire_at = wall.saturating_add(left);
+        }
+        if let Some(sw) = &state.stopwatch {
+            state.stopwatch = Some(sw.persisted(wall, clock.monotonic_secs(), valid));
         }
         state
     }
@@ -552,19 +558,20 @@ impl Scheduler {
         self.insert(Item::countdown(fired.kind, &fired.label, clock, secs))
     }
 
-    /// Start the stopwatch at `now`. A stopped one is replaced; a running one is left alone.
+    /// Start the stopwatch. A stopped one is replaced; a running one is left alone. It counts on the
+    /// monotonic clock (REQ-TMR-012).
     ///
     /// # Errors
-    /// [`Refusal::Running`] with its reading, or [`Refusal::ClockWentBack`] when it is running and
-    /// the clock is behind its last record.
-    pub fn stopwatch_start(&mut self, now: Ts) -> Result<(), Refusal> {
+    /// [`Refusal::Running`] with its reading.
+    pub fn stopwatch_start(&mut self, clock: &dyn Clock) -> Result<(), Refusal> {
+        let mono = clock.monotonic_secs();
         if let Some(sw) = &self.state.stopwatch {
-            let r = sw.read(now)?;
+            let r = sw.read(mono);
             if r.running {
                 return Err(Refusal::Running(r));
             }
         }
-        self.state.stopwatch = Some(Stopwatch::start(now));
+        self.state.stopwatch = Some(Stopwatch::start(mono));
         Ok(())
     }
 
@@ -572,29 +579,35 @@ impl Scheduler {
     ///
     /// # Errors
     /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
-    pub fn stopwatch_lap(&mut self, now: Ts) -> Result<Lap, Refusal> {
-        self.state.stopwatch.as_mut().ok_or(Refusal::None)?.lap(now)
+    pub fn stopwatch_lap(&mut self, clock: &dyn Clock) -> Result<Lap, Refusal> {
+        let mono = clock.monotonic_secs();
+        self.state
+            .stopwatch
+            .as_mut()
+            .ok_or(Refusal::None)?
+            .lap(mono)
     }
 
     /// Stop the stopwatch.
     ///
     /// # Errors
     /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
-    pub fn stopwatch_stop(&mut self, now: Ts) -> Result<Reading, Refusal> {
+    pub fn stopwatch_stop(&mut self, clock: &dyn Clock) -> Result<Reading, Refusal> {
+        let mono = clock.monotonic_secs();
         self.state
             .stopwatch
             .as_mut()
             .ok_or(Refusal::None)?
-            .stop(now)
+            .stop(mono)
     }
 
     /// What the stopwatch shows, with each lap's own time.
     ///
     /// # Errors
-    /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
-    pub fn stopwatch_read(&self, now: Ts) -> Result<(Reading, Vec<i64>), Refusal> {
+    /// [`Refusal::None`] when there is no stopwatch.
+    pub fn stopwatch_read(&self, clock: &dyn Clock) -> Result<(Reading, Vec<i64>), Refusal> {
         let sw = self.state.stopwatch.as_ref().ok_or(Refusal::None)?;
-        Ok((sw.read(now)?, sw.splits()))
+        Ok((sw.read(clock.monotonic_secs()), sw.splits()))
     }
 
     /// Throw the stopwatch away; false when there was none. Needs no clock.

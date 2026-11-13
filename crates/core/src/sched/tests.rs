@@ -528,14 +528,15 @@ fn a_saved_scheduler_from_before_the_stopwatch_still_loads_and_the_stopwatch_is_
         max_items: 4,
     };
     assert!(!s.stopwatch_reset(), "nothing to reset");
-    s.stopwatch_start(1_800_000_000).unwrap();
-    let json = serde_json::to_string(&s.state).unwrap();
+    let clock = StepClock::at(1_800_000_000);
+    s.stopwatch_start(&clock).unwrap();
+    let json = serde_json::to_string(&s.persisted(&clock)).unwrap();
     assert!(json.contains("stopwatch"));
     let back: SchedState = serde_json::from_str(&json).unwrap();
-    assert_eq!(back, s.state);
+    assert_eq!(back, s.persisted(&clock));
     // A stopwatch needs no timer slot, and a full scheduler can still run one.
     let mut full = Scheduler::new(1);
     full.set_timer(&StepClock::at(1_800_000_000), 60, "")
         .unwrap();
-    assert!(full.stopwatch_start(1_800_000_000).is_ok());
+    assert!(full.stopwatch_start(&StepClock::at(1_800_000_000)).is_ok());
 }

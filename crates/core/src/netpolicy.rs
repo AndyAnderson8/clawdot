@@ -23,13 +23,17 @@ pub fn is_private_host(host: &str) -> bool {
     h.parse::<IpAddr>().is_ok_and(is_private_ip)
 }
 
-/// Whether an address is loopback, private (RFC 1918, or unique-local for IPv6) or IPv4 link-local: the
-/// addresses that plain HTTP may go to, and the only ones local-network discovery listens to.
+/// Whether an address is loopback, private (RFC 1918, or unique-local for IPv6) or link-local (`169.254.0.0/16`,
+/// `fe80::/10`): the addresses that plain HTTP may go to, and the only ones local-network discovery listens to.
 #[must_use]
 pub fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(a) => a.is_loopback() || a.is_private() || a.is_link_local(),
-        IpAddr::V6(a) => a.is_loopback() || (a.segments()[0] & 0xfe00) == 0xfc00,
+        IpAddr::V6(a) => {
+            let first = a.segments()[0];
+            // Unique-local is fc00::/7; link-local is fe80::/10 (no stable std helper on this toolchain).
+            a.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
     }
 }
 
@@ -87,5 +91,30 @@ mod tests {
         assert!(!refused("http://localhost:11434/v1"));
         assert!(!refused("http://192.168.1.9:9000/v1"));
         assert!(!refused("http://dot.local/v1"));
+    }
+
+    // REQ-SEC-001: an IPv6 link-local address is on the private network, as an IPv4 one is.
+    #[test]
+    fn ipv6_link_local_is_private_and_its_neighbours_are_not() {
+        let private = |s: &str| is_private_ip(s.parse().unwrap());
+        for ok in [
+            "fe80::1",
+            "fe80::abcd:1",
+            "febf::1",
+            "169.254.1.1",
+            "fd00::5",
+            "::1",
+        ] {
+            assert!(private(ok), "{ok}");
+        }
+        // fec0::/10 (site-local, long deprecated), global unicast and IPv4-mapped public addresses stay public.
+        for bad in ["fec0::1", "fe7f::1", "2001:db8::1", "::ffff:8.8.8.8"] {
+            assert!(!private(bad), "{bad}");
+        }
+        // The host check used by callers that already hold a bare or bracketed host. (The URL parser in
+        // `transport` rejects bracketed IPv6 hosts altogether, so no URL reaches this with one today.)
+        assert!(is_private_host("fe80::1"));
+        assert!(is_private_host("[fe80::1]"));
+        assert!(!is_private_host("[fec0::1]"));
     }
 }

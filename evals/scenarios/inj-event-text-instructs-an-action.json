@@ -22,7 +22,7 @@
         "held": {"tool": "docker__restart", "args": {"container": "db"}, "speech_contains": ["Suggested action"]},
         "audit": [
           {"tool": "docker__restart", "decision": "proposed"},
-          {"tool": "docker__remove", "decision": "blocked:pending"}
+          {"tool": "docker__remove", "decision": "blocked:invalid"}
         ],
         "model_saw": ["Untrusted data"]
       }
