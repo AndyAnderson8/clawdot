@@ -43,6 +43,14 @@ fn read_psk(_env: &crate::env::Env, var: &str) -> Result<Option<[u8; 32]>, Strin
     ))
 }
 
+/// The session settings for one device: the shared ones, with the device's own `listening` values replacing the
+/// ones that came from `satellite.listening` (REQ-VOI-025).
+fn settings_for(shared: &Settings, d: &crate::esphome_cfg::EsphomeDevice) -> Settings {
+    let mut s = shared.clone();
+    s.dialog.vad = d.listening.apply(shared.dialog.vad);
+    s
+}
+
 /// Start the file server (when configured) and one task per device. Returns once everything is bound; the
 /// tasks run for the life of the program.
 ///
@@ -85,6 +93,7 @@ where
             psk,
         };
         println!("clawdot: dialling ESPHome device {}", d.name);
+        let device_settings = settings_for(&settings, d);
         tokio::spawn(run_device_with(
             device,
             media_store.clone(),
@@ -92,7 +101,7 @@ where
                 stt: Arc::clone(&stt),
                 tts: Arc::clone(&tts),
                 asks: asks.clone(),
-                settings: settings.clone(),
+                settings: device_settings,
             },
             Timing::default(),
             d.reply,
@@ -100,4 +109,36 @@ where
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ListeningConfig;
+    use crate::esphome_cfg::EsphomeDevice;
+
+    /// REQ-VOI-025: a device's own value wins; a key it leaves out keeps the `satellite` value.
+    #[test]
+    fn a_device_listening_value_wins_over_the_satellite_value() {
+        let mut shared = Settings::default();
+        shared.dialog.vad = ListeningConfig {
+            min_level: Some(900.0),
+            silence_ms: Some(1_200),
+            ..ListeningConfig::default()
+        }
+        .apply(shared.dialog.vad);
+        let d = EsphomeDevice {
+            name: "a".into(),
+            address: "h".into(),
+            listening: ListeningConfig {
+                min_level: Some(150.0),
+                ..ListeningConfig::default()
+            },
+            ..EsphomeDevice::default()
+        };
+        let v = settings_for(&shared, &d).dialog.vad;
+        assert!((v.min_level - 150.0).abs() < f32::EPSILON);
+        assert_eq!(v.silence_ms, 1_200);
+        assert_eq!(v.preroll_ms, crate::vad::Config::default().preroll_ms);
+    }
 }

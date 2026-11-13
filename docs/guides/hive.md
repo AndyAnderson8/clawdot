@@ -18,8 +18,12 @@ safe under any answer was built.
   label `clawdot-<first 12 hex of the id>`.
 - **Browse.** It asks for other speakers at start and again at 1, 2, 4... seconds up to every 15 minutes, and lists
   what it hears in memory only. A peer expires when its record's TTL runs out (75 minutes) or at once on its
-  goodbye. At most 32 peers are kept. The address shown is where the packet came from; an A record inside a
-  packet is ignored.
+  goodbye. At most 32 peers are kept. The address shown is where the packet came from, never a value read from the
+  packet.
+- **What is checked on what arrives.** A packet from a source address that is not loopback, private (RFC 1918) or
+  link-local is dropped before it is read. A response that carries an A record for the service's host name that
+  differs from the packet's source address is dropped, so the peer is not listed. The first address to announce an
+  id keeps it until its record runs out, and only that address can say goodbye for it.
 - **API.** `GET /api/hive/peers` (administrator only, [openapi](../api/openapi.yaml)) returns this speaker's id,
   name, public key and portal port, the discovery mode, and the peers with `last_seen_secs`.
 
@@ -56,6 +60,13 @@ announcer sits behind the `Announcer` trait so another route (for example D-Bus)
   is a claim; nothing checks it against a key until the pairing milestone. Do not act on the list.
 - **No `clawdot.local`.** The host name is not answered (REQ-CFG-009 is not closed). An A record is sent only when
   `--listen` names a specific IPv4 address.
+- **The network interface and the multicast group are not checked.** A packet is not tied to the interface it
+  arrived on, is not checked to have been sent to the multicast group rather than to this host's own address, and
+  its IP time-to-live (RFC 6762 asks for 255, which shows it did not cross a router) is not read. Those need socket
+  options that the workspace's ban on `unsafe` code excludes. So a host attached to several private networks (wired
+  and wireless, a VPN, a bridge to virtual machines) accepts answers from all of them, and a device on a routed
+  guest network can answer. The checks above do not stop a device with a private address that lies about its id
+  or name.
 - **No probing or conflict handling**, no random response delay, no IPv6, no unicast responses, and only the
   default network interface. mDNS does not cross a router, a guest network or an isolated Wi-Fi.
 - **No goodbye on a crash or kill.** The process has no signal handler, so a stopped speaker lingers in others'

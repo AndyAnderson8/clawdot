@@ -206,7 +206,7 @@ pub fn resolve(
         };
         layer.insert("persona".into(), text.into());
     }
-    let (state, warnings) = SettingsState::open(
+    let (mut state, warnings) = SettingsState::open(
         Some(&data_dir),
         Sources {
             defaults: settings::built_in_defaults(),
@@ -216,6 +216,8 @@ pub fn resolve(
         file.speech.url.is_some(),
         env.lookup(),
     )?;
+    // The machine's name is read here, once, for the address snippets print when `listen` is unspecified.
+    state.set_machine_name(crate::hostguard::machine_name(env).as_deref());
     let text = |k: &str| state.get(k).as_str().map(str::to_owned);
     let listen = text("listen")
         .and_then(|l| l.parse().ok())
