@@ -56,6 +56,40 @@ export const CSP =
   "connect-src 'self'; img-src data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const now = () => Math.floor(Date.now() / 1000);
 
+// What each setting is (kind, limits, choices, group, live): the same file crates/core/src/settings/tests.rs checks
+// against the table the real device validates with, so the fake restates none of it.
+const SETTING_META = JSON.parse(
+  readFileSync(new URL("../fixtures/settings-meta.json", import.meta.url), "utf8"),
+) as Record<string, Json>;
+
+/** What the device says about setting `key` besides its value. */
+export function settingMeta(key: string): Json {
+  const m = SETTING_META[key];
+  if (!m) throw new Error(`the fixture has no setting ${key}`);
+  return m;
+}
+
+const adaptersDir = join(fileURLToPath(new URL(".", import.meta.url)), "..", "..", "..", "crates", "core", "adapters");
+
+/** The set-up lines of the adapter called `name`, read from the adapter file the device embeds (none for an unknown one). */
+export function adapterSetup(name: string): string[] {
+  try {
+    return (JSON.parse(readFileSync(join(adaptersDir, name + ".json"), "utf8")) as { setup?: string[] }).setup ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** One entry of the endpoint listing, with its adapter's set-up lines as the device gives them. */
+export function endpoint(name: string, adapter: string, createdAt: number): Json {
+  return { name, adapter, enabled: true, created_at: createdAt, setup: adapterSetup(adapter) };
+}
+
+/** One entry of the settings listing: the setting's description from the fixture, and its value and source. */
+function setting(key: string, value: unknown, source: string, extra: Json = {}): Json {
+  return { ...settingMeta(key), value, source, ...extra };
+}
+
 // What a setting goes back to when it is cleared.
 const DEFAULTS: Json = { plan_speech: true, progress_speech: true, agent_max_rounds: 8 };
 
@@ -113,42 +147,46 @@ function seed(mode: string): Json {
     password: "",
     session: "",
     window: 0,
-    settings: {
-      device_name: { value: "Kitchen Dot", source: "saved", live: true },
-      zone: { value: "UTC", source: "file", live: true },
-      persona: { value: "You are brief.", source: "default", live: true },
-      llm_url: { value: "https://api.example.com/v1", source: "file", live: true },
-      llm_model: { value: "model-a", source: "file", live: true },
-      llm_key_env: { value: "API_KEY", source: "file", live: true },
-      voice: { value: null, source: "default", live: true },
-      speech_language: { value: null, source: "default", live: true },
-      speech_provider: { value: "openai", source: "default", live: false },
-      realtime_enabled: { value: false, source: "default", live: true },
-      realtime_url: { value: null, source: "default", live: true },
-      realtime_model: { value: null, source: "default", live: true },
-      realtime_voice: { value: "alloy", source: "default", live: true },
-      realtime_usd_per_min_in: { value: 0.03, source: "default", live: true },
-      realtime_usd_per_min_out: { value: 0.1, source: "default", live: true },
-      realtime_max_session_secs: { value: 300, source: "default", live: true },
-      listen: { value: "0.0.0.0:3335", source: "flag", live: false, ignored: true },
-      public_url: { value: null, source: "default", live: true },
-      daily_spend_usd: { value: null, source: "default", live: true },
-      llm_usd_per_mtok_in: { value: null, source: "default", live: true },
-      llm_usd_per_mtok_out: { value: null, source: "default", live: true },
-      agent_max_rounds: { value: 8, source: "default", live: true },
-      agent_max_tool_calls: { value: 12, source: "file", live: true },
-      agent_deadline_secs: { value: 60, source: "default", live: true },
-      agent_tool_timeout_secs: { value: 45, source: "default", live: true },
-      plan_speech: { value: true, source: "default", live: true },
-      progress_speech: { value: true, source: "default", live: true },
-      notes: { value: false, source: "default", live: true },
-      update_check: { value: true, source: "default", live: true },
-      max_actions_per_day: { value: 100, source: "default", live: true },
-      max_costly_per_day: { value: 20, source: "default", live: true },
-      dry_run: { value: true, source: "flag", live: true, saved: false },
-      quiet_start: { value: null, source: "default", live: true },
-      quiet_end: { value: null, source: "default", live: true },
-    },
+    settings: Object.fromEntries(
+      (
+        [
+          ["device_name", "Kitchen Dot", "saved"],
+          ["zone", "UTC", "file"],
+          ["persona", "You are brief.", "default"],
+          ["llm_url", "https://api.example.com/v1", "file"],
+          ["llm_model", "model-a", "file"],
+          ["llm_key_env", "API_KEY", "file"],
+          ["voice", null, "default"],
+          ["speech_language", null, "default"],
+          ["speech_provider", "openai", "default"],
+          ["realtime_enabled", false, "default"],
+          ["realtime_url", null, "default"],
+          ["realtime_model", null, "default"],
+          ["realtime_voice", "alloy", "default"],
+          ["realtime_usd_per_min_in", 0.03, "default"],
+          ["realtime_usd_per_min_out", 0.1, "default"],
+          ["realtime_max_session_secs", 300, "default"],
+          ["listen", "0.0.0.0:3335", "flag", { ignored: true }],
+          ["public_url", null, "default"],
+          ["daily_spend_usd", null, "default"],
+          ["llm_usd_per_mtok_in", null, "default"],
+          ["llm_usd_per_mtok_out", null, "default"],
+          ["agent_max_rounds", 8, "default"],
+          ["agent_max_tool_calls", 12, "file"],
+          ["agent_deadline_secs", 60, "default"],
+          ["agent_tool_timeout_secs", 45, "default"],
+          ["plan_speech", true, "default"],
+          ["progress_speech", true, "default"],
+          ["notes", false, "default"],
+          ["update_check", true, "default"],
+          ["max_actions_per_day", 100, "default"],
+          ["max_costly_per_day", 20, "default"],
+          ["dry_run", true, "flag", { saved: false }],
+          ["quiet_start", null, "default"],
+          ["quiet_end", null, "default"],
+        ] as [string, unknown, string, Json?][]
+      ).map(([k, v, src, extra]) => [k, setting(k, v, src, extra)]),
+    ),
     restart: ["listen"],
     schedule: [
       { id: 1, kind: "timer", label: "pasta", fire_at: t + 600, seconds_left: 600, repeat: null },
@@ -162,7 +200,7 @@ function seed(mode: string): Json {
       },
     ],
     nextId: 3,
-    endpoints: [{ name: "claude-code", adapter: "claude-code", enabled: true, created_at: t - 100 }],
+    endpoints: [endpoint("claude-code", "claude-code", t - 100)],
     events: [
       {
         id: 1,
@@ -262,7 +300,8 @@ function seed(mode: string): Json {
 /**
  * Every API route the fake device answers, written as in docs/api/openapi.yaml (`{name}` for a path parameter).
  * Keep it next to the handlers in startMock: test/unit/mock-routes.test.ts fails when a route here is not in the
- * description, or when a handler below matches an exact path that is not listed here.
+ * description, or when a handler below matches an exact path that is not listed here. test/unit/mock-shapes.test.ts
+ * checks the top-level keys of the answers against the description as well.
  */
 export const MOCK_ROUTES: readonly { method: string; path: string }[] = [
   { method: "GET", path: "/api/auth" },
@@ -565,14 +604,14 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
       if (m === "PUT" && path === "/api/settings") {
         if (body.llm_url === "http://insecure.example.com")
           return err(400, "The language model address must start with https:// unless it is on your own network.");
-        const ranges: Record<string, [number, number, string]> = {
-          agent_max_rounds: [1, 20, "Rounds per request"],
-          max_actions_per_day: [0, 100000, "Actions per day"],
-        };
         for (const [k, v] of Object.entries(body)) {
-          const r = ranges[k];
-          if (r && v !== null && !(Number.isInteger(v) && (v as number) >= r[0] && (v as number) <= r[1]))
-            return err(400, `${r[2]} must be a whole number from ${r[0]} to ${r[1]}.`);
+          const meta = SETTING_META[k];
+          if (meta?.["kind"] === "whole" && v !== null) {
+            const lo = meta["min"] as number;
+            const hi = meta["max"] as number;
+            if (!(Number.isInteger(v) && (v as number) >= lo && (v as number) <= hi))
+              return err(400, `${k} must be a whole number from ${lo} to ${hi}.`);
+          }
         }
         if (
           ("quiet_start" in body || "quiet_end" in body) &&
@@ -588,7 +627,6 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             source: was.source === "flag" ? "flag" : v === null ? "default" : "saved",
             saved: v !== null,
             ignored: was.source === "flag",
-            live: true,
           };
         }
         return send(200, settingsJson("Saved."));
@@ -714,12 +752,13 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         if (m === "POST" && seg.length === 1) {
           if (eps.some((e) => e["name"] === body.name)) return err(409, "That name is taken.");
           const spoken = body.spoken_name ?? null;
-          eps.push({ name: body.name, adapter: body.adapter, enabled: true, created_at: now(), spoken_name: spoken });
+          eps.push({ ...endpoint(body.name, body.adapter, now()), spoken_name: spoken });
           return send(201, {
             name: body.name,
             adapter: body.adapter,
             spoken_name: spoken,
             token: "tok-" + body.name + "-1",
+            setup: adapterSetup(body.adapter),
           });
         }
         if (m === "PUT" && seg.length === 2) {

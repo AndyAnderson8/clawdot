@@ -1,0 +1,218 @@
+{
+  "agent_deadline_secs": {
+    "group": "agent",
+    "kind": "whole",
+    "live": true,
+    "max": 300,
+    "min": 5
+  },
+  "agent_max_rounds": {
+    "group": "agent",
+    "kind": "whole",
+    "live": true,
+    "max": 20,
+    "min": 1
+  },
+  "agent_max_tool_calls": {
+    "group": "agent",
+    "kind": "whole",
+    "live": true,
+    "max": 20,
+    "min": 1
+  },
+  "agent_tool_timeout_secs": {
+    "group": "agent",
+    "kind": "whole",
+    "live": true,
+    "max": 120,
+    "min": 1
+  },
+  "daily_spend_usd": {
+    "group": "own",
+    "kind": "money",
+    "live": true,
+    "max": 100000.0,
+    "min": 0.0
+  },
+  "device_name": {
+    "group": "own",
+    "kind": "text",
+    "live": true,
+    "max_length": 40
+  },
+  "dry_run": {
+    "group": "policy",
+    "kind": "flag",
+    "live": true
+  },
+  "listen": {
+    "group": "own",
+    "kind": "address",
+    "live": false
+  },
+  "llm_key_env": {
+    "group": "llm",
+    "kind": "secret_name",
+    "live": true
+  },
+  "llm_model": {
+    "group": "llm",
+    "kind": "text",
+    "live": true,
+    "max_length": 200
+  },
+  "llm_url": {
+    "group": "llm",
+    "kind": "url",
+    "live": true
+  },
+  "llm_usd_per_mtok_in": {
+    "group": "own",
+    "kind": "money",
+    "live": true,
+    "max": 1000.0,
+    "min": 0.0
+  },
+  "llm_usd_per_mtok_out": {
+    "group": "own",
+    "kind": "money",
+    "live": true,
+    "max": 1000.0,
+    "min": 0.0
+  },
+  "max_actions_per_day": {
+    "group": "policy",
+    "kind": "whole",
+    "live": true,
+    "max": 100000,
+    "min": 0
+  },
+  "max_costly_per_day": {
+    "group": "policy",
+    "kind": "whole",
+    "live": true,
+    "max": 100000,
+    "min": 0
+  },
+  "notes": {
+    "group": "own",
+    "kind": "flag",
+    "live": true
+  },
+  "persona": {
+    "group": "own",
+    "kind": "long_text",
+    "live": true,
+    "max_length": 4000
+  },
+  "plan_speech": {
+    "group": "agent",
+    "kind": "flag",
+    "live": true
+  },
+  "progress_speech": {
+    "group": "agent",
+    "kind": "flag",
+    "live": true
+  },
+  "public_url": {
+    "group": "own",
+    "kind": "url",
+    "live": false
+  },
+  "quiet_end": {
+    "group": "quiet",
+    "kind": "time",
+    "live": true
+  },
+  "quiet_start": {
+    "group": "quiet",
+    "kind": "time",
+    "live": true
+  },
+  "realtime_enabled": {
+    "group": "realtime",
+    "kind": "flag",
+    "live": true
+  },
+  "realtime_key_env": {
+    "group": "realtime",
+    "kind": "secret_name",
+    "live": true
+  },
+  "realtime_max_session_secs": {
+    "group": "realtime",
+    "kind": "whole",
+    "live": true,
+    "max": 3600,
+    "min": 10
+  },
+  "realtime_model": {
+    "group": "realtime",
+    "kind": "text",
+    "live": true,
+    "max_length": 100
+  },
+  "realtime_transcription_model": {
+    "group": "realtime",
+    "kind": "text",
+    "live": true,
+    "max_length": 100
+  },
+  "realtime_url": {
+    "group": "realtime",
+    "kind": "url",
+    "live": true
+  },
+  "realtime_usd_per_min_in": {
+    "group": "realtime",
+    "kind": "money",
+    "live": true,
+    "max": 100.0,
+    "min": 0.0
+  },
+  "realtime_usd_per_min_out": {
+    "group": "realtime",
+    "kind": "money",
+    "live": true,
+    "max": 100.0,
+    "min": 0.0
+  },
+  "realtime_voice": {
+    "group": "realtime",
+    "kind": "text",
+    "live": true,
+    "max_length": 64
+  },
+  "speech_language": {
+    "group": "speech",
+    "kind": "language",
+    "live": true
+  },
+  "speech_provider": {
+    "choices": [
+      "openai",
+      "elevenlabs",
+      "deepgram"
+    ],
+    "group": "own",
+    "kind": "choice",
+    "live": false
+  },
+  "update_check": {
+    "group": "own",
+    "kind": "flag",
+    "live": true
+  },
+  "voice": {
+    "group": "speech",
+    "kind": "text",
+    "live": true,
+    "max_length": 64
+  },
+  "zone": {
+    "group": "own",
+    "kind": "zone",
+    "live": true
+  }
+}

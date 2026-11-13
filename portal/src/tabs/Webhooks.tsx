@@ -131,7 +131,7 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
             make a new token.
           </p>
         )}
-        {snippets(base(), e.name, e.adapter, tok).map(([title, text]) => (
+        {snippets(base(), e.name, e.adapter, tok, e.setup).map(([title, text]) => (
           <div key={title}>
             <h3>{title}</h3>
             <pre>{text}</pre>

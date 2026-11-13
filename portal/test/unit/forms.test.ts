@@ -19,7 +19,7 @@ import {
   type ReminderForm,
   type SettingSpec,
 } from "../../src/forms.ts";
-import type { Settings } from "../../src/types.ts";
+import { sampleSettings } from "./sample.ts";
 
 const base: ReminderForm = {
   kind: "timer",
@@ -141,32 +141,37 @@ test("skill body splits tools on commas and spaces", () => {
 
 // (the snippets are tested in snippets.test.ts)
 
-const settings: Settings = {
-  fields: {
-    device_name: { value: "Kitchen", source: "saved" },
-    zone: { value: null, source: "default" },
-    daily_spend_usd: { value: 100, source: "file" },
-    voice: { value: "x", source: "file" },
-  },
-};
+const settings = sampleSettings({
+  device_name: ["Kitchen", "saved"],
+  zone: [null, "default"],
+  daily_spend_usd: [100, "file"],
+  voice: ["x", "file"],
+});
 const specs: SettingSpec[] = [
-  { key: "device_name", kind: "text" },
-  { key: "zone", kind: "zone" },
-  { key: "daily_spend_usd", kind: "number" },
-  { key: "voice", kind: "text", off: true },
+  { key: "device_name" },
+  { key: "zone" },
+  { key: "daily_spend_usd" },
+  { key: "voice", off: true },
 ];
 
 test("settings patch sends only what changed", () => {
   const cur = Object.fromEntries(specs.map((s) => [s.key, currentText(settings, s.key)]));
   assert.deepEqual(cur, { device_name: "Kitchen", zone: "", daily_spend_usd: "100", voice: "x" });
-  assert.deepEqual(settingsPatch(specs, cur, cur), {});
-  assert.deepEqual(settingsPatch(specs, cur, { ...cur, device_name: " Den ", daily_spend_usd: "250" }), {
-    device_name: "Den",
-    daily_spend_usd: 250,
-  });
-  assert.deepEqual(settingsPatch(specs, cur, { ...cur, device_name: "" }), { device_name: null });
-  assert.deepEqual(settingsPatch(specs, cur, { ...cur, zone: "UTC" }), { zone: "UTC" });
-  assert.deepEqual(settingsPatch(specs, cur, { ...cur, voice: "other" }), {}, "a disabled field is never sent");
+  assert.deepEqual(settingsPatch(settings.fields, specs, cur, cur), {});
+  assert.deepEqual(
+    settingsPatch(settings.fields, specs, cur, { ...cur, device_name: " Den ", daily_spend_usd: "250" }),
+    {
+      device_name: "Den",
+      daily_spend_usd: 250,
+    },
+  );
+  assert.deepEqual(settingsPatch(settings.fields, specs, cur, { ...cur, device_name: "" }), { device_name: null });
+  assert.deepEqual(settingsPatch(settings.fields, specs, cur, { ...cur, zone: "UTC" }), { zone: "UTC" });
+  assert.deepEqual(
+    settingsPatch(settings.fields, specs, cur, { ...cur, voice: "other" }),
+    {},
+    "a disabled field is never sent",
+  );
 });
 
 test("labels", () => {
@@ -178,21 +183,19 @@ test("labels", () => {
 // REQ-CFG-062
 test("agent settings: toggles become real booleans, times stay text, and an emptied box goes back to the default", () => {
   const agent: SettingSpec[] = [
-    { key: "plan_speech", kind: "bool" },
-    { key: "dry_run", kind: "bool" },
-    { key: "agent_max_rounds", kind: "number", min: 1, max: 20 },
-    { key: "quiet_start", kind: "time" },
-    { key: "quiet_end", kind: "time" },
+    { key: "plan_speech" },
+    { key: "dry_run" },
+    { key: "agent_max_rounds" },
+    { key: "quiet_start" },
+    { key: "quiet_end" },
   ];
-  const s: Settings = {
-    fields: {
-      plan_speech: { value: true, source: "default" },
-      dry_run: { value: false, source: "default" },
-      agent_max_rounds: { value: 8, source: "default" },
-      quiet_start: { value: null, source: "default" },
-      quiet_end: { value: null, source: "default" },
-    },
-  };
+  const s = sampleSettings({
+    plan_speech: [true, "default"],
+    dry_run: [false, "default"],
+    agent_max_rounds: [8, "default"],
+    quiet_start: [null, "default"],
+    quiet_end: [null, "default"],
+  });
   const cur = Object.fromEntries(agent.map((a) => [a.key, currentText(s, a.key)]));
   assert.deepEqual(cur, {
     plan_speech: "true",
@@ -201,9 +204,9 @@ test("agent settings: toggles become real booleans, times stay text, and an empt
     quiet_start: "",
     quiet_end: "",
   });
-  assert.deepEqual(settingsPatch(agent, cur, cur), {});
+  assert.deepEqual(settingsPatch(s.fields, agent, cur, cur), {});
   assert.deepEqual(
-    settingsPatch(agent, cur, {
+    settingsPatch(s.fields, agent, cur, {
       ...cur,
       plan_speech: "false",
       dry_run: "true",
@@ -213,7 +216,7 @@ test("agent settings: toggles become real booleans, times stay text, and an empt
     }),
     { plan_speech: false, dry_run: true, agent_max_rounds: 5, quiet_start: "22:00", quiet_end: "07:00" },
   );
-  assert.deepEqual(settingsPatch(agent, cur, { ...cur, plan_speech: "" }), { plan_speech: null });
+  assert.deepEqual(settingsPatch(s.fields, agent, cur, { ...cur, plan_speech: "" }), { plan_speech: null });
   assert.equal(labelOf("quiet_start"), "Quiet from");
 });
 
@@ -244,13 +247,11 @@ test("a settings file is checked before anything is sent", () => {
 
 // REQ-CFG-065
 test("loading a file lists only what would change, in plain words", () => {
-  const s: Settings = {
-    fields: {
-      device_name: { value: "Kitchen", source: "default" },
-      dry_run: { value: false, source: "default" },
-      quiet_start: { value: null, source: "default" },
-    },
-  };
+  const s = sampleSettings({
+    device_name: ["Kitchen", "default"],
+    dry_run: [false, "default"],
+    quiet_start: [null, "default"],
+  });
   assert.deepEqual(settingsChanges(s, { device_name: "Kitchen", dry_run: true, quiet_start: "22:00", nothing: null }), [
     { key: "dry_run", label: "Dry run", from: "off", to: "on" },
     { key: "quiet_start", label: "Quiet from", from: "not set", to: "22:00" },

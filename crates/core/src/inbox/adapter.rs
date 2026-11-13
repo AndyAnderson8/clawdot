@@ -341,6 +341,13 @@ impl Adapter {
         })
     }
 
+    /// The set-up lines as written in the definition, with `{public}`, `{endpoint}` and `{token}` unfilled. The
+    /// portal fills them itself, so the text exists once.
+    #[must_use]
+    pub fn setup_lines(&self) -> &[String] {
+        &self.setup
+    }
+
     /// What to tell the person who has just created an endpoint with this adapter: how to point the sending
     /// program at `public`/hook/`endpoint`. `None` when the definition has no set-up text.
     #[must_use]

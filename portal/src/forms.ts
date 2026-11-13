@@ -1,5 +1,5 @@
 // Turning form state into request bodies, and the copy-and-paste snippets. Pure functions, unit-tested.
-import type { ScheduleKind, Settings } from "./types.ts";
+import type { ScheduleKind, SettingField, Settings } from "./types.ts";
 
 export interface ReminderForm {
   kind: ScheduleKind;
@@ -160,22 +160,23 @@ export const FROM: Record<string, string> = {
   flag: "Set when ClawDot was started",
 };
 
-export type SettingKind =
-  "text" | "zone" | "area" | "number" | "money" | "choice" | "bool" | "time" | "language" | "voice" | "model";
+/**
+ * How the page shows one setting: the wording and the layout. What the setting is (its kind, limits, choices, and
+ * whether it applies live) comes from the device in `Settings.fields` (`SettingField`), never from here.
+ */
 export interface SettingSpec {
   key: string;
-  kind: SettingKind;
+  /** A control that asks the device for its list (the models, the voices) instead of drawing the setting's kind. */
+  widget?: "model" | "voice";
+  /** For a whole number the device's range ("1 to 20.") is added after the hint, so a hint never repeats it. */
   hint?: string;
   off?: boolean;
   /** An optional setting: shown only once added, with this text on the button that adds it, and a Remove button. */
   optional?: string;
   /** Hide the control (its value is still kept and saved) while this returns true for the form's current values. */
   hideWhen?: (vals: Record<string, string>) => boolean;
-  /** For a whole number: the range the device accepts (shown to the browser as min and max). */
-  min?: number;
-  max?: number;
-  /** For a choice: each value and the words shown for it. */
-  options?: [string, string][];
+  /** For a choice: the words shown for each of the device's choices (a choice without an entry shows as itself). */
+  labels?: Record<string, string>;
   /** Shown in an empty box. */
   placeholder?: string;
 }
@@ -190,8 +191,15 @@ export function currentText(s: Settings, key: string): string {
   return String(v ?? "");
 }
 
+/** The words under a setting: the page's hint, then the device's range for a whole number ("1 to 20."). */
+export function hintText(sp: SettingSpec, f: SettingField | undefined): string {
+  const range = f?.kind === "whole" && f.min !== undefined && f.max !== undefined ? f.min + " to " + f.max + "." : "";
+  return [sp.hint ?? "", range].filter(Boolean).join(" ");
+}
+
 /** Only the values that changed, ready for `PUT /api/settings`; an emptied box becomes null (back to the default). */
 export function settingsPatch(
+  fields: Record<string, SettingField>,
   specs: SettingSpec[],
   current: Record<string, string>,
   edited: Record<string, string>,
@@ -202,8 +210,9 @@ export function settingsPatch(
     const was = (current[sp.key] ?? "").trim();
     const v = (edited[sp.key] ?? "").trim();
     if (v === was) continue;
+    const kind = fields[sp.key]?.kind;
     body[sp.key] =
-      v === "" ? null : sp.kind === "number" || sp.kind === "money" ? Number(v) : sp.kind === "bool" ? v === "true" : v;
+      v === "" ? null : kind === "whole" || kind === "money" ? Number(v) : kind === "flag" ? v === "true" : v;
   }
   return body;
 }
