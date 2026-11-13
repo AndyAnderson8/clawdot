@@ -2,18 +2,16 @@ import type { JSX } from "preact";
 import { useApp } from "../store.ts";
 import type { HardwareInfo } from "../types.ts";
 
-/** The kind of board, in words. */
-export function boardName(hw: HardwareInfo): string {
-  switch (hw.board) {
-    case "echo-dot":
-      return "Echo Dot class speaker";
-    case "raspberry-pi":
-      return "Raspberry Pi";
-    case "pc":
-      return "Computer";
-    default:
-      return "Not recognised";
-  }
+/** What to call the device: the configured label, else the model it gives itself, else a plain "Unknown device". */
+export function deviceName(hw: HardwareInfo): string {
+  return hw.label || hw.model || "Unknown device";
+}
+
+/** Whether a part's answer came from the configuration file instead of from looking. */
+function badge(hw: HardwareInfo, k: keyof HardwareInfo["parts"]): [string, string] {
+  const configured = hw.configured_parts.includes(k);
+  if (hw.parts[k]) return [configured ? "Set in configuration" : "Found", "good"];
+  return [configured ? "Turned off in configuration" : "Not found", ""];
 }
 
 const PARTS: [keyof HardwareInfo["parts"], string, string][] = [
@@ -37,8 +35,8 @@ export function HardwareCard(): JSX.Element {
         <>
           <dl class="kv">
             <dt>Device</dt>
-            <dd id="hwboard">{boardName(hw)}</dd>
-            {hw.model ? (
+            <dd id="hwboard">{deviceName(hw)}</dd>
+            {hw.model && hw.model !== deviceName(hw) ? (
               <>
                 <dt>Model</dt>
                 <dd>{hw.model}</dd>
@@ -65,20 +63,23 @@ export function HardwareCard(): JSX.Element {
             </dd>
           </dl>
           <ul class="rows hwparts" id="hwparts">
-            {PARTS.map(([k, name, what]) => (
-              <li key={k} class="hwpart">
-                <span class={"badge " + (hw.parts[k] ? "good" : "")}>{hw.parts[k] ? "Found" : "Not found"}</span>
-                <div>
-                  <strong>{name}</strong>
-                  <div class="mut">{what}</div>
-                </div>
-              </li>
-            ))}
+            {PARTS.map(([k, name, what]) => {
+              const [text, tone] = badge(hw, k);
+              return (
+                <li key={k} class="hwpart">
+                  <span class={"badge " + tone}>{text}</span>
+                  <div>
+                    <strong>{name}</strong>
+                    <div class="mut">{what}</div>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
           {hw.board === "unknown" ? (
             <p class="mut" id="hwunknown">
-              This device is not one ClawDot knows, so it is not configured for any of its parts. Lights and Bluetooth
-              stay off until a board file describes how to reach them.
+              No device preset is set up, so only what the operating system shows was used. A part it cannot show, such
+              as a light ring another program drives, can be declared in the device section of the configuration file.
             </p>
           ) : null}
         </>

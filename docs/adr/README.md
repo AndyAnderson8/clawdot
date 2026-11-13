@@ -23,6 +23,8 @@ An ADR captures one significant decision, its context, and its consequences, so 
 | [0017](0017-portal-design-system-astryx.md) | Portal design system: the Astryx token contract on Preact, native controls, no Astryx runtime | Proposed |
 | [0018](0018-landing-gate-mode.md) | Landing gate mode: a temporary stabilization mode for dev | Proposed |
 | [0019](0019-updates-and-remote-access.md) | Updates (daily check, install on confirmation, signed releases) and what a smart speaker should not share (SSH opt-in, no USB storage, no SMB) | Proposed |
+| [0020](0020-realtime-voice-provider.md) | Realtime voice as an optional provider: feature-gated, tools and confirmation stay in ClawDot, audio time counted in the spend cap, no new dependency | Proposed |
+| [0021](0021-turns-as-tasks.md) | Turns, realtime sessions and speech run as tasks beside the main loop, which keeps one owner of the state; one bounded conversation per speaker; one gate for the turn and realtime | Proposed |
 
 ## Rules
 - ADRs are immutable once Accepted. To change a decision, write a new ADR that **supersedes** it.

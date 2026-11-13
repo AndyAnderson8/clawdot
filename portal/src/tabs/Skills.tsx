@@ -6,7 +6,9 @@ import {
   SKILL_NAME_MAX,
   SKILL_TEXT_MAX,
   matching,
+  SKILL_HELPER,
   readSkillFiles,
+  skillImports,
   skillBody,
   type SkillDraft,
   type SkillFile,
@@ -14,6 +16,7 @@ import {
 import { Field } from "../parts.tsx";
 import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { Skill } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 const MAX_FILE_BYTES = 70000;
 const MAX_FILES = 300;
@@ -41,8 +44,8 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
         );
     if (ok) props.onDone();
   };
-  const remove = () => {
-    if (k && confirm("Delete the skill " + k.name + "?"))
+  const remove = async () => {
+    if (k && (await ask("Delete the skill " + k.name + "?", "Delete")))
       void change("POST", "/api/skills/delete", { name: k.name }, "Deleted.").then((ok) => ok && props.onDone());
   };
   return (
@@ -106,10 +109,11 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
   const [list, setList] = useState<{ found: SkillDraft[]; skipped: string[] } | null>(null);
   const [off, setOff] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [raw, setRaw] = useState<SkillFile[]>([]);
 
   const read = async (files: FileList | null) => {
     if (!files?.length) return;
-    const all = Array.from(files).filter((f) => /\.(md|json)$/i.test(f.name));
+    const all = Array.from(files).filter((f) => SKILL_HELPER.test(f.name));
     if (all.length > MAX_FILES) {
       say("That folder has more than " + MAX_FILES + " files to read. Choose a smaller folder.", true);
       return;
@@ -121,7 +125,17 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
       if (f.size > MAX_FILE_BYTES) skippedBig.push(path + ": it is larger than 64 KB");
       else read.push({ path, text: await f.text() });
     }
-    const r = readSkillFiles(read);
+    setRaw(read);
+    // A folder with a SKILL.md is one skill; its other text files are helper files, not skills of their own.
+    const isSkillMd = (p: string) => /(^|\/)SKILL\.md$/i.test(p);
+    const dirOf = (p: string) => p.slice(0, p.lastIndexOf("/") + 1);
+    const skillDirs = new Set(read.filter((f) => isSkillMd(f.path)).map((f) => dirOf(f.path)));
+    const r = readSkillFiles(
+      read.filter(
+        (f) =>
+          /\.(md|json)$/i.test(f.path) && (isSkillMd(f.path) || dirOf(f.path) === "" || !skillDirs.has(dirOf(f.path))),
+      ),
+    );
     setList({ found: r.found, skipped: [...skippedBig, ...r.skipped] });
     setOff([]);
   };
@@ -130,14 +144,27 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     setBusy(true);
     const skills = list.found.filter((s) => !off.includes(s.name));
     try {
-      const out = await api<unknown>("POST", "/api/skills/import", { format: "clawdot-skills", version: 1, skills });
-      void out;
+      const { folders, plain } = skillImports(skills, raw);
+      let added = 0;
+      const left: string[] = [];
+      const send = async (body: unknown) => {
+        const r = await api<{ import?: { added: number; skipped: string[] } | null }>(
+          "POST",
+          "/api/skills/import",
+          body,
+        );
+        added += r.import?.added ?? 0;
+        left.push(...(r.import?.skipped ?? []));
+      };
+      if (folders.length) await send({ format: "skill-folder", files: folders });
+      if (plain.length) await send({ format: "clawdot-skills", version: 1, skills: plain });
       await loadExt();
       say(
         "Added " +
-          skills.length +
-          (skills.length === 1 ? " skill" : " skills") +
-          ", turned off. Read each one, then turn on the ones you trust.",
+          (added || skills.length) +
+          ((added || skills.length) === 1 ? " skill" : " skills") +
+          ". Each one waits for you to read and accept it." +
+          (left.length ? " Left out: " + left.length + "." : ""),
       );
       props.onDone();
     } catch (x) {
@@ -150,8 +177,8 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     <div class="dlgform">
       <p class="mut">
         Point at a folder of skills (each in its own folder with a SKILL.md file), or at single files. ClawDot reads
-        them here in your browser and lists what it found. Added skills start turned off, because they are text from
-        somewhere else.
+        them here in your browser and lists what it found. Added skills start turned off and wait for you to read and
+        accept them, because they are text from somewhere else. Scripts and programs in a folder are never sent.
       </p>
       <div class="row">
         <label class="plain small filebtn">
@@ -241,6 +268,75 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
   );
 }
 
+/** Read an imported skill before it can be used: what it says it is for, where it came from, its instructions and
+ *  any helper files. Accepting it is a separate step from turning it on. */
+function SkillReview(props: { skill: Skill; onDone: () => void }): JSX.Element {
+  const k = props.skill;
+  const accept = async (alsoOn: boolean) => {
+    try {
+      await api("POST", "/api/skills/accept", { name: k.name });
+      if (alsoOn) await api("POST", "/api/skills/enabled", { name: k.name, enabled: true });
+      await loadExt();
+      say(alsoOn ? "Accepted and turned on." : "Accepted. Turn it on when you want it used.");
+      props.onDone();
+    } catch (x) {
+      fail(x);
+    }
+  };
+  const remove = async () => {
+    if (await ask("Delete the skill " + k.name + "?", "Delete"))
+      void change("POST", "/api/skills/delete", { name: k.name }, "Deleted.").then((ok) => ok && props.onDone());
+  };
+  return (
+    <div class="dlgform" id="skillreview">
+      <p class="mut">
+        This skill came from a file. Read it before you accept it: the assistant will follow these instructions when the
+        skill is on. Nothing in it is ever run as a program.
+      </p>
+      <dl class="kv">
+        {k.description ? (
+          <>
+            <dt>What it is for</dt>
+            <dd>{k.description}</dd>
+          </>
+        ) : null}
+        {k.source ? (
+          <>
+            <dt>Came from</dt>
+            <dd>{k.source}</dd>
+          </>
+        ) : null}
+      </dl>
+      <h4 class="sub">Instructions</h4>
+      <pre class="pre reviewtext" id="reviewtext">
+        {k.instructions}
+      </pre>
+      {(k.files ?? []).length ? (
+        <>
+          <h4 class="sub">Helper files</h4>
+          {(k.files ?? []).map((f) => (
+            <details key={f.path} class="help">
+              <summary>{f.path}</summary>
+              <pre class="pre reviewtext">{f.text}</pre>
+            </details>
+          ))}
+        </>
+      ) : null}
+      <div class="row dlgfoot">
+        <button type="button" id="skillaccepton" onClick={() => void accept(true)}>
+          Accept and turn on
+        </button>
+        <button class="plain" type="button" id="skillaccept" onClick={() => void accept(false)}>
+          Accept, keep off
+        </button>
+        <button class="danger" type="button" onClick={remove}>
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function Skills(): JSX.Element {
   const ext = useApp().ext;
   usePolled(loadExt);
@@ -248,12 +344,15 @@ export function Skills(): JSX.Element {
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState<"" | "write" | "import">("");
   const [editing, setEditing] = useState<Skill | null>(null);
+  const [reviewing, setReviewing] = useState<Skill | null>(null);
   const shown = matching(skills, query, (k) => k.instructions);
   const on = skills.filter((k) => k.enabled).length;
+  const waiting = skills.filter((k) => k.needs_review).length;
 
   // Turn a group of skills on or off at once.
   const setMany = async (list: Skill[], enabled: boolean) => {
-    const todo = list.filter((k) => k.enabled !== enabled);
+    // A skill that has not been read and accepted cannot be turned on, so it is left alone here.
+    const todo = list.filter((k) => k.enabled !== enabled && !(enabled && k.needs_review));
     try {
       for (const k of todo) await api("POST", "/api/skills/enabled", { name: k.name, enabled });
     } catch (x) {
@@ -302,6 +401,7 @@ export function Skills(): JSX.Element {
             </button>
             <span class="mut" role="status" id="skillcount">
               {on} of {skills.length} turned on
+              {waiting ? ", " + waiting + " to review" : ""}
             </span>
           </div>
         ) : null}
@@ -312,20 +412,34 @@ export function Skills(): JSX.Element {
         ) : (
           <ul class="rows tools">
             {shown.map((k) => (
-              <li key={k.name} class={"toolrow skillrow" + (k.enabled ? "" : " off")}>
+              <li
+                key={k.name}
+                class={"toolrow skillrow" + (k.enabled ? "" : " off") + (k.needs_review ? " review" : "")}
+              >
                 <input
                   class="switch"
                   type="checkbox"
                   checked={k.enabled}
-                  aria-label={k.name + (k.enabled ? " is on" : " is off")}
+                  disabled={k.needs_review === true}
+                  title={k.needs_review ? "Read and accept this skill before turning it on." : undefined}
+                  aria-label={k.name + (k.needs_review ? " needs review" : k.enabled ? " is on" : " is off")}
                   onChange={() => void toggle(k)}
                 />
                 <div class="toolmain">
-                  <div class="skillname">{k.name}</div>
-                  <div class="tooldesc clamp">{k.instructions}</div>
+                  <div class="skillname">
+                    {k.name}
+                    {k.needs_review ? <span class="badge warn">Needs review</span> : null}
+                  </div>
+                  <div class="tooldesc clamp">{k.description || k.instructions}</div>
+                  {k.source ? <div class="toolorigin">From {k.source}</div> : null}
                   {(k.tools ?? []).length ? <div class="toolorigin">Uses {(k.tools ?? []).join(", ")}</div> : null}
                 </div>
                 <div class="toolact">
+                  {k.needs_review ? (
+                    <button type="button" class="small" onClick={() => setReviewing(k)}>
+                      Review
+                    </button>
+                  ) : null}
                   <button class="plain small" type="button" onClick={() => setEditing(k)}>
                     Edit
                   </button>
@@ -365,6 +479,15 @@ export function Skills(): JSX.Element {
         wide
       >
         {editing ? <SkillForm key={editing.name} skill={editing} onDone={() => setEditing(null)} /> : null}
+      </Dialog>
+      <Dialog
+        id="skillreviewdialog"
+        title={reviewing ? "Review " + reviewing.name : "Review skill"}
+        open={reviewing !== null}
+        onClose={() => setReviewing(null)}
+        wide
+      >
+        {reviewing ? <SkillReview key={reviewing.name} skill={reviewing} onDone={() => setReviewing(null)} /> : null}
       </Dialog>
     </>
   );

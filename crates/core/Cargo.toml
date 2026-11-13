@@ -1,6 +1,6 @@
 [package]
 name = "clawdot-core"
-description = "ClawDot core: agent inbox, scheduler, fast-path commands, and the HTTP front end"
+description = "ClawDot core: the assistant program with its language-model turns, tool gate, agent inbox, timers, satellite server, MCP client and server, updater, and embedded web portal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,8 +20,20 @@ tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots", "dep:ring"]
 # Client for ESPHome voice satellites (spec 0004): dials a Dot or other ESPHome device with no Home Assistant.
 # Plaintext API only; adds no dependency. Off by default.
 esphome-satellite = []
-# Noise encryption for the ESPHome client (REQ-ESP-014), built on `ring`, which the tls feature already pulls in.
-esphome-noise = ["esphome-satellite", "dep:ring"]
+# Noise encryption for the ESPHome client (REQ-ESP-014), built on `ring`, which the tls feature already pulls in. Keys
+# are wiped on drop with `zeroize`, which the tls feature also already links (through rustls).
+esphome-noise = ["esphome-satellite", "dep:ring", "dep:zeroize"]
+
+# Optional realtime (speech-to-speech) voice (ADR-0020, REQ-RTV-001): one streaming WebSocket to a provider
+# instead of separate listen, think and speak steps. Meant for a PC or Pi. Adds no crate (a minimal
+# WebSocket client is built in) and uses the TLS stack the `tls` feature already has. Off by default.
+realtime = ["tls"]
+
+# Hive (docs/research/14-hive.md, milestone H0): a persistent Ed25519 device identity and mDNS/DNS-SD discovery of other
+# speakers on the home network. Identity uses `ring`, which the default `tls` feature already links; mDNS is a small
+# hand-written responder over tokio UDP plus `socket2`, which tokio's `net` feature already compiles. No new crate.
+# Off by default, and even when built in nothing is sent until `--hive-discovery` is given.
+hive = ["dep:ring", "dep:socket2"]
 
 [[bin]]
 name = "clawdot"
@@ -33,7 +45,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 getrandom = "0.3"
-tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util", "signal"] }
 hyper = { version = "1", default-features = false, features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
@@ -42,10 +54,15 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "1", optional = true }
 ring = { version = "0.17", default-features = false, features = ["alloc"], optional = true }
+socket2 = { version = "0.6", features = ["all"], optional = true }
+zeroize = { version = "1", optional = true }
 
 # Build time only: compresses the portal page (REQ-CFG-043). Not linked into the program.
 [build-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Build time only: the SHA-256 of the page's inline script and style for its content-security policy. The same crate
+# and version the program already links (see [dependencies]), so Cargo.lock and the binary are unchanged.
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "io-util"] }

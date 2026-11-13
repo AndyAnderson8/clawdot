@@ -1,8 +1,8 @@
 import { Fragment, type JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api, keep } from "../api.ts";
+import { api, keep, ApiError } from "../api.ts";
 import { restartText, type SettingSpec } from "../forms.ts";
-import { fail, say, signedOut, start, sv, useApp } from "../store.ts";
+import { fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
 import { zoneName } from "../time.ts";
 import type { HardwareInfo, Settings as SettingsData } from "../types.ts";
 import { About } from "./About.tsx";
@@ -17,10 +17,13 @@ import { Skills } from "./Skills.tsx";
 import { HardwareCard } from "./HardwareCard.tsx";
 import { Lights } from "./Lights.tsx";
 import { Planned } from "./Planned.tsx";
+import { SavedKey } from "./SavedKey.tsx";
+import { Speakers } from "./Speakers.tsx";
 import { Themes } from "./Themes.tsx";
 import { MediaSettings } from "./Media.tsx";
 import { Tools } from "./Tools.tsx";
 import { Webhooks } from "./Webhooks.tsx";
+import { ask } from "../confirm.tsx";
 
 type Spec = SettingSpec[];
 const MODEL: Spec = [
@@ -85,18 +88,6 @@ function General(props: { s: SettingsData }): JSX.Element {
         ]}
       />
       <HardwareCard />
-      <Group
-        title="Hardware support"
-        settings={props.s}
-        intro="How ClawDot reaches this device's own parts, such as its lights."
-        specs={[
-          {
-            key: "board",
-            kind: "board",
-            hint: "Not used yet: the hardware layer is not built. The choice is saved for when it is. Choose None for a device ClawDot does not know.",
-          },
-        ]}
-      />
     </>
   );
 }
@@ -104,19 +95,26 @@ function General(props: { s: SettingsData }): JSX.Element {
 /** The provider's key: pasted once, checked with the service, kept on the device, and shown only as its first and last few characters. */
 function KeyRow(props: {
   s: SettingsData;
-  vals: Record<string, string>;
-  setVals: (v: Record<string, string>) => void;
+  /** The provider address chosen in the form, saved or not. */
+  url: string;
 }): JSX.Element | null {
-  const { s, vals, setVals } = props;
-  const prov = providerFor(vals["llm_url"] ?? "");
+  const { s, url } = props;
+  const prov = providerFor(url);
   const [typed, setTyped] = useState("");
   const [replacing, setReplacing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [bad, setBad] = useState(false);
   if (!prov) return null;
-  const hint = vals["_keyhint"] ?? s.llm?.key_hint ?? "";
-  const fromEnv = !hint && s.llm?.key_present === true && vals["_keyok"] !== "0";
+  const hint = s.llm?.key_hint ?? "";
+  const fromEnv = !hint && s.llm?.key_present === true;
+  // What the device now holds is read back from it, and kept with the settings (not among this form's values):
+  // the form is not rebuilt, so a provider or model chosen but not yet saved stays as it is.
+  const keyChanged = async () => {
+    const fresh = await api<SettingsData>("GET", "/api/settings");
+    const old = get().settings;
+    if (old) set({ settings: { ...old, llm: fresh.llm }, keyRev: get().keyRev + 1 });
+  };
   const check = async () => {
     const key = typed.trim();
     if (!key) {
@@ -128,15 +126,15 @@ function KeyRow(props: {
     setMsg("");
     try {
       // The service is asked first, so a key that does not work is never kept.
-      const r = await api<{ models: string[] }>("POST", "/api/models", { url: vals["llm_url"] ?? "", key });
-      const k = await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
+      const r = await api<{ models: string[] }>("POST", "/api/models", { url, key });
+      await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
+      await keyChanged();
       setTyped("");
       setReplacing(false);
       setBad(false);
       setMsg(
         "Key accepted. " + r.models.length + (r.models.length === 1 ? " model is" : " models are") + " available.",
       );
-      setVals({ ...vals, _keyhint: k.hint ?? "", _keyok: "1", _keyrev: String(Date.now()) });
     } catch (x) {
       setBad(true);
       setMsg(x instanceof Error ? x.message : "The key could not be checked.");
@@ -144,11 +142,11 @@ function KeyRow(props: {
     setBusy(false);
   };
   const remove = async () => {
-    if (!confirm("Remove the saved key? The assistant will stop answering until you add one.")) return;
+    if (!(await ask("Remove the saved key? The assistant will stop answering until you add one.", "Remove"))) return;
     try {
       await api("DELETE", "/api/llm/key");
       setMsg("");
-      setVals({ ...vals, _keyhint: "", _keyok: "0", _keyrev: String(Date.now()) });
+      await keyChanged();
     } catch (x) {
       fail(x);
     }
@@ -248,7 +246,6 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
                         ...vals,
                         llm_url: p.id === "custom" ? "https://" : p.url,
                         llm_model: p.id === "custom" ? "" : p.model,
-                        _keyrev: String(Date.now()),
                       });
                     }}
                   >
@@ -265,7 +262,7 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
                   </select>
                 </div>
               </div>
-              <KeyRow s={s} vals={vals} setVals={setVals} />
+              <KeyRow s={s} url={vals["llm_url"] ?? ""} />
             </>
           );
         }}
@@ -291,8 +288,23 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
       <Group
         title="Spending limit"
         settings={s}
-        intro="Stops the assistant from using the language model once it has cost this much in a day. It starts again the next day."
-        specs={[{ key: "daily_spend_usd", kind: "money", hint: "In US dollars. Leave it empty for no limit." }]}
+        intro="Stops the assistant from using the language model once it has cost this much in a day. It starts again the next day. Some providers say what each request cost. For the others the cost is worked out from the prices below."
+        specs={[
+          { key: "daily_spend_usd", kind: "money", hint: "In US dollars. Leave it empty for no limit." },
+          {
+            key: "llm_usd_per_mtok_in",
+            kind: "money",
+            placeholder: "10.00",
+            hint: "What your provider charges for a million tokens of what is sent to the model. Leave it empty and a high price is assumed, so the limit stops early, never late. Enter 0 for a model that is free.",
+          },
+          {
+            key: "llm_usd_per_mtok_out",
+            kind: "money",
+            placeholder: "40.00",
+            hint: "What it charges for a million tokens of the model's reply.",
+          },
+        ]}
+        below={() => <SpendBasis />}
       />
       <Group
         title="Quiet hours"
@@ -312,33 +324,86 @@ function Assistant(props: { s: SettingsData }): JSX.Element {
 }
 
 /** Speech: the provider (shown, not yet changeable here), the voice and language, and a way to hear it. */
+/** One line saying how sure today's spending figure is. */
+function SpendBasis(): JSX.Element | null {
+  const basis = useApp().status?.usage?.spend_basis;
+  const text =
+    basis === "estimated"
+      ? "Today's spending is an estimate: the provider does not say what a request cost, and at least one price above is empty. Enter your provider's prices to make it accurate."
+      : basis === "priced"
+        ? "Today's spending is worked out from the prices above."
+        : basis === "reported"
+          ? "Today's spending is the cost your provider reported."
+          : "";
+  return text ? (
+    <p class="mut" id="spendbasis" role="status">
+      {text}
+    </p>
+  ) : null;
+}
+
+const SPEECH_SERVICES: [string, string][] = [
+  ["openai", "An OpenAI-style speech server"],
+  ["elevenlabs", "ElevenLabs"],
+  ["deepgram", "Deepgram"],
+];
+
 function VoiceSection(props: { s: SettingsData }): JSX.Element {
   const s = props.s;
   const vi = s.voice_info ?? {};
+  const live = useApp().status?.realtime;
+  const service = String(s.fields["speech_provider"]?.value ?? "openai");
+  const own = service !== "openai";
+  const rt = s.realtime;
+  const noRealtime = rt?.built === false;
   return (
     <>
-      <section class="card" id="speechprovider">
-        <h3>Speech provider</h3>
-        <p class="mut">
-          The service that turns what you say into text and the assistant&apos;s words into speech. It is chosen when
-          ClawDot is installed. Changing it from this page is not available yet.
-        </p>
-        {s.speech_configured ? (
-          <dl class="kv">
-            <dt>Provider</dt>
-            <dd>{vi.provider || "Not known"}</dd>
-            <dt>Hears you with</dt>
-            <dd>{vi.stt_model || "Not set"}</dd>
-            <dt>Speaks with</dt>
-            <dd>{vi.tts_model || "Not set"}</dd>
-          </dl>
-        ) : (
-          <p class="empty">
-            No speech provider is set up, so the speaker cannot hear you or talk yet. Whoever installed ClawDot can add
-            one; the local speech guide shows a free one.
-          </p>
+      <Group
+        title="Speech provider"
+        settings={s}
+        intro="The service that turns what you say into text and the assistant's words into speech. Changing it needs a restart, and a new voice, because voices do not carry from one service to another."
+        specs={[
+          {
+            key: "speech_provider",
+            kind: "choice",
+            options: SPEECH_SERVICES,
+            hint: "ElevenLabs and Deepgram need only a key. An OpenAI-style server is set up where ClawDot is installed.",
+          },
+        ]}
+        below={() => (
+          <>
+            <SavedKey
+              id="speech"
+              label="Key"
+              what={
+                own
+                  ? "From your account with the service. It is kept on this device; only its first and last few characters are shown."
+                  : "Only if your speech server asks for one. It is kept on this device; only its first and last few characters are shown."
+              }
+              path="/api/speech/key"
+              hint={s.speech?.key_hint}
+              fromEnv={s.speech?.key_present === true}
+            />
+            <div id="speechprovider">
+              {s.speech_configured || own ? (
+                <dl class="kv">
+                  <dt>In use now</dt>
+                  <dd>{vi.provider || "Not known"}</dd>
+                  <dt>Hears you with</dt>
+                  <dd>{vi.stt_model || "The service's usual model"}</dd>
+                  <dt>Speaks with</dt>
+                  <dd>{vi.tts_model || "The service's usual model"}</dd>
+                </dl>
+              ) : (
+                <p class="empty">
+                  No speech provider is set up, so the speaker cannot hear you or talk yet. Choose ElevenLabs or
+                  Deepgram above and add a key, or follow the local speech guide for a free one.
+                </p>
+              )}
+            </div>
+          </>
         )}
-      </section>
+      />
       <Group
         title="Voice and language"
         settings={s}
@@ -360,6 +425,67 @@ function VoiceSection(props: { s: SettingsData }): JSX.Element {
         ]}
       />
       <TestSpeaker />
+      <Group
+        title="Realtime voice"
+        settings={s}
+        intro="An optional service that hears you and answers in one step, which is faster than listening, thinking and speaking in turn. It is billed by the minute of audio, and your spending limit counts it. Tools still ask you first. Off unless you turn it on."
+        specs={[
+          { key: "realtime_enabled", kind: "bool", off: noRealtime },
+          {
+            key: "realtime_url",
+            kind: "text",
+            off: noRealtime,
+            hint: "It starts with wss://. For example wss://api.openai.com/v1/realtime.",
+          },
+          { key: "realtime_model", kind: "text", off: noRealtime, hint: "The realtime model's name." },
+          { key: "realtime_voice", kind: "text", off: noRealtime, hint: "A voice name the service offers." },
+          {
+            key: "realtime_usd_per_min_in",
+            kind: "money",
+            off: noRealtime,
+            placeholder: "0.03",
+            hint: "What the service charges for a minute of your speech. Used to count spending; check it against your bill.",
+          },
+          {
+            key: "realtime_usd_per_min_out",
+            kind: "money",
+            off: noRealtime,
+            placeholder: "0.10",
+            hint: "What it charges for a minute of its speech.",
+          },
+          {
+            key: "realtime_max_session_secs",
+            kind: "number",
+            min: 10,
+            max: 3600,
+            off: noRealtime,
+            hint: "In seconds. A conversation ends by itself after this long. 10 to 3600.",
+          },
+        ]}
+        below={() => (
+          <>
+            <SavedKey
+              id="realtime"
+              label="Key"
+              what="From your account with the realtime service. It is kept on this device; only its first and last few characters are shown."
+              path="/api/realtime/key"
+              hint={rt?.key_hint}
+              off={noRealtime ? "Not available in this build" : undefined}
+            />
+            <p class="mut" id="realtimestate" role="status">
+              {noRealtime
+                ? "This build of ClawDot does not include realtime voice."
+                : live?.active
+                  ? "A realtime conversation is going on now."
+                  : live?.last_error
+                    ? "The last realtime conversation failed: " + live.last_error
+                    : rt?.configured
+                      ? "Ready. The next conversation after the wake word uses it."
+                      : "Not ready: it needs to be turned on, with an address, a model and a key."}
+            </p>
+          </>
+        )}
+      />
     </>
   );
 }
@@ -417,17 +543,33 @@ function MemorySection(): JSX.Element {
 function Security(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
+  const [cur, setCur] = useState("");
+  const [pwErr, setPwErr] = useState("");
+  const hasPassword = s.mode === "password";
   const savePassword = async (ev: Event) => {
     ev.preventDefault();
+    setPwErr("");
+    if (hasPassword && !cur) {
+      setPwErr(s.legacy ? "Type the old administrator token first." : "Type your current password first.");
+      return;
+    }
     const password = pw;
-    setPw("");
     try {
-      const r = await api<{ token: string }>("POST", "/api/admin/password", { password });
+      const r = await api<{ token: string }>(
+        "POST",
+        "/api/admin/password",
+        hasPassword ? { password, current: cur } : { password },
+      );
+      setPw("");
+      setCur("");
       keep(r.token);
       say("Password saved.");
       await start();
     } catch (x) {
-      fail(x);
+      // A wrong current password is said next to the boxes, and what was typed stays so it can be corrected.
+      if (x instanceof ApiError && x.status === 403)
+        setPwErr("That is not the current password. Check it and try again.");
+      else fail(x);
     }
   };
   const signOut = async () => {
@@ -449,6 +591,22 @@ function Security(): JSX.Element {
             You are signed in with the old administrator token. Set a password to replace it.
           </p>
         ) : null}
+        {hasPassword ? (
+          <Field
+            id="curpw"
+            label={s.legacy ? "Old administrator token" : "Current password"}
+            hint="So that only you can change it."
+          >
+            <input
+              id="curpw"
+              type="password"
+              autoComplete="current-password"
+              maxLength={128}
+              value={cur}
+              onInput={(e) => setCur(e.currentTarget.value)}
+            />
+          </Field>
+        ) : null}
         <Field id="newpw" label="New password" hint="At least 8 characters.">
           <input
             id="newpw"
@@ -460,6 +618,9 @@ function Security(): JSX.Element {
             onInput={(e) => setPw(e.currentTarget.value)}
           />
         </Field>
+        <p class="errtext" role="alert" id="pwerr">
+          {pwErr}
+        </p>
         <div class="row">
           <button>Save password</button>
         </div>
@@ -522,6 +683,7 @@ export const SECTIONS: [Section, ...Section[]] = [
     why: "No light ring was found on this device, so these settings would do nothing here.",
   },
   { id: "webhooks", label: "Webhooks", group: "Integrations", view: Notifications },
+  { id: "speakers", label: "Speakers", group: "Integrations", view: () => <Speakers /> },
   {
     id: "homeassistant",
     label: "Home Assistant",
@@ -628,8 +790,8 @@ export function SettingsPage(props: { sub: string }): JSX.Element {
               <h4>Restart needed</h4>
               <p>These saved values are not running yet: {restartText(need)}.</p>
               <p>
-                ClawDot cannot restart itself safely from this page. Restart it on the device: for example run sudo
-                systemctl restart clawdot if it runs as a service, or stop the program and start it again.
+                ClawDot cannot restart itself safely from this page. Restart it on the device the way you start it: with
+                whatever runs it (a service manager or a supervisor script), or stop the program and start it again.
               </p>
             </div>
           ) : null}

@@ -9,6 +9,7 @@
 //!
 //! Secrets are not settings. A key is named by the environment variable that holds it (REQ-CFG-042).
 
+use crate::secrets::Secrets;
 use crate::store::JsonStore;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -25,7 +26,16 @@ pub const EXPORT_FORMAT: &str = "clawdot-settings";
 pub type Layer = BTreeMap<String, Value>;
 
 /// How a lookup of an environment variable is done; tests replace it.
-pub type EnvFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub use crate::env::EnvFn;
+
+/// The three layers a program has before the data directory is read, lowest first: the built-in defaults, the
+/// configuration file, and the command-line flags.
+#[derive(Debug, Default)]
+pub struct Sources {
+    pub defaults: Layer,
+    pub file: Layer,
+    pub flags: Layer,
+}
 
 /// Which layer an effective value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,142 +63,468 @@ impl Source {
     }
 }
 
-/// One setting: its key and whether a change applies without a restart.
+/// The environment lookup a validator may use to check that a key variable exists.
+type EnvRef<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// What a validator may look at besides the value: the environment, and the keys pasted into the portal.
+pub struct Lookup<'a> {
+    env: EnvRef<'a>,
+    secrets: &'a Secrets,
+}
+
+impl std::fmt::Debug for Lookup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lookup").finish_non_exhaustive()
+    }
+}
+
+/// A validator that needs more than a range or a length: it gets the value and the environment lookup, and
+/// returns the value in the form that is stored.
+pub type Validator = fn(&Value, &Lookup<'_>) -> Result<Value, String>;
+
+/// How a value is checked. Every row names one; the error texts are what the portal shows.
+#[derive(Debug, Clone, Copy)]
+pub enum Check {
+    /// Plain text of at most `max` characters, without control characters.
+    Text {
+        /// How the setting is named in the message.
+        what: &'static str,
+        /// Longest allowed, in characters.
+        max: usize,
+    },
+    /// A whole number from `lo` to `hi`.
+    Whole {
+        /// How the setting is named in the message.
+        what: &'static str,
+        /// Smallest allowed.
+        lo: u64,
+        /// Largest allowed.
+        hi: u64,
+    },
+    /// A number from `lo` to `hi`; `err` is the whole message when it is not.
+    Number {
+        /// Smallest allowed.
+        lo: f64,
+        /// Largest allowed.
+        hi: f64,
+        /// The message for a value outside the range.
+        err: &'static str,
+    },
+    /// On or off.
+    Flag,
+    /// One of a fixed list of words; `err` is the whole message when it is not.
+    Choice {
+        /// How the setting is named in the message.
+        what: &'static str,
+        /// The allowed words.
+        options: &'static [&'static str],
+        /// The message for any other word.
+        err: &'static str,
+    },
+    /// A named function, for rules of its own.
+    Custom(Validator),
+}
+
+impl Check {
+    fn run(self, key: &str, v: &Value, lk: &Lookup<'_>) -> Result<Value, String> {
+        match self {
+            Self::Text { what, max } => string(v, what, max).map(Value::from),
+            Self::Whole { what, lo, hi } => whole(v, what, lo, hi),
+            Self::Number { lo, hi, err } => v
+                .as_f64()
+                .filter(|n| n.is_finite() && (lo..=hi).contains(n))
+                .map(|n| json!(n))
+                .ok_or_else(|| err.to_owned()),
+            Self::Flag => v
+                .as_bool()
+                .map(Value::from)
+                .ok_or_else(|| format!("`{key}` must be on or off (true or false).")),
+            Self::Choice { what, options, err } => {
+                let t = text(v, what)?;
+                options
+                    .contains(&t.as_str())
+                    .then(|| json!(t))
+                    .ok_or_else(|| err.to_owned())
+            }
+            Self::Custom(f) => f(v, lk),
+        }
+    }
+}
+
+/// What a setting is when nothing sets it.
+#[derive(Debug, Clone, Copy)]
+pub enum Initial {
+    /// Unset: the feature is off or the value is derived elsewhere.
+    None,
+    /// Text.
+    Str(&'static str),
+    /// On or off.
+    Bool(bool),
+    /// A whole number.
+    Whole(u64),
+    /// A number.
+    Number(f64),
+    /// Taken from the code that consumes the value, so the two cannot drift.
+    From(fn() -> Value),
+}
+
+impl Initial {
+    fn value(self) -> Option<Value> {
+        match self {
+            Self::None => None,
+            Self::Str(s) => Some(json!(s)),
+            Self::Bool(b) => Some(json!(b)),
+            Self::Whole(n) => Some(json!(n)),
+            Self::Number(n) => Some(json!(n)),
+            Self::From(f) => Some(f()),
+        }
+    }
+}
+
+/// Settings that are applied together: when any member changes, the main loop redoes the one piece of work
+/// that reads them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    /// Belongs to no group. Which applier runs for the setting is decided by the live-settings table in
+    /// `runtime/live.rs`, not by this value; here it only marks the setting as outside every group.
+    Own,
+    /// The language model address, model name and key variable.
+    Llm,
+    /// The voice and speech language.
+    Speech,
+    /// The agent limits and the speech around a request.
+    Agent,
+    /// The daily caps and the dry-run switch.
+    Policy,
+    /// The quiet hours window.
+    Quiet,
+    /// Realtime voice.
+    Realtime,
+}
+
+/// One setting: everything the Rust side needs to know about it, in one place. Adding a setting is adding a
+/// row to [`FIELDS`] and the code that uses the value.
 #[derive(Debug, Clone, Copy)]
 pub struct Field {
     /// The key used in `settings.json` and the API.
     pub key: &'static str,
     /// True when the running assistant can switch immediately.
     pub live: bool,
+    /// How a new value is checked and normalised.
+    pub check: Check,
+    /// The value when no layer sets one.
+    pub default: Initial,
+    /// The settings that are applied together with this one.
+    pub group: Group,
 }
 
-/// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039).
-pub const FIELDS: [Field; 25] = [
-    Field {
-        key: "device_name",
-        live: true,
-    },
-    Field {
-        key: "zone",
-        live: true,
-    },
-    Field {
-        key: "persona",
-        live: true,
-    },
-    Field {
-        key: "llm_url",
-        live: true,
-    },
-    Field {
-        key: "llm_model",
-        live: true,
-    },
-    Field {
-        key: "llm_key_env",
-        live: true,
-    },
-    Field {
-        key: "voice",
-        live: true,
-    },
-    Field {
-        key: "speech_language",
-        live: true,
-    },
-    Field {
-        key: "listen",
-        live: false,
-    },
-    Field {
-        key: "public_url",
-        live: false,
-    },
-    Field {
-        key: "daily_spend_usd",
-        live: true,
-    },
-    Field {
-        key: "board",
-        live: false,
-    },
-    Field {
-        key: "agent_max_rounds",
-        live: true,
-    },
-    Field {
-        key: "agent_max_tool_calls",
-        live: true,
-    },
-    Field {
-        key: "agent_deadline_secs",
-        live: true,
-    },
-    Field {
-        key: "agent_tool_timeout_secs",
-        live: true,
-    },
-    Field {
-        key: "plan_speech",
-        live: true,
-    },
-    Field {
-        key: "progress_speech",
-        live: true,
-    },
-    Field {
-        key: "notes",
-        live: true,
-    },
-    Field {
-        key: "update_check",
-        live: true,
-    },
-    Field {
-        key: "max_actions_per_day",
-        live: true,
-    },
-    Field {
-        key: "max_costly_per_day",
-        live: true,
-    },
-    Field {
-        key: "dry_run",
-        live: true,
-    },
-    Field {
-        key: "quiet_start",
-        live: true,
-    },
-    Field {
-        key: "quiet_end",
-        live: true,
-    },
+impl Field {
+    /// A setting that applies without a restart.
+    const fn live(key: &'static str, check: Check, default: Initial) -> Self {
+        Self {
+            key,
+            live: true,
+            check,
+            default,
+            group: Group::Own,
+        }
+    }
+
+    /// A setting that needs a restart to apply.
+    const fn restart(key: &'static str, check: Check, default: Initial) -> Self {
+        Self {
+            live: false,
+            ..Self::live(key, check, default)
+        }
+    }
+
+    /// The same setting, applied together with the others of `group`.
+    const fn in_group(self, group: Group) -> Self {
+        Self { group, ..self }
+    }
+}
+
+const fn text_of(what: &'static str, max: usize) -> Check {
+    Check::Text { what, max }
+}
+
+const fn count(what: &'static str, lo: u64, hi: u64) -> Check {
+    Check::Whole { what, lo, hi }
+}
+
+const PRICE_ERR: &str = "The price per minute of audio must be a number of dollars from 0 to 100.";
+
+const PRICE: Check = Check::Number {
+    lo: 0.0,
+    hi: 100.0,
+    err: PRICE_ERR,
+};
+
+/// The price of a million tokens of the language model, for the spend cap (REQ-AST-011).
+const TOKEN_PRICE: Check = Check::Number {
+    lo: 0.0,
+    hi: 1000.0,
+    err: "The price per million tokens must be a number of dollars from 0 to 1000. Leave it empty if you do not know it, and 0 if the model is free.",
+};
+
+/// Every setting the portal can change (REQ-CFG-037, REQ-CFG-039), in the order the API lists them.
+pub const FIELDS: &[Field] = &[
+    Field::live(
+        "device_name",
+        text_of("The device name", 40),
+        Initial::Str("ClawDot"),
+    ),
+    Field::live("zone", Check::Custom(zone_value), Initial::Str("UTC")),
+    Field::live(
+        "persona",
+        Check::Custom(persona_value),
+        Initial::Str(crate::assistant::DEFAULT_PERSONA),
+    ),
+    Field::live("llm_url", Check::Custom(llm_url_value), Initial::None).in_group(Group::Llm),
+    Field::live("llm_model", Check::Custom(llm_model_value), Initial::None).in_group(Group::Llm),
+    Field::live(
+        "llm_key_env",
+        Check::Custom(llm_key_env_value),
+        Initial::Str("OPENROUTER_API_KEY"),
+    )
+    .in_group(Group::Llm),
+    Field::live("voice", text_of("The voice", 64), Initial::None).in_group(Group::Speech),
+    Field::live(
+        "speech_language",
+        Check::Custom(speech_language_value),
+        Initial::None,
+    )
+    .in_group(Group::Speech),
+    // Which service's wire format the speech client speaks; the clients are built at start (REQ-VOI-021).
+    Field::restart(
+        "speech_provider",
+        Check::Custom(speech_provider_value),
+        Initial::Str("openai"),
+    ),
+    Field::restart(
+        "listen",
+        Check::Custom(listen_value),
+        Initial::Str(DEFAULT_LISTEN),
+    ),
+    Field::restart("public_url", Check::Custom(public_url_value), Initial::None),
+    Field::live(
+        "daily_spend_usd",
+        Check::Number {
+            lo: 0.0,
+            hi: 100_000.0,
+            err: "The daily spend limit must be a number of dollars, zero or more. Leave it empty for no limit.",
+        },
+        Initial::None,
+    ),
+    // Dollars per million tokens, so the spend cap works with a provider that reports no cost. Unset is not
+    // 0: unset means "price it with the built-in prices", 0 means "free" (usage.rs).
+    Field::live("llm_usd_per_mtok_in", TOKEN_PRICE, Initial::None),
+    Field::live("llm_usd_per_mtok_out", TOKEN_PRICE, Initial::None),
+    Field::live(
+        "agent_max_rounds",
+        count("Rounds per request", 1, 20),
+        Initial::From(|| crate::session::TurnConfig::default().max_tool_loops.into()),
+    )
+    .in_group(Group::Agent),
+    Field::live(
+        "agent_max_tool_calls",
+        count("Tool calls per request", 1, 20),
+        Initial::From(|| crate::session::TurnConfig::default().max_tool_calls.into()),
+    )
+    .in_group(Group::Agent),
+    Field::live(
+        "agent_deadline_secs",
+        count("Seconds per request", 5, 300),
+        Initial::From(|| crate::session::TurnConfig::default().deadline_secs.into()),
+    )
+    .in_group(Group::Agent),
+    Field::live(
+        "agent_tool_timeout_secs",
+        count("Seconds per tool call", 1, 120),
+        Initial::From(|| {
+            crate::session::TurnConfig::default()
+                .tool_timeout
+                .as_secs()
+                .into()
+        }),
+    )
+    .in_group(Group::Agent),
+    Field::live(
+        "plan_speech",
+        Check::Flag,
+        Initial::From(|| crate::session::TurnConfig::default().plan_speech.into()),
+    )
+    .in_group(Group::Agent),
+    Field::live(
+        "progress_speech",
+        Check::Flag,
+        Initial::From(|| crate::session::TurnConfig::default().progress_speech.into()),
+    )
+    .in_group(Group::Agent),
+    Field::live("notes", Check::Flag, Initial::Bool(false)),
+    Field::live("update_check", Check::Flag, Initial::Bool(true)),
+    Field::live(
+        "max_actions_per_day",
+        count("Actions per day", 0, 100_000),
+        Initial::From(|| {
+            crate::audit::ActionPolicy::default()
+                .max_actions_per_day
+                .into()
+        }),
+    )
+    .in_group(Group::Policy),
+    Field::live(
+        "max_costly_per_day",
+        count("Actions that ask first, per day", 0, 100_000),
+        Initial::From(|| {
+            crate::audit::ActionPolicy::default()
+                .max_costly_per_day
+                .into()
+        }),
+    )
+    .in_group(Group::Policy),
+    Field::live(
+        "dry_run",
+        Check::Flag,
+        Initial::From(|| crate::audit::ActionPolicy::default().dry_run.into()),
+    )
+    .in_group(Group::Policy),
+    Field::live(
+        "quiet_start",
+        Check::Custom(quiet_time_value),
+        Initial::None,
+    )
+    .in_group(Group::Quiet),
+    Field::live("quiet_end", Check::Custom(quiet_time_value), Initial::None).in_group(Group::Quiet),
+    Field::live(
+        "realtime_enabled",
+        Check::Custom(realtime_enabled_value),
+        Initial::Bool(false),
+    )
+    .in_group(Group::Realtime),
+    Field::live(
+        "realtime_url",
+        Check::Custom(realtime_url_value),
+        Initial::None,
+    )
+    .in_group(Group::Realtime),
+    Field::live(
+        "realtime_model",
+        Check::Custom(realtime_model_value),
+        Initial::None,
+    )
+    .in_group(Group::Realtime),
+    Field::live(
+        "realtime_voice",
+        text_of("The realtime voice", 64),
+        Initial::Str(crate::rtvoice::DEFAULT_VOICE),
+    )
+    .in_group(Group::Realtime),
+    Field::live(
+        "realtime_key_env",
+        Check::Custom(realtime_key_env_value),
+        Initial::Str(crate::rtvoice::DEFAULT_KEY_ENV),
+    )
+    .in_group(Group::Realtime),
+    Field::live(
+        "realtime_transcription_model",
+        text_of("The transcription model", 100),
+        Initial::Str(crate::rtvoice::DEFAULT_TRANSCRIPTION),
+    )
+    .in_group(Group::Realtime),
+    Field::live(
+        "realtime_usd_per_min_in",
+        PRICE,
+        Initial::Number(crate::rtvoice::DEFAULT_USD_IN),
+    )
+    .in_group(Group::Realtime),
+    Field::live(
+        "realtime_usd_per_min_out",
+        PRICE,
+        Initial::Number(crate::rtvoice::DEFAULT_USD_OUT),
+    )
+    .in_group(Group::Realtime),
+    Field::live(
+        "realtime_max_session_secs",
+        count("Seconds per realtime conversation", 10, 3600),
+        Initial::Whole(crate::rtvoice::DEFAULT_MAX_SESSION_SECS),
+    )
+    .in_group(Group::Realtime),
 ];
+
+/// The row for `key`.
+#[must_use]
+pub fn field(key: &str) -> Option<&'static Field> {
+    FIELDS.iter().find(|f| f.key == key)
+}
+
+/// The smallest and largest value of a whole-number setting, from its row. `None` for any other setting.
+#[must_use]
+pub fn whole_range(key: &str) -> Option<(u64, u64)> {
+    match field(key)?.check {
+        Check::Whole { lo, hi, .. } => Some((lo, hi)),
+        _ => None,
+    }
+}
+
+/// Whether a change to `key` applies without a restart. `None` for a key that is not a setting.
+#[must_use]
+pub fn is_live(key: &str) -> Option<bool> {
+    field(key).map(|f| f.live)
+}
+
+/// The built-in defaults, one entry for each setting that has one.
+#[must_use]
+pub fn built_in_defaults() -> Layer {
+    FIELDS
+        .iter()
+        .filter_map(|f| f.default.value().map(|v| (f.key.to_owned(), v)))
+        .collect()
+}
+
+/// Whether any setting of `group` differs between `now` and `before`.
+#[must_use]
+pub fn group_changed(group: Group, now: &Map<String, Value>, before: &Map<String, Value>) -> bool {
+    FIELDS
+        .iter()
+        .any(|f| f.group == group && now.get(f.key) != before.get(f.key))
+}
 
 /// The default listen address (REQ-CFG-014).
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:3335";
 
 /// The base URL printed in snippets when none is set, and whether the host was assumed because the listen
-/// address (`0.0.0.0`, `[::]`) cannot be dialled as written (REQ-CFG-016).
+/// address (`0.0.0.0`, `[::]`) cannot be dialled as written (REQ-CFG-016). An unspecified address becomes the
+/// machine's own `.local` name (`machine` is its host name as read at start-up), or `clawdot.local` when that
+/// is not known.
 #[must_use]
-pub fn public_url_from_listen(listen: SocketAddr) -> (String, bool) {
+pub fn public_url_from_listen(listen: SocketAddr, machine: Option<&str>) -> (String, bool) {
     if listen.ip().is_unspecified() {
-        (format!("http://clawdot.local:{}", listen.port()), true)
+        let name = crate::hostguard::local_name(machine);
+        (format!("http://{name}:{}", listen.port()), true)
     } else {
         (format!("http://{listen}"), false)
     }
 }
 
-/// Settings that were removed. A file saved by an older version may still hold one, and it is skipped quietly.
-const RETIRED: [&str; 3] = [
+/// Settings that were removed. A file saved by an older version, or an export taken from one, may still hold one,
+/// and it is skipped quietly. (`board` was a choice of `auto` or `none` that nothing ever read; what a device is
+/// called and which parts it has now come from the `device` section of the configuration file.)
+pub const RETIRED: [&str; 4] = [
     "max_requests_per_day",
+    "board",
     "llm_fallback_model",
     "summary_model",
 ];
 
-fn is_field(key: &str) -> bool {
-    FIELDS.iter().any(|f| f.key == key)
+/// Whether `n` can be the name of an environment variable (letters, digits and underscores, not starting
+/// with a digit).
+#[must_use]
+pub fn is_env_name(n: &str) -> bool {
+    n.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn text(v: &Value, what: &str) -> Result<String, String> {
@@ -249,130 +585,149 @@ pub fn minute_of_day(hhmm: &str) -> Option<u16> {
 
 /// Check one value and return it in the form that is stored. Empty text counts as "clear" and is
 /// handled by the caller before this is reached.
-fn normalize(key: &str, v: &Value, env: &dyn Fn(&str) -> Option<String>) -> Result<Value, String> {
-    let string = |what: &str, max: usize| -> Result<String, String> {
-        let s = text(v, what)?;
-        plain(&s, what, max)
-    };
-    Ok(match key {
-        "device_name" => json!(string("The device name", 40)?),
-        "zone" => {
-            let z = string("The time zone", 64)?;
-            check_zone(&z)?;
-            json!(z)
-        }
-        "persona" => {
-            let s = text(v, "The persona")?;
-            if s.chars().count() > 4000 {
-                return Err("The persona is too long: use at most 4000 characters.".into());
-            }
-            if s.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
-                return Err("The persona cannot contain control characters.".into());
-            }
-            json!(s)
-        }
-        "llm_url" => {
-            let u = string("The language model address", 300)?;
-            if u.contains(char::is_whitespace) {
-                return Err("The language model address cannot contain spaces.".into());
-            }
-            if !(u.starts_with("http://") || u.starts_with("https://")) {
-                return Err(
-                    "The language model address must start with https:// (or http:// on your own network), for example https://openrouter.ai/api/v1.".into(),
-                );
-            }
-            // The same rules the client applies when it connects (REQ-SEC-001).
-            crate::transport::HttpBackend::new(&u, "", std::time::Duration::from_secs(1))?;
-            json!(u)
-        }
-        "llm_model" => {
-            let what = "The model name";
-            let s = string(what, 200)?;
-            if s.contains(char::is_whitespace) {
-                return Err(format!("{what} cannot contain spaces."));
-            }
-            json!(s)
-        }
-        "llm_key_env" => {
-            let n = string("The key variable name", 64)?;
-            let ok = n
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-            if !ok {
-                return Err(
-                    "Enter the NAME of an environment variable (letters, digits, and underscores), not the key itself.".into(),
-                );
-            }
-            // A key pasted into the page needs no variable at all.
-            if crate::secrets::get(crate::secrets::LLM_KEY).is_none()
-                && env(&n).is_none_or(|v| v.is_empty())
-            {
-                return Err(format!(
-                    "The environment variable {n} is not set where ClawDot runs. Set it there (for example in the service's environment file), restart ClawDot, then save this again."
-                ));
-            }
-            json!(n)
-        }
-        "voice" => json!(string("The voice", 64)?),
-        "speech_language" => {
-            let t = string("The speech language", 12)?;
-            if !t.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
-                return Err(
-                    "The speech language is a language code such as en, de or pt-BR.".into(),
-                );
-            }
-            json!(t)
-        }
-        "listen" => {
-            let l = string("The listen address", 64)?;
-            let a: SocketAddr = l.parse().map_err(|_| {
-                "The listen address must look like 127.0.0.1:3335 or 0.0.0.0:3335 (an IP address, a colon, and a port).".to_owned()
-            })?;
-            json!(a.to_string())
-        }
-        "public_url" => {
-            let u = string("The public address", 200)?;
-            if u.contains(char::is_whitespace)
-                || !(u.starts_with("http://") || u.starts_with("https://"))
-            {
-                return Err(
-                    "The public address must start with http:// or https:// and have no spaces, for example http://dot.local:3335.".into(),
-                );
-            }
-            json!(u.trim_end_matches('/'))
-        }
-        "daily_spend_usd" => {
-            let n = v.as_f64().filter(|n| n.is_finite() && (0.0..=100_000.0).contains(n)).ok_or(
-                "The daily spend limit must be a number of dollars, zero or more. Leave it empty for no limit.",
-            )?;
-            json!(n)
-        }
-        "agent_max_rounds" => whole(v, "Rounds per request", 1, 20)?,
-        "agent_max_tool_calls" => whole(v, "Tool calls per request", 1, 20)?,
-        "agent_deadline_secs" => whole(v, "Seconds per request", 5, 300)?,
-        "agent_tool_timeout_secs" => whole(v, "Seconds per tool call", 1, 120)?,
-        "max_actions_per_day" => whole(v, "Actions per day", 0, 100_000)?,
-        "max_costly_per_day" => whole(v, "Actions that ask first, per day", 0, 100_000)?,
-        "plan_speech" | "progress_speech" | "notes" | "dry_run" | "update_check" => {
-            json!(
-                v.as_bool()
-                    .ok_or_else(|| format!("`{key}` must be on or off (true or false)."))?
-            )
-        }
-        "quiet_start" | "quiet_end" => {
-            let t = string("The quiet hours time", 5)?;
-            minute_of_day(&t)
-                .ok_or("Quiet hours times look like 22:00 or 07:30 (24-hour, local time).")?;
-            json!(t)
-        }
-        "board" => match text(v, "The board")?.as_str() {
-            b @ ("auto" | "none") => json!(b),
-            _ => return Err("The board setting must be `auto` or `none`.".into()),
-        },
-        _ => return Err(format!("`{key}` is not a setting.")),
-    })
+fn normalize(key: &str, v: &Value, lk: &Lookup<'_>) -> Result<Value, String> {
+    field(key).map_or_else(
+        || Err(format!("`{key}` is not a setting.")),
+        |f| f.check.run(key, v, lk),
+    )
+}
+
+fn string(v: &Value, what: &str, max: usize) -> Result<String, String> {
+    plain(&text(v, what)?, what, max)
+}
+
+fn zone_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let z = string(v, "The time zone", 64)?;
+    check_zone(&z)?;
+    Ok(json!(z))
+}
+
+fn persona_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let s = text(v, "The persona")?;
+    if s.chars().count() > 4000 {
+        return Err("The persona is too long: use at most 4000 characters.".into());
+    }
+    if s.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+        return Err("The persona cannot contain control characters.".into());
+    }
+    Ok(json!(s))
+}
+
+fn llm_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let u = string(v, "The language model address", 300)?;
+    if u.contains(char::is_whitespace) {
+        return Err("The language model address cannot contain spaces.".into());
+    }
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return Err(
+            "The language model address must start with https:// (or http:// on your own network), for example https://openrouter.ai/api/v1.".into(),
+        );
+    }
+    // The same rules the client applies when it connects (REQ-SEC-001).
+    crate::transport::HttpBackend::new(&u, "", std::time::Duration::from_secs(1))?;
+    Ok(json!(u))
+}
+
+fn llm_model_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let what = "The model name";
+    let s = string(v, what, 200)?;
+    if s.contains(char::is_whitespace) {
+        return Err(format!("{what} cannot contain spaces."));
+    }
+    Ok(json!(s))
+}
+
+/// The name of an environment variable that holds a key. The variable must be set where ClawDot runs unless a
+/// key was pasted into the page (`pasted`), which needs no variable at all.
+fn key_env_name(v: &Value, env: EnvRef<'_>, what: &str, pasted: bool) -> Result<Value, String> {
+    let n = string(v, what, 64)?;
+    if !is_env_name(&n) {
+        return Err(
+            "Enter the NAME of an environment variable (letters, digits, and underscores), not the key itself.".into(),
+        );
+    }
+    if !pasted && env(&n).is_none_or(|v| v.is_empty()) {
+        return Err(format!(
+            "The environment variable {n} is not set where ClawDot runs. Set it there (in the environment ClawDot is started with, for example its service or supervisor's environment file), restart ClawDot, then save this again."
+        ));
+    }
+    Ok(json!(n))
+}
+
+fn llm_key_env_value(v: &Value, lk: &Lookup<'_>) -> Result<Value, String> {
+    let pasted = lk.secrets.get(crate::secrets::LLM_KEY).is_some();
+    key_env_name(v, lk.env, "The key variable name", pasted)
+}
+
+fn realtime_key_env_value(v: &Value, lk: &Lookup<'_>) -> Result<Value, String> {
+    let pasted = lk.secrets.get(crate::secrets::REALTIME_KEY).is_some();
+    key_env_name(v, lk.env, "The realtime key variable name", pasted)
+}
+
+fn realtime_enabled_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    Ok(json!(v.as_bool().ok_or(
+        "Realtime voice must be on or off (true or false)."
+    )?))
+}
+
+fn realtime_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let u = string(v, "The realtime voice address", 300)?;
+    if u.contains(char::is_whitespace) || !(u.starts_with("wss://") || u.starts_with("ws://")) {
+        return Err("The realtime voice address must start with wss:// (or ws:// on your own network), for example wss://api.openai.com/v1/realtime.".into());
+    }
+    // The same rule the session applies when it connects (REQ-SEC-001).
+    crate::netpolicy::check_realtime_url(&u)
+        .map_err(|e| format!("The realtime voice address is refused: {e}."))?;
+    Ok(json!(u))
+}
+
+fn realtime_model_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let s = string(v, "The realtime model name", 100)?;
+    if s.is_empty()
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c))
+    {
+        return Err("The realtime model name can use only letters, digits, and - _ . :".into());
+    }
+    Ok(json!(s))
+}
+
+fn speech_provider_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let t = string(v, "The speech provider", 20)?;
+    Ok(json!(crate::speech::Dialect::parse(&t)?.name()))
+}
+
+fn speech_language_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let t = string(v, "The speech language", 12)?;
+    if !t.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+        return Err("The speech language is a language code such as en, de or pt-BR.".into());
+    }
+    Ok(json!(t))
+}
+
+fn listen_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let l = string(v, "The listen address", 64)?;
+    let a: SocketAddr = l.parse().map_err(|_| {
+        "The listen address must look like 127.0.0.1:3335 or 0.0.0.0:3335 (an IP address, a colon, and a port).".to_owned()
+    })?;
+    Ok(json!(a.to_string()))
+}
+
+fn public_url_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let u = string(v, "The public address", 200)?;
+    if u.contains(char::is_whitespace) || !(u.starts_with("http://") || u.starts_with("https://")) {
+        return Err(
+            "The public address must start with http:// or https:// and have no spaces, for example http://clawdot.local:3335.".into(),
+        );
+    }
+    Ok(json!(u.trim_end_matches('/')))
+}
+
+fn quiet_time_value(v: &Value, _: &Lookup<'_>) -> Result<Value, String> {
+    let t = string(v, "The quiet hours time", 5)?;
+    minute_of_day(&t).ok_or("Quiet hours times look like 22:00 or 07:30 (24-hour, local time).")?;
+    Ok(json!(t))
 }
 
 /// Checks that involve more than one setting, on the values that would be in effect.
@@ -394,7 +749,27 @@ fn check(
     {
         return Err("Quiet hours cannot start and end at the same time. Use different times, or clear both.".into());
     }
-    if (has("voice") || has("speech_language")) && !speech_configured {
+    if has("realtime_url") != has("realtime_model") {
+        return Err(
+            "Set both the realtime voice address and the model name, or clear both.".into(),
+        );
+    }
+    if eff
+        .get("realtime_enabled")
+        .is_some_and(|(v, _)| v.as_bool() == Some(true))
+        && !has("realtime_url")
+    {
+        return Err(
+            "Realtime voice needs an address and a model name before it can be turned on.".into(),
+        );
+    }
+    // A provider with its own address (ElevenLabs, Deepgram) needs no `speech` section (REQ-VOI-021).
+    let own_service = eff
+        .get("speech_provider")
+        .and_then(|(v, _)| v.as_str())
+        .and_then(|p| crate::speech::Dialect::parse(p).ok())
+        .is_some_and(|d| d.default_url().is_some());
+    if (has("voice") || has("speech_language")) && !speech_configured && !own_service {
         return Err(
             "A voice needs a speech provider. Add a `speech` section to the configuration file (see docs/architecture/voice-pipeline.md) and restart, or clear the voice.".into(),
         );
@@ -413,6 +788,9 @@ pub struct SettingsState {
     speech_configured: bool,
     extra: Value,
     env: EnvFn,
+    secrets: Secrets,
+    /// The machine's host name as read at start-up, for the address derived from `listen` (REQ-CFG-016).
+    machine: Option<String>,
 }
 
 impl std::fmt::Debug for SettingsState {
@@ -433,12 +811,15 @@ impl SettingsState {
     /// warnings so a headless device still starts.
     pub fn open(
         dir: Option<&Path>,
-        defaults: Layer,
-        file: Layer,
-        flags: Layer,
+        sources: Sources,
         speech_configured: bool,
         env: EnvFn,
     ) -> Result<(Self, Vec<String>), String> {
+        let Sources {
+            defaults,
+            file,
+            flags,
+        } = sources;
         let store = dir.map(|d| JsonStore::new(d.join("settings.json"), SCHEMA));
         let mut loaded = Layer::new();
         let mut warnings = Vec::new();
@@ -451,14 +832,18 @@ impl SettingsState {
                 if RETIRED.contains(&k.as_str()) {
                     continue;
                 }
-                if !is_field(&k) {
+                if field(&k).is_none() {
                     return Err(format!(
                         "{} has an unknown setting `{k}`. Remove that line, or restore a copy of the file.",
                         s.path().display()
                     ));
                 }
                 // The key variable may not be set yet (it is the service's job); only the shape matters here.
-                match normalize(&k, &v, &|_| Some("x".to_owned())) {
+                let lk = Lookup {
+                    env: &|_| Some("x".to_owned()),
+                    secrets: &Secrets::none(),
+                };
+                match normalize(&k, &v, &lk) {
                     Ok(v) => {
                         loaded.insert(k, v);
                     }
@@ -476,6 +861,8 @@ impl SettingsState {
             speech_configured,
             extra: Value::Null,
             env,
+            secrets: Secrets::none(),
+            machine: None,
         };
         let eff = st.effective();
         check(&eff, speech_configured).map_err(|e| {
@@ -503,9 +890,24 @@ impl SettingsState {
             speech_configured,
             extra: Value::Null,
             env,
+            secrets: Secrets::none(),
+            machine: None,
         };
         st.running = st.values_of(&st.effective());
         st
+    }
+
+    /// Where the keys pasted into the portal are looked up (the owning core hands over its own).
+    pub fn set_secrets(&mut self, secrets: Secrets) {
+        self.secrets = secrets;
+    }
+
+    /// Tell the state the machine's host name, read once at start-up, so the address derived from `listen` names this
+    /// machine (REQ-CFG-016). Call it straight after building the state: it also takes the running snapshot again, so
+    /// the derived address is not reported as a change that needs a restart.
+    pub fn set_machine_name(&mut self, name: Option<&str>) {
+        self.machine = name.map(str::to_owned);
+        self.running = self.values_of(&self.effective());
     }
 
     /// Facts shown next to the settings but not changeable here (for example the speech provider's models).
@@ -515,7 +917,7 @@ impl SettingsState {
 
     fn effective(&self) -> BTreeMap<&'static str, (Value, Source)> {
         let mut out = BTreeMap::new();
-        for f in &FIELDS {
+        for f in FIELDS {
             let mut cur = (Value::Null, Source::Default);
             for (layer, src) in [
                 (&self.defaults, Source::Default),
@@ -535,7 +937,10 @@ impl SettingsState {
         {
             out.insert(
                 "public_url",
-                (json!(public_url_from_listen(l).0), Source::Default),
+                (
+                    json!(public_url_from_listen(l, self.machine.as_deref()).0),
+                    Source::Default,
+                ),
             );
         }
         out
@@ -577,18 +982,28 @@ impl SettingsState {
         };
         let mut saved = self.saved.clone();
         for (k, v) in patch {
-            if !is_field(k) {
+            // An export from an older version may carry a removed setting; it is dropped, not an error.
+            if RETIRED.contains(&k.as_str()) {
+                continue;
+            }
+            if field(k).is_none() {
                 return Err(format!("`{k}` is not a setting."));
             }
             if v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()) {
                 saved.remove(k);
             } else {
-                saved.insert(k.clone(), normalize(k, v, &*self.env)?);
+                let lk = Lookup {
+                    env: &*self.env,
+                    secrets: &self.secrets,
+                };
+                saved.insert(k.clone(), normalize(k, v, &lk)?);
             }
         }
         let before = std::mem::replace(&mut self.saved, saved);
         let eff = self.effective();
-        if let Err(e) = check(&eff, self.speech_configured) {
+        if let Err(e) = check(&eff, self.speech_configured)
+            .and_then(|()| self.check_realtime_change(patch, &eff))
+        {
             self.saved = before;
             return Err(e);
         }
@@ -598,6 +1013,38 @@ impl SettingsState {
             self.saved = before;
             return Err(format!(
                 "Could not save the settings file: {e}. Check that the data directory is writable."
+            ));
+        }
+        Ok(())
+    }
+
+    /// Turning realtime voice on needs a build that has it and a key to use. Checked only when a change touches
+    /// a realtime setting, never at start-up, so a device whose service environment lacks the key still starts
+    /// (REQ-RTV-008).
+    fn check_realtime_change(
+        &self,
+        patch: &Map<String, Value>,
+        eff: &BTreeMap<&'static str, (Value, Source)>,
+    ) -> Result<(), String> {
+        if !patch
+            .keys()
+            .any(|k| field(k).is_some_and(|f| f.group == Group::Realtime))
+            || eff["realtime_enabled"].0.as_bool() != Some(true)
+        {
+            return Ok(());
+        }
+        if !crate::rtvoice::RtSettings::built() {
+            return Err("This build of ClawDot does not include realtime voice (it needs the `realtime` cargo feature), so it cannot be turned on.".into());
+        }
+        let key_env = eff["realtime_key_env"]
+            .0
+            .as_str()
+            .unwrap_or(crate::rtvoice::DEFAULT_KEY_ENV);
+        if self.secrets.get(crate::secrets::REALTIME_KEY).is_none()
+            && (self.env)(key_env).is_none_or(|v| v.is_empty())
+        {
+            return Err(format!(
+                "Realtime voice needs an API key. Set the environment variable {key_env} where ClawDot runs, restart ClawDot, then turn this on."
             ));
         }
         Ok(())
@@ -617,7 +1064,7 @@ impl SettingsState {
         let eff = self.effective();
         let mut fields = Map::new();
         let mut restart = Vec::new();
-        for f in &FIELDS {
+        for f in FIELDS {
             let (v, src) = &eff[f.key];
             let saved = self.saved.contains_key(f.key);
             if !f.live && self.running.get(f.key) != Some(v) {
@@ -632,16 +1079,35 @@ impl SettingsState {
             );
         }
         let key_env = eff["llm_key_env"].0.as_str().unwrap_or("");
+        let rt = {
+            let live = self.values_of(&eff).into_iter().collect::<Map<_, _>>();
+            crate::rtvoice::RtSettings::from_live(&live)
+        };
         let mut out = json!({
             "fields": fields,
             "restart_needed": restart,
             "speech_configured": self.speech_configured,
             "llm": {
                 "configured": !eff["llm_url"].0.is_null() && !eff["llm_model"].0.is_null(),
-                "key_present": crate::secrets::get(crate::secrets::LLM_KEY).is_some()
+                "key_present": self.secrets.get(crate::secrets::LLM_KEY).is_some()
                     || (self.env)(key_env).is_some_and(|v| !v.is_empty()),
                 // The first and last few characters of the key pasted into the page, never the key.
-                "key_hint": crate::secrets::hint(crate::secrets::LLM_KEY),
+                "key_hint": self.secrets.hint(crate::secrets::LLM_KEY),
+            },
+            // Never the key: whether realtime voice can run, the provider, and the masked end of a pasted key.
+            "realtime": {
+                "configured": rt.configured_with(&self.secrets, &*self.env),
+                "built": crate::rtvoice::RtSettings::built(),
+                "provider": crate::rtvoice::PROVIDER,
+                "key_hint": self.secrets.hint(crate::secrets::REALTIME_KEY),
+            },
+            // The speech service key follows the same rules: only a masked hint, never the key (REQ-VOI-023).
+            "speech": {
+                "key_present": self.secrets.get(crate::secrets::SPEECH_KEY).is_some()
+                    || self.extra["speech_key_env"]
+                        .as_str()
+                        .is_some_and(|n| (self.env)(n).is_some_and(|v| !v.is_empty())),
+                "key_hint": self.secrets.hint(crate::secrets::SPEECH_KEY),
             },
         });
         if let (Some(o), Some(e)) = (out.as_object_mut(), self.extra.as_object()) {
@@ -654,407 +1120,4 @@ impl SettingsState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::testutil::TempDir;
-
-    fn env_with(vars: &'static [&'static str]) -> EnvFn {
-        Box::new(move |n| vars.contains(&n).then(|| "secret-value".to_owned()))
-    }
-
-    fn layer(pairs: &[(&str, Value)]) -> Layer {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), v.clone()))
-            .collect()
-    }
-
-    fn defaults() -> Layer {
-        layer(&[
-            ("device_name", json!("Kitchen")),
-            ("zone", json!("UTC")),
-            ("listen", json!(DEFAULT_LISTEN)),
-            ("llm_key_env", json!("OPENROUTER_API_KEY")),
-            ("board", json!("none")),
-        ])
-    }
-
-    fn open_in(dir: &Path, file: Layer, flags: Layer) -> SettingsState {
-        SettingsState::open(
-            Some(dir),
-            defaults(),
-            file,
-            flags,
-            false,
-            env_with(&["MY_KEY"]),
-        )
-        .unwrap()
-        .0
-    }
-
-    fn source(st: &SettingsState, key: &str) -> String {
-        st.json()["fields"][key]["source"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    }
-
-    // REQ-CFG-038
-    #[test]
-    fn layers_apply_defaults_then_file_then_saved_then_flags() {
-        let dir = TempDir::new("layers");
-        let file = layer(&[
-            ("zone", json!("America/Chicago")),
-            ("device_name", json!("File name")),
-        ]);
-        let flags = layer(&[("device_name", json!("Flag name"))]);
-        let mut st = open_in(&dir.0, file, flags);
-        assert_eq!(
-            (st.get("zone"), source(&st, "zone")),
-            (json!("America/Chicago"), "file".into())
-        );
-        assert_eq!(source(&st, "public_url"), "default");
-        st.change(&json!({"zone": "Europe/Berlin", "public_url": "http://dot.local:3335"}))
-            .unwrap();
-        assert_eq!(
-            (st.get("zone"), source(&st, "zone")),
-            (json!("Europe/Berlin"), "saved".into())
-        );
-        assert_eq!(
-            (st.get("public_url"), source(&st, "public_url")),
-            (json!("http://dot.local:3335"), "saved".into())
-        );
-        // A flag beats a saved value, and the page is told the saved value is ignored.
-        st.change(&json!({"device_name": "Saved name"})).unwrap();
-        let j = st.json();
-        assert_eq!(j["fields"]["device_name"]["value"], "Flag name");
-        assert_eq!(j["fields"]["device_name"]["source"], "flag");
-        assert_eq!(j["fields"]["device_name"]["ignored"], true);
-        // Clearing a saved value falls back to the layer below.
-        st.change(&json!({"zone": null})).unwrap();
-        assert_eq!(
-            (st.get("zone"), source(&st, "zone")),
-            (json!("America/Chicago"), "file".into())
-        );
-        st.change(&json!({"public_url": ""})).unwrap();
-        assert_eq!(source(&st, "public_url"), "default");
-    }
-
-    // A file saved before the request cap was removed still starts, and the old value is dropped.
-    #[test]
-    fn a_retired_setting_in_an_old_file_is_skipped() {
-        let dir = TempDir::new("retired");
-        std::fs::write(
-            dir.0.join("settings.json"),
-            r#"{"schema":1,"data":{"max_requests_per_day":40,"zone":"Europe/Berlin"}}"#,
-        )
-        .unwrap();
-        let st = open_in(&dir.0, Layer::new(), Layer::new());
-        assert_eq!(st.get("zone"), "Europe/Berlin");
-    }
-
-    // REQ-CFG-038
-    #[test]
-    fn saved_settings_survive_a_restart() {
-        let dir = TempDir::new("persist");
-        let mut st = open_in(&dir.0, Layer::new(), Layer::new());
-        st.change(&json!({"zone": "Europe/Berlin", "persona": "Be brief.\nBe kind."}))
-            .unwrap();
-        let st2 = open_in(&dir.0, Layer::new(), Layer::new());
-        assert_eq!(st2.get("zone"), "Europe/Berlin");
-        assert_eq!(st2.get("persona"), "Be brief.\nBe kind.");
-        assert!(dir.0.join("settings.json").exists());
-        assert!(!dir.0.join("settings.tmp").exists());
-    }
-
-    // REQ-CFG-038, REQ-SEC-009
-    #[cfg(unix)]
-    #[test]
-    fn the_settings_file_is_private() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new("perm");
-        let mut st = open_in(&dir.0, Layer::new(), Layer::new());
-        st.change(&json!({"device_name": "Den"})).unwrap();
-        let mode = std::fs::metadata(dir.0.join("settings.json"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
-    }
-
-    // REQ-CFG-038
-    #[test]
-    fn a_damaged_unknown_or_newer_file_stops_startup_with_a_clear_message() {
-        let open = |dir: &Path| {
-            SettingsState::open(
-                Some(dir),
-                defaults(),
-                Layer::new(),
-                Layer::new(),
-                false,
-                env_with(&[]),
-            )
-        };
-        let dir = TempDir::new("bad");
-        let path = dir.0.join("settings.json");
-        std::fs::write(&path, "not json").unwrap();
-        assert!(open(&dir.0).unwrap_err().contains("settings.json"));
-        std::fs::write(&path, r#"{"schema":1,"data":{"zoen":"x"}}"#).unwrap();
-        let e = open(&dir.0).unwrap_err();
-        assert!(e.contains("unknown setting `zoen`"), "{e}");
-        std::fs::write(&path, r#"{"schema":9,"data":{}}"#).unwrap();
-        assert!(open(&dir.0).unwrap_err().contains("upgrade"));
-        // An invalid saved value does not stop a headless device; it is skipped with a warning.
-        std::fs::write(
-            &path,
-            r#"{"schema":1,"data":{"zone":"Mars/Base","device_name":"Den"}}"#,
-        )
-        .unwrap();
-        let (st, warnings) = open(&dir.0).unwrap();
-        assert_eq!(st.get("zone"), "UTC");
-        assert_eq!(st.get("device_name"), "Den");
-        assert!(warnings[0].contains("zone"), "{warnings:?}");
-    }
-
-    // REQ-CFG-040
-    #[test]
-    fn bad_values_are_refused_with_what_to_fix_and_nothing_changes() {
-        let dir = TempDir::new("validate");
-        let mut st = open_in(&dir.0, Layer::new(), Layer::new());
-        for (patch, needle) in [
-            (json!({"zone": "Mars/Base"}), "time zone"),
-            (json!({"zone": 5}), "text"),
-            (json!({"listen": "everywhere"}), "127.0.0.1:3335"),
-            (json!({"public_url": "dot.local"}), "http://"),
-            (json!({"daily_spend_usd": -1}), "zero or more"),
-            (json!({"board": "rpi"}), "auto"),
-            (json!({"device_name": "a\nb"}), "control"),
-            (json!({"llm_url": "ftp://x"}), "https://"),
-            (
-                json!({"llm_url": "http://example.com/v1", "llm_model": "m"}),
-                "unencrypted",
-            ),
-            (json!({"llm_url": "https://x.example/v1"}), "both"),
-            (json!({"llm_key_env": "sk-abc def"}), "NAME"),
-            (
-                json!({"llm_key_env": "NOT_SET_ANYWHERE"}),
-                "NOT_SET_ANYWHERE is not set",
-            ),
-            (json!({"voice": "alloy"}), "speech provider"),
-            (json!({"nonsense": 1}), "not a setting"),
-            (json!({}), "JSON object"),
-            (
-                json!({"zone": "Europe/Berlin", "listen": "bad"}),
-                "127.0.0.1",
-            ),
-        ] {
-            let e = st.change(&patch).unwrap_err();
-            assert!(e.contains(needle), "{patch}: {e}");
-        }
-        assert!(
-            !dir.0.join("settings.json").exists(),
-            "a rejected change must save nothing"
-        );
-        assert_eq!(
-            st.get("zone"),
-            "UTC",
-            "the valid half of a rejected change is not applied"
-        );
-    }
-
-    // REQ-CFG-040
-    #[test]
-    fn a_valid_model_group_is_accepted_together() {
-        let dir = TempDir::new("llm");
-        let mut st = open_in(&dir.0, Layer::new(), Layer::new());
-        st.change(&json!({
-            "llm_url": "https://openrouter.ai/api/v1", "llm_model": "a/b",
-            "llm_key_env": "MY_KEY"
-        }))
-        .unwrap();
-        let j = st.json();
-        assert_eq!(j["llm"]["configured"], true);
-        assert_eq!(j["llm"]["key_present"], true);
-        // Clearing the address alone would orphan the model.
-        assert!(
-            st.change(&json!({"llm_url": null}))
-                .unwrap_err()
-                .contains("both")
-        );
-        st.change(&json!({"llm_url": null, "llm_model": null}))
-            .unwrap();
-        assert_eq!(st.json()["llm"]["configured"], false);
-    }
-
-    // REQ-CFG-039
-    #[test]
-    fn live_settings_are_listed_for_the_assistant_and_restart_ones_are_reported() {
-        let dir = TempDir::new("restart");
-        let mut st = open_in(&dir.0, Layer::new(), Layer::new());
-        assert_eq!(st.json()["restart_needed"], json!([]));
-        st.change(&json!({"zone": "Europe/Berlin", "listen": "0.0.0.0:4000", "board": "auto"}))
-            .unwrap();
-        let j = st.json();
-        assert_eq!(
-            j["restart_needed"],
-            json!(["listen", "public_url", "board"])
-        );
-        assert_eq!(j["fields"]["zone"]["live"], true);
-        assert_eq!(j["fields"]["listen"]["live"], false);
-        let live = st.live_values();
-        assert_eq!(live["zone"], "Europe/Berlin");
-        assert!(!live.contains_key("listen") && !live.contains_key("board"));
-        // Going back to the running value needs no restart.
-        st.change(&json!({"listen": null, "board": null})).unwrap();
-        assert_eq!(st.json()["restart_needed"], json!([]));
-    }
-
-    // REQ-CFG-016
-    #[test]
-    fn the_public_address_follows_the_listen_address_until_set() {
-        let mut st = SettingsState::in_memory(defaults(), false, env_with(&[]));
-        assert_eq!(st.get("public_url"), "http://127.0.0.1:3335");
-        st.change(&json!({"listen": "0.0.0.0:4000"})).unwrap();
-        assert_eq!(st.get("public_url"), "http://clawdot.local:4000");
-        st.change(&json!({"public_url": "http://dot.local:4000/"}))
-            .unwrap();
-        assert_eq!(st.get("public_url"), "http://dot.local:4000");
-    }
-
-    // REQ-CFG-042
-    #[test]
-    fn no_secret_value_is_ever_in_the_output_or_the_file() {
-        let dir = TempDir::new("secret");
-        let mut st = open_in(&dir.0, Layer::new(), Layer::new());
-        st.change(&json!({"llm_key_env": "MY_KEY"})).unwrap();
-        let out = st.json().to_string();
-        let file = std::fs::read_to_string(dir.0.join("settings.json")).unwrap();
-        for s in [&out, &file] {
-            assert!(s.contains("MY_KEY") && !s.contains("secret-value"), "{s}");
-        }
-    }
-
-    // REQ-CFG-042
-    #[test]
-    fn a_stored_key_cannot_be_smuggled_in_as_an_unknown_setting() {
-        let mut st = SettingsState::in_memory(defaults(), false, env_with(&[]));
-        for k in ["llm_key", "api_key", "key"] {
-            assert!(st.change(&json!({ (k): "sk-1234" })).is_err());
-        }
-    }
-
-    // REQ-CFG-062, REQ-CFG-038
-    #[test]
-    fn agent_settings_are_layered_validated_and_live() {
-        let dir = TempDir::new("agent");
-        let file = layer(&[("agent_max_rounds", json!(6)), ("notes", json!(true))]);
-        let flags = layer(&[("dry_run", json!(true))]);
-        let mut st = open_in(&dir.0, file, flags);
-        assert_eq!(source(&st, "agent_max_rounds"), "file");
-        st.change(&json!({
-            "agent_max_rounds": 10, "agent_max_tool_calls": 3, "agent_deadline_secs": 30,
-            "agent_tool_timeout_secs": 20, "plan_speech": false, "progress_speech": false,
-            "max_actions_per_day": 0, "max_costly_per_day": 5, "quiet_start": "22:00", "quiet_end": "07:30",
-        }))
-        .unwrap();
-        let live = st.live_values();
-        for (k, v) in [
-            ("agent_max_rounds", json!(10)),
-            ("plan_speech", json!(false)),
-            ("max_actions_per_day", json!(0)),
-            ("quiet_start", json!("22:00")),
-            ("notes", json!(true)),
-            ("dry_run", json!(true)),
-        ] {
-            assert_eq!(live[k], v, "{k}");
-        }
-        assert_eq!(source(&st, "agent_max_rounds"), "saved");
-        // a flag beats a saved value, and the page is told
-        st.change(&json!({"dry_run": false})).unwrap();
-        assert_eq!(st.json()["fields"]["dry_run"]["ignored"], true);
-        assert_eq!(st.get("dry_run"), true);
-        // clearing falls back to the file, then the default
-        st.change(&json!({"agent_max_rounds": null, "quiet_start": null, "quiet_end": ""}))
-            .unwrap();
-        assert_eq!(st.get("agent_max_rounds"), 6);
-        assert!(st.get("quiet_start").is_null());
-    }
-
-    // REQ-CFG-062, REQ-CFG-040
-    #[test]
-    fn bad_agent_values_are_refused_and_change_nothing() {
-        let mut st = SettingsState::in_memory(defaults(), false, env_with(&[]));
-        for (patch, needle) in [
-            (json!({"agent_max_rounds": 0}), "1 to 20"),
-            (json!({"agent_max_rounds": 21}), "1 to 20"),
-            (json!({"agent_max_tool_calls": "many"}), "1 to 20"),
-            (json!({"agent_deadline_secs": 4}), "5 to 300"),
-            (json!({"agent_tool_timeout_secs": 121}), "1 to 120"),
-            (json!({"max_actions_per_day": -1}), "0 to 100000"),
-            (json!({"max_costly_per_day": 1.5}), "0 to 100000"),
-            (json!({"plan_speech": "yes"}), "on or off"),
-            (json!({"dry_run": 1}), "on or off"),
-            (
-                json!({"quiet_start": "10pm", "quiet_end": "07:00"}),
-                "22:00",
-            ),
-            (
-                json!({"quiet_start": "24:00", "quiet_end": "07:00"}),
-                "22:00",
-            ),
-            (
-                json!({"quiet_start": "7:00", "quiet_end": "08:00"}),
-                "22:00",
-            ),
-            (json!({"quiet_start": "22:00"}), "both"),
-            (
-                json!({"quiet_start": "22:00", "quiet_end": "22:00"}),
-                "same time",
-            ),
-        ] {
-            let e = st.change(&patch).unwrap_err();
-            assert!(e.contains(needle), "{patch}: {e}");
-        }
-        assert!(st.get("quiet_start").is_null() && st.get("agent_max_rounds").is_null());
-        assert_eq!(minute_of_day("07:30"), Some(450));
-        assert_eq!(minute_of_day("23:59"), Some(1439));
-        assert_eq!(minute_of_day("7:30"), None);
-    }
-
-    // REQ-CFG-065
-    #[test]
-    fn the_export_holds_only_saved_values_and_loads_back_through_the_same_checks() {
-        let dir = TempDir::new("export");
-        let mut st = open_in(
-            &dir.0,
-            layer(&[("zone", json!("America/Chicago"))]),
-            Layer::new(),
-        );
-        assert_eq!(st.export()["settings"], json!({}), "nothing saved yet");
-        st.change(&json!({"device_name": "Den", "llm_key_env": "MY_KEY", "plan_speech": false}))
-            .unwrap();
-        let x = st.export();
-        assert_eq!(
-            (x["format"].clone(), x["version"].clone()),
-            (json!("clawdot-settings"), json!(1))
-        );
-        assert_eq!(
-            x["settings"],
-            json!({"device_name": "Den", "llm_key_env": "MY_KEY", "plan_speech": false})
-        );
-        assert!(
-            !x.to_string().contains("secret-value"),
-            "a key is only a variable name"
-        );
-        // A fresh device accepts it, and a file with a bad value is refused whole.
-        let other = TempDir::new("export2");
-        let mut st2 = open_in(&other.0, Layer::new(), Layer::new());
-        st2.change(&x["settings"]).unwrap();
-        assert_eq!(st2.get("device_name"), "Den");
-        let e = st2
-            .change(&json!({"device_name": "Ok", "agent_max_rounds": 99}))
-            .unwrap_err();
-        assert!(e.contains("1 to 20"));
-        assert_eq!(st2.get("device_name"), "Den", "nothing applied");
-    }
-}
+mod tests;

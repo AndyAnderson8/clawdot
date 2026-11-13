@@ -4,6 +4,7 @@ import { api, ApiError } from "../api.ts";
 import { fail } from "../store.ts";
 import { ago } from "../time.ts";
 import type { UpdateStatus } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 /** What each step of an install is called while the person waits. */
 function phaseText(u: UpdateStatus): string {
@@ -77,12 +78,11 @@ export function Updates(): JSX.Element | null {
     const restart = u.supervised
       ? "ClawDot will restart by itself."
       : "You will need to restart ClawDot yourself afterwards.";
-    if (
-      !confirm(
-        `Install version ${v}? ClawDot downloads it, checks that the project signed it, and replaces the version you have. ${restart} The old version is kept.`,
-      )
-    )
-      return;
+    const sure = await ask(
+      `Install version ${v}? ClawDot downloads it, checks that the project signed it, and replaces the version you have. ${restart} The old version is kept.`,
+      "Install",
+    );
+    if (!sure) return;
     before.current = u.current;
     try {
       setU(await api<UpdateStatus>("POST", "/api/update/apply", { version: v }));

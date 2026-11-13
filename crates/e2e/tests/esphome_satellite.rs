@@ -15,7 +15,7 @@ use clawdot_core::voice::{Config as DialogConfig, Synthesizer, Transcriber};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -43,10 +43,10 @@ impl Synthesizer for Mouth {
 
 fn quick() -> Timing {
     Timing {
-        connect: Duration::from_secs(2),
-        setup_step: Duration::from_secs(2),
+        connect: Duration::from_secs(10),
+        setup_step: Duration::from_secs(10),
         ping_every: Duration::from_millis(300),
-        dead_after: Duration::from_secs(3),
+        dead_after: Duration::from_secs(10),
         wake_watch: Duration::from_secs(1),
         mic_idle: Duration::from_secs(3),
         api_margin: Duration::from_millis(50),
@@ -166,18 +166,20 @@ struct Rig {
 
 /// Start the client against a fake device. `media` also starts the file server.
 async fn rig(media: bool) -> Rig {
-    rig_slow(media, 0).await
+    rig_keys(media, None, None, None).await
 }
 
-/// Like `rig`, with an assistant that takes `think_ms` to answer.
-async fn rig_slow(media: bool, think_ms: u64) -> Rig {
-    rig_keys(media, think_ms, None, None).await
+/// Like `rig`, with an assistant that does not answer until `hold` says so: it is working until then, however
+/// long the test takes to get there (a fixed delay would be a race against the machine's load).
+async fn rig_held(media: bool, hold: watch::Receiver<bool>) -> Rig {
+    rig_keys(media, Some(hold), None, None).await
 }
 
-/// Like `rig_slow`, with Noise keys: the one the client uses and the one the fake device expects.
+/// Like `rig`, with Noise keys: the one the client uses and the one the fake device expects. `hold`, when
+/// given, keeps the assistant from answering until it reads true.
 async fn rig_keys(
     media: bool,
-    think_ms: u64,
+    hold: Option<watch::Receiver<bool>>,
     client_key: Option<[u8; 32]>,
     device_key: Option<[u8; 32]>,
 ) -> Rig {
@@ -186,10 +188,13 @@ async fn rig_keys(
     let announcer = Announcer::default();
     let (asks, mut rx) = mpsc::channel::<Ask>(4);
     let (asked_tx, asked) = mpsc::unbounded_channel();
+    let mut hold = hold;
     tokio::spawn(async move {
         while let Some(ask) = rx.recv().await {
             let _ = asked_tx.send(ask.text.clone());
-            tokio::time::sleep(Duration::from_millis(think_ms)).await;
+            if let Some(hold) = hold.as_mut() {
+                let _ = hold.wait_for(|open| *open).await;
+            }
             let _ = ask.reply.send(Answer {
                 say: "You have nothing.".into(),
                 effects: vec![clawdot_core::assistant::Effect::VolumeSet(40)],
@@ -267,13 +272,30 @@ impl Rig {
             })
         );
         // The pipeline session registers shortly after setup.
-        for _ in 0..200 {
-            if self.announcer.connected() == 1 {
-                return c;
+        timeout(PATIENCE, async {
+            while self.announcer.connected() != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("the pipeline session never started");
+        })
+        .await
+        .expect("the pipeline session never started");
+        c
+    }
+
+    /// Wait until the pipeline is idle again (it can take an announcement), answering the client's pings
+    /// meanwhile. Waits for the state, not for a number of polls.
+    async fn until_idle(&self, c: &mut Conn, what: &str) {
+        timeout(PATIENCE, async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if self.announcer.is_available().await {
+                    return;
+                }
+                let _ = timeout(Duration::from_millis(1), c.recv()).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
     }
 }
 
@@ -554,17 +576,7 @@ async fn req_esp_011_an_unanswered_window_closes() {
     .await;
     c.send(Msg::AnnounceFinished { success: true }).await;
     // The follow-up window is one second; afterwards the pipeline is idle again.
-    let mut ok = false;
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        // Keep the device side alive while waiting.
-        if rig.announcer.is_available().await {
-            ok = true;
-            break;
-        }
-        let _ = timeout(Duration::from_millis(1), c.recv()).await;
-    }
-    assert!(ok, "the pipeline became idle");
+    rig.until_idle(&mut c, "the pipeline became idle").await;
     assert!(rig.announcer.announce("Second.").await);
     c.expect("a second announce request", |m| {
         matches!(m, Msg::AnnounceRequest { .. })
@@ -606,16 +618,8 @@ async fn req_esp_010_no_file_server_means_no_announcement_but_no_hang() {
     let mut c = rig.ready(Spec::full()).await;
     assert!(rig.announcer.announce("Anyone there?").await);
     // Nothing is sent; the pipeline returns to idle after the follow-up window.
-    let mut idle = false;
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if rig.announcer.is_available().await {
-            idle = true;
-            break;
-        }
-        let _ = timeout(Duration::from_millis(1), c.recv()).await;
-    }
-    assert!(idle);
+    rig.until_idle(&mut c, "the pipeline returned to idle")
+        .await;
 }
 
 // REQ-ESP-009
@@ -634,21 +638,17 @@ async fn req_esp_009_an_aborted_run_leaves_the_pipeline_idle() {
         wake_word_phrase: String::new(),
     })
     .await;
-    let mut idle = false;
-    for _ in 0..50 {
-        if rig.announcer.is_available().await {
-            idle = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(idle, "the pipeline stopped listening");
+    rig.until_idle(&mut c, "the pipeline stopped listening")
+        .await;
 }
 
 // REQ-ESP-007: a pipeline that is busy refuses the run instead of hanging the device.
 #[tokio::test]
 async fn req_esp_007_a_run_the_pipeline_cannot_start_is_ended() {
-    let rig = rig_slow(false, 1500).await;
+    // The assistant stays busy until the test lets it go. (A fixed think time left half a second between the
+    // client's wake-up watch of one second and the end of the answer, which a loaded machine can eat.)
+    let (release, hold) = watch::channel(false);
+    let rig = rig_held(false, hold).await;
     let mut c = rig.ready(Spec::full()).await;
     c.send(start_run()).await;
     speak(&mut c, 1200, false).await;
@@ -661,6 +661,7 @@ async fn req_esp_007_a_run_the_pipeline_cannot_start_is_ended() {
     c.send(start_run()).await;
     let (kinds, _) = until_run_end(&mut c).await;
     assert!(kinds.contains(&event::ERROR), "{kinds:?}");
+    release.send_replace(true);
 }
 
 // REQ-ESP-012
@@ -723,7 +724,7 @@ async fn req_esp_003_malformed_frames_end_the_connection_and_it_is_redialled() {
 // REQ-ESP-014: the whole voice run works over the encrypted link.
 #[tokio::test]
 async fn req_esp_014_a_voice_run_works_over_noise() {
-    let mut rig = rig_keys(false, 0, Some([5; 32]), Some([5; 32])).await;
+    let mut rig = rig_keys(false, None, Some([5; 32]), Some([5; 32])).await;
     let mut c = rig.ready(Spec::full()).await;
     c.send(start_run()).await;
     speak(&mut c, 1200, false).await;
@@ -736,7 +737,7 @@ async fn req_esp_014_a_voice_run_works_over_noise() {
 // REQ-ESP-014: a wrong key never gets as far as a voice session, and the client keeps trying.
 #[tokio::test]
 async fn req_esp_014_a_wrong_key_is_refused_and_retried() {
-    let rig = rig_keys(false, 0, Some([5; 32]), Some([6; 32])).await;
+    let rig = rig_keys(false, None, Some([5; 32]), Some([6; 32])).await;
     for _ in 0..2 {
         let (s, _) = timeout(PATIENCE, rig.listener.accept())
             .await
@@ -751,7 +752,7 @@ async fn req_esp_014_a_wrong_key_is_refused_and_retried() {
 // REQ-ESP-014, REQ-ESP-003: a device that is not encrypted, dialled with a key, is refused.
 #[tokio::test]
 async fn req_esp_014_a_plaintext_device_is_refused_when_a_key_is_set() {
-    let rig = rig_keys(false, 0, Some([5; 32]), None).await;
+    let rig = rig_keys(false, None, Some([5; 32]), None).await;
     let (mut s, _) = timeout(PATIENCE, rig.listener.accept())
         .await
         .unwrap()
@@ -779,4 +780,657 @@ async fn req_esp_004_unknown_message_types_are_ignored() {
     c.send(Msg::PingRequest).await;
     c.expect("a ping response", |m| *m == Msg::PingResponse)
         .await;
+}
+
+/// A reply that reaches the device while the pipeline is still making it (`reply: "streamed"`): the pipeline
+/// speaks sentence by sentence, and the client relays each sentence at once. The speech provider here waits for
+/// the test to let each sentence through, so the test decides when each synthesis finishes and no timing is
+/// guessed.
+mod streamed {
+    use super::*;
+    use clawdot_core::esphome::run_device_with;
+    use clawdot_core::esphome_cfg::ReplyMode;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Semaphore;
+
+    const S: [&str; 4] = [
+        "The first sentence is here.",
+        "The second sentence is here.",
+        "The third sentence is here.",
+        "The fourth sentence is here.",
+    ];
+    /// The size of the WAV header the media server writes.
+    const HEADER: usize = 44;
+
+    /// Bytes of audio the fake voice makes for a sentence.
+    fn bytes_of(sentence: &str) -> usize {
+        sentence.len() * 50 * 2
+    }
+
+    /// Bytes of audio for the first `n` sentences.
+    fn upto(n: usize) -> usize {
+        S[..n].iter().map(|s| bytes_of(s)).sum()
+    }
+
+    /// The audio of all four sentences: sentence `i` is made by call `i + 1`, whose samples have that value.
+    fn all_audio() -> Vec<u8> {
+        (0..4)
+            .flat_map(|i| {
+                std::iter::repeat_n(
+                    i16::try_from(i + 1).unwrap().to_le_bytes(),
+                    bytes_of(S[i]) / 2,
+                )
+                .flatten()
+            })
+            .collect()
+    }
+
+    /// A voice that reports each request and then waits for a permit. Call number `n` makes samples of value
+    /// `n`, so the order of the audio can be read back. Call `fail_on` fails.
+    struct Gated {
+        asked: mpsc::UnboundedSender<String>,
+        permits: Arc<Semaphore>,
+        calls: AtomicUsize,
+        fail_on: usize,
+    }
+
+    impl Synthesizer for Gated {
+        async fn synthesize(&self, text: &str) -> Result<Vec<i16>, String> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = self.asked.send(text.to_owned());
+            self.permits
+                .acquire()
+                .await
+                .map_err(|e| e.to_string())?
+                .forget();
+            if n == self.fail_on {
+                return Err("the voice failed".into());
+            }
+            Ok(vec![i16::try_from(n).unwrap(); text.len() * 50])
+        }
+    }
+
+    struct Streams {
+        rig: Rig,
+        /// The sentences the voice is asked for, as it is asked.
+        tts: mpsc::UnboundedReceiver<String>,
+        permits: Arc<Semaphore>,
+    }
+
+    /// The client against a fake device, `mode` for its replies, an assistant that answers with all of `S`, and
+    /// a voice that fails on call number `fail_on` (0: never).
+    async fn streams(mode: ReplyMode, fail_on: usize) -> Streams {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let announcer = Announcer::default();
+        let (asks, mut rx) = mpsc::channel::<Ask>(4);
+        let (asked_tx, asked) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(ask) = rx.recv().await {
+                let _ = asked_tx.send(ask.text.clone());
+                let _ = ask.reply.send(Answer {
+                    say: S.join(" "),
+                    ..Answer::default()
+                });
+            }
+        });
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let store = MediaStore::new(&base);
+        tokio::spawn(serve_media(l, store.clone(), std::future::pending()));
+        let (tts_tx, tts) = mpsc::unbounded_channel();
+        let permits = Arc::new(Semaphore::new(0));
+        let voice = Gated {
+            asked: tts_tx,
+            permits: Arc::clone(&permits),
+            calls: AtomicUsize::new(0),
+            fail_on,
+        };
+        let settings = Settings {
+            announcer: announcer.clone(),
+            dialog: DialogConfig {
+                follow_up_secs: 1,
+                ..DialogConfig::default()
+            },
+            ..Settings::default()
+        };
+        tokio::spawn(run_device_with(
+            Device {
+                name: "kitchen".into(),
+                addr: addr.to_string(),
+                psk: None,
+            },
+            Some(store),
+            Pipeline {
+                stt: Arc::new(Ears),
+                tts: Arc::new(voice),
+                asks,
+                settings,
+            },
+            quick(),
+            mode,
+            std::future::pending(),
+        ));
+        Streams {
+            rig: Rig {
+                listener,
+                announcer,
+                asked,
+                media_base: Some(base),
+                device_key: None,
+            },
+            tts,
+            permits,
+        }
+    }
+
+    /// A device with a speaker on the API connection, and one that must fetch a URL.
+    fn api_device() -> Spec {
+        Spec::full()
+    }
+
+    fn url_device() -> Spec {
+        Spec {
+            flags: flags::VOICE_ASSISTANT | flags::API_AUDIO,
+            ..Spec::full()
+        }
+    }
+
+    /// What the device saw of a reply, in order.
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Ev(u32),
+        Pcm(Vec<u8>),
+        End,
+    }
+
+    fn pcm_len(log: &[Seen]) -> usize {
+        log.iter()
+            .map(|s| if let Seen::Pcm(p) = s { p.len() } else { 0 })
+            .sum()
+    }
+
+    fn pcm_of(log: &[Seen]) -> Vec<u8> {
+        log.iter()
+            .filter_map(|s| {
+                if let Seen::Pcm(p) = s {
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect()
+    }
+
+    fn has_event(log: &[Seen], kind: u32) -> bool {
+        log.contains(&Seen::Ev(kind))
+    }
+
+    /// Read from the device's connection into `log` until `done` holds.
+    async fn hear_until(c: &mut Conn, log: &mut Vec<Seen>, done: impl Fn(&[Seen]) -> bool) {
+        while !done(log) {
+            match c.recv().await {
+                Msg::VoiceEvent { kind, .. } => log.push(Seen::Ev(kind)),
+                Msg::VoiceAudio { end: true, .. } => log.push(Seen::End),
+                Msg::VoiceAudio { data, .. } if !data.is_empty() => log.push(Seen::Pcm(data)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Like `hear_until`, for a device that is given a URL: returns it from the `TTS_END` event.
+    async fn hear_url(c: &mut Conn, log: &mut Vec<Seen>) -> String {
+        loop {
+            match c.recv().await {
+                Msg::VoiceEvent { kind, data } => {
+                    log.push(Seen::Ev(kind));
+                    if kind == event::TTS_END {
+                        return data.iter().find(|(k, _)| k == "url").unwrap().1.clone();
+                    }
+                }
+                Msg::VoiceAudio { .. } => panic!("a device without a speaker is sent no audio"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Start a run on the device and speak a question, ready for the reply.
+    async fn ask(c: &mut Conn) {
+        c.send(start_run()).await;
+        speak(c, 1200, false).await;
+    }
+
+    fn stop_run() -> Msg {
+        Msg::VoiceRequest {
+            start: false,
+            conversation_id: String::new(),
+            flags: 0,
+            wake_word_phrase: String::new(),
+        }
+    }
+
+    /// One HTTP download of a live reply, read piece by piece.
+    struct Download {
+        s: TcpStream,
+        buf: Vec<u8>,
+        chunked: bool,
+        head: String,
+    }
+
+    impl Download {
+        /// None when the server closes the connection without answering.
+        async fn open(url: &str, version: &str) -> Option<Self> {
+            let rest = url.strip_prefix("http://").unwrap();
+            let (host, path) = rest.split_once('/').unwrap();
+            let mut s = TcpStream::connect(host).await.unwrap();
+            s.write_all(format!("GET /{path} HTTP/{version}\r\nHost: {host}\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut buf = Vec::new();
+            loop {
+                if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8(buf[..at].to_vec()).unwrap();
+                    assert!(head.starts_with(&format!("HTTP/{version} 200")), "{head}");
+                    let chunked = head.contains("Transfer-Encoding: chunked");
+                    buf.drain(..at + 4);
+                    return Some(Self {
+                        s,
+                        buf,
+                        chunked,
+                        head,
+                    });
+                }
+                let mut tmp = [0u8; 512];
+                let n = timeout(PATIENCE, s.read(&mut tmp))
+                    .await
+                    .expect("the media server answers")
+                    .unwrap_or(0);
+                if n == 0 {
+                    return None;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+        }
+
+        /// Open, trying again until the server has a free connection (a closed one is freed asynchronously).
+        async fn open_when_free(url: &str) -> Self {
+            timeout(PATIENCE, async {
+                loop {
+                    if let Some(d) = Self::open(url, "1.1").await {
+                        return d;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("a connection slot became free")
+        }
+
+        async fn more(&mut self) -> usize {
+            let mut tmp = [0u8; 4096];
+            let n = timeout(PATIENCE, self.s.read(&mut tmp))
+                .await
+                .expect("the stream makes progress")
+                .unwrap_or(0);
+            self.buf.extend_from_slice(&tmp[..n]);
+            n
+        }
+
+        /// The next piece of the body, or None when the response has ended.
+        async fn piece(&mut self) -> Option<Vec<u8>> {
+            if !self.chunked {
+                if self.buf.is_empty() && self.more().await == 0 {
+                    return None;
+                }
+                return Some(std::mem::take(&mut self.buf));
+            }
+            loop {
+                if let Some(at) = self.buf.windows(2).position(|w| w == b"\r\n") {
+                    let size =
+                        usize::from_str_radix(std::str::from_utf8(&self.buf[..at]).unwrap(), 16)
+                            .unwrap();
+                    if size == 0 {
+                        if self.buf.len() < at + 4 {
+                            assert!(self.more().await > 0, "the terminator is complete");
+                            continue;
+                        }
+                        assert_eq!(&self.buf[at..at + 4], b"\r\n\r\n");
+                        return None;
+                    }
+                    if self.buf.len() >= at + 2 + size + 2 {
+                        let body = self.buf[at + 2..at + 2 + size].to_vec();
+                        assert_eq!(&self.buf[at + 2 + size..at + 4 + size], b"\r\n");
+                        self.buf.drain(..at + 4 + size);
+                        return Some(body);
+                    }
+                }
+                assert!(
+                    self.more().await > 0,
+                    "the response ended in the middle of a chunk"
+                );
+            }
+        }
+
+        /// Read until at least `len` bytes of body have arrived.
+        async fn body_upto(&mut self, got: &mut Vec<u8>, len: usize) {
+            while got.len() < len {
+                got.extend(self.piece().await.expect("the body is not over yet"));
+            }
+        }
+
+        async fn body_to_end(&mut self, got: &mut Vec<u8>) {
+            while let Some(p) = self.piece().await {
+                got.extend(p);
+            }
+        }
+    }
+
+    // REQ-ESP-008: over the API connection the first sentence reaches the device after ONE synthesis, the
+    // rest follow as they are made, in order, and the reply ends once, after the last.
+    #[tokio::test]
+    async fn req_esp_008_streamed_api_audio_starts_after_one_synthesis() {
+        let mut t = streams(ReplyMode::Streamed, 0).await;
+        let mut c = t.rig.ready(api_device()).await;
+        ask(&mut c).await;
+        let mut log = Vec::new();
+        for (i, sentence) in S.iter().enumerate() {
+            assert_eq!(
+                t.tts.recv().await.unwrap(),
+                *sentence,
+                "sentence {i} is asked for"
+            );
+            if i == 1 {
+                // Hold the second sentence for much longer than the playback margin (50 ms in these tests):
+                // a gap while the next sentence is made must not be taken for the end of the reply.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            t.permits.add_permits(1);
+            hear_until(&mut c, &mut log, |l| pcm_len(l) >= upto(i + 1)).await;
+            if i == 0 {
+                assert!(has_event(&log, event::TTS_STREAM_START));
+                assert!(
+                    !has_event(&log, event::TTS_STREAM_END) && !log.contains(&Seen::End),
+                    "{log:?}"
+                );
+            }
+        }
+        hear_until(&mut c, &mut log, |l| has_event(l, event::RUN_END)).await;
+
+        // The audio is the four sentences in order, then the end, then the events that close the reply.
+        assert_eq!(pcm_of(&log), all_audio());
+        let tail: Vec<_> = log
+            .iter()
+            .skip_while(|s| !matches!(s, Seen::End))
+            .map(|s| match s {
+                Seen::Ev(k) => *k,
+                _ => 0,
+            })
+            .collect();
+        assert_eq!(
+            tail,
+            [0, event::TTS_STREAM_END, event::TTS_END, event::RUN_END],
+            "{log:?}"
+        );
+        let starts = log
+            .iter()
+            .filter(|s| **s == Seen::Ev(event::TTS_STREAM_START))
+            .count();
+        assert_eq!(starts, 1);
+        let first_pcm = log.iter().position(|s| matches!(s, Seen::Pcm(_))).unwrap();
+        let start = log
+            .iter()
+            .position(|s| *s == Seen::Ev(event::TTS_STREAM_START))
+            .unwrap();
+        assert!(start < first_pcm);
+
+        // The follow-up window opened (once, after the last sentence).
+        let mut opened = false;
+        for _ in 0..300 {
+            if !t.rig.announcer.is_available().await {
+                opened = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(opened, "the follow-up window opened after the reply");
+        assert!(t.tts.try_recv().is_err(), "nothing more was synthesised");
+    }
+
+    // REQ-ESP-008, REQ-ESP-010: for a device that fetches a URL, the URL is given once the first sentence is
+    // ready and the body is the WAV header then the sentences in order, ending cleanly with the reply.
+    #[tokio::test]
+    async fn req_esp_008_streamed_url_is_fetched_while_the_reply_is_made() {
+        let mut t = streams(ReplyMode::Streamed, 0).await;
+        let mut c = t.rig.ready(url_device()).await;
+        ask(&mut c).await;
+        let mut log = Vec::new();
+        assert_eq!(t.tts.recv().await.unwrap(), S[0]);
+        t.permits.add_permits(1);
+        let url = hear_url(&mut c, &mut log).await;
+        assert!(url.starts_with(t.rig.media_base.as_ref().unwrap()));
+        let mut dl = Download::open(&url, "1.1").await.unwrap();
+        assert!(!dl.head.contains("Content-Length"), "{}", dl.head);
+        assert!(dl.head.contains("audio/wav"), "{}", dl.head);
+        let mut body = Vec::new();
+        dl.body_upto(&mut body, HEADER + upto(1)).await;
+        assert_eq!(&body[..4], b"RIFF");
+        assert_eq!(
+            &body[4..8],
+            &u32::MAX.to_le_bytes(),
+            "no length is declared"
+        );
+        assert_eq!(
+            &body[40..44],
+            &u32::MAX.to_le_bytes(),
+            "no data length is declared"
+        );
+        assert!(!has_event(&log, event::RUN_END));
+
+        for (i, sentence) in S.iter().enumerate().skip(1) {
+            assert_eq!(t.tts.recv().await.unwrap(), *sentence);
+            t.permits.add_permits(1);
+            dl.body_upto(&mut body, HEADER + upto(i + 1)).await;
+        }
+        dl.body_to_end(&mut body).await;
+        let want = all_audio();
+        assert_eq!(body.len(), HEADER + want.len());
+        assert_eq!(&body[HEADER..], &want[..]);
+        hear_until(&mut c, &mut log, |l| has_event(l, event::RUN_END)).await;
+        let kinds: Vec<_> = log
+            .iter()
+            .filter_map(|s| if let Seen::Ev(k) = s { Some(*k) } else { None })
+            .collect();
+        assert_eq!(
+            &kinds[kinds.len() - 3..],
+            [event::TTS_START, event::TTS_END, event::RUN_END],
+            "the URL was announced once, with the first sentence: {kinds:?}"
+        );
+    }
+
+    // REQ-ESP-008: an HTTP/1.0 fetcher gets the same body, delimited by the end of the connection.
+    #[tokio::test]
+    async fn req_esp_008_streamed_url_without_chunking_for_http_1_0() {
+        let t = streams(ReplyMode::Streamed, 0).await;
+        let mut c = t.rig.ready(url_device()).await;
+        ask(&mut c).await;
+        t.permits.add_permits(100);
+        let url = hear_url(&mut c, &mut Vec::new()).await;
+        let mut dl = Download::open(&url, "1.0").await.unwrap();
+        assert!(!dl.head.contains("chunked"), "{}", dl.head);
+        let mut body = Vec::new();
+        dl.body_to_end(&mut body).await;
+        assert_eq!(body.len(), HEADER + upto(4));
+    }
+
+    // REQ-ESP-009, REQ-VOI-020: the device ends the run in the middle of a reply (its stop button). The audio
+    // stops, and no sentence that was not yet made is asked for.
+    #[tokio::test]
+    async fn req_esp_009_a_stop_in_the_middle_of_a_streamed_api_reply_stops_the_synthesis() {
+        let mut t = streams(ReplyMode::Streamed, 0).await;
+        let mut c = t.rig.ready(api_device()).await;
+        ask(&mut c).await;
+        let mut log = Vec::new();
+        assert_eq!(t.tts.recv().await.unwrap(), S[0]);
+        t.permits.add_permits(1);
+        hear_until(&mut c, &mut log, |l| pcm_len(l) >= upto(1)).await;
+        // The second sentence is being made; the device gives up.
+        assert_eq!(t.tts.recv().await.unwrap(), S[1]);
+        c.send(stop_run()).await;
+
+        // A new run gets a whole new reply. Its first sentence is the next thing the voice is asked for, so the
+        // old reply asked for nothing more, and the device hears nothing of the old one after the stop. (No
+        // permit is given until then: the stopped synthesis must not be able to finish first.)
+        c.send(start_run()).await;
+        speak(&mut c, 1200, false).await;
+        assert_eq!(t.tts.recv().await.unwrap(), S[0]);
+        t.permits.add_permits(100);
+        let mut again = Vec::new();
+        hear_until(&mut c, &mut again, |l| has_event(l, event::RUN_END)).await;
+        assert_eq!(pcm_len(&again), upto(4));
+        assert!(
+            pcm_of(&again)
+                .chunks(2)
+                .all(|s| i16::from_le_bytes([s[0], s[1]]) >= 3),
+            "no audio of the stopped reply arrived"
+        );
+    }
+
+    // REQ-ESP-009: the same for a reply the device is fetching: the download ends cleanly with what was made.
+    #[tokio::test]
+    async fn req_esp_009_a_stop_in_the_middle_of_a_streamed_url_reply_ends_the_download() {
+        let mut t = streams(ReplyMode::Streamed, 0).await;
+        let mut c = t.rig.ready(url_device()).await;
+        ask(&mut c).await;
+        assert_eq!(t.tts.recv().await.unwrap(), S[0]);
+        t.permits.add_permits(1);
+        let url = hear_url(&mut c, &mut Vec::new()).await;
+        let mut dl = Download::open(&url, "1.1").await.unwrap();
+        let mut body = Vec::new();
+        dl.body_upto(&mut body, HEADER + upto(1)).await;
+        assert_eq!(t.tts.recv().await.unwrap(), S[1]);
+        c.send(stop_run()).await;
+        dl.body_to_end(&mut body).await;
+        assert_eq!(
+            body.len(),
+            HEADER + upto(1),
+            "only the first sentence was sent"
+        );
+        c.send(start_run()).await;
+        speak(&mut c, 1200, false).await;
+        assert_eq!(
+            t.tts.recv().await.unwrap(),
+            S[0],
+            "the stopped reply asked for nothing more"
+        );
+        t.permits.add_permits(100);
+    }
+
+    // REQ-VOI-006: a synthesis that fails on the third sentence ends the reply after the second, cleanly.
+    #[tokio::test]
+    async fn req_esp_008_a_failed_synthesis_ends_the_streamed_api_reply_cleanly() {
+        let mut t = streams(ReplyMode::Streamed, 3).await;
+        let mut c = t.rig.ready(api_device()).await;
+        ask(&mut c).await;
+        let mut log = Vec::new();
+        for i in 0..2 {
+            // Each of the first two sentences is on the device before the next is allowed to be made.
+            t.permits.add_permits(1);
+            hear_until(&mut c, &mut log, |l| pcm_len(l) >= upto(i + 1)).await;
+        }
+        t.permits.add_permits(100); // the third fails
+        hear_until(&mut c, &mut log, |l| has_event(l, event::RUN_END)).await;
+        assert_eq!(pcm_len(&log), upto(2), "sentences one and two were played");
+        assert!(
+            has_event(&log, event::TTS_STREAM_END) && has_event(&log, event::TTS_END),
+            "{log:?}"
+        );
+        assert!(!has_event(&log, event::ERROR), "no error cue: {log:?}");
+        // Nothing was asked after the failure.
+        let mut asked = Vec::new();
+        while let Ok(s) = t.tts.try_recv() {
+            asked.push(s);
+        }
+        assert_eq!(asked, S[..3]);
+    }
+
+    #[tokio::test]
+    async fn req_esp_008_a_failed_synthesis_ends_the_streamed_url_reply_cleanly() {
+        let t = streams(ReplyMode::Streamed, 3).await;
+        let mut c = t.rig.ready(url_device()).await;
+        ask(&mut c).await;
+        t.permits.add_permits(1);
+        let url = hear_url(&mut c, &mut Vec::new()).await;
+        let mut dl = Download::open(&url, "1.1").await.unwrap();
+        let mut body = Vec::new();
+        dl.body_upto(&mut body, HEADER + upto(1)).await;
+        t.permits.add_permits(1);
+        dl.body_upto(&mut body, HEADER + upto(2)).await;
+        t.permits.add_permits(100); // the third fails
+        dl.body_to_end(&mut body).await;
+        assert_eq!(body.len(), HEADER + upto(2));
+        let mut log = Vec::new();
+        hear_until(&mut c, &mut log, |l| has_event(l, event::RUN_END)).await;
+        assert!(!has_event(&log, event::ERROR), "{log:?}");
+    }
+
+    // REQ-ESP-010: a device that drops its download in the middle of a reply frees its connection slot, even
+    // while no audio is arriving; one that drops the API connection ends the download.
+    #[tokio::test]
+    async fn req_esp_010_a_device_that_disconnects_mid_stream_frees_its_slot() {
+        let mut t = streams(ReplyMode::Streamed, 0).await;
+        let mut c = t.rig.ready(url_device()).await;
+        ask(&mut c).await;
+        assert_eq!(t.tts.recv().await.unwrap(), S[0]);
+        t.permits.add_permits(1);
+        let url = hear_url(&mut c, &mut Vec::new()).await;
+        // The media server serves four at once. Take all four, and let go of them mid-reply (sentence two is
+        // being made, so the downloads are idle).
+        let mut holders = Vec::new();
+        for _ in 0..4 {
+            let mut d = Download::open_when_free(&url).await;
+            let mut got = Vec::new();
+            d.body_upto(&mut got, HEADER + upto(1)).await;
+            holders.push(d);
+        }
+        assert_eq!(t.tts.recv().await.unwrap(), S[1]);
+        drop(holders);
+        let mut d = Download::open_when_free(&url).await;
+        let mut got = Vec::new();
+        d.body_upto(&mut got, HEADER + upto(1)).await;
+
+        // Now the device itself goes away: its download ends with what had been made.
+        drop(c);
+        d.body_to_end(&mut got).await;
+        assert_eq!(got.len(), HEADER + upto(1));
+        // And it can come back.
+        t.permits.add_permits(100);
+        let mut c2 = t.rig.ready(url_device()).await;
+        ask(&mut c2).await;
+        let again = hear_url(&mut c2, &mut Vec::new()).await;
+        assert_ne!(again, url);
+    }
+
+    // REQ-ESP-008: the way a reply is delivered is the device's own setting, and `whole` is how it always was.
+    #[tokio::test]
+    async fn req_esp_008_whole_replies_arrive_complete_after_every_sentence_is_made() {
+        let mut t = streams(ReplyMode::Whole, 0).await;
+        let mut c = t.rig.ready(api_device()).await;
+        t.permits.add_permits(100);
+        ask(&mut c).await;
+        let mut log = Vec::new();
+        hear_until(&mut c, &mut log, |l| has_event(l, event::RUN_END)).await;
+        assert_eq!(pcm_len(&log), upto(4));
+        let start = log
+            .iter()
+            .position(|s| *s == Seen::Ev(event::TTS_STREAM_START))
+            .unwrap();
+        assert!(log[..start].contains(&Seen::Ev(event::TTS_START)));
+        let mut asked = 0;
+        while t.tts.try_recv().is_ok() {
+            asked += 1;
+        }
+        assert_eq!(asked, 4);
+    }
 }

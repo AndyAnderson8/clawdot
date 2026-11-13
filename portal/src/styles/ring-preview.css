@@ -1,0 +1,22 @@
+/* ---- Light ring preview ---- */
+.ledring {
+  width: 3.25rem;
+  height: 3.25rem;
+  color: var(--color-text-secondary);
+  flex: none;
+}
+.ledrow {
+  display: grid;
+  grid-template-columns: 3.25rem minmax(0, 1fr) auto;
+  gap: var(--spacing-4);
+  align-items: center;
+}
+.ledcolor input[type="color"] {
+  width: 3rem;
+  height: 2.25rem;
+  padding: 2px;
+}
+.blank .btn {
+  white-space: normal;
+  max-width: 100%;
+}

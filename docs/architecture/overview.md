@@ -1,159 +1,132 @@
-# Architecture Overview
+# Architecture overview
 
-Status: Draft. Describes intended design; updated as specs are accepted and code lands.
+Status: describes the code on `dev` as of 2026-11-12. Things that are planned and not built are in the [roadmap](../roadmap.md), not here.
+
+ClawDot is one program, the **core**, that holds the assistant: the language-model turn, the tools, the timers, the inbox and the web portal. A **satellite** (a microphone, a speaker and optional buttons and lights) connects to it over a small protocol, and the core knows nothing else about the hardware.
 
 ## 1. Context
 
 ```mermaid
 flowchart LR
-    User((User)) <-->|voice| Sat[Satellite<br/>mic, speaker, LEDs]
-    Sat <-->|satellite protocol| Core[ClawDot Core]
-    Core -->|HTTPS| STT[STT provider]
-    Core -->|HTTPS| LLM[LLM provider<br/>OpenRouter / OpenAI-compatible]
-    Core -->|HTTPS| TTS[TTS provider]
-    Core <-->|MCP| MCP[MCP servers / tools]
-    Agents[External agents<br/>Claude Code, CI, scripts] -->|webhook POST| Core
-    Core -->|reply callback| Agents
-    Admin((Admin)) -->|web UI| Core
+    User((Person)) <-->|voice| Sat[Satellite<br/>microphone, speaker,<br/>buttons, lights]
+    Sat <-->|satellite protocol,<br/>TCP| Core[ClawDot core]
+    Core -->|HTTPS| LLM[Language model<br/>OpenAI-compatible]
+    Core -->|HTTPS| Speech[Speech to text<br/>and text to speech]
+    Core <-->|MCP over HTTP| MCP[MCP servers]
+    Core -->|HTTPS| Web[Web tools you describe]
+    Agents[Agents, scripts, CI] -->|webhook, announce API,<br/>MCP server| Core
+    Core -->|reply stream| Bridge[Agent bridge]
+    Bridge -->|resume| Agents
+    Admin((Administrator)) -->|portal| Core
+    Core -->|about once a day| Rel[Release page]
 ```
 
-By default the satellite and core run **in one process** on the same device. The protocol lets them be split across machines, so an ESP32 or Pi can be a satellite for a remote core.
+The satellite can be a computer (the reference satellite), a board running the device daemon, or an ESPHome voice device that the core dials (feature `esphome-satellite`). The core also has a text console, which stands in for a satellite when none is connected. There is no in-process satellite: audio always arrives over a connection.
 
-## 2. Guiding constraints
+## 2. The crates
 
-1. The whole system fits the [resource budget](../specs/0002-resource-budget.md) (≤ 64 MB RSS hard gate, 48 MB target; ≤ 8 MB binary).
-2. The core knows nothing about hardware; the satellite knows nothing about AI.
-3. All I/O is bounded: queues, buffers, history, logs.
-4. External text is untrusted, including LLM output, inbox events, and tool results.
-5. State is persisted atomically; the process may be killed at any moment.
-
-## 3. Components
-
-| Component | Responsibility | Crate (planned) |
-|---|---|---|
-| **protocol** | Message types, framing, schemas, conformance helpers. Shared by core and every satellite written in Rust. | `crates/protocol` |
-| **satellite (trait + transports)** | Abstract mic/speaker/events; in-process and WebSocket transports. | `crates/satellite-api` |
-| **satellite-desktop** | Reference satellite for development (laptop mic/speaker). | `crates/satellite-desktop` |
-| **wake** | Wake-word inference over audio frames. Pluggable engine. | `crates/wake` |
-| **vad/endpointing** | Detect speech start and end. | `crates/audio` |
-| **session** | Conversation state machine; orchestrates a turn. | `crates/core` |
-| **providers** | `Stt`, `Llm`, `Tts` traits and HTTP implementations. | `crates/providers` |
-| **tools** | Tool registry, schemas, policy (confirm/deny), built-ins, MCP client. | `crates/tools` |
-| **scheduler** | Timers, alarms, reminders; monotonic and wall-clock handling. | `crates/sched` |
-| **inbox** | Endpoints, event queue, announcement policy, reply relay. | `crates/inbox` |
-| **music** | Backend trait, HTTP stream player, ducking. | `crates/music` |
-| **store** | Atomic JSON persistence, bounded collections. | `crates/store` |
-| **http** | Web UI, config API, webhook ingress, health. Embedded static assets. | `crates/http` |
-| **config** | Single-file config, validation, hot reload. | `crates/config` |
-| **budget** | Benchmark scenarios and the CI gate tooling. | `tools/budget` |
-
-Crate count is a size and compile-time trade-off and will be revisited. Boundaries are logical first.
-
-## 4. Conversation state machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Listening: wake
-    Listening --> Thinking: end of utterance
-    Listening --> Idle: timeout / no speech
-    Thinking --> Speaking: first TTS audio
-    Thinking --> Idle: error (audible)
-    Speaking --> Listening: follow-up window
-    Speaking --> Idle: done
-    Speaking --> Listening: barge-in
-    Idle --> Announcing: inbox event / alarm
-    Announcing --> Listening: user responds
-    Announcing --> Idle: dismissed / done
-```
-
-Alarms and inbox announcements preempt `Idle` only. Alarms may preempt other states; this is a policy to be specified in a spec.
-
-## 5. Turn pipeline (streaming)
-
-```mermaid
-sequenceDiagram
-    participant S as Satellite
-    participant C as Core
-    participant T as STT
-    participant L as LLM
-    participant V as TTS
-    S->>C: wake
-    S->>C: audio frames (while listening)
-    C->>T: stream audio
-    T-->>C: transcript
-    C->>L: messages + tool schemas (stream)
-    L-->>C: tokens / tool calls
-    C->>C: run tool(s) with policy and timeouts
-    L-->>C: sentence 1
-    C->>V: sentence 1
-    V-->>C: audio
-    C->>S: play_audio
-    Note over C,V: later sentences pipeline while earlier ones play
-```
-
-Latency is managed by overlapping stages: STT while speaking, sentence-level TTS while the LLM generates.
-
-## 6. Agent inbox flow
-
-```mermaid
-sequenceDiagram
-    participant A as Agent (e.g. Claude Code hook)
-    participant B as Agent bridge (dev machine)
-    participant H as Core HTTP
-    participant I as Inbox
-    participant S as Satellite
-    B->>H: open SSE reply stream (token)
-    A->>H: POST /hook/{endpoint} (token, native payload)
-    H->>I: adapter maps payload to event, persist
-    I->>S: tone, then spoken summary (when idle)
-    S-->>I: user: "keep going, add tests"
-    I-->>B: reply {type: instruct, session_ref, text} over SSE
-    B->>A: claude -p --resume session_ref
-    A-->>H: later: new event (done again)
-```
-
-The device never calls out to agent hosts; the bridge pulls. Reply types are `ack`, `instruct`, `snooze`, `dismiss`, and `details`. Transport options are covered in [ADR-0006](../adr/0006-inbox-transport.md).
-
-## 7. Data and persistence
-
-| Data | Store | Bound |
-|---|---|---|
-| Config | `config.toml` | n/a |
-| Timers, alarms, reminders | JSON file, atomic write | max items configurable |
-| Inbox events | Append log with compaction | max N events / bytes |
-| Endpoint tokens | Config (hashed) | n/a |
-| Conversation history | Memory only | token and byte capped |
-| Logs | Ring buffer + optional file | bytes capped |
-
-No raw audio is ever stored.
-
-## 8. Cross-cutting concerns
-
-- **Errors:** typed errors with context; user-facing failures are spoken in plain language.
-- **Observability:** structured logs, a small metrics endpoint (RSS, queue depth, provider latency).
-- **Time:** monotonic clock for durations, wall clock for alarms; clock validity is a first-class state.
-- **Concurrency:** single-threaded async executor for logic, and a dedicated audio thread/callbacks for real-time paths.
-- **Configuration:** one file, schema-validated, with secrets separated.
-
-## 9. Extension points
-
-| Extension | Mechanism |
+| Crate | What it is today |
 |---|---|
-| New hardware | Implement a satellite per the protocol |
-| New tools | MCP server (Streamable HTTP), declarative HTTP tool, or pack; built-in `Tool` trait for core tools |
-| New providers | `Stt`/`Llm`/`Tts` trait; OpenAI-compatible HTTP by default |
-| New audio/music source | Media backend (playback or control shape), see [extensibility](extensibility.md) |
-| New agent or event source | Inbox adapter mapping (pack) |
-| Anything else | Sidecar through the documented core API ([ADR-0010](../adr/0010-extension-model.md)) |
-| New wake engine | `WakeEngine` trait |
+| `crates/core` | The `clawdot` program: dialog, turns, tools and the gate, inbox, timers, notes, settings, the HTTP server, the MCP server and client, the portal's API, the updater. About 3.4 MB stripped for the Dot build. |
+| `crates/protocol` | The wire format between core and satellite: framing, typed messages, the bridge reply types. No I/O, no async runtime. |
+| `crates/satellite` | A reference satellite using only the standard library. Its device is a WAV file or a command, for development. |
+| `crates/device` | The portable device daemon: board files, a capability model, LED states, buttons, tones, quiet hours, and the wake-engine seam, over the satellite protocol. |
+| `crates/device-conformance` | A suite that runs the device contract ([spec 0006](../specs/0006-device-layer-contract.md)) against any board with a fake core. |
+| `crates/wake` | A wake-word runtime for streaming microWakeWord models: model reader, audio front end and an int8 interpreter, in safe Rust with no dependencies. |
+| `crates/bridge` | The agent bridge: reads spoken replies from a speaker over server-sent events and resumes the coding agent with them. |
+| `crates/eval` | Scenario evaluation of the agent loop: replayed in CI, or live with a spending cap. A development tool, not in the product binary. |
+| `crates/e2e` | End-to-end tests with a real HTTP server and a real bridge client. |
+| `portal/` | The web portal in TypeScript and Preact. It is bundled into one page, committed as `crates/core/src/ui.html`, and compiled into the core. |
+| `bridges/` | Small Python bridges to chat and notification services, outside the Rust workspace. |
 
-## 10. Risks (tracked)
+Optional features of `clawdot-core` (all off except the first two): `tz` (time-zone database), `tls` (HTTPS to providers), `esphome-satellite`, `esphome-noise`, `realtime` (speech-to-speech voice), `hive` (device identity and mDNS discovery). The Dot build uses `esphome-satellite,esphome-noise`.
 
-| Risk | Mitigation |
+## 3. Inside the core
+
+### Start-up and the loop
+
+`main.rs` reads the environment once (`env.rs`), parses the arguments into a `Cli` and the `--config` file into a `Config` (`cli.rs`), runs a one-shot command if asked (`say`, `--create-endpoint`, `--reset-admin`, `--voice-in`), and otherwise calls `startup::start`. That first resolves the three layers and the saved settings into one immutable `Resolved` (`seed.rs`), which the rest reads by reference, and then runs a fixed sequence: settings, clock, the stores, the brain, the listening socket (bound before any token is printed), the satellite servers, hive discovery, the update check. It returns an `App`.
+
+`app_loop.rs` is the running application: **one loop that owns the state** (the built-in tools and timers, the portal's tools and skills, settings, the usage files) and reacts to events. Slow work does not run in it. A model turn, a realtime session, speech and a new MCP connection are tasks that send their results back as messages ([ADR-0021](../adr/0021-turns-as-tasks.md)). `runtime.rs` holds the `Brain` (live settings, the status snapshot); what the loop does with a turn, a portal change and a connection result is on `App`, in `app_loop/`.
+
+### A turn
+
+An utterance (or a typed line) goes to the local fast path first (`fastpath.rs`, `assistant.rs`): timers, alarms, volume, music, with no model call. The words it listens for (the grammar, number and clock words, yes and no, note commands, day and month names) are data in `lang.rs` and `lang/en.rs`; the logic takes a `Language` chosen once at start-up, and the full spoken sentences are not moved there yet. Anything else becomes a model turn (`turns.rs`) in a task, with that speaker's own conversation (`speakers.rs`: at most 8 conversations, bounded in messages, bytes and idle time). The turn runs `session::run_turn_with`, which loops: ask the model, validate its calls, pass each call through the **gate** (`session/gate.rs`), add the result, repeat until a limit or an answer. Durations (timers, confirmation windows, sessions) are measured on a monotonic clock, so a correction of the wall clock cannot stretch or cut them; calendar points (alarms, reminders at a time) follow the wall clock. Details: [agent loop](agent-loop.md) (see "Time"), [action safety](action-safety.md).
+
+The gate decides every call: risk tier, a spoken read-back and a plain "yes" held by the host for costly actions, the audit record, the daily caps, dry-run, cancel. The model cannot release a held action. Realtime voice calls the same gate.
+
+### Tools
+
+A turn sees one tool host built in layers: built-in tools (`assistant/tools.rs`: timers, alarms, reminders, stopwatch, music, inbox), then HTTP tools described by the administrator ([http-tools.md](http-tools.md)), then tools from MCP servers ([mcp.md](mcp.md)), under a policy layer that applies what the administrator switched off or re-tiered. Built-in tools change state the loop owns, so a turn sends them to the loop; HTTP and MCP tools are called by the turn task itself. Skills (`SKILL.md` folders) add instructions and may limit the tools a turn can use ([extensibility.md](extensibility.md)).
+
+### The inbox
+
+Agents post to `POST /hook/{endpoint}` or `POST /api/announce`, or call the core's own MCP server at `POST /mcp`. An adapter maps the payload to an event; the queue is bounded per endpoint (`inbox/`). An endpoint has a name, which the URLs, the portal, the bridge and the spoken origin use, and an id (32 random hex digits, made at creation and never reused). Its events, the replies waiting for its bridge, a question it is asking and its rate-limit state are all held under the id, so deleting an endpoint and creating another of the same name starts with none of them; the bridge route takes the name in the path and the core turns it into the id once the token is checked, and a reply on the wire carries the name. The speaker task says events in order, summarised and with their source named. Replies from the person go out on an SSE stream per endpoint (`/bridge/{endpoint}/replies`) that the agent bridge reads and acknowledges.
+
+### State and storage
+
+`store.rs` writes small JSON files atomically (temporary file, flush, rename) with a schema version and private permissions. A single writer thread (`app/persist.rs`) does the writes and coalesces changes to one file, so neither the loop nor the async runtime waits for flash; the HTTP layer waits for it before it reports an inbox change as accepted. There is no database.
+
+### The HTTP server
+
+`http.rs` and `ui.rs` serve from two route tables (`routes.rs` defines the row type, the matcher and the auth classes). `http::ROUTES` holds the page, health, webhooks, announce, the MCP server and the bridge. `ui::ROUTES` holds the portal's `/api`. Each row names its auth class (public, sign-in routes, administrator session, endpoint token, any endpoint token, endpoint token or administrator), and the OpenAPI file ([../api/openapi.yaml](../api/openapi.yaml)) is checked against both tables. Connection counts are capped overall and per address (`limit.rs`), the `Host` header is checked against the device's own names (`hostguard.rs`), and failed sign-ins and token guesses share a rate limit.
+
+### The portal, settings and secrets
+
+The portal is one static page with no external assets. Settings (`settings.rs`) are one table with a row per setting, layered: defaults, the configuration file, `settings.json` (what the portal saved), flags. Most apply without a restart ([configuration.md](configuration.md)). Provider keys pasted into the portal go to `secrets.json` (mode 0600, never returned whole, never in an export). A key can instead be named by an environment variable.
+
+### The updater
+
+`update.rs` checks a release page about once a day, and installs only on confirmation, only a release whose checksum file carries a valid signature from the project key, and keeps the previous program ([updates guide](../guides/updates.md), [ADR-0019](../adr/0019-updates-and-remote-access.md)).
+
+### Satellites and voice
+
+`satellite.rs` and the files under `satellite/` serve the satellite protocol (settings, announcer, handshake, session loop, realtime audio, playback, speech, turns); `voice.rs` is the dialog state machine (who may listen when), `vad.rs` finds the end of an utterance, `speech.rs` (with a file per provider under `speech/`, the shared HTTP client `apiclient.rs`, and `audio.rs` and `netpolicy.rs` for PCM/WAV and the plain-http rule) and `speechio.rs` reach the speech services, and `rtvoice.rs` plus `realtime/` are the optional realtime path. `esphome/` is the client for ESPHome voice devices. See [voice pipeline](voice-pipeline.md), [satellite server](satellite-server.md) and [ESPHome satellite](esphome-satellite.md).
+
+## 4. Trust boundaries
+
+Text from the language model, tool results, MCP servers, webhooks and agents is untrusted data. It is never allowed to change a tier, release a held action or write a note. Credentials differ by route: an administrator session (or a private-network peer in open mode) for the portal, a per-endpoint token for webhooks, the bridge and the MCP server, a separate token for satellites. The portal is plain HTTP on the local network; use a trusted network or a VPN. See the [threat model](../security/threat-model.md), [action safety](action-safety.md), [SECURITY.md](../../SECURITY.md) and [PRIVACY.md](../../PRIVACY.md).
+
+## 5. Where state lives
+
+Everything is in the data directory (`--data-dir`, default `./clawdot-data`). No raw audio is stored.
+
+| File | Holds |
 |---|---|
-| Echo Dot Gen 2 cannot be unlocked or has unusable audio paths | Design is hardware-agnostic; the Dot is a stretch port and the budget remains the benchmark (SPIKE-001) |
-| Wake-word runtime exceeds budget | SPIKE-002; alternative engines behind `WakeEngine` |
-| Software AEC quality is insufficient for barge-in | Barge-in is "Should"; fall back to wake-word-only interruption |
-| TLS memory overhead | SPIKE-003; connection reuse, buffer tuning |
-| Prompt injection via inbox/tool output | REQ-INB-010, [threat model](../security/threat-model.md) |
+| `admin.json` | The administrator setting and the password hash |
+| `settings.json` | Settings saved from the portal |
+| `secrets.json` | Provider keys pasted into the portal |
+| `endpoints.json` | Webhook endpoints (id, name, token hash, adapter, spoken name; a file from before ids is given them at the first start) |
+| `inbox.json`, `replies.json` | Queued agent events and pending replies |
+| `timers.json` | Timers, alarms, reminders, the stopwatch |
+| `usage.json` | The day's request and spend counters |
+| `audit.jsonl`, `audit.1.jsonl` | The audit log, rotated at a size cap |
+| `audit-counts.json` | The day's counts of actions and costly actions, for the daily caps |
+| `memory.json` | Notes the user asked to keep (only if enabled) |
+| `tools.json`, `connections.json`, `skills.json` | Tools, MCP connections and skills managed in the portal |
+| `update.json` | Update-check state |
+| `hive-identity.json` | The device's identity key (only with `hive`) |
+
+The configuration file you write by hand is never rewritten by the core.
+
+## 6. Resource budget
+
+The budget ([spec 0002](../specs/0002-resource-budget.md)) is a feature: default configuration must fit a 512 MB device (idle RSS at most 24 MB, peak at most 64 MB, binary at most 8 MB). Measured on 2026-11-11 ([proving pass](../reports/2026-11-11-proving-pass.md), [architecture review](../reports/2026-11-11-architecture-review.md)):
+
+| Measure | Result |
+|---|---|
+| Release binary, armv7 musl, features the Dot uses | 3,247,568 bytes |
+| Same with `hive` and `realtime` | 3,348,880 bytes |
+| Idle memory on the first device it ran on | 2.95 MB resident, one thread |
+
+CI builds both armv7 binaries and fails over 8 MiB. Peak memory across the benchmark scenarios is not measured yet.
+
+## 7. Extension points
+
+| To add | Use |
+|---|---|
+| Hardware | A satellite that speaks the protocol ([porting](porting-a-satellite.md), [board support](board-support.md)) |
+| Tools | An MCP server, a declarative HTTP tool, or a skill |
+| Music source | A media backend ([media.md](media.md)) |
+| An agent or event source | An inbox adapter and an endpoint ([recipes](../recipes/README.md)) |
+| Anything else | A sidecar through the documented API ([ADR-0010](../adr/0010-extension-model.md)) |

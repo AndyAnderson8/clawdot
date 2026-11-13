@@ -1,8 +1,8 @@
 use super::*;
+use crate::env::Env;
 use crate::store::testutil::TempDir;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -50,7 +50,7 @@ fn release_json(port: u16, version: &str) -> String {
 }
 
 struct Rig {
-    updater: Updater,
+    updater: Arc<Updater>,
     dir: TempDir,
     exe: PathBuf,
 }
@@ -65,12 +65,16 @@ fn rig(port: u16, key: Option<[u8; 32]>) -> Rig {
         supervised: false,
     };
     let updater = Updater::new(cfg, true, Some(dir.0.clone()), exe.clone(), false, false).unwrap();
-    Rig { updater, dir, exe }
+    Rig {
+        updater: Arc::new(updater),
+        dir,
+        exe,
+    }
 }
 
 /// A server with a newer release whose files are signed by `signer`, whose signed hash is of `hashed`, and whose
 /// program file is `program`.
-async fn newer_release(signer: &Ed25519KeyPair, program: &[u8], hashed: &[u8]) -> u16 {
+pub(super) async fn newer_release(signer: &Ed25519KeyPair, program: &[u8], hashed: &[u8]) -> u16 {
     let name = asset_name();
     let sums = format!(
         "{}  {name}
@@ -151,6 +155,21 @@ fn versions_compare_the_way_people_expect() {
         ("0.1.0", "1.2.3.4", false),
     ] {
         assert_eq!(is_newer(a, b), newer, "{a} -> {b}");
+    }
+}
+
+// REQ-UPD-007
+#[test]
+fn the_new_program_must_report_exactly_the_announced_version() {
+    assert!(reports_version("clawdot 0.2.0 (abc1234)\n", "0.2.0"));
+    assert!(reports_version("clawdot v0.2.0\n", "0.2.0"));
+    for wrong in [
+        "clawdot 10.2.0 (abc)",
+        "clawdot 0.2.01 (abc)",
+        "clawdot 0.2.0-old (abc)",
+        "",
+    ] {
+        assert!(!reports_version(wrong, "0.2.0"), "{wrong}");
     }
 }
 
@@ -340,7 +359,6 @@ async fn a_build_with_no_key_never_installs_and_says_where_to_download() {
             .unwrap()
             .contains("no update key")
     );
-    let r: &'static Rig = Box::leak(Box::new(r));
     let e = r.updater.start_apply("99.0.0").unwrap_err();
     assert!(e.contains("no update key"), "{e}");
     assert_eq!(std::fs::read(&r.exe).unwrap(), b"old program");
@@ -351,7 +369,7 @@ async fn a_build_with_no_key_never_installs_and_says_where_to_download() {
 async fn only_the_newer_version_that_was_found_can_be_asked_for() {
     let kp = keypair();
     let port = newer_release(&kp, b"p", b"p").await;
-    let r: &'static Rig = Box::leak(Box::new(rig(port, Some(public(&kp)))));
+    let r = rig(port, Some(public(&kp)));
     assert!(
         r.updater
             .start_apply("99.0.0")
@@ -444,22 +462,151 @@ fn a_new_version_that_never_proved_itself_leaves_its_marker_for_the_supervisor()
 
 #[test]
 fn the_configuration_is_checked() {
-    assert!(UpdateConfig::new(None, None).is_ok());
+    assert!(UpdateConfig::new(None, None, &Env::empty()).is_ok());
     assert!(
-        UpdateConfig::new(Some("http://example.test/feed"), None)
+        UpdateConfig::new(Some("http://example.test/feed"), None, &Env::empty())
             .unwrap_err()
             .contains("https")
     );
-    assert!(UpdateConfig::new(Some("ftp://x"), None).is_err());
+    assert!(UpdateConfig::new(Some("ftp://x"), None, &Env::empty()).is_err());
     assert!(
-        UpdateConfig::new(None, Some("zz"))
+        UpdateConfig::new(None, Some("zz"), &Env::empty())
             .unwrap_err()
             .contains("64 hexadecimal")
     );
     let key = "ab".repeat(32);
     assert_eq!(
-        UpdateConfig::new(None, Some(&key)).unwrap().public_key,
+        UpdateConfig::new(None, Some(&key), &Env::empty())
+            .unwrap()
+            .public_key,
         Some([0xab; 32])
     );
     assert!(asset_name().starts_with("clawdot-"));
+}
+
+// REQ-UPD-004: the file is named from the build target, so an ARMv6 build is not offered armv7.
+#[test]
+fn the_asset_is_named_from_the_architecture_the_program_was_built_for() {
+    let name = |arch, target| asset_name_for("linux", arch, target, false);
+    assert_eq!(
+        name("arm", "armv7-unknown-linux-musleabihf"),
+        "clawdot-linux-armv7"
+    );
+    assert_eq!(
+        name("arm", "armv7-unknown-linux-gnueabihf"),
+        "clawdot-linux-armv7"
+    );
+    assert_eq!(
+        name("arm", "arm-unknown-linux-musleabi"),
+        "clawdot-linux-armv6"
+    );
+    assert_eq!(
+        name("arm", "arm-unknown-linux-gnueabihf"),
+        "clawdot-linux-armv6"
+    );
+    assert_eq!(
+        name("aarch64", "aarch64-unknown-linux-gnu"),
+        "clawdot-linux-aarch64"
+    );
+    assert_eq!(
+        name("x86_64", "x86_64-unknown-linux-gnu"),
+        "clawdot-linux-x86_64"
+    );
+    assert_eq!(
+        asset_name_for("windows", "x86_64", "x86_64-pc-windows-msvc", true),
+        "clawdot-windows-x86_64.exe"
+    );
+}
+
+// The build script hands over a real target name, so the file this very build asks for can be worked out.
+#[test]
+fn the_build_target_is_known() {
+    let t = env!("CLAWDOT_BUILD_TARGET");
+    assert!(t.contains('-'), "{t:?}");
+    assert!(asset_name().starts_with("clawdot-"));
+}
+
+#[test]
+fn supervision_is_read_from_the_environment_snapshot() {
+    let on = |pairs: &[(&str, &str)]| {
+        UpdateConfig::new(None, None, &Env::from_pairs(pairs.iter().copied()))
+            .unwrap()
+            .supervised
+    };
+    assert!(!on(&[]));
+    assert!(on(&[("CLAWDOT_SUPERVISED", "1")]));
+    assert!(on(&[("INVOCATION_ID", "abc")]));
+}
+
+// REQ-UPD-009: two requests at once start one install, not two.
+#[test]
+fn two_requests_at_once_start_exactly_one_install() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let kp = keypair();
+    let port = rt.block_on(newer_release(&kp, b"p", b"p"));
+    let found = {
+        let r = rig(port, Some(public(&kp)));
+        rt.block_on(r.updater.check()).unwrap();
+        let latest = r.updater.lock().latest.clone();
+        latest.unwrap()
+    };
+    for _ in 0..200 {
+        let r = rig(port, Some(public(&kp)));
+        r.updater.lock().latest = Some(found.clone());
+        let gate = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (u, g, h) = (
+                    Arc::clone(&r.updater),
+                    Arc::clone(&gate),
+                    rt.handle().clone(),
+                );
+                std::thread::spawn(move || {
+                    let _in = h.enter();
+                    g.wait();
+                    u.start_apply("99.0.0").is_ok()
+                })
+            })
+            .collect();
+        let started = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(started, 1, "exactly one request may start the install");
+    }
+}
+
+// The remembered release is saved through the shared temporary-file rule (`update.json.tmp`), never by swapping
+// the extension (`update.tmp`).
+#[test]
+fn the_remembered_release_is_saved_through_the_shared_temporary_name() {
+    let r = rig(1, None);
+    // Block the shared temporary name with a directory: a save that uses it cannot complete.
+    let tmp = crate::store::temp_path(&r.dir.0.join("update.json"));
+    std::fs::create_dir(&tmp).unwrap();
+    r.updater.save();
+    assert!(
+        !r.dir.0.join("update.json").exists(),
+        "the save went through some other temporary file"
+    );
+    std::fs::remove_dir(&tmp).unwrap();
+    r.updater.save();
+    assert!(r.dir.0.join("update.json").exists());
+    assert!(!tmp.exists(), "the temporary file is renamed away");
+}
+
+// A save cut short leaves its temporary file; the next start removes it, including the name older versions used.
+#[test]
+fn start_removes_leftover_temporary_files_of_the_remembered_release() {
+    let r = rig(1, None);
+    let new_name = crate::store::temp_path(&r.dir.0.join("update.json"));
+    let old_name = r.dir.0.join("update.tmp");
+    std::fs::write(&new_name, "{").unwrap();
+    std::fs::write(&old_name, "{").unwrap();
+    r.updater.load();
+    assert!(!new_name.exists() && !old_name.exists());
 }

@@ -4,6 +4,7 @@
 //! This module is transport-free: it turns values into JSON and JSON (or SSE lines) back into values, so
 //! it is tested without a network. [`crate::transport`] carries it over HTTP.
 
+use crate::lang::Language;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -41,6 +42,50 @@ pub struct ToolCall {
     pub name: String,
     /// Arguments as JSON text (models sometimes produce invalid JSON; parse defensively).
     pub arguments: String,
+}
+
+/// A call id of nine ASCII letters and digits: `prefix` (four characters) and five base-36 digits of the
+/// counter `n`. Every OpenAI-compatible provider accepts that shape (Mistral wants exactly nine
+/// alphanumerics). The host writes ids with the prefix `host`, parsed replies with `call`.
+#[must_use]
+pub(crate) fn call_id(prefix: &str, mut n: u32) -> String {
+    let mut digits = [b'0'; 5];
+    for d in digits.iter_mut().rev() {
+        *d = b"0123456789abcdefghijklmnopqrstuvwxyz"[(n % 36) as usize];
+        n /= 36;
+    }
+    format!("{prefix}{}", String::from_utf8_lossy(&digits))
+}
+
+/// The next id after `*counter` (which wraps within the five digits) that `taken` does not claim. The
+/// callers hold far fewer ids than there are digits, so this ends.
+pub(crate) fn fresh_call_id(
+    prefix: &str,
+    counter: &mut u32,
+    taken: impl Fn(&str) -> bool,
+) -> String {
+    const SPACE: u32 = 36 * 36 * 36 * 36 * 36;
+    loop {
+        let id = call_id(prefix, *counter);
+        *counter = (*counter + 1) % SPACE;
+        if !taken(&id) {
+            return id;
+        }
+    }
+}
+
+/// Give every call without an id one of its own (`call` and five digits), different from the ids the reply
+/// already has. Ids the provider sent are kept as they are.
+fn name_unnamed_calls(calls: &mut [ToolCall]) {
+    let sent: Vec<String> = calls
+        .iter()
+        .filter(|c| !c.id.is_empty())
+        .map(|c| c.id.clone())
+        .collect();
+    let mut next = 0;
+    for c in calls.iter_mut().filter(|c| c.id.is_empty()) {
+        c.id = fresh_call_id("call", &mut next, |id| sent.iter().any(|s| s == id));
+    }
 }
 
 /// One message in a conversation.
@@ -186,6 +231,35 @@ impl ChatRequest {
         }
         body
     }
+
+    /// Bytes this request sends, counted without building it: every message (the system prompt among them)
+    /// and every tool specification, which goes out again with each round. The basis of the estimate in
+    /// [`crate::usage`] when a provider reports no tokens.
+    #[must_use]
+    pub fn sent_bytes(&self) -> usize {
+        /// Counts what is written to it and keeps nothing.
+        struct Count(usize);
+        impl std::io::Write for Count {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0 += b.len();
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let tools: usize = self
+            .tools
+            .iter()
+            .map(|t| {
+                let mut n = Count(0);
+                // Counting cannot fail; a schema that will not serialise is counted as its name alone.
+                let _ = serde_json::to_writer(&mut n, &t.parameters);
+                t.name.len() + t.description.len() + n.0 + 48
+            })
+            .sum();
+        self.messages.iter().map(Message::size).sum::<usize>() + tools
+    }
 }
 
 /// Token and cost accounting for one response.
@@ -212,6 +286,19 @@ pub struct Completion {
     pub usage: Option<Usage>,
 }
 
+impl Completion {
+    /// Bytes the model sent back: its words and its tool calls. See [`ChatRequest::sent_bytes`].
+    #[must_use]
+    pub fn received_bytes(&self) -> usize {
+        self.text.len()
+            + self
+                .tool_calls
+                .iter()
+                .map(|c| c.name.len() + c.arguments.len() + 24)
+                .sum::<usize>()
+    }
+}
+
 /// Why a request failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmError {
@@ -236,7 +323,8 @@ impl fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 fn parse_usage(v: &Value) -> Option<Usage> {
-    let u = v.get("usage")?;
+    // Servers that stream usage send `"usage": null` on every chunk but the last: that is no usage.
+    let u = v.get("usage").filter(|u| u.is_object())?;
     Some(Usage {
         prompt_tokens: u
             .get("prompt_tokens")
@@ -274,7 +362,7 @@ pub fn parse_completion(body: &str) -> Result<Completion, LlmError> {
         .pointer("/choices/0")
         .ok_or_else(|| LlmError::Malformed("no choices".into()))?;
     let msg = choice.get("message").unwrap_or(&Value::Null);
-    let tool_calls = msg
+    let mut tool_calls: Vec<ToolCall> = msg
         .get("tool_calls")
         .and_then(Value::as_array)
         .map(|calls| {
@@ -296,6 +384,7 @@ pub fn parse_completion(body: &str) -> Result<Completion, LlmError> {
                 .collect()
         })
         .unwrap_or_default();
+    name_unnamed_calls(&mut tool_calls);
     Ok(Completion {
         text: msg
             .get("content")
@@ -327,11 +416,19 @@ struct PartialCall {
     arguments: String,
 }
 
+/// The most reply text plus tool-call arguments one streamed response may accumulate. A non-streamed body is
+/// capped at the same size in the transport; a stream has no length of its own, only the call deadline.
+const MAX_STREAMED: usize = 1024 * 1024;
+/// The most distinct tool calls one streamed response may open.
+const MAX_STREAMED_CALLS: usize = 32;
+
 /// Accumulates a streamed (SSE) response line by line.
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     text: String,
     calls: BTreeMap<usize, PartialCall>,
+    /// Bytes of text, names and arguments kept so far, against [`MAX_STREAMED`].
+    kept: usize,
     finish_reason: Option<String>,
     usage: Option<Usage>,
 }
@@ -366,6 +463,7 @@ impl StreamAccumulator {
             let delta = choice.get("delta").unwrap_or(&Value::Null);
             if let Some(t) = delta.get("content").and_then(Value::as_str) {
                 if !t.is_empty() {
+                    self.keep(t.len())?;
                     self.text.push_str(t);
                     events.push(StreamEvent::Text(t.to_owned()));
                 }
@@ -377,14 +475,28 @@ impl StreamAccumulator {
                         .and_then(Value::as_u64)
                         .and_then(|i| usize::try_from(i).ok())
                         .unwrap_or(0);
+                    if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
+                        return Err(LlmError::Malformed("too many tool calls".into()));
+                    }
+                    let id = c
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|i| !i.is_empty());
+                    let name = c.pointer("/function/name").and_then(Value::as_str);
+                    let args = c.pointer("/function/arguments").and_then(Value::as_str);
+                    self.keep(
+                        id.map_or(0, str::len)
+                            + name.map_or(0, str::len)
+                            + args.map_or(0, str::len),
+                    )?;
                     let p = self.calls.entry(index).or_default();
-                    if let Some(id) = c.get("id").and_then(Value::as_str) {
+                    if let Some(id) = id {
                         p.id = id.to_owned();
                     }
-                    if let Some(name) = c.pointer("/function/name").and_then(Value::as_str) {
+                    if let Some(name) = name {
                         p.name.push_str(name);
                     }
-                    if let Some(args) = c.pointer("/function/arguments").and_then(Value::as_str) {
+                    if let Some(args) = args {
                         p.arguments.push_str(args);
                     }
                 }
@@ -393,25 +505,37 @@ impl StreamAccumulator {
         Ok(events)
     }
 
+    /// Count `n` more bytes kept, failing once a response is larger than any sane reply.
+    fn keep(&mut self, n: usize) -> Result<(), LlmError> {
+        self.kept = self.kept.saturating_add(n);
+        if self.kept > MAX_STREAMED {
+            return Err(LlmError::Malformed("response too large".into()));
+        }
+        Ok(())
+    }
+
     /// The finished response.
     #[must_use]
     pub fn finish(self) -> Completion {
+        // The id arrives on a call's first chunk only (or never), so a missing one is made here, once per call.
+        let mut tool_calls: Vec<ToolCall> = self
+            .calls
+            .into_values()
+            .filter(|c| !c.name.is_empty())
+            .map(|c| ToolCall {
+                id: c.id,
+                name: c.name,
+                arguments: if c.arguments.trim().is_empty() {
+                    "{}".into()
+                } else {
+                    c.arguments
+                },
+            })
+            .collect();
+        name_unnamed_calls(&mut tool_calls);
         Completion {
             text: self.text,
-            tool_calls: self
-                .calls
-                .into_values()
-                .filter(|c| !c.name.is_empty())
-                .map(|c| ToolCall {
-                    id: c.id,
-                    name: c.name,
-                    arguments: if c.arguments.trim().is_empty() {
-                        "{}".into()
-                    } else {
-                        c.arguments
-                    },
-                })
-                .collect(),
+            tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage,
         }
@@ -420,19 +544,26 @@ impl StreamAccumulator {
 
 /// Cuts streamed text into speakable sentences so TTS can start before the reply is finished
 /// (REQ-VOI-004).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SentenceSplitter {
+    lang: &'static Language,
     buf: String,
 }
 
 /// A sentence is emitted early at a comma or space once it passes this length.
 const LONG_RUN: usize = 160;
-const ABBREVIATIONS: &[&str] = &[
-    "mr", "mrs", "ms", "dr", "st", "vs", "etc", "e.g", "i.e", "approx", "no",
-];
 
 impl SentenceSplitter {
-    fn ends_sentence(s: &str, i: usize) -> bool {
+    /// A splitter for text in `lang`, which says which abbreviations end in a full stop without ending the sentence.
+    #[must_use]
+    pub fn new(lang: &'static Language) -> Self {
+        Self {
+            lang,
+            buf: String::new(),
+        }
+    }
+
+    fn ends_sentence(&self, s: &str, i: usize) -> bool {
         let bytes = s.as_bytes();
         if !matches!(bytes[i], b'.' | b'!' | b'?') {
             return false;
@@ -447,7 +578,7 @@ impl SentenceSplitter {
                 .rfind(|c: char| c.is_whitespace())
                 .map_or(0, |p| p + 1);
             let word = s[word_start..i].to_ascii_lowercase();
-            if ABBREVIATIONS.contains(&word.as_str()) {
+            if self.lang.abbreviations.contains(&word.as_str()) {
                 return false;
             }
         }
@@ -461,15 +592,18 @@ impl SentenceSplitter {
         loop {
             let cut = (0..self.buf.len())
                 .filter(|&i| self.buf.is_char_boundary(i))
-                .find(|&i| Self::ends_sentence(&self.buf, i))
+                .find(|&i| self.ends_sentence(&self.buf, i))
                 .map(|i| i + 1)
                 .or_else(|| {
                     // No terminator for a long time: split at the last comma or space.
                     (self.buf.len() > LONG_RUN)
                         .then(|| {
-                            self.buf[..LONG_RUN.min(self.buf.len())]
-                                .rfind([',', ';', ' '])
-                                .map(|p| p + 1)
+                            // LONG_RUN is a byte count: back up to a character boundary before slicing.
+                            let mut end = LONG_RUN;
+                            while !self.buf.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            self.buf[..end].rfind([',', ';', ' ']).map(|p| p + 1)
                         })
                         .flatten()
                 });
@@ -656,6 +790,52 @@ mod tests {
         );
     }
 
+    fn well_formed(id: &str) -> bool {
+        id.len() == 9 && id.starts_with("call") && id.bytes().all(|b| b.is_ascii_alphanumeric())
+    }
+
+    #[test]
+    fn a_reply_with_calls_that_have_no_id_gets_distinct_well_formed_ones() {
+        let body = r#"{"choices":[{"message":{"content":null,"tool_calls":[
+            {"function":{"name":"a","arguments":"{}"}},
+            {"id":"","function":{"name":"b","arguments":"{}"}},
+            {"id":"keep_me-1","function":{"name":"c","arguments":"{}"}}]},
+            "finish_reason":"tool_calls"}]}"#;
+        let c = parse_completion(body).unwrap();
+        let ids: Vec<&str> = c.tool_calls.iter().map(|t| t.id.as_str()).collect();
+        assert!(well_formed(ids[0]) && well_formed(ids[1]), "{ids:?}");
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids[2], "keep_me-1", "a provider id is kept verbatim");
+    }
+
+    #[test]
+    fn a_generated_id_never_repeats_one_the_provider_sent() {
+        let body = r#"{"choices":[{"message":{"tool_calls":[
+            {"id":"call00000","function":{"name":"a"}},
+            {"function":{"name":"b"}}]}}]}"#;
+        let c = parse_completion(body).unwrap();
+        assert_eq!(c.tool_calls[0].id, "call00000");
+        assert!(well_formed(&c.tool_calls[1].id));
+        assert_ne!(c.tool_calls[1].id, "call00000");
+    }
+
+    #[test]
+    fn streamed_calls_without_an_id_get_one_each_not_one_per_chunk() {
+        let (_, c) = stream(&[
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"a","arguments":""}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"","function":{"name":"b"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":2,"id":"x9","function":{"name":"c"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{}"}}]}}]}"#,
+        ])
+        .unwrap();
+        let ids: Vec<&str> = c.tool_calls.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(well_formed(ids[0]) && well_formed(ids[1]), "{ids:?}");
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids[2], "x9");
+    }
+
     #[test]
     fn mid_stream_errors_surface() {
         let err = stream(&[r#"data: {"error":{"message":"upstream failed"}}"#]).unwrap_err();
@@ -667,7 +847,7 @@ mod tests {
     }
 
     fn split_all(chunks: &[&str]) -> Vec<String> {
-        let mut s = SentenceSplitter::default();
+        let mut s = SentenceSplitter::new(crate::lang::DEFAULT);
         let mut out: Vec<String> = chunks.iter().flat_map(|c| s.push(c)).collect();
         out.extend(s.flush());
         out
@@ -715,7 +895,7 @@ mod tests {
 
     #[test]
     fn a_sentence_split_across_chunks_waits_for_its_end() {
-        let mut s = SentenceSplitter::default();
+        let mut s = SentenceSplitter::new(crate::lang::DEFAULT);
         assert!(s.push("Hello wor").is_empty());
         assert!(
             s.push("ld.").is_empty(),
@@ -733,5 +913,52 @@ mod tests {
             parts.len() >= 2 && parts.iter().all(|p| p.len() <= 170),
             "{parts:?}"
         );
+    }
+
+    #[test]
+    fn a_long_run_of_multibyte_text_does_not_panic_the_splitter() {
+        // 3-byte characters put byte 160 inside a character; the cut must land on a boundary.
+        let long = "\u{4e16}\u{754c}\u{4e16}\u{754c} ".repeat(30);
+        let parts = split_all(&[&long]);
+        assert!(parts.len() >= 2, "{parts:?}");
+        assert_eq!(parts.join("").replace(' ', ""), long.replace(' ', ""));
+    }
+
+    #[test]
+    fn a_null_usage_field_is_no_usage() {
+        // OpenAI-compatible servers put `"usage": null` on every chunk but the last.
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(r#"data: {"choices":[{"delta":{"content":"a"}}],"usage":null}"#)
+            .unwrap();
+        assert_eq!(acc.finish().usage, None);
+        let mut acc = StreamAccumulator::default();
+        acc.feed_line(r#"data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#)
+            .unwrap();
+        acc.feed_line(r#"data: {"choices":[],"usage":null}"#)
+            .unwrap();
+        assert_eq!(acc.finish().usage.map(|u| u.prompt_tokens), Some(3));
+    }
+
+    #[test]
+    fn a_stream_that_never_ends_cannot_grow_the_reply_without_limit() {
+        let mut acc = StreamAccumulator::default();
+        let line = format!(
+            r#"data: {{"choices":[{{"delta":{{"content":"{}"}}}}]}}"#,
+            "x".repeat(60_000)
+        );
+        let failed = (0..100).any(|_| acc.feed_line(&line).is_err());
+        assert!(failed, "6 MB of reply text was accepted");
+    }
+
+    #[test]
+    fn a_stream_cannot_open_unbounded_tool_calls() {
+        let mut acc = StreamAccumulator::default();
+        let failed = (0..1000).any(|i| {
+            let line = format!(
+                r#"data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":{i},"function":{{"name":"a"}}}}]}}}}]}}"#
+            );
+            acc.feed_line(&line).is_err()
+        });
+        assert!(failed, "1000 tool calls were accepted");
     }
 }

@@ -7,6 +7,7 @@ import { TimeField } from "../timefield.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { DAYS, fmt, hhmm, parts, repeatText, span, whenText, zoneName } from "../time.ts";
 import type { ScheduleItem, ScheduleKind, ScheduleList } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 export const NAMES: Record<ScheduleKind, string> = { timer: "Timer", alarm: "Alarm", reminder: "Reminder" };
 const PLACEHOLDER: Record<ScheduleKind, string> = {
@@ -25,6 +26,8 @@ const today = () => parts(Math.floor(Date.now() / 1000), zone()).date;
 
 export function whenLine(i: ScheduleItem, now: number): string {
   const z = zone();
+  if (i.kind === "reminder" && i.countdown)
+    return `Says it in ${span(i.seconds_left)} (${whenText(i.fire_at, now, z)})`;
   if (i.kind === "timer") return `Rings in ${span(i.seconds_left)} (${whenText(i.fire_at, now, z)})`;
   if (i.repeat)
     return `${repeatText(i.repeat)} at ${fmt(i.fire_at, z, { hour: "numeric", minute: "2-digit" })}. Next: ${whenText(i.fire_at, now, z)}`;
@@ -43,6 +46,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const [days, setDays] = useState<number[]>([]);
   const [date, setDate] = useState(today());
   const [time2, setTime2] = useState("09:00");
+  const [when, setWhen] = useState<"delay" | "time">("time");
   const [open, setOpen] = useState(false);
 
   usePolled(async () => {
@@ -65,11 +69,12 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
     setDays([]);
     setDate(today());
     setTime2("09:00");
+    setWhen("time");
   };
 
   const submit = async (ev: Event) => {
     ev.preventDefault();
-    const body = reminderBody({ kind, label, amount, unit, time, days, date, time2 });
+    const body = reminderBody({ kind, label, amount, unit, time, days, date, time2, when });
     if (typeof body === "string") {
       say(body, true);
       return;
@@ -95,7 +100,12 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
     } else if (i.kind === "alarm") {
       setTime(i.repeat ? hhmm(i.repeat.hour, i.repeat.minute) : parts(i.fire_at, zone()).time);
       setDays(i.repeat ? i.repeat.days : []);
+    } else if (i.countdown) {
+      setWhen("delay");
+      setAmount(String(Math.max(1, Math.ceil(i.seconds_left / 60))));
+      setUnit("60");
     } else {
+      setWhen("time");
       const q = parts(i.fire_at, zone());
       setDate(q.date);
       setTime2(q.time);
@@ -104,7 +114,8 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   };
 
   const cancel = async (i: ScheduleItem) => {
-    if (!confirm("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?")) return;
+    if (!(await ask("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?", "Cancel it", "Keep it")))
+      return;
     try {
       setData(await api<ScheduleList>("DELETE", "/api/schedule/" + i.id));
       say("Cancelled.");
@@ -116,7 +127,9 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const note =
     unavailable ||
     (data
-      ? (data.clock_valid ? "" : "The device clock is not set yet, so nothing will ring until it is. ") +
+      ? (data.clock_valid
+          ? ""
+          : "The device clock is not set yet. Timers and reminders after a delay still count down and ring; alarms and reminders at a time wait until it is. ") +
         "Times are in " +
         zoneName(zone()) +
         ", the device's time zone."
@@ -166,10 +179,28 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
 
       <Dialog id="clockdialog" title={editing ? "Change this " + noun : ADD[kind]} open={open} onClose={reset}>
         <form class="dlgform" onSubmit={submit}>
-          {kind === "timer" ? (
+          {kind === "reminder" ? (
+            <div class="srow">
+              <div class="slabel">
+                <label for="rwhen">When</label>
+                <p class="mut">After a delay still works when the device clock is not set.</p>
+              </div>
+              <div class="sctl">
+                <select
+                  id="rwhen"
+                  value={when}
+                  onChange={(e) => setWhen(e.currentTarget.value === "delay" ? "delay" : "time")}
+                >
+                  <option value="delay">After a delay</option>
+                  <option value="time">At a time</option>
+                </select>
+              </div>
+            </div>
+          ) : null}
+          {kind === "timer" || (kind === "reminder" && when === "delay") ? (
             <div class="srow" id="rtimer">
               <div class="slabel">
-                <label for="ramount">Length</label>
+                <label for="ramount">{kind === "timer" ? "Length" : "Wait"}</label>
               </div>
               <div class="sctl">
                 <div class="row">
@@ -177,7 +208,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
                     id="ramount"
                     type="number"
                     min="1"
-                    max="10080"
+                    max={kind === "timer" ? "10080" : undefined}
                     value={amount}
                     onInput={(e) => setAmount(e.currentTarget.value)}
                   />
@@ -225,7 +256,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
               </div>
             </div>
           ) : null}
-          {kind === "reminder" ? (
+          {kind === "reminder" && when === "time" ? (
             <div id="rrem">
               <div class="srow">
                 <div class="slabel">
@@ -276,7 +307,12 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
 const PAGES: { id: string; label: string; kind?: ScheduleKind; intro: string }[] = [
   { id: "alarms", label: "Alarms", kind: "alarm", intro: "Ring at a time of day, once or on the days you choose." },
   { id: "timers", label: "Timers", kind: "timer", intro: "Count down from a length of time." },
-  { id: "reminders", label: "Reminders", kind: "reminder", intro: "Say a message on a date and a time." },
+  {
+    id: "reminders",
+    label: "Reminders",
+    kind: "reminder",
+    intro: "Say a message after a delay, or on a date and a time.",
+  },
   { id: "stopwatch", label: "Stopwatch", intro: "Count up, and take laps." },
 ];
 

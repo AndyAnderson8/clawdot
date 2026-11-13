@@ -7,10 +7,17 @@
 //! (half-duplex), the follow-up window re-opens listening without the wake word, and the "thinking" earcon
 //! plays only if the reply is slow.
 //!
-//! [`voice_turn`] turns one captured utterance into text, asks a responder for a reply, and synthesises it one
-//! sentence at a time so playback can start before the whole reply is spoken. Speech-to-text and text-to-speech
-//! are traits; the providers live elsewhere.
+//! A turn has two halves. [`hear`] turns one captured utterance into text and asks a responder for the whole
+//! reply. Then the reply is split into [`sentences`] and each is synthesised on its own, one request each.
+//! [`voice_turn`] does both halves and returns every sentence's audio together: that is the form for the console
+//! and `--voice-in`, which have no speaker to start early. The satellite session calls [`hear`] and runs the
+//! second half itself, one sentence at a time, sending each sentence's audio to the speaker as soon as it is made
+//! so playback starts after one synthesis, not after all of them (see `satellite`). The reply text is still
+//! complete before the first synthesis starts; streaming the model's text is a separate step
+//! (docs/architecture/speech-latency.md). Speech-to-text and text-to-speech are traits; the providers live
+//! elsewhere.
 
+use crate::lang::Language;
 use crate::llm::SentenceSplitter;
 use crate::vad::{Config as VadConfig, Endpointer, Event};
 use std::future::Future;
@@ -193,7 +200,8 @@ impl Dialog {
         {
             if self.interrupt.is_none() {
                 let mut vad = self.cfg.vad;
-                vad.no_speech_ms = 4_000;
+                // Derived from the tuned value so a device can tune it (REQ-VOI-025).
+                vad.no_speech_ms = vad.no_speech_ms.min(4_000);
                 self.interrupt = Some(Endpointer::new(vad));
                 return Step::Cue(Cue::Wake);
             }
@@ -318,6 +326,20 @@ pub trait Synthesizer {
     /// # Errors
     /// A message describing why it failed.
     fn synthesize(&self, text: &str) -> impl Future<Output = Result<Vec<i16>, String>> + Send;
+
+    /// Synthesise with `voice` for this one call, leaving the voice every other line uses alone (a portal
+    /// preview). A provider with no choice of voice speaks as usual.
+    ///
+    /// # Errors
+    /// A message describing why it failed.
+    fn synthesize_voice(
+        &self,
+        text: &str,
+        voice: &str,
+    ) -> impl Future<Output = Result<Vec<i16>, String>> + Send {
+        let _ = voice;
+        self.synthesize(text)
+    }
 }
 
 /// The result of one voice turn.
@@ -336,20 +358,28 @@ pub struct VoiceOutcome {
 /// Spoken when speech recognition fails outright.
 pub const COULD_NOT_UNDERSTAND: &str = "Sorry, I couldn't make that out.";
 
-/// Turn one utterance into a spoken reply: transcribe, ask `respond`, then synthesise sentence by sentence.
-///
-/// An empty transcript produces no reply (the satellite shows its error cue). A transcription failure speaks a
-/// short apology without calling `respond`. A synthesis failure keeps the text reply and records the problem.
-pub async fn voice_turn<T, S, F, Fut>(stt: &T, tts: &S, pcm: &[i16], respond: F) -> VoiceOutcome
+/// What was understood and answered in one turn, before any of it is spoken.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Heard {
+    /// What the user said, if it could be understood.
+    pub transcript: Option<String>,
+    /// What the assistant says back (empty when nothing should be spoken).
+    pub reply: String,
+    /// Problems worth logging.
+    pub problems: Vec<String>,
+}
+
+/// The first half of a turn: transcribe, then ask `respond`. An empty transcript produces no reply. A
+/// transcription failure makes the reply a short apology without calling `respond`.
+pub async fn hear<T, F, Fut>(stt: &T, pcm: &[i16], respond: F) -> Heard
 where
     T: Transcriber,
-    S: Synthesizer,
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = String>,
 {
-    let mut out = VoiceOutcome::default();
+    let mut out = Heard::default();
     match stt.transcribe(pcm).await {
-        Ok(t) if t.trim().is_empty() => return out,
+        Ok(t) if t.trim().is_empty() => {}
         Ok(t) => {
             let t = t.trim().to_owned();
             out.reply = respond(t.clone()).await;
@@ -360,23 +390,77 @@ where
             out.reply = COULD_NOT_UNDERSTAND.into();
         }
     }
-    out.audio = speak_text(tts, &out.reply, &mut out.problems).await;
+    out
+}
+
+/// Turn one utterance into a spoken reply, all of it before returning: [`hear`], then synthesise every sentence
+/// in order. This is the whole-reply form that the console and `--voice-in` use, which have no playback clock to
+/// pace against. The satellite session does not use it: it calls [`hear`] and then synthesises
+/// [`sentences`] one at a time while earlier ones are already playing.
+///
+/// An empty transcript produces no reply (the satellite shows its error cue). A transcription failure speaks a
+/// short apology without calling `respond`. A synthesis failure keeps the text reply and records the problem.
+pub async fn voice_turn<T, S, F, Fut>(
+    lang: &'static Language,
+    stt: &T,
+    tts: &S,
+    pcm: &[i16],
+    respond: F,
+) -> VoiceOutcome
+where
+    T: Transcriber,
+    S: Synthesizer,
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = String>,
+{
+    let heard = hear(stt, pcm, respond).await;
+    let mut out = VoiceOutcome {
+        transcript: heard.transcript,
+        reply: heard.reply,
+        audio: Vec::new(),
+        problems: heard.problems,
+    };
+    if out.transcript.is_some() || !out.reply.is_empty() {
+        out.audio = speak_text(lang, tts, &out.reply, &mut out.problems).await;
+    }
+    out
+}
+
+/// The sentences of `text`, in the order they are to be spoken. Each is synthesised on its own.
+#[must_use]
+pub fn sentences(lang: &'static Language, text: &str) -> Vec<String> {
+    let mut splitter = SentenceSplitter::new(lang);
+    let mut out = splitter.push(text);
+    out.extend(splitter.flush());
     out
 }
 
 /// Synthesise `text` one sentence at a time. Stops at the first failure, keeping what was already made and
 /// recording the problem.
 pub async fn speak_text<S: Synthesizer>(
+    lang: &'static Language,
     tts: &S,
     text: &str,
     problems: &mut Vec<String>,
 ) -> Vec<Vec<i16>> {
-    let mut splitter = SentenceSplitter::default();
-    let mut sentences = splitter.push(text);
-    sentences.extend(splitter.flush());
+    speak_text_as(lang, tts, text, None, problems).await
+}
+
+/// Like [`speak_text`], in `voice` for these sentences only when one is given.
+pub async fn speak_text_as<S: Synthesizer>(
+    lang: &'static Language,
+    tts: &S,
+    text: &str,
+    voice: Option<&str>,
+    problems: &mut Vec<String>,
+) -> Vec<Vec<i16>> {
     let mut audio = Vec::new();
-    for s in sentences {
-        match tts.synthesize(&s).await {
+    for s in sentences(lang, text) {
+        let made = match voice {
+            Some(v) => tts.synthesize_voice(&s, v).await,
+            None => tts.synthesize(&s).await,
+        };
+        match made {
             Ok(a) => audio.push(a),
             Err(e) => {
                 problems.push(format!("speech synthesis: {e}"));
@@ -553,6 +637,26 @@ mod tests {
         got
     }
 
+    // REQ-VOI-025: the stop-while-working window follows the tuned no-speech value, capped at 4 seconds.
+    #[test]
+    fn the_stop_capture_window_follows_a_shorter_tuned_no_speech_value() {
+        let mut cfg = Config::default();
+        cfg.vad.no_speech_ms = 1_000;
+        let mut d = Dialog::new(cfg);
+        d.on_wake();
+        assert!(matches!(speak_into(&mut d, 0), Step::Utterance(_)));
+        d.on_wake();
+        assert_eq!(drain(&mut d, &silence(1_500)), Step::Interrupt(Vec::new()));
+        // A longer tuned value is still capped at 4 seconds.
+        let mut cfg = Config::default();
+        cfg.vad.no_speech_ms = 20_000;
+        let mut d = Dialog::new(cfg);
+        d.on_wake();
+        assert!(matches!(speak_into(&mut d, 0), Step::Utterance(_)));
+        d.on_wake();
+        assert_eq!(drain(&mut d, &silence(5_000)), Step::Interrupt(Vec::new()));
+    }
+
     // REQ-VOI-020: while a turn runs and nothing is playing, a wake word opens a stop capture and nothing else.
     #[test]
     fn a_wake_word_while_thinking_opens_a_stop_capture_and_ordinary_audio_is_still_ignored() {
@@ -692,6 +796,7 @@ mod tests {
     async fn a_turn_transcribes_responds_and_speaks_sentence_by_sentence() {
         let tts = voice(None);
         let out = voice_turn(
+            crate::lang::DEFAULT,
             &Heard(Ok("  what time is it ")),
             &tts,
             &[0; 10],
@@ -714,9 +819,13 @@ mod tests {
     #[tokio::test]
     async fn nothing_heard_means_nothing_said() {
         let tts = voice(None);
-        let out = voice_turn(&Heard(Ok("   ")), &tts, &[], |_| async {
-            panic!("must not respond")
-        })
+        let out = voice_turn(
+            crate::lang::DEFAULT,
+            &Heard(Ok("   ")),
+            &tts,
+            &[],
+            |_| async { panic!("must not respond") },
+        )
         .await;
         assert_eq!(out, VoiceOutcome::default());
     }
@@ -724,9 +833,13 @@ mod tests {
     #[tokio::test]
     async fn a_recognition_failure_apologises_without_asking_the_assistant() {
         let tts = voice(None);
-        let out = voice_turn(&Heard(Err("timeout")), &tts, &[], |_| async {
-            panic!("must not respond")
-        })
+        let out = voice_turn(
+            crate::lang::DEFAULT,
+            &Heard(Err("timeout")),
+            &tts,
+            &[],
+            |_| async { panic!("must not respond") },
+        )
         .await;
         assert_eq!(out.reply, COULD_NOT_UNDERSTAND);
         assert!(out.transcript.is_none());
@@ -737,9 +850,13 @@ mod tests {
     #[tokio::test]
     async fn a_synthesis_failure_keeps_the_text_and_records_the_problem() {
         let tts = voice(Some("Second"));
-        let out = voice_turn(&Heard(Ok("hi")), &tts, &[], |_| async {
-            "First one. Second one. Third one.".to_owned()
-        })
+        let out = voice_turn(
+            crate::lang::DEFAULT,
+            &Heard(Ok("hi")),
+            &tts,
+            &[],
+            |_| async { "First one. Second one. Third one.".to_owned() },
+        )
         .await;
         assert_eq!(out.reply, "First one. Second one. Third one.");
         assert_eq!(

@@ -6,12 +6,18 @@
 //! new file starts, so the disk holds at most twice the cap. Start-up tolerates a crash: a half-written last
 //! line or any damaged line is skipped, never an error.
 //!
+//! The day's counts of actions are also kept in their own small file, `audit-counts.json`, because the log
+//! forgets: it keeps only the current file and one rotated file, so on a busy day a restart that recounted from
+//! the log alone would undercount and loosen the caps. At start the larger of the two counts is used.
+//!
 //! The log is written from the session loop with text that may come from outside (a tool result, a model's
 //! arguments). So everything is made safe on the way in: secrets and tokens are replaced, each value is
 //! clipped, control characters are removed, and nothing the user said or any audio is ever written.
 
+use crate::app::persist::Writer;
 use crate::sched::Ts;
 use crate::session::Tier;
+use crate::store::JsonStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
@@ -219,6 +225,17 @@ struct Counts {
     costly: u32,
 }
 
+/// What `audit-counts.json` holds: the counts for one local day.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+struct SavedCounts {
+    day: i64,
+    actions: u32,
+    costly: u32,
+}
+
+/// The counts file's schema version.
+const COUNTS_SCHEMA: u32 = 1;
+
 #[derive(Debug)]
 enum Sink {
     Disk {
@@ -242,6 +259,10 @@ struct State {
     next_id: u64,
     next_turn: u64,
     counts: Counts,
+    /// Where the day's counts are kept besides the log (`None` for the in-memory log).
+    counts_store: Option<JsonStore>,
+    /// The background writer, when the core has one; without it the counts file is written in place.
+    writer: Option<Arc<Writer>>,
     /// Damaged lines seen when the log was last read.
     corrupt_lines: u64,
     /// Records that could not be written.
@@ -314,6 +335,8 @@ impl AuditLog {
                 next_id: 1,
                 next_turn: 1,
                 counts: Counts::default(),
+                counts_store: None,
+                writer: None,
                 corrupt_lines: 0,
                 write_errors: 0,
             }),
@@ -333,12 +356,16 @@ impl AuditLog {
         let mut max_turn = 0;
         let mut corrupt = 0;
         for p in [&old, &path] {
-            let (records, bad, _) = read_lines(p);
-            corrupt += bad;
-            for r in &records {
-                max_id = max_id.max(r.id);
-                max_turn = max_turn.max(r.turn);
-            }
+            let Ok(file) = fs::File::open(p) else {
+                continue;
+            };
+            each_file_line(file, |line| match parse_line(line) {
+                Some(r) => {
+                    max_id = max_id.max(r.id);
+                    max_turn = max_turn.max(r.turn);
+                }
+                None => corrupt += 1,
+            });
         }
         let size = fs::metadata(&path).map_or(0, |m| m.len());
         let needs_newline = size > 0 && !ends_with_newline(&path);
@@ -363,10 +390,18 @@ impl AuditLog {
                 next_id: max_id.saturating_add(1),
                 next_turn: max_turn.saturating_add(1),
                 counts: Counts::default(),
+                counts_store: Some(JsonStore::new(dir.join("audit-counts.json"), COUNTS_SCHEMA)),
+                writer: None,
                 corrupt_lines: corrupt,
                 write_errors: 0,
             }),
         })
+    }
+
+    /// Hand the counts file to the background writer, so recording an action does not wait for a second write
+    /// to flash. Without one the file is written in place.
+    pub fn set_writer(&self, writer: Option<Arc<Writer>>) {
+        lock(&self.state).writer = writer;
     }
 
     /// The caps and the dry-run switch in force.
@@ -474,12 +509,8 @@ impl AuditLog {
             return None;
         }
         line.push('\n');
-        if let Err(e) = s.write(&line) {
-            s.write_errors = s.write_errors.saturating_add(1);
-            crate::diag::error(&format!("could not write the audit log: {e}"));
-            return None;
-        }
-        s.next_id = id.saturating_add(1);
+        // The daily caps count what ran, whether or not the record could be written: a full or read-only disk
+        // must not turn the caps off (REQ-SEC-016).
         let counted = a.decision == decision::RAN || a.decision == decision::APPROVED;
         if counted && a.tier.is_some_and(|t| t != Tier::ReadOnly) {
             s.load_counts(day);
@@ -487,7 +518,14 @@ impl AuditLog {
             if a.tier >= Some(Tier::Costly) {
                 s.counts.costly = s.counts.costly.saturating_add(1);
             }
+            s.save_counts();
         }
+        if let Err(e) = s.write(&line) {
+            s.write_errors = s.write_errors.saturating_add(1);
+            crate::diag::error(&format!("could not write the audit log: {e}"));
+            return None;
+        }
+        s.next_id = id.saturating_add(1);
         Some(id)
     }
 
@@ -510,25 +548,40 @@ impl AuditLog {
     /// last few calls that failed (tool and time only; no arguments or result text). REQ-CFG-063.
     #[must_use]
     pub fn summary(&self) -> Value {
-        let s = lock(&self.state);
-        let (mut all, _) = s.read_all();
-        drop(s);
-        all.sort_by_key(|r| std::cmp::Reverse(r.id));
+        let source = lock(&self.state).source();
+        let mut records = 0_usize;
         let mut by_decision = std::collections::BTreeMap::<String, u64>::new();
         let mut by_tier = std::collections::BTreeMap::<String, u64>::new();
-        for r in &all {
+        // The record with the highest id is the newest and the one with the lowest the oldest; among equal ids
+        // the first in the file is the newest and the last the oldest, as a stable sort by id would give.
+        let mut newest: Option<(u64, Ts)> = None;
+        let mut oldest: Option<(u64, Ts)> = None;
+        // (id, ts, tool, decision) of every failed call; the ten with the highest ids are kept at the end.
+        let mut failures: Vec<(u64, Ts, String, String)> = Vec::new();
+        source.each_line(|line| {
+            let Some(r) = parse_line(line) else { return };
+            records += 1;
             *by_decision.entry(r.decision.clone()).or_default() += 1;
             *by_tier.entry(r.tier.clone()).or_default() += 1;
-        }
-        let failed: Vec<Value> = all
-            .iter()
-            .filter(|r| r.status.as_deref() == Some("error"))
+            if newest.is_none_or(|(id, _)| r.id > id) {
+                newest = Some((r.id, r.ts));
+            }
+            if oldest.is_none_or(|(id, _)| r.id <= id) {
+                oldest = Some((r.id, r.ts));
+            }
+            if r.status.as_deref() == Some("error") {
+                failures.push((r.id, r.ts, r.tool, r.decision));
+            }
+        });
+        failures.sort_by_key(|f| std::cmp::Reverse(f.0));
+        let failed: Vec<Value> = failures
+            .into_iter()
             .take(10)
-            .map(|r| serde_json::json!({ "ts": r.ts, "tool": r.tool, "decision": r.decision }))
+            .map(|(_, ts, tool, decision)| json!({ "ts": ts, "tool": tool, "decision": decision }))
             .collect();
-        serde_json::json!({
-            "records": all.len(), "by_decision": by_decision, "by_tier": by_tier,
-            "newest": all.first().map(|r| r.ts), "oldest": all.last().map(|r| r.ts),
+        json!({
+            "records": records, "by_decision": by_decision, "by_tier": by_tier,
+            "newest": newest.map(|n| n.1), "oldest": oldest.map(|o| o.1),
             "recent_failures": failed,
         })
     }
@@ -536,13 +589,68 @@ impl AuditLog {
     /// Records matching `q`, newest first.
     #[must_use]
     pub fn query(&self, q: &Query) -> Page {
-        let mut s = lock(&self.state);
-        let (mut all, bad) = s.read_all();
-        s.corrupt_lines = bad;
-        drop(s);
+        let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+        // Records are appended in id order, so the newest are at the end of the newest file: read from there
+        // and stop as soon as the page is full and one more match proves there is a next page. If an id is
+        // ever not lower than the one before it (a hand-edited file), fall back to reading everything.
+        let source = lock(&self.state).source();
+        let mut records: Vec<Record> = Vec::new();
+        let mut more = false;
+        let mut ordered = true;
+        let mut bad = 0_u64;
+        let mut stopped = false;
+        let mut last_id = u64::MAX;
+        source.each_line_rev(|line| {
+            let Some(r) = parse_line(line) else {
+                bad += 1;
+                return true;
+            };
+            if r.id >= last_id {
+                ordered = false;
+                return false;
+            }
+            last_id = r.id;
+            if !q.matches(&r) {
+                return true;
+            }
+            if records.len() >= limit {
+                more = true;
+                stopped = true;
+                return false;
+            }
+            records.push(r);
+            true
+        });
+        if !ordered {
+            return self.query_sorted(q, limit);
+        }
+        if !stopped {
+            // The whole log was read, so the damaged-line figure is current.
+            lock(&self.state).corrupt_lines = bad;
+        }
+        let next_before = if more {
+            records.last().map(|r| r.id)
+        } else {
+            None
+        };
+        Page {
+            records,
+            next_before,
+        }
+    }
+
+    /// [`AuditLog::query`] for a log whose ids are not in order: read everything, sort, drop repeated ids.
+    fn query_sorted(&self, q: &Query, limit: usize) -> Page {
+        let source = lock(&self.state).source();
+        let mut all: Vec<Record> = Vec::new();
+        let mut bad = 0_u64;
+        source.each_line(|line| match parse_line(line) {
+            Some(r) => all.push(r),
+            None => bad += 1,
+        });
+        lock(&self.state).corrupt_lines = bad;
         all.sort_by_key(|r| std::cmp::Reverse(r.id));
         all.dedup_by_key(|r| r.id);
-        let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
         let mut matched = all.into_iter().filter(|r| q.matches(r));
         let records: Vec<Record> = matched.by_ref().take(limit).collect();
         let next_before = if matched.next().is_some() {
@@ -619,41 +727,35 @@ impl State {
         }
     }
 
-    fn read_all(&self) -> (Vec<Record>, u64) {
+    /// What a read of the log works from. Taken under the lock; the reading itself needs no lock, because open
+    /// file handles keep pointing at the file they were opened on even if it is rotated meanwhile.
+    fn source(&self) -> Source {
         match &self.sink {
-            Sink::Memory { lines, .. } => {
-                let mut out = Vec::new();
-                let mut bad = 0;
-                for l in lines {
-                    match parse_line(l) {
-                        Some(r) => out.push(r),
-                        None => bad += 1,
-                    }
-                }
-                (out, bad)
-            }
-            Sink::Disk { path, old, .. } => {
-                let (mut a, bad_a, _) = read_lines(old);
-                let (b, bad_b, _) = read_lines(path);
-                a.extend(b);
-                (a, bad_a + bad_b)
-            }
+            Sink::Memory { lines, .. } => Source::Memory(lines.iter().cloned().collect()),
+            Sink::Disk { path, old, .. } => Source::Files {
+                old: fs::File::open(old).ok(),
+                current: fs::File::open(path).ok(),
+            },
         }
     }
 
     /// Make the day's counters match the log (it is the record of what ran), the first time a day is seen.
+    /// After that [`AuditLog::record`] keeps them up to date, so this does not run again for the same day.
     fn load_counts(&mut self, day: i64) {
         if self.counts.known && self.counts.day == day {
             return;
         }
-        let (records, _) = self.read_all();
         let mut c = Counts {
             day,
             known: true,
             actions: 0,
             costly: 0,
         };
-        for r in records.iter().filter(|r| r.day == day) {
+        self.source().each_line(|line| {
+            let Some(r) = parse_line(line) else { return };
+            if r.day != day {
+                return;
+            }
             if r.decision == decision::RAN || r.decision == decision::APPROVED {
                 if r.tier != Tier::ReadOnly.label() && r.tier != "unknown" {
                     c.actions = c.actions.saturating_add(1);
@@ -662,8 +764,166 @@ impl State {
                     c.costly = c.costly.saturating_add(1);
                 }
             }
+        });
+        // The log may have rotated away some of the day; the counts file has not forgotten them. Take the larger.
+        // A missing or unreadable file changes nothing: the recount stands.
+        if let Some(saved) = self
+            .counts_store
+            .as_ref()
+            .and_then(|st| st.load::<SavedCounts>().ok())
+            .filter(|saved| saved.day == day)
+        {
+            c.actions = c.actions.max(saved.actions);
+            c.costly = c.costly.max(saved.costly);
         }
         self.counts = c;
+    }
+
+    /// Write the day's counts to their own file. A failure is reported, never fatal: the counts in memory still
+    /// hold, so a full or read-only disk does not turn the caps off (REQ-SEC-016).
+    fn save_counts(&self) {
+        let Some(store) = &self.counts_store else {
+            return;
+        };
+        let saved = SavedCounts {
+            day: self.counts.day,
+            actions: self.counts.actions,
+            costly: self.counts.costly,
+        };
+        if let Some(w) = &self.writer {
+            w.submit_with(store, || store.encode(&saved));
+        } else if let Err(e) = store.save(&saved) {
+            crate::diag::error(&format!("could not save the action counts: {e}"));
+        }
+    }
+}
+
+/// The log as lines, ready to read without the lock.
+enum Source {
+    /// The in-memory log, oldest line first.
+    Memory(Vec<String>),
+    /// The rotated file and the current one (either may be missing).
+    Files {
+        old: Option<fs::File>,
+        current: Option<fs::File>,
+    },
+}
+
+impl Source {
+    /// Every non-blank line, oldest first.
+    fn each_line(self, mut f: impl FnMut(&str)) {
+        match self {
+            Self::Memory(lines) => {
+                for l in lines.iter().filter(|l| !l.trim().is_empty()) {
+                    f(l);
+                }
+            }
+            Self::Files { old, current } => {
+                for file in [old, current].into_iter().flatten() {
+                    each_file_line(file, &mut f);
+                }
+            }
+        }
+    }
+
+    /// Non-blank lines, newest first, until `f` returns false.
+    fn each_line_rev(self, mut f: impl FnMut(&str) -> bool) {
+        match self {
+            Self::Memory(lines) => {
+                for l in lines.iter().rev().filter(|l| !l.trim().is_empty()) {
+                    if !f(l) {
+                        return;
+                    }
+                }
+            }
+            Self::Files { old, current } => {
+                for file in [current, old].into_iter().flatten() {
+                    let mut lines = RevLines::new(file, REV_CHUNK);
+                    while let Some(l) = lines.next_line() {
+                        let text = String::from_utf8_lossy(&l);
+                        if !text.trim().is_empty() && !f(&text) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Call `f` with each non-blank line of a file, oldest first, without holding the whole file.
+fn each_file_line(file: fs::File, mut f: impl FnMut(&str)) {
+    use std::io::BufRead;
+    let mut reader = io::BufReader::new(file);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&buf);
+                if !text.trim().is_empty() {
+                    f(&text);
+                }
+            }
+        }
+    }
+}
+
+/// How much of the end of a file is read at a time when reading newest first.
+const REV_CHUNK: usize = 4096;
+
+/// The lines of a file from the last to the first, reading it backwards in chunks.
+struct RevLines {
+    file: fs::File,
+    chunk: usize,
+    /// Bytes before this offset have not been read yet.
+    pos: u64,
+    /// The start of a line whose beginning is in an earlier chunk.
+    carry: Vec<u8>,
+    /// Complete lines read but not yet handed out, in file order.
+    ready: Vec<Vec<u8>>,
+}
+
+impl RevLines {
+    fn new(mut file: fs::File, chunk: usize) -> Self {
+        use std::io::{Seek, SeekFrom};
+        let pos = file.seek(SeekFrom::End(0)).unwrap_or(0);
+        Self {
+            file,
+            chunk: chunk.max(1),
+            pos,
+            carry: Vec::new(),
+            ready: Vec::new(),
+        }
+    }
+
+    /// The next line towards the start of the file, without its newline.
+    fn next_line(&mut self) -> Option<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        loop {
+            if let Some(line) = self.ready.pop() {
+                return Some(line);
+            }
+            if self.pos == 0 {
+                return (!self.carry.is_empty()).then(|| std::mem::take(&mut self.carry));
+            }
+            let n = u64::try_from(self.chunk).map_or(self.pos, |c| c.min(self.pos));
+            self.pos -= n;
+            let mut data = vec![0_u8; usize::try_from(n).unwrap_or(self.chunk)];
+            if self.file.seek(SeekFrom::Start(self.pos)).is_err()
+                || self.file.read_exact(&mut data).is_err()
+            {
+                self.pos = 0;
+                self.carry.clear();
+                return None;
+            }
+            data.extend_from_slice(&self.carry);
+            let mut parts = data.split(|b| *b == b'\n').map(<[u8]>::to_vec);
+            // The first part may continue into the chunk before; every later one is a whole line.
+            self.carry = parts.next().unwrap_or_default();
+            self.ready = parts.collect();
+        }
     }
 }
 
@@ -674,25 +934,6 @@ fn parse_line(line: &str) -> Option<Record> {
     serde_json::from_str::<Record>(line)
         .ok()
         .filter(|r| r.v >= 1 && r.v <= FORMAT)
-}
-
-/// Read a log file, skipping what cannot be understood. Returns the records, the number of damaged
-/// non-empty lines, and whether the file ended without a newline.
-fn read_lines(path: &Path) -> (Vec<Record>, u64, bool) {
-    let Ok(bytes) = fs::read(path) else {
-        return (Vec::new(), 0, false);
-    };
-    let ends = bytes.last().is_none_or(|b| *b == b'\n');
-    let text = String::from_utf8_lossy(&bytes);
-    let mut out = Vec::new();
-    let mut bad = 0;
-    for l in text.lines().filter(|l| !l.trim().is_empty()) {
-        match parse_line(l) {
-            Some(r) => out.push(r),
-            None => bad += 1,
-        }
-    }
-    (out, bad, ends)
 }
 
 fn ends_with_newline(path: &Path) -> bool {
@@ -770,28 +1011,83 @@ fn clean_name(s: &str) -> String {
     clip(&cleaned, MAX_NAME_CHARS)
 }
 
-/// Whether a key names something secret.
+/// Words that name a secret when they are a whole word of a key (`api_key`, `apiKey`, `X-Auth-Token`).
+const SECRET_WORDS: [&str; 20] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "passcode",
+    "key",
+    "auth",
+    "oauth",
+    "authorization",
+    "authentication",
+    "bearer",
+    "jwt",
+    "cookie",
+    "credential",
+    "signature",
+    "session",
+    "otp",
+    "apikey",
+];
+
+/// Endings that name a secret when a key is written as one word (`accesstoken`, `clientsecret`, `sessionid`).
+const SECRET_ENDINGS: [&str; 12] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "passphrase",
+    "apikey",
+    "accesskey",
+    "secretkey",
+    "privatekey",
+    "authkey",
+    "passkey",
+    "sessionid",
+];
+
+/// The words of a key, in lower case: split at anything that is not a letter or digit, and where a capital
+/// follows a small letter or digit (`apiKey`).
+fn key_words(key: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut after_small = false;
+    for c in key.chars() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            after_small = false;
+            continue;
+        }
+        if c.is_uppercase() && after_small && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        after_small = c.is_lowercase() || c.is_numeric();
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// Whether a key names something secret. It is decided on the key's whole words, so `keyword`, `author`,
+/// `monkey` or `privately` are not taken for secrets: a value hidden for no reason is one the person cannot
+/// hear before they say yes to an action (REQ-SEC-011), and one missing from the record of what ran.
 fn sensitive_key(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "pwd",
-        "passphrase",
-        "key",
-        "auth",
-        "bearer",
-        "cookie",
-        "credential",
-        "private",
-        "signature",
-        "session",
-        "otp",
-    ]
-    .iter()
-    .any(|s| k.contains(s))
+    key_words(key).iter().any(|w| {
+        // `tokens`, `keys`, `credentials`.
+        let one = w.strip_suffix('s').filter(|b| b.len() >= 3).unwrap_or(w);
+        SECRET_WORDS.contains(&one)
+            || SECRET_WORDS.contains(&w.as_str())
+            || SECRET_ENDINGS.iter().any(|e| one.ends_with(e))
+    })
 }
 
 /// Start of well-known credential formats.
@@ -947,12 +1243,29 @@ fn redact_value(v: &Value, depth: usize) -> Value {
     }
 }
 
-/// Strings longer than this are spoken as "a long value" instead of being read out.
+/// Whether a name (an argument key) names something secret. One implementation for the log and for speech.
+#[must_use]
+pub fn is_secret_name(key: &str) -> bool {
+    sensitive_key(key)
+}
+
+/// The secrets in `text` replaced, with nothing clipped, for the read-back of a held action (REQ-SEC-011): the
+/// same word rules as [`redact_text`] but the whole text is kept, because the user must hear all of what will
+/// be sent. Control characters become spaces.
+#[must_use]
+pub fn redact_unclipped(text: &str) -> String {
+    redact_words(&printable(text))
+}
+
+/// The marker [`redact_unclipped`] leaves where it removed a secret.
+pub const REDACTED_MARK: &str = REDACTED;
+
+/// Strings longer than this are shortened to "a long value" in [`spoken_args`].
 pub const MAX_SPOKEN_VALUE_CHARS: usize = 60;
 
-/// Arguments as they are read aloud when a call is held (REQ-SEC-011): the same redaction as the audit log
-/// (`redact_value`), and any text value longer than [`MAX_SPOKEN_VALUE_CHARS`] replaced by "a long value".
-/// For speech only: the stored action keeps its exact arguments.
+/// Arguments in a short, redacted form for the recent-actions list the model sees: the same redaction as the
+/// audit log (`redact_value`), and any text value longer than [`MAX_SPOKEN_VALUE_CHARS`] replaced by "a long
+/// value". Not the read-back of a held action, which says everything (`session::describe_generic`).
 #[must_use]
 pub fn spoken_args(args: &Value) -> Value {
     fn shorten(v: Value) -> Value {
@@ -1031,419 +1344,4 @@ impl TurnLog {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::testutil::TempDir;
-
-    fn act<'a>(tool: &'a str, tier: Tier, args: &'a Value, d: &'a str) -> Act<'a> {
-        Act {
-            tool,
-            tier: Some(tier),
-            args,
-            decision: d,
-            held_id: None,
-            outcome: None,
-            note: None,
-        }
-    }
-
-    fn cfg(max: u64) -> AuditConfig {
-        AuditConfig {
-            max_file_bytes: max,
-            ..AuditConfig::default()
-        }
-    }
-
-    // REQ-SEC-014
-    #[test]
-    fn secrets_in_arguments_and_results_are_redacted() {
-        let args = json!({
-            "url": "https://bob:hunter2@example.com/x?api_key=abc123&room=den",
-            "Authorization": "Bearer abcdefghijklmnop",
-            "note": "use Bearer sk-live-1234567890abcdef please",
-            "password": "p",
-            "nested": {"client_secret": "zzz", "keep": "plain words"},
-            "blob": "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
-            "n": 5,
-        });
-        let v = redact_args(&args);
-        let s = v.to_string();
-        for leak in [
-            "hunter2",
-            "abc123",
-            "abcdefghijklmnop",
-            "sk-live",
-            "zzz",
-            "A1b2C3d4E5f6",
-        ] {
-            assert!(!s.contains(leak), "{leak} leaked in {s}");
-        }
-        assert!(s.contains("room=den"), "{s}");
-        assert!(s.contains("plain words"), "{s}");
-        assert_eq!(v["n"], 5);
-        let r = excerpt("token=abc and cdt_0123456789abcdef and password: hunter2");
-        assert!(!r.contains("abc") || r.contains(REDACTED));
-        assert!(!r.contains("hunter2") && !r.contains("cdt_0123"), "{r}");
-    }
-
-    // REQ-SEC-011, REQ-SEC-014
-    #[test]
-    fn spoken_arguments_hide_secrets_and_shorten_long_values() {
-        let args = json!({
-            "note": "use Bearer abcdefghijklmnop1234",
-            "api_key": "sk-live-0123456789abcdef",
-            "url": "https://bob:hunter2@example.com/x",
-            "body": "word ".repeat(40),
-            "room": "den",
-        });
-        let s = spoken_args(&args).to_string();
-        for leak in ["abcdefghijklmnop1234", "sk-live", "hunter2", "word word"] {
-            assert!(!s.contains(leak), "{leak} leaked in {s}");
-        }
-        assert!(s.contains("a long value") && s.contains("den"), "{s}");
-    }
-
-    // REQ-SEC-014
-    #[test]
-    fn values_are_clipped_and_cleaned() {
-        let long = "x ".repeat(500);
-        let args = json!({ "text": long, "weird\nkey": "a\u{7}b\nc", "list": (0..100).collect::<Vec<_>>() });
-        let v = redact_args(&args);
-        assert!(v.to_string().len() <= MAX_ARGS_BYTES + 50, "{v}");
-        let big = redact_args(
-            &json!({"a": "y".repeat(190), "b": "z".repeat(190), "c": "q".repeat(190),
-            "d": "w".repeat(190), "e": "r".repeat(190), "f": "t".repeat(190)}),
-        );
-        assert!(big.get("_truncated").is_some(), "{big}");
-        let r = excerpt(&"é".repeat(1000));
-        assert!(r.chars().count() <= MAX_VALUE_CHARS + 3);
-        assert_eq!(clean_name("rm -rf /;\n"), "rm_-rf____");
-        assert!(clean_name(&"a".repeat(500)).len() <= MAX_NAME_CHARS + 3);
-    }
-
-    // REQ-SEC-014
-    #[test]
-    fn records_are_appended_in_a_private_file_and_read_back() {
-        let dir = TempDir::new("audit");
-        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
-        let args = json!({"minutes": 10});
-        let t = log.next_turn();
-        let a = Act {
-            outcome: Some(Ok("Timer set.")),
-            ..act("set_timer", Tier::Reversible, &args, decision::RAN)
-        };
-        let id = log.record(1000, 7, t, "voice", Some(0.002), &a).unwrap();
-        let held = log
-            .record(
-                1001,
-                7,
-                t,
-                "event:nas-monitor",
-                None,
-                &act("docker__restart", Tier::Costly, &json!({}), decision::HELD),
-            )
-            .unwrap();
-        assert_eq!((id, held), (1, 2));
-        let page = log.query(&Query::default());
-        assert_eq!(page.records.len(), 2);
-        assert_eq!(page.records[0].id, 2);
-        let r = &page.records[1];
-        assert_eq!(
-            (r.tool.as_str(), r.tier.as_str(), r.status.as_deref()),
-            ("set_timer", "reversible", Some("ok"))
-        );
-        assert_eq!(r.turn_cost_usd, Some(0.002));
-        assert_eq!(r.trigger, "voice");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(dir.0.join("audit.jsonl"))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-        // ids and turns continue after a restart
-        drop(log);
-        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
-        assert_eq!(log.next_turn(), t + 1);
-        let again = log
-            .record(
-                1002,
-                7,
-                t + 1,
-                "voice",
-                None,
-                &act("set_timer", Tier::Reversible, &args, decision::RAN),
-            )
-            .unwrap();
-        assert_eq!(again, 3);
-    }
-
-    // REQ-SEC-014
-    #[test]
-    fn the_file_rotates_and_stays_bounded() {
-        let dir = TempDir::new("audit-rot");
-        let log = AuditLog::open(&dir.0, cfg(2_000)).unwrap();
-        let args = json!({"n": 1});
-        for i in 0..200 {
-            log.record(
-                i,
-                1,
-                1,
-                "voice",
-                None,
-                &act("set_timer", Tier::Reversible, &args, decision::RAN),
-            );
-        }
-        let size = |n: &str| fs::metadata(dir.0.join(n)).map_or(0, |m| m.len());
-        assert!(size("audit.jsonl") <= 2_000, "{}", size("audit.jsonl"));
-        assert!(size("audit.1.jsonl") <= 2_000);
-        assert!(size("audit.1.jsonl") > 0, "it rotated");
-        let all = log.query(&Query {
-            limit: Some(MAX_PAGE),
-            ..Query::default()
-        });
-        assert!(!all.records.is_empty() && all.records.len() < 200);
-        assert_eq!(all.records[0].id, 200, "the newest record survives");
-        let ids: Vec<u64> = all.records.iter().map(|r| r.id).collect();
-        assert!(ids.windows(2).all(|w| w[0] == w[1] + 1), "no gaps: {ids:?}");
-        assert!(log.health().bytes <= 2_000);
-    }
-
-    // REQ-SEC-014
-    #[test]
-    fn a_damaged_or_half_written_log_is_tolerated_at_start_up() {
-        let dir = TempDir::new("audit-bad");
-        {
-            let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
-            for _ in 0..3 {
-                log.record(
-                    5,
-                    1,
-                    4,
-                    "voice",
-                    None,
-                    &act("set_timer", Tier::Reversible, &json!({}), decision::RAN),
-                );
-            }
-        }
-        // garbage in the middle, a line from the future, and a crash mid-write at the end
-        let path = dir.0.join("audit.jsonl");
-        let mut text = fs::read_to_string(&path).unwrap();
-        text.push_str(
-            "{not json\n\u{0}\u{1}binary\n{\"v\":99,\"id\":1}\n{\"v\":1,\"id\":9,\"ts\":",
-        );
-        fs::write(&path, text).unwrap();
-        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
-        let h = log.health();
-        assert!(h.corrupt_lines >= 3, "{h:?}");
-        let id = log
-            .record(
-                6,
-                1,
-                5,
-                "voice",
-                None,
-                &act("set_timer", Tier::Reversible, &json!({}), decision::RAN),
-            )
-            .unwrap();
-        assert_eq!(id, 4, "continues after the last good record");
-        let page = log.query(&Query::default());
-        assert_eq!(page.records.len(), 4);
-        // the new record starts on its own line, so it is readable
-        assert_eq!(page.records[0].id, 4);
-        // an unreadable file (a directory in its place) is an error to report, never a panic
-        let bad = TempDir::new("audit-dir");
-        fs::create_dir_all(bad.0.join("audit.jsonl")).unwrap();
-        let log = AuditLog::open(&bad.0, AuditConfig::default()).unwrap();
-        assert!(
-            log.record(
-                1,
-                1,
-                1,
-                "voice",
-                None,
-                &act("x", Tier::ReadOnly, &json!({}), decision::RAN)
-            )
-            .is_none()
-        );
-        assert_eq!(log.health().write_errors, 1);
-    }
-
-    // REQ-SEC-014
-    #[test]
-    fn paging_and_filters() {
-        let log = AuditLog::in_memory(AuditConfig::default());
-        let none = json!({});
-        for i in 0..10_i64 {
-            let (tool, tier, d, trig) = if i % 2 == 0 {
-                ("set_timer", Tier::Reversible, decision::RAN, "voice")
-            } else {
-                (
-                    "docker__restart",
-                    Tier::Costly,
-                    decision::PROPOSED,
-                    "event:nas",
-                )
-            };
-            log.record(100 + i, 1, 1, trig, None, &act(tool, tier, &none, d));
-        }
-        let p1 = log.query(&Query {
-            limit: Some(4),
-            ..Query::default()
-        });
-        assert_eq!(
-            p1.records.iter().map(|r| r.id).collect::<Vec<_>>(),
-            [10, 9, 8, 7]
-        );
-        assert_eq!(p1.next_before, Some(7));
-        let p2 = log.query(&Query {
-            limit: Some(4),
-            before: p1.next_before,
-            ..Query::default()
-        });
-        assert_eq!(p2.records[0].id, 6);
-        let p3 = log.query(&Query {
-            limit: Some(4),
-            before: p2.next_before,
-            ..Query::default()
-        });
-        assert_eq!(p3.records.len(), 2);
-        assert_eq!(p3.next_before, None);
-        let by = |f: &dyn Fn(&mut Query)| {
-            let mut q = Query::default();
-            f(&mut q);
-            log.query(&q).records.len()
-        };
-        assert_eq!(by(&|q| q.tool = Some("docker__restart".into())), 5);
-        assert_eq!(by(&|q| q.tier = Some("reversible".into())), 5);
-        assert_eq!(by(&|q| q.decision = Some("proposed".into())), 5);
-        assert_eq!(by(&|q| q.trigger = Some("event".into())), 5);
-        assert_eq!(by(&|q| q.trigger = Some("event:nas".into())), 5);
-        assert_eq!(by(&|q| q.trigger = Some("eve".into())), 0);
-        assert_eq!(by(&|q| q.since = Some(107)), 3);
-        assert_eq!(by(&|q| q.decision = Some("blocked:".into())), 0);
-        assert_eq!(by(&|q| q.limit = Some(0)), 1, "limit is at least one");
-    }
-
-    // REQ-SEC-015
-    #[test]
-    fn daily_caps_count_what_ran_and_reset_with_the_day() {
-        let log = AuditLog::in_memory(AuditConfig {
-            policy: ActionPolicy {
-                dry_run: false,
-                max_actions_per_day: 3,
-                max_costly_per_day: 1,
-            },
-            ..AuditConfig::default()
-        });
-        let none = json!({});
-        let run = |tier, d| {
-            log.record(1, 5, 1, "voice", None, &act("t", tier, &none, d));
-        };
-        assert_eq!(log.gate(5, Tier::Costly), Gate::Run);
-        run(Tier::Costly, decision::APPROVED);
-        assert_eq!(
-            log.gate(5, Tier::Costly),
-            Gate::Capped(CapHit::Costly(1)),
-            "costly cap"
-        );
-        assert_eq!(log.gate(5, Tier::Reversible), Gate::Run);
-        run(Tier::Reversible, decision::RAN);
-        run(Tier::Reversible, decision::RAN);
-        assert_eq!(
-            log.gate(5, Tier::Reversible),
-            Gate::Capped(CapHit::Actions(3))
-        );
-        // reads, held and blocked records do not count
-        assert_eq!(log.gate(5, Tier::ReadOnly), Gate::Run);
-        run(Tier::ReadOnly, decision::RAN);
-        run(Tier::Costly, decision::HELD);
-        assert_eq!(log.today(5), (3, 1));
-        // a new day starts clean
-        assert_eq!(log.gate(6, Tier::Costly), Gate::Run);
-        assert_eq!(log.today(6), (0, 0));
-    }
-
-    // REQ-SEC-015
-    #[test]
-    fn the_day_s_count_survives_a_restart() {
-        let dir = TempDir::new("audit-caps");
-        let policy = ActionPolicy {
-            max_actions_per_day: 2,
-            ..ActionPolicy::default()
-        };
-        let c = AuditConfig {
-            policy,
-            ..AuditConfig::default()
-        };
-        {
-            let log = AuditLog::open(&dir.0, c.clone()).unwrap();
-            for _ in 0..2 {
-                log.record(
-                    1,
-                    9,
-                    1,
-                    "voice",
-                    None,
-                    &act("t", Tier::Reversible, &json!({}), decision::RAN),
-                );
-            }
-        }
-        let log = AuditLog::open(&dir.0, c).unwrap();
-        assert_eq!(
-            log.gate(9, Tier::Reversible),
-            Gate::Capped(CapHit::Actions(2))
-        );
-    }
-
-    // REQ-SEC-016
-    #[test]
-    fn dry_run_gates_everything_but_reads_and_uses_no_allowance() {
-        let log = AuditLog::in_memory(AuditConfig::default());
-        let mut p = log.policy();
-        p.dry_run = true;
-        log.set_policy(p);
-        assert_eq!(log.gate(1, Tier::ReadOnly), Gate::Run);
-        for t in [Tier::Reversible, Tier::Costly, Tier::Destructive] {
-            assert_eq!(log.gate(1, t), Gate::DryRun);
-        }
-        let id = log
-            .record(
-                1,
-                1,
-                1,
-                "voice",
-                None,
-                &act("t", Tier::Costly, &json!({}), decision::DRY_RUN),
-            )
-            .unwrap();
-        let page = log.query(&Query::default());
-        assert_eq!(page.records[0].id, id);
-        assert!(page.records[0].dry_run);
-        assert_eq!(log.today(1), (0, 0));
-    }
-
-    // REQ-SEC-014
-    #[test]
-    fn nothing_the_model_or_an_event_chooses_can_break_the_file() {
-        let log = AuditLog::in_memory(AuditConfig::default());
-        let hostile = json!({"a\"b\n{\"id\":1}": "line1\n{\"v\":1,\"id\":99}\r\n"});
-        let a = Act {
-            tool: "x\n{\"v\":1}",
-            tier: None,
-            args: &hostile,
-            decision: decision::INVALID,
-            held_id: None,
-            outcome: Some(Err("boom\n{\"id\":5}")),
-            note: None,
-        };
-        log.record(1, 1, 1, "event:ev\nil", None, &a).unwrap();
-        let page = log.query(&Query::default());
-        assert_eq!(page.records.len(), 1);
-        assert_eq!(page.records[0].tier, "unknown");
-        assert!(!page.records[0].tool.contains('\n'));
-        assert_eq!(log.health().corrupt_lines, 0);
-    }
-}
+mod tests;

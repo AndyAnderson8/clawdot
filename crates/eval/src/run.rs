@@ -12,8 +12,8 @@ use clawdot_core::audit::{ActionPolicy, AuditConfig, AuditLog, Query, Record};
 use clawdot_core::cancel::CancelToken;
 use clawdot_core::notes::NoteStore;
 use clawdot_core::session::{
-    Conversation, Stop, Tier, TurnConfig, TurnCtl, TurnEnd, TurnResult, run_event_turn_ctl,
-    run_turn_ctl,
+    Conversation, Stop, Tier, TurnConfig, TurnCtl, TurnEnd, TurnInputs, TurnResult,
+    run_event_turn_with, run_turn_with,
 };
 use clawdot_core::usage::{LimitReached, UsageTracker};
 use std::sync::Arc;
@@ -85,19 +85,7 @@ impl RunReport {
 }
 
 fn sentences(text: &str) -> usize {
-    let mut n = 0;
-    let mut in_sentence = false;
-    for c in text.chars() {
-        if matches!(c, '.' | '!' | '?') {
-            if in_sentence {
-                n += 1;
-            }
-            in_sentence = false;
-        } else if !c.is_whitespace() {
-            in_sentence = true;
-        }
-    }
-    n + usize::from(in_sentence)
+    clawdot_core::voice::sentences(clawdot_core::lang::DEFAULT, text).len()
 }
 
 fn contains_all(text: &str, needles: &[String]) -> Result<(), String> {
@@ -177,14 +165,12 @@ pub async fn run_scenario<M: Model>(
         },
         ..AuditConfig::default()
     }));
-    let mut conv = Conversation::new(
-        s.setup.system.as_deref().unwrap_or(DEFAULT_PERSONA),
-        20,
-        24_000,
-        600,
-    );
+    let mut conv = Conversation::standard(s.setup.system.as_deref().unwrap_or(DEFAULT_PERSONA));
     conv.set_audit(Arc::clone(&log));
-    let notes = Arc::new(NoteStore::in_memory(s.setup.notes));
+    let notes = Arc::new(NoteStore::in_memory(
+        clawdot_core::lang::DEFAULT,
+        s.setup.notes,
+    ));
     if s.setup.notes {
         conv.set_notes(Arc::clone(&notes));
     }
@@ -228,15 +214,38 @@ pub async fn run_scenario<M: Model>(
         }
         let result = match turn.trigger {
             Trigger::User => {
-                run_turn_ctl(
-                    &ctl, model, &mut host, &mut conv, &cfg, usage, day, now, &turn.say,
+                run_turn_with(
+                    &ctl,
+                    model,
+                    TurnInputs {
+                        host: &mut host,
+                        conv: &mut conv,
+                        cfg: &cfg,
+                        usage,
+                        day,
+                        now,
+                        mono: now,
+                    },
+                    &turn.say,
                 )
                 .await
             }
             Trigger::Event => {
                 let source = turn.source.as_deref().unwrap_or("event");
-                run_event_turn_ctl(
-                    &ctl, source, model, &mut host, &mut conv, &cfg, usage, day, now, &turn.say,
+                run_event_turn_with(
+                    &ctl,
+                    source,
+                    model,
+                    TurnInputs {
+                        host: &mut host,
+                        conv: &mut conv,
+                        cfg: &cfg,
+                        usage,
+                        day,
+                        now,
+                        mono: now,
+                    },
+                    &turn.say,
                 )
                 .await
             }
@@ -351,10 +360,8 @@ fn check_turn(
     let e: &Expect = &turn.expect;
     let speech = result.speech.as_str();
     if let Some(want) = e.ends {
-        let held = conv.pending().is_some()
-            && matches!(result.end, TurnEnd::Answered)
-            && (speech.ends_with("Yes or no?") || speech.contains("Say yes if you want that"));
-        let got = if held {
+        // The gate says it held an action and is waiting for the answer; the spoken question is not read.
+        let got = if result.pending {
             Ends::Held
         } else {
             end_name(&result.end)

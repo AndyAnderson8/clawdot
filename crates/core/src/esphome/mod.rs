@@ -1,6 +1,6 @@
 //! Optional ESPHome voice-satellite client (spec 0004), behind the `esphome-satellite` cargo feature.
 //!
-//! The core dials an ESPHome voice satellite (a Dot running a base image, a Voice PE, linux-voice-assistant)
+//! The core dials an ESPHome voice satellite (a speaker running ESPHome firmware, a Voice PE, linux-voice-assistant)
 //! and uses it as a microphone and speaker, with no Home Assistant in between. Layers, bottom to top:
 //!
 //! * [`proto`]: a hand-written minimal protobuf codec for the messages used;
@@ -23,11 +23,11 @@ use crate::voice::{Synthesizer, Transcriber};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub use client::{Device, Pipeline, Timing, run_device};
+pub use client::{Device, Pipeline, Timing, run_device, run_device_with};
 
 #[cfg(feature = "esphome-noise")]
-fn read_psk(var: &str) -> Result<Option<[u8; 32]>, String> {
-    let text = std::env::var(var).unwrap_or_default();
+fn read_psk(env: &crate::env::Env, var: &str) -> Result<Option<[u8; 32]>, String> {
+    let text = env.get(var).unwrap_or_default();
     if text.trim().is_empty() {
         return Err(format!(
             "environment variable {var} (esphome psk_env) is not set"
@@ -37,10 +37,18 @@ fn read_psk(var: &str) -> Result<Option<[u8; 32]>, String> {
 }
 
 #[cfg(not(feature = "esphome-noise"))]
-fn read_psk(var: &str) -> Result<Option<[u8; 32]>, String> {
+fn read_psk(_env: &crate::env::Env, var: &str) -> Result<Option<[u8; 32]>, String> {
     Err(format!(
         "`psk_env` ({var}) needs a build with the `esphome-noise` feature"
     ))
+}
+
+/// The session settings for one device: the shared ones, with the device's own `listening` values replacing the
+/// ones that came from `satellite.listening` (REQ-VOI-025).
+fn settings_for(shared: &Settings, d: &crate::esphome_cfg::EsphomeDevice) -> Settings {
+    let mut s = shared.clone();
+    s.dialog.vad = d.listening.apply(shared.dialog.vad);
+    s
 }
 
 /// Start the file server (when configured) and one task per device. Returns once everything is bound; the
@@ -50,6 +58,7 @@ fn read_psk(var: &str) -> Result<Option<[u8; 32]>, String> {
 /// A message when the file server cannot bind or a device's key is missing or malformed.
 pub async fn start<S, T>(
     cfg: &EsphomeConfig,
+    env: &crate::env::Env,
     stt: Arc<S>,
     tts: Arc<T>,
     asks: mpsc::Sender<Ask>,
@@ -75,7 +84,7 @@ where
     }
     for d in &cfg.devices {
         let psk = match &d.psk_env {
-            Some(var) => read_psk(var)?,
+            Some(var) => read_psk(env, var)?,
             None => None,
         };
         let device = Device {
@@ -84,18 +93,52 @@ where
             psk,
         };
         println!("clawdot: dialling ESPHome device {}", d.name);
-        tokio::spawn(run_device(
+        let device_settings = settings_for(&settings, d);
+        tokio::spawn(run_device_with(
             device,
             media_store.clone(),
             Pipeline {
                 stt: Arc::clone(&stt),
                 tts: Arc::clone(&tts),
                 asks: asks.clone(),
-                settings: settings.clone(),
+                settings: device_settings,
             },
             Timing::default(),
+            d.reply,
             std::future::pending(),
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ListeningConfig;
+    use crate::esphome_cfg::EsphomeDevice;
+
+    /// REQ-VOI-025: a device's own value wins; a key it leaves out keeps the `satellite` value.
+    #[test]
+    fn a_device_listening_value_wins_over_the_satellite_value() {
+        let mut shared = Settings::default();
+        shared.dialog.vad = ListeningConfig {
+            min_level: Some(900.0),
+            silence_ms: Some(1_200),
+            ..ListeningConfig::default()
+        }
+        .apply(shared.dialog.vad);
+        let d = EsphomeDevice {
+            name: "a".into(),
+            address: "h".into(),
+            listening: ListeningConfig {
+                min_level: Some(150.0),
+                ..ListeningConfig::default()
+            },
+            ..EsphomeDevice::default()
+        };
+        let v = settings_for(&shared, &d).dialog.vad;
+        assert!((v.min_level - 150.0).abs() < f32::EPSILON);
+        assert_eq!(v.silence_ms, 1_200);
+        assert_eq!(v.preroll_ms, crate::vad::Config::default().preroll_ms);
+    }
 }

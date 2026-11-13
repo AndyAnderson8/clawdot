@@ -1,0 +1,246 @@
+/* ---- Shell: a dark rail (the puck) beside the page; on a phone a top bar and a fixed bottom bar ---- */
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.shell.in {
+  flex-direction: row;
+}
+.rail {
+  flex: none;
+  width: 16rem;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-8);
+  padding: var(--spacing-6) var(--spacing-3);
+  background: var(--color-rail);
+  color: var(--color-rail-text);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: 0 var(--spacing-2);
+  color: var(--color-rail-strong);
+  text-decoration: none;
+  border-radius: var(--radius-inner);
+}
+.brand .chip {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 1rem;
+  background: #e9f4f2;
+}
+.brand .logo {
+  width: 2.875rem;
+  height: 2.875rem;
+}
+.wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+.wordmark .ring {
+  display: inline-block;
+  width: 0.6em;
+  height: 0.6em;
+  margin: 0 0.03em;
+  border: 0.15em solid var(--color-mint);
+  border-radius: 50%;
+  box-shadow: 0 0 0.45em rgb(46 230 197 / 0.5);
+}
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav a {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  min-height: 2.75rem;
+  padding: 0 var(--spacing-3);
+  border-radius: var(--radius-inner);
+  color: var(--color-rail-text);
+  text-decoration: none;
+  font-weight: 600;
+}
+.nav a:hover {
+  background: rgb(255 255 255 / 0.07);
+  color: var(--color-rail-strong);
+}
+.nav a[aria-current="page"] {
+  background: var(--color-rail-active);
+  color: var(--color-rail-strong);
+  box-shadow: inset 3px 0 0 var(--color-mint);
+}
+.nav a:focus-visible,
+.brand:focus-visible {
+  outline-color: var(--color-mint);
+}
+.ico {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.stage {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+#banner {
+  background: var(--color-warning-muted);
+  color: var(--color-text-primary);
+  padding: var(--spacing-2) var(--spacing-4);
+  font-weight: 600;
+  text-align: center;
+}
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 88rem;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: var(--spacing-8) clamp(1rem, 4vw, 3rem) var(--spacing-6);
+  overflow-wrap: anywhere;
+}
+#app,
+#panel {
+  flex: 1;
+  min-width: 0;
+}
+#panel:focus {
+  outline: none;
+}
+footer {
+  margin-top: var(--spacing-12);
+  padding: var(--spacing-4) 0;
+  border-top: 1px solid var(--color-card-border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2) var(--spacing-6);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+footer .fmark {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  font-weight: 650;
+  color: var(--color-text-primary);
+}
+footer .fmark i {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 0.2rem solid var(--color-live);
+  border-radius: 50%;
+}
+footer a {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  text-decoration: none;
+  border-bottom: 1px solid var(--color-card-border);
+}
+footer a:hover {
+  border-bottom-color: var(--color-live);
+}
+.toast {
+  position: fixed;
+  left: var(--spacing-4);
+  right: var(--spacing-4);
+  bottom: 5rem;
+  max-width: 36rem;
+  margin: 0 auto;
+  padding: var(--spacing-3) var(--spacing-4);
+  border-radius: var(--radius-inner);
+  background: var(--color-rail);
+  color: #fff;
+  font-weight: 600;
+  z-index: 20;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
+}
+.toast.err {
+  background: var(--color-text-error);
+  color: var(--color-background-body);
+}
+.toast:empty {
+  display: none;
+}
+@media (min-width: 48rem) {
+  .toast {
+    bottom: var(--spacing-6);
+  }
+}
+@media (max-width: 47.99rem) {
+  .shell.in {
+    flex-direction: column;
+  }
+  .rail {
+    position: static;
+    width: auto;
+    height: auto;
+    flex-direction: row;
+    padding: var(--spacing-2) var(--spacing-4);
+  }
+  .brand .chip {
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 0.75rem;
+  }
+  .brand .logo {
+    width: 2rem;
+    height: 2rem;
+  }
+  .wordmark {
+    font-size: 1.25rem;
+  }
+  .nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 10;
+    flex-direction: row;
+    gap: 0;
+    background: var(--color-rail);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .nav a {
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    min-height: 3.5rem;
+    padding: 0 2px;
+    border-radius: 0;
+    font-size: 0.6875rem;
+  }
+  .nav a[aria-current="page"] {
+    box-shadow: inset 0 3px 0 var(--color-mint);
+  }
+  main {
+    padding: var(--spacing-4) var(--spacing-4) 6rem;
+  }
+}

@@ -16,7 +16,10 @@ export interface AuthState {
 export type SpeakerState = "idle" | "listening" | "thinking" | "speaking" | "muted";
 /** What the device is and which parts it has, found by looking at it (the core's hardware module). */
 export interface HardwareInfo {
+  /** The identifier from the configuration file's `device.board`, or `unknown`. */
   board: string;
+  /** What `device.label` says to call it; empty when not configured. */
+  label: string;
   model: string;
   cpu: string;
   cores: number;
@@ -24,16 +27,21 @@ export interface HardwareInfo {
   arch: string;
   os: string;
   parts: { leds: boolean; bluetooth: boolean; wifi: boolean; screen: boolean; usb_serial: boolean };
+  /** The parts whose value comes from the configuration file rather than from looking at the device. */
+  configured_parts: string[];
 }
 
 export interface Status {
   hardware?: HardwareInfo;
+  realtime?: { configured?: boolean; active?: boolean; last_error?: string | null };
   clock_valid?: boolean;
   satellites?: number;
   llm?: { configured?: boolean; model?: string | null };
   usage?: {
     requests_today: number;
     spend_today: number;
+    /** What today's spend rests on: the provider's own figure, your prices, or an estimate. */
+    spend_basis?: "reported" | "priced" | "estimated" | "none";
     /** The local day number today is, and the requests each recent day made. */
     day?: number;
     history?: { day: number; requests: number }[];
@@ -63,6 +71,8 @@ export interface Endpoint {
   adapter: string;
   enabled: boolean;
   created_at: number;
+  /** What the speaker calls this webhook when it reads a message out; none means its name. */
+  spoken_name?: string | null;
 }
 export interface Overview {
   now: number;
@@ -83,6 +93,8 @@ export interface ScheduleItem {
   label: string;
   fire_at: number;
   seconds_left: number;
+  /** Runs as a countdown (a timer, or a reminder after a delay). Absent from older programs. */
+  countdown?: boolean;
   repeat?: Repeat | null;
 }
 export interface ScheduleList {
@@ -116,12 +128,30 @@ export interface McpServer {
   error?: string;
   token_env?: string;
   tools: Tool[];
+  /** Tools the source offers that are new or changed since they were approved. They are off until accepted. */
+  needs_review?: ToolToReview[];
+}
+/** A tool waiting for approval. Everything in it is the source's own text: show it as text. */
+export interface ToolToReview {
+  name: string;
+  description: string;
+  reason: string;
+  reason_text: string;
+  arguments: string[];
 }
 export interface Skill {
   name: string;
   instructions: string;
   tools?: string[];
   enabled: boolean;
+  /** What the skill is for, from the header of an imported skill file. */
+  description?: string;
+  /** The file an imported skill came from, for example `tea/SKILL.md`. */
+  source?: string;
+  /** Imported and not yet read and accepted: it cannot be turned on until it is. */
+  needs_review?: boolean;
+  /** Plain-text helper files that came in the skill's folder. They are text the assistant may read, never run. */
+  files?: { path: string; text: string }[];
 }
 export interface Problem {
   kind: string;
@@ -133,6 +163,8 @@ export interface Extensions {
   mcp?: McpServer[];
   skills?: Skill[];
   problems?: Problem[];
+  /** What the last import did: how many were added, and what was left out and why. */
+  import?: { added: number; skipped: string[] } | null;
 }
 
 export interface SettingField {
@@ -146,6 +178,10 @@ export interface Settings {
   fields: Record<string, SettingField>;
   restart_needed?: string[];
   llm?: { key_present?: boolean; key_hint?: string | null };
+  /** The speech service's key: whether one is in place, and the masked end of a pasted one. Never the key. */
+  speech?: { key_present?: boolean; key_hint?: string | null };
+  /** Realtime voice: whether it can run, whether this build has it, and the masked end of a pasted key. */
+  realtime?: { configured?: boolean; built?: boolean; provider?: string; key_hint?: string | null };
   voice_info?: { language?: string; stt_model?: string; tts_model?: string; provider?: string | null };
   speech_configured?: boolean;
   speakers_listen?: string;

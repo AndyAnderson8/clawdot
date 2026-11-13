@@ -1,6 +1,14 @@
 //! Timers, alarms, and reminders (REQ-TMR-001..008).
 //!
-//! All deadlines are UTC unix seconds. Alarm recurrence is expressed in *local* wall time through the
+//! Two kinds of time are kept apart here. A *duration* (a countdown timer, a snooze, "remind me in ten
+//! minutes") runs on [`Clock::monotonic_secs`], which never goes backwards and does not notice a step of the
+//! wall clock, so network time arriving mid-countdown cannot make it ring early, late or "missed". A point on
+//! the *calendar* (an alarm, a reminder at a date and time) is a UTC unix second compared with
+//! [`Clock::now`], so it follows a corrected clock to the true 07:30. A monotonic reading means nothing after
+//! a restart, so a countdown is saved as the seconds it still has left plus the wall time of the save, and the
+//! downtime is taken off it at load.
+//!
+//! All calendar deadlines are UTC unix seconds. Alarm recurrence is expressed in *local* wall time through the
 //! [`Zone`] trait, so "every weekday at 07:00" stays at 07:00 across daylight-saving changes
 //! (REQ-TMR-005). Nothing fires until the wall clock is trustworthy (REQ-TMR-006), and the whole state
 //! is a small serialisable value that survives restarts (REQ-TMR-003).
@@ -24,8 +32,14 @@ pub const MAX_AHEAD_SECS: i64 = 366 * 24 * 3600;
 
 /// Source of the current time.
 pub trait Clock {
-    /// Current UTC unix time.
+    /// Current UTC unix time. It can step in either direction when the clock is set; use it for points on
+    /// the calendar and never to measure how long something has lasted.
     fn now(&self) -> Ts;
+    /// Whole seconds since an arbitrary origin (at least 1, so 0 can mean "never"). It never goes backwards and
+    /// is not affected by a step of [`Clock::now`]; use it to measure durations, and compare only readings
+    /// taken in the same process, because it means nothing after a restart. Required rather than defaulted to
+    /// `now`, so no implementation can silently give a duration the wall clock's flaw.
+    fn monotonic_secs(&self) -> i64;
     /// False until the clock has been synchronised (REQ-TMR-006).
     fn wall_clock_valid(&self) -> bool {
         self.now() >= CLOCK_VALID_AFTER
@@ -43,6 +57,20 @@ impl Clock for SystemClock {
             .ok()
             .and_then(|d| i64::try_from(d.as_secs()).ok())
             .unwrap_or(0)
+    }
+    /// Seconds since the first reading in this process, from [`std::time::Instant`]. On Linux that is
+    /// `CLOCK_MONOTONIC`, which stops while the machine is suspended, so a timer on a laptop loses the time it
+    /// slept. The devices this runs on never suspend, so this is accepted; the fix (`CLOCK_BOOTTIME`) needs a
+    /// `libc` call or a new dependency and is not worth it for them.
+    fn monotonic_secs(&self) -> i64 {
+        static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let secs = ORIGIN
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_secs();
+        i64::try_from(secs)
+            .unwrap_or(i64::MAX - 1)
+            .saturating_add(1)
     }
 }
 
@@ -200,12 +228,77 @@ pub struct Item {
     pub kind: Kind,
     /// Name or reminder text.
     pub label: String,
-    /// Next firing instant.
+    /// Next firing instant on the calendar. For a countdown (see [`Item::is_countdown`]) it is only what was
+    /// true when it was created or last saved; read it through [`Item::due_wall`].
     pub fire_at: Ts,
     /// Recurrence, for alarms.
     pub repeat: Option<Repeat>,
     /// When it was created.
     pub created_at: Ts,
+    /// Persisted form of a countdown: the seconds it still had left when the file was written (negative
+    /// when it was already late). Present in a file only; consumed at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remaining_secs: Option<i64>,
+    /// Persisted form of a countdown: the wall time of that save, if the clock was valid then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved_at: Option<Ts>,
+    /// The monotonic reading at which a countdown comes due. Never written to disk.
+    #[serde(skip)]
+    due_mono: Option<i64>,
+}
+
+impl Item {
+    fn new(kind: Kind, label: &str, fire_at: Ts, repeat: Option<Repeat>, created_at: Ts) -> Self {
+        Self {
+            id: 0,
+            kind,
+            label: label.to_owned(),
+            fire_at,
+            repeat,
+            created_at,
+            remaining_secs: None,
+            saved_at: None,
+            due_mono: None,
+        }
+    }
+
+    fn countdown(kind: Kind, label: &str, clock: &dyn Clock, secs: i64) -> Self {
+        let now = clock.now();
+        let mut item = Self::new(kind, label, now.saturating_add(secs), None, now);
+        item.due_mono = Some(clock.monotonic_secs().saturating_add(secs));
+        item
+    }
+
+    /// A duration that runs on the monotonic clock (a timer, a snooze, a reminder after a delay) rather than
+    /// a point on the calendar.
+    #[must_use]
+    pub fn is_countdown(&self) -> bool {
+        self.due_mono.is_some()
+    }
+
+    /// Seconds until it comes due, never negative.
+    #[must_use]
+    pub fn secs_left(&self, clock: &dyn Clock) -> i64 {
+        self.signed_left(clock).max(0)
+    }
+
+    /// Seconds until it comes due; negative once it is late.
+    fn signed_left(&self, clock: &dyn Clock) -> i64 {
+        match self.due_mono {
+            Some(m) => m.saturating_sub(clock.monotonic_secs()),
+            None => self.fire_at.saturating_sub(clock.now()),
+        }
+    }
+
+    /// When it comes due as a wall-clock instant, worked out now, so what a person is shown stays right after
+    /// the wall clock was set.
+    #[must_use]
+    pub fn due_wall(&self, clock: &dyn Clock) -> Ts {
+        match self.due_mono {
+            Some(_) => clock.now().saturating_add(self.signed_left(clock)),
+            None => self.fire_at,
+        }
+    }
 }
 
 /// An item that has come due.
@@ -278,23 +371,85 @@ impl Scheduler {
         }
     }
 
-    /// Restore from a store.
+    /// Restore from a store and put the countdowns back on the monotonic clock.
+    ///
+    /// A countdown is in the file as the seconds it had left and the wall time of the save. The time the
+    /// program was off is taken off with the wall clock (REQ-TMR-003), as far as the wall clock can be
+    /// trusted: a clock that is not valid, or is behind the save, takes off nothing, never a negative amount.
+    /// A countdown that ran out while the program was off comes back already late, so it is announced as
+    /// missed when it is more than [`MISSED_GRACE_SECS`] late. A file from before this form (a timer with only
+    /// an absolute `fire_at`) is read as the wall clock then says: `fire_at - now` seconds left.
     ///
     /// # Errors
     /// Storage errors (corrupt or newer-schema files are reported, never silently dropped).
-    pub fn load(store: &JsonStore, max_items: usize) -> Result<Self, StoreError> {
-        Ok(Self {
-            state: store.load()?,
-            max_items,
-        })
+    pub fn load(
+        store: &JsonStore,
+        max_items: usize,
+        clock: &dyn Clock,
+    ) -> Result<Self, StoreError> {
+        let mut state: SchedState = store.load()?;
+        let (wall, mono, valid) = (
+            clock.now(),
+            clock.monotonic_secs(),
+            clock.wall_clock_valid(),
+        );
+        for item in &mut state.items {
+            let left = match (item.remaining_secs.take(), item.saved_at.take()) {
+                (Some(remaining), saved) => {
+                    let off = match saved {
+                        Some(at) if valid => wall.saturating_sub(at).max(0),
+                        _ => 0,
+                    };
+                    remaining.saturating_sub(off)
+                }
+                // Written before countdowns were kept apart: only timers are durations.
+                (None, _) if item.kind == Kind::Timer => {
+                    let from = if valid { wall } else { item.created_at };
+                    item.fire_at.saturating_sub(from).min(MAX_TIMER_SECS)
+                }
+                (None, _) => continue,
+            };
+            item.due_mono = Some(mono.saturating_add(left));
+        }
+        if let Some(sw) = &mut state.stopwatch {
+            sw.resume(wall, mono, valid);
+        }
+        Ok(Self { state, max_items })
     }
 
     /// Persist atomically.
     ///
     /// # Errors
     /// Storage errors.
-    pub fn save(&self, store: &JsonStore) -> Result<(), StoreError> {
-        store.save(&self.state)
+    pub fn save(&self, store: &JsonStore, clock: &dyn Clock) -> Result<(), StoreError> {
+        store.save(&self.persisted(clock))
+    }
+
+    /// The bytes [`Scheduler::save`] would write, for handing to the background writer.
+    ///
+    /// # Errors
+    /// A state that cannot be serialised.
+    pub fn encode(&self, store: &JsonStore, clock: &dyn Clock) -> Result<Vec<u8>, StoreError> {
+        store.encode(&self.persisted(clock))
+    }
+
+    /// The state as it goes to disk. The seconds a countdown has left are worked out afresh at every save,
+    /// because the file is rewritten only when the set of items changes and an old figure would be wrong.
+    /// `fire_at` is refreshed too, so a build from before this form still reads a sensible deadline.
+    fn persisted(&self, clock: &dyn Clock) -> SchedState {
+        let mut state = self.state.clone();
+        let wall = clock.now();
+        let valid = clock.wall_clock_valid();
+        for item in state.items.iter_mut().filter(|i| i.due_mono.is_some()) {
+            let left = item.signed_left(clock);
+            item.remaining_secs = Some(left);
+            item.saved_at = valid.then_some(wall);
+            item.fire_at = wall.saturating_add(left);
+        }
+        if let Some(sw) = &state.stopwatch {
+            state.stopwatch = Some(sw.persisted(wall, clock.monotonic_secs(), valid));
+        }
+        state
     }
 
     fn insert(&mut self, mut item: Item) -> Result<u64, SchedError> {
@@ -312,18 +467,33 @@ impl Scheduler {
     ///
     /// # Errors
     /// [`SchedError::InvalidTime`] outside 1 second to 7 days; [`SchedError::TooMany`].
-    pub fn set_timer(&mut self, now: Ts, secs: i64, label: &str) -> Result<u64, SchedError> {
+    pub fn set_timer(
+        &mut self,
+        clock: &dyn Clock,
+        secs: i64,
+        label: &str,
+    ) -> Result<u64, SchedError> {
         if !(1..=MAX_TIMER_SECS).contains(&secs) {
             return Err(SchedError::InvalidTime);
         }
-        self.insert(Item {
-            id: 0,
-            kind: Kind::Timer,
-            label: label.to_owned(),
-            fire_at: now + secs,
-            repeat: None,
-            created_at: now,
-        })
+        self.insert(Item::countdown(Kind::Timer, label, clock, secs))
+    }
+
+    /// A reminder after a delay ("remind me in ten minutes"): a duration, so it runs on the monotonic clock.
+    ///
+    /// # Errors
+    /// [`SchedError::InvalidTime`] when `secs` is not in the future or is over a year away;
+    /// [`SchedError::TooMany`].
+    pub fn set_reminder_in(
+        &mut self,
+        clock: &dyn Clock,
+        secs: i64,
+        text: &str,
+    ) -> Result<u64, SchedError> {
+        if !(1..=MAX_AHEAD_SECS).contains(&secs) {
+            return Err(SchedError::InvalidTime);
+        }
+        self.insert(Item::countdown(Kind::Reminder, text, clock, secs))
     }
 
     /// An alarm at local `hour:minute`. With `days` it repeats on those weekdays; without, it rings once
@@ -347,18 +517,17 @@ impl Scheduler {
         let mask = days.unwrap_or(days::ALL);
         let fire_at =
             next_occurrence(zone, now, mask, hour, minute).ok_or(SchedError::InvalidTime)?;
-        self.insert(Item {
-            id: 0,
-            kind: Kind::Alarm,
-            label: label.to_owned(),
+        self.insert(Item::new(
+            Kind::Alarm,
+            label,
             fire_at,
-            repeat: days.map(|d| Repeat {
+            days.map(|d| Repeat {
                 days: d,
                 hour,
                 minute,
             }),
-            created_at: now,
-        })
+            now,
+        ))
     }
 
     /// A reminder at the instant `at`.
@@ -369,47 +538,40 @@ impl Scheduler {
         if at <= now || at - now > MAX_AHEAD_SECS {
             return Err(SchedError::InvalidTime);
         }
-        self.insert(Item {
-            id: 0,
-            kind: Kind::Reminder,
-            label: text.to_owned(),
-            fire_at: at,
-            repeat: None,
-            created_at: now,
-        })
+        self.insert(Item::new(Kind::Reminder, text, at, None, now))
     }
 
-    /// Ring again in `secs`: a one-shot alarm carrying the label of a fired item.
+    /// Ring again in `secs`: a one-shot carrying the label of a fired item. A duration, so it runs on the
+    /// monotonic clock.
     ///
     /// # Errors
     /// [`SchedError::InvalidTime`] outside 1 minute to 1 hour; [`SchedError::TooMany`].
-    pub fn snooze(&mut self, now: Ts, fired: &Fired, secs: i64) -> Result<u64, SchedError> {
+    pub fn snooze(
+        &mut self,
+        clock: &dyn Clock,
+        fired: &Fired,
+        secs: i64,
+    ) -> Result<u64, SchedError> {
         if !(60..=3600).contains(&secs) {
             return Err(SchedError::InvalidTime);
         }
-        self.insert(Item {
-            id: 0,
-            kind: fired.kind,
-            label: fired.label.clone(),
-            fire_at: now + secs,
-            repeat: None,
-            created_at: now,
-        })
+        self.insert(Item::countdown(fired.kind, &fired.label, clock, secs))
     }
 
-    /// Start the stopwatch at `now`. A stopped one is replaced; a running one is left alone.
+    /// Start the stopwatch. A stopped one is replaced; a running one is left alone. It counts on the
+    /// monotonic clock (REQ-TMR-012).
     ///
     /// # Errors
-    /// [`Refusal::Running`] with its reading, or [`Refusal::ClockWentBack`] when it is running and
-    /// the clock is behind its last record.
-    pub fn stopwatch_start(&mut self, now: Ts) -> Result<(), Refusal> {
+    /// [`Refusal::Running`] with its reading.
+    pub fn stopwatch_start(&mut self, clock: &dyn Clock) -> Result<(), Refusal> {
+        let mono = clock.monotonic_secs();
         if let Some(sw) = &self.state.stopwatch {
-            let r = sw.read(now)?;
+            let r = sw.read(mono);
             if r.running {
                 return Err(Refusal::Running(r));
             }
         }
-        self.state.stopwatch = Some(Stopwatch::start(now));
+        self.state.stopwatch = Some(Stopwatch::start(mono));
         Ok(())
     }
 
@@ -417,29 +579,35 @@ impl Scheduler {
     ///
     /// # Errors
     /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
-    pub fn stopwatch_lap(&mut self, now: Ts) -> Result<Lap, Refusal> {
-        self.state.stopwatch.as_mut().ok_or(Refusal::None)?.lap(now)
+    pub fn stopwatch_lap(&mut self, clock: &dyn Clock) -> Result<Lap, Refusal> {
+        let mono = clock.monotonic_secs();
+        self.state
+            .stopwatch
+            .as_mut()
+            .ok_or(Refusal::None)?
+            .lap(mono)
     }
 
     /// Stop the stopwatch.
     ///
     /// # Errors
     /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
-    pub fn stopwatch_stop(&mut self, now: Ts) -> Result<Reading, Refusal> {
+    pub fn stopwatch_stop(&mut self, clock: &dyn Clock) -> Result<Reading, Refusal> {
+        let mono = clock.monotonic_secs();
         self.state
             .stopwatch
             .as_mut()
             .ok_or(Refusal::None)?
-            .stop(now)
+            .stop(mono)
     }
 
     /// What the stopwatch shows, with each lap's own time.
     ///
     /// # Errors
-    /// [`Refusal`]; [`Refusal::None`] when there is no stopwatch.
-    pub fn stopwatch_read(&self, now: Ts) -> Result<(Reading, Vec<i64>), Refusal> {
+    /// [`Refusal::None`] when there is no stopwatch.
+    pub fn stopwatch_read(&self, clock: &dyn Clock) -> Result<(Reading, Vec<i64>), Refusal> {
         let sw = self.state.stopwatch.as_ref().ok_or(Refusal::None)?;
-        Ok((sw.read(now)?, sw.splits()))
+        Ok((sw.read(clock.monotonic_secs()), sw.splits()))
     }
 
     /// Throw the stopwatch away; false when there was none. Needs no clock.
@@ -488,50 +656,43 @@ impl Scheduler {
 
     /// All items, soonest first.
     #[must_use]
-    pub fn list(&self) -> Vec<&Item> {
+    pub fn list(&self, clock: &dyn Clock) -> Vec<&Item> {
         let mut v: Vec<&Item> = self.state.items.iter().collect();
-        v.sort_by_key(|i| (i.fire_at, i.id));
+        v.sort_by_key(|i| (i.due_wall(clock), i.id));
         v
-    }
-
-    /// Seconds until the soonest item, for sleeping the event loop; `None` when empty.
-    #[must_use]
-    pub fn next_due_in(&self, now: Ts) -> Option<i64> {
-        self.state
-            .items
-            .iter()
-            .map(|i| (i.fire_at - now).max(0))
-            .min()
     }
 
     /// Seconds left on a timer (or time until any item).
     ///
     /// # Errors
     /// [`SchedError::NotFound`].
-    pub fn remaining(&self, id: u64, now: Ts) -> Result<i64, SchedError> {
+    pub fn remaining(&self, id: u64, clock: &dyn Clock) -> Result<i64, SchedError> {
         self.state
             .items
             .iter()
             .find(|i| i.id == id)
-            .map(|i| (i.fire_at - now).max(0))
+            .map(|i| i.secs_left(clock))
             .ok_or(SchedError::NotFound)
     }
 
-    /// Collect everything that has come due. Returns nothing until the wall clock is valid
-    /// (REQ-TMR-006). Repeating alarms are rescheduled; everything else is removed.
+    /// Collect everything that has come due. Calendar items wait until the wall clock is valid
+    /// (REQ-TMR-006); a countdown does not depend on the wall clock at all, so it comes due on a device that
+    /// has never had the time. Repeating alarms are rescheduled; everything else is removed.
     pub fn take_due(&mut self, clock: &dyn Clock, zone: &dyn Zone) -> Vec<Fired> {
-        if !clock.wall_clock_valid() {
-            return Vec::new();
-        }
+        let wall_ok = clock.wall_clock_valid();
         let now = clock.now();
         let mut fired = Vec::new();
         let mut keep = Vec::with_capacity(self.state.items.len());
         for mut item in std::mem::take(&mut self.state.items) {
-            if item.fire_at > now {
+            if !wall_ok && !item.is_countdown() {
                 keep.push(item);
                 continue;
             }
-            let late = now - item.fire_at;
+            let late = -item.signed_left(clock);
+            if late < 0 {
+                keep.push(item);
+                continue;
+            }
             fired.push(Fired {
                 id: item.id,
                 kind: item.kind,
@@ -571,274 +732,67 @@ pub fn next_occurrence(zone: &dyn Zone, now: Ts, mask: u8, hour: u8, minute: u8)
     None
 }
 
+/// A clock for tests whose wall and monotonic readings move independently, so a test can step one and not
+/// the other, the way network time arriving does.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::testutil::TempDir;
-    use std::cell::Cell;
+pub(crate) mod testclock {
+    use super::{Clock, Ts};
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-    struct FakeClock {
-        now: Cell<Ts>,
-        valid: Cell<bool>,
+    /// Wall time and monotonic time are separate. [`StepClock::advance`] moves both (time passing),
+    /// [`StepClock::step_wall`] moves only the wall clock (it was set), and the monotonic reading starts well away
+    /// from the wall one so mixing them up shows.
+    #[derive(Debug)]
+    pub(crate) struct StepClock {
+        wall: AtomicI64,
+        mono: AtomicI64,
+        unset: AtomicBool,
     }
 
-    impl FakeClock {
-        fn at(now: Ts) -> Self {
+    impl StepClock {
+        /// Wall time `wall`; the monotonic reading starts at 1000.
+        pub(crate) fn at(wall: Ts) -> Self {
+            Self::with_mono(wall, 1000)
+        }
+        /// As [`StepClock::at`], with a chosen monotonic reading (a restarted process has a new origin).
+        pub(crate) fn with_mono(wall: Ts, mono: i64) -> Self {
             Self {
-                now: Cell::new(now),
-                valid: Cell::new(true),
+                wall: AtomicI64::new(wall),
+                mono: AtomicI64::new(mono),
+                unset: AtomicBool::new(false),
             }
         }
+        /// `secs` pass on both clocks.
+        pub(crate) fn advance(&self, secs: i64) {
+            self.wall.fetch_add(secs, Ordering::SeqCst);
+            self.mono.fetch_add(secs, Ordering::SeqCst);
+        }
+        /// The wall clock is set `secs` forward (or back, when negative); no time passes.
+        pub(crate) fn step_wall(&self, secs: i64) {
+            self.wall.fetch_add(secs, Ordering::SeqCst);
+        }
+        /// Put the wall clock at `t` without any time passing.
+        pub(crate) fn set_wall(&self, t: Ts) {
+            self.wall.store(t, Ordering::SeqCst);
+        }
+        /// Make the wall clock report that it was never set (or that it has been).
+        pub(crate) fn set_unset(&self, unset: bool) {
+            self.unset.store(unset, Ordering::SeqCst);
+        }
     }
 
-    impl Clock for FakeClock {
+    impl Clock for StepClock {
         fn now(&self) -> Ts {
-            self.now.get()
+            self.wall.load(Ordering::SeqCst)
+        }
+        fn monotonic_secs(&self) -> i64 {
+            self.mono.load(Ordering::SeqCst)
         }
         fn wall_clock_valid(&self) -> bool {
-            self.valid.get()
+            !self.unset.load(Ordering::SeqCst) && self.now() >= super::CLOCK_VALID_AFTER
         }
-    }
-
-    /// UTC instant for a calendar time.
-    fn utc(y: i64, mo: i64, d: i64, h: i64, mi: i64) -> Ts {
-        days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60
-    }
-
-    #[test]
-    fn calendar_helpers_agree_with_known_dates() {
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
-        assert_eq!(weekday(0), 3, "1970-01-01 was a Thursday");
-        assert_eq!(
-            weekday(days_from_civil(2026, 11, 7)),
-            5,
-            "2026-11-07 is a Saturday"
-        );
-        for day in (-800_000..800_000).step_by(997) {
-            let (y, m, d) = civil_from_days(day);
-            assert_eq!(days_from_civil(y, m, d), day);
-        }
-    }
-
-    #[test]
-    fn a_timer_fires_at_its_deadline_and_not_before() {
-        let mut s = Scheduler::new(8);
-        let t0 = utc(2026, 11, 7, 12, 0);
-        let id = s.set_timer(t0, 600, "pasta").unwrap();
-        let clock = FakeClock::at(t0 + 599);
-        assert!(s.take_due(&clock, &FixedOffset(0)).is_empty());
-        assert_eq!(s.remaining(id, clock.now()).unwrap(), 1);
-        clock.now.set(t0 + 600);
-        let due = s.take_due(&clock, &FixedOffset(0));
-        assert_eq!(due.len(), 1);
-        assert_eq!(
-            (due[0].kind, due[0].label.as_str(), due[0].late_secs),
-            (Kind::Timer, "pasta", 0)
-        );
-        assert!(s.list().is_empty(), "fired one-shots are removed");
-    }
-
-    #[test]
-    fn durations_are_validated() {
-        let mut s = Scheduler::new(8);
-        for bad in [0, -5, MAX_TIMER_SECS + 1] {
-            assert_eq!(
-                s.set_timer(1_800_000_000, bad, ""),
-                Err(SchedError::InvalidTime)
-            );
-        }
-        assert!(s.set_timer(1_800_000_000, MAX_TIMER_SECS, "").is_ok());
-    }
-
-    #[test]
-    fn the_item_limit_is_enforced() {
-        let mut s = Scheduler::new(2);
-        s.set_timer(1_800_000_000, 10, "a").unwrap();
-        s.set_timer(1_800_000_000, 10, "b").unwrap();
-        assert_eq!(
-            s.set_timer(1_800_000_000, 10, "c"),
-            Err(SchedError::TooMany)
-        );
-    }
-
-    #[test]
-    fn a_one_off_alarm_rings_today_if_the_time_is_ahead_otherwise_tomorrow() {
-        let mut s = Scheduler::new(8);
-        let zone = FixedOffset(0);
-        let now = utc(2026, 11, 7, 6, 0); // Saturday 06:00
-        s.set_alarm(now, &zone, 7, 30, None, "wake").unwrap();
-        assert_eq!(s.list()[0].fire_at, utc(2026, 11, 7, 7, 30));
-        let later = utc(2026, 11, 7, 8, 0);
-        s.set_alarm(later, &zone, 7, 30, None, "wake2").unwrap();
-        assert_eq!(s.list()[1].fire_at, utc(2026, 11, 8, 7, 30));
-    }
-
-    #[test]
-    fn weekday_alarms_skip_the_weekend_and_reschedule_after_firing() {
-        let mut s = Scheduler::new(8);
-        let zone = FixedOffset(0);
-        let friday_evening = utc(2026, 11, 6, 20, 0);
-        s.set_alarm(friday_evening, &zone, 7, 0, Some(days::WEEKDAYS), "work")
-            .unwrap();
-        assert_eq!(s.list()[0].fire_at, utc(2026, 11, 9, 7, 0), "Monday");
-        let clock = FakeClock::at(utc(2026, 11, 9, 7, 0));
-        let fired = s.take_due(&clock, &zone);
-        assert!(fired[0].repeats && !fired[0].missed);
-        assert_eq!(s.list()[0].fire_at, utc(2026, 11, 10, 7, 0), "Tuesday");
-    }
-
-    #[test]
-    fn a_local_time_zone_offset_is_respected() {
-        let mut s = Scheduler::new(8);
-        let zone = FixedOffset(-5 * 3600); // UTC-5
-        let now = utc(2026, 1, 15, 0, 0); // 19:00 the previous local day
-        s.set_alarm(now, &zone, 7, 0, None, "x").unwrap();
-        assert_eq!(s.list()[0].fire_at, utc(2026, 1, 15, 12, 0));
-    }
-
-    #[test]
-    fn invalid_alarm_times_are_rejected() {
-        let mut s = Scheduler::new(8);
-        let z = FixedOffset(0);
-        let now = 1_800_000_000;
-        assert!(s.set_alarm(now, &z, 24, 0, None, "").is_err());
-        assert!(s.set_alarm(now, &z, 7, 60, None, "").is_err());
-        assert!(s.set_alarm(now, &z, 7, 0, Some(0), "").is_err());
-        assert!(s.set_alarm(now, &z, 7, 0, Some(0b1000_0000), "").is_err());
-    }
-
-    #[test]
-    fn reminders_must_be_in_the_future() {
-        let mut s = Scheduler::new(8);
-        let now = utc(2026, 11, 7, 12, 0);
-        assert!(s.set_reminder(now, now, "x").is_err());
-        assert!(s.set_reminder(now, now - 1, "x").is_err());
-        assert!(s.set_reminder(now, now + MAX_AHEAD_SECS + 1, "x").is_err());
-        let id = s.set_reminder(now, now + 3600, "call mum").unwrap();
-        assert_eq!(s.cancel(id).unwrap().label, "call mum");
-        assert_eq!(s.cancel(id), Err(SchedError::NotFound));
-    }
-
-    #[test]
-    fn nothing_fires_until_the_wall_clock_is_valid() {
-        let mut s = Scheduler::new(8);
-        let t0 = utc(2026, 11, 7, 12, 0);
-        s.set_timer(t0, 10, "x").unwrap();
-        let clock = FakeClock::at(t0 + 100);
-        clock.valid.set(false);
-        assert!(s.take_due(&clock, &FixedOffset(0)).is_empty());
-        assert_eq!(s.list().len(), 1, "still pending");
-        clock.valid.set(true);
-        assert_eq!(s.take_due(&clock, &FixedOffset(0)).len(), 1);
-    }
-
-    #[test]
-    fn items_found_long_overdue_after_a_restart_are_marked_missed() {
-        let mut s = Scheduler::new(8);
-        let zone = FixedOffset(0);
-        let t0 = utc(2026, 11, 7, 6, 0);
-        s.set_alarm(t0, &zone, 7, 0, Some(days::ALL), "wake")
-            .unwrap();
-        // The device was off all day.
-        let clock = FakeClock::at(utc(2026, 11, 7, 15, 0));
-        let fired = s.take_due(&clock, &zone);
-        assert!(fired[0].missed);
-        assert_eq!(fired[0].late_secs, 8 * 3600);
-        assert_eq!(
-            s.list()[0].fire_at,
-            utc(2026, 11, 8, 7, 0),
-            "next one is still scheduled"
-        );
-    }
-
-    #[test]
-    fn snooze_creates_a_one_shot_with_the_same_label() {
-        let mut s = Scheduler::new(8);
-        let zone = FixedOffset(0);
-        let t0 = utc(2026, 11, 7, 6, 0);
-        s.set_alarm(t0, &zone, 7, 0, None, "wake").unwrap();
-        let clock = FakeClock::at(utc(2026, 11, 7, 7, 0));
-        let fired = s.take_due(&clock, &zone).remove(0);
-        s.snooze(clock.now(), &fired, 540).unwrap();
-        assert_eq!(s.list()[0].fire_at, utc(2026, 11, 7, 7, 9));
-        assert_eq!(s.list()[0].label, "wake");
-        assert!(s.snooze(clock.now(), &fired, 5).is_err());
-    }
-
-    #[test]
-    fn next_due_in_drives_the_event_loop_sleep() {
-        let mut s = Scheduler::new(8);
-        assert_eq!(s.next_due_in(100), None);
-        let t0 = utc(2026, 11, 7, 12, 0);
-        s.set_timer(t0, 30, "a").unwrap();
-        s.set_timer(t0, 90, "b").unwrap();
-        assert_eq!(s.next_due_in(t0), Some(30));
-        assert_eq!(s.next_due_in(t0 + 1000), Some(0));
-    }
-
-    #[test]
-    fn state_survives_a_restart() {
-        let dir = TempDir::new("sched");
-        let store = JsonStore::new(dir.0.join("sched.json"), SCHEMA);
-        let t0 = utc(2026, 11, 7, 12, 0);
-        let mut s = Scheduler::new(8);
-        s.set_timer(t0, 600, "pasta").unwrap();
-        s.set_reminder(t0, t0 + 7200, "call mum").unwrap();
-        s.save(&store).unwrap();
-        let restored = Scheduler::load(&store, 8).unwrap();
-        assert_eq!(restored.list().len(), 2);
-        let mut restored = restored;
-        let id = restored.set_timer(t0, 5, "new").unwrap();
-        assert_eq!(id, 3, "ids keep counting after a restart");
-    }
-
-    #[cfg(feature = "tz")]
-    #[test]
-    fn a_daily_alarm_stays_at_local_time_across_a_daylight_saving_change() {
-        use jiff::Timestamp;
-        let zone = IanaZone::new("America/New_York").unwrap();
-        let at = |s: &str| s.parse::<Timestamp>().unwrap().as_second();
-        let mut s = Scheduler::new(8);
-        // Saturday 2026-03-07 evening, before clocks go forward on Sunday 2026-03-08.
-        let now = at("2026-03-07T20:00:00-05:00");
-        s.set_alarm(now, &zone, 7, 0, Some(days::ALL), "wake")
-            .unwrap();
-        assert_eq!(
-            s.list()[0].fire_at,
-            at("2026-03-08T07:00:00-04:00"),
-            "07:00 EDT, 11:00Z"
-        );
-        let clock = FakeClock::at(at("2026-03-08T07:00:00-04:00"));
-        s.take_due(&clock, &zone);
-        assert_eq!(s.list()[0].fire_at, at("2026-03-09T07:00:00-04:00"));
-        // The gap itself: 02:30 does not exist on 2026-03-08; the alarm lands just after the gap.
-        let mut s2 = Scheduler::new(8);
-        s2.set_alarm(at("2026-03-07T20:00:00-05:00"), &zone, 2, 30, None, "gap")
-            .unwrap();
-        assert_eq!(s2.list()[0].fire_at, at("2026-03-08T03:30:00-04:00"));
-    }
-
-    // REQ-TMR-011
-    #[test]
-    fn a_saved_scheduler_from_before_the_stopwatch_still_loads_and_the_stopwatch_is_saved() {
-        let old = r#"{"next_id":2,"items":[{"id":1,"kind":"timer","label":"","fire_at":5,"repeat":null,"created_at":1}]}"#;
-        let state: SchedState = serde_json::from_str(old).unwrap();
-        assert!(state.stopwatch.is_none() && state.items.len() == 1);
-        let mut s = Scheduler {
-            state,
-            max_items: 4,
-        };
-        assert!(!s.stopwatch_reset(), "nothing to reset");
-        s.stopwatch_start(1_800_000_000).unwrap();
-        let json = serde_json::to_string(&s.state).unwrap();
-        assert!(json.contains("stopwatch"));
-        let back: SchedState = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, s.state);
-        // A stopwatch needs no timer slot, and a full scheduler can still run one.
-        let mut full = Scheduler::new(1);
-        full.set_timer(1_800_000_000, 60, "").unwrap();
-        assert!(full.stopwatch_start(1_800_000_000).is_ok());
     }
 }
+
+#[cfg(test)]
+mod tests;

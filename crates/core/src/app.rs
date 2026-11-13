@@ -3,37 +3,56 @@
 //! testable without sockets or audio.
 
 use crate::admin::{Admin, AdminError, Mode as AdminMode};
+use crate::inbox::Moment;
 use crate::inbox::adapter::Adapter;
 use crate::inbox::endpoint::{self, Endpoint, Endpoints, QuietHours};
 use crate::inbox::event::{Event, EventState};
 use crate::inbox::queue::{FilterReason, Inbox, InboxLimits, Ingest, SourceStatus};
 use crate::inbox::reply::{self, Reply, ReplyKind, ReplyQueue};
+use crate::limit::{FailureBudget, FailureLimiter};
 use crate::sched::{Clock, Ts};
 use crate::store::{JsonStore, StoreError};
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::Notify;
 
 mod announce;
+mod ask;
+pub mod persist;
 mod portal;
+pub(crate) use announce::AuditAs;
 pub use announce::{AnnounceError, Announcement, Caller, outcome_json};
+pub use ask::{AskEnd, AskError, AskTicket, MAX_PENDING_ASKS};
+use persist::Dirty;
 pub use portal::{Fail, Job, Op, SchedOp};
+
+/// The address of a request from this machine, for tests and local callers that have no peer to name.
+pub const LOCALHOST_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+/// Where the saves stood when a change began (see [`Core::save_mark`]).
+#[derive(Debug, Clone, Copy)]
+pub struct SaveMark {
+    submitted: u64,
+    errors: u64,
+}
 
 /// Adapters available to endpoints, by name.
 #[derive(Debug, Clone, Default)]
 pub struct Adapters(BTreeMap<String, Adapter>);
 
 impl Adapters {
-    /// The built-in adapters (`claude-code`, `generic`).
+    /// The adapters embedded in the binary. One that fails to parse is reported and left out; a test requires
+    /// that none does.
     #[must_use]
     pub fn builtin() -> Self {
         let mut a = Self::default();
-        for adapter in [Adapter::claude_code(), Adapter::generic()]
-            .into_iter()
-            .flatten()
-        {
-            a.insert(adapter);
+        for adapter in Adapter::builtins() {
+            match adapter {
+                Ok(adapter) => a.insert(adapter),
+                Err(e) => crate::diag::error(&format!("built-in {e}")),
+            }
         }
         a
     }
@@ -59,10 +78,16 @@ pub struct Limits {
     pub hook_burst: f64,
     /// Sustained requests per second per endpoint.
     pub hook_per_sec: f64,
-    /// Failed authentications that may burst before further attempts are refused.
+    /// Failed authentications one source address may make at once before its further attempts are refused.
     pub auth_fail_burst: f64,
-    /// Sustained failed authentications per second.
+    /// Sustained failed authentications per second, per source address.
     pub auth_fail_per_sec: f64,
+    /// The backstop over all sources together: failures that may burst. Larger than one source can spend.
+    pub auth_fail_overall_burst: f64,
+    /// The backstop's sustained rate per second.
+    pub auth_fail_overall_per_sec: f64,
+    /// Source addresses remembered at once; the table never grows past this.
+    pub auth_fail_sources: usize,
     /// Replies held for bridges.
     pub max_pending_replies: usize,
     /// Seconds a reply waits for a bridge before expiring.
@@ -77,6 +102,9 @@ impl Default for Limits {
             hook_per_sec: 5.0,
             auth_fail_burst: 20.0,
             auth_fail_per_sec: 1.0,
+            auth_fail_overall_burst: 100.0,
+            auth_fail_overall_per_sec: 5.0,
+            auth_fail_sources: 64,
             max_pending_replies: 64,
             reply_ttl_secs: 24 * 3600,
         }
@@ -94,6 +122,8 @@ pub struct Stores {
     pub replies: JsonStore,
     /// The web UI administrator setting (password hash or open mode).
     pub admin: JsonStore,
+    /// The keys pasted into the portal (see [`crate::secrets`]).
+    pub secrets: JsonStore,
 }
 
 impl Stores {
@@ -105,6 +135,7 @@ impl Stores {
             inbox: JsonStore::new(dir.join("inbox.json"), crate::inbox::queue::SCHEMA),
             replies: JsonStore::new(dir.join("replies.json"), reply::SCHEMA),
             admin: JsonStore::new(dir.join("admin.json"), crate::admin::SCHEMA),
+            secrets: JsonStore::new(dir.join("secrets.json"), crate::secrets::SCHEMA),
         }
     }
 }
@@ -142,6 +173,9 @@ pub enum ReplyError {
     NothingToReplyTo,
     /// The bridge queue is full.
     QueueFull,
+    /// The event named is no longer open: it was answered, dismissed, snoozed, pruned or deleted with its
+    /// endpoint since the reply was proposed.
+    NoLongerWaiting,
 }
 
 /// The result of answering an announced event.
@@ -151,8 +185,8 @@ pub struct Replied {
     pub event_id: u64,
     /// Its headline.
     pub title: String,
-    /// Its source.
-    pub source: String,
+    /// Who the speaker named it as (the endpoint's spoken name or name).
+    pub origin: String,
 }
 
 /// An event to speak, and how many others wait behind it.
@@ -164,6 +198,8 @@ pub struct NextAnnouncement {
     pub more_waiting: usize,
 }
 
+/// A token bucket; `last` is a monotonic reading ([`Clock::monotonic_secs`]), so a step of the wall clock
+/// cannot refill it.
 #[derive(Debug)]
 struct Bucket {
     tokens: f64,
@@ -187,8 +223,10 @@ struct Inner {
     endpoints: Endpoints,
     inbox: Inbox,
     replies: ReplyQueue,
+    /// Rate-limit state, by endpoint id (never by name: see [`Endpoint::id`]).
     buckets: HashMap<String, Bucket>,
-    auth_failures: Bucket,
+    /// Failed attempts, counted per source address (REQ-SEC-004).
+    auth_failures: FailureLimiter,
 }
 
 /// Test phrases that may wait to be spoken.
@@ -202,6 +240,9 @@ pub struct Core {
     adapters: Adapters,
     limits: Limits,
     stores: Option<Stores>,
+    /// Writes the stores in the background; `None` without storage, or when no thread could be started (then
+    /// writes happen inline).
+    writer: Option<Arc<persist::Writer>>,
     inner: Mutex<Inner>,
     notify: Notify,
     admin: Mutex<crate::admin::Admin>,
@@ -212,6 +253,19 @@ pub struct Core {
     jobs: Mutex<Option<tokio::sync::mpsc::Sender<portal::Job>>>,
     audit: std::sync::OnceLock<Arc<crate::audit::AuditLog>>,
     notes: std::sync::OnceLock<Arc<crate::notes::NoteStore>>,
+    asks: Mutex<Vec<ask::PendingAsk>>,
+    secrets: crate::secrets::Secrets,
+    env: crate::env::Env,
+    /// The machine's host name, read once by [`Core::with_env`]; the Host check reads this, not the system.
+    machine: Option<String>,
+    speech_handles: crate::speechio::SpeechHandles,
+    speech_origin: std::sync::OnceLock<crate::speech::SpeechOrigin>,
+    /// Saves of the core's own three files that could not be made inline or encoded.
+    save_errors: AtomicU64,
+    #[cfg(feature = "hive")]
+    hive: std::sync::OnceLock<crate::hive::Hive>,
+    #[cfg(feature = "tls")]
+    updater: std::sync::OnceLock<Arc<crate::update::Updater>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -251,13 +305,28 @@ impl Core {
         limits: Limits,
         stores: Stores,
     ) -> Result<Self, StoreError> {
-        let endpoints: Endpoints = stores.endpoints.load()?;
-        let inbox = Inbox::load(&stores.inbox, InboxLimits::default())?;
-        let replies = ReplyQueue::load(
+        let mut endpoints: Endpoints = stores.endpoints.load()?;
+        let mut inbox = Inbox::load(&stores.inbox, InboxLimits::default(), &*clock)?;
+        let mut replies = ReplyQueue::load(
             &stores.replies,
             limits.max_pending_replies,
             limits.reply_ttl_secs,
+            &*clock,
         )?;
+        // Files saved before endpoints had ids: give each endpoint one and tie what was kept by name to it. The
+        // endpoint list is written first and before anything else is, because an id that is not on disk would be
+        // a different one after the next restart, orphaning every event and reply saved with it meanwhile.
+        if endpoints
+            .assign_missing_ids()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+        {
+            stores.endpoints.save(&endpoints)?;
+        }
+        let moved = Dirty {
+            endpoints: false,
+            inbox: inbox.adopt_endpoint_ids(&endpoints) > 0,
+            replies: replies.adopt_endpoint_ids(&endpoints) > 0,
+        };
         let admin = crate::admin::Admin::open(stores.admin.clone())?;
         let mut core = Self::build(
             clock,
@@ -269,6 +338,10 @@ impl Core {
             replies,
         );
         core.admin = Mutex::new(admin);
+        if moved.inbox || moved.replies {
+            let g = core.lock();
+            core.persist(&g, moved);
+        }
         Ok(core)
     }
 
@@ -281,21 +354,38 @@ impl Core {
         inbox: Inbox,
         replies: ReplyQueue,
     ) -> Self {
-        let now = clock.now();
+        let mono = clock.monotonic_secs();
+        let writer = stores
+            .as_ref()
+            .and_then(|_| persist::Writer::start().map(Arc::new));
+        let secrets = stores
+            .as_ref()
+            .map_or_else(crate::secrets::Secrets::none, |s| {
+                crate::secrets::Secrets::at(s.secrets.clone())
+            });
         Self {
             clock,
             adapters,
             limits,
+            writer,
             stores,
             inner: Mutex::new(Inner {
                 endpoints,
                 inbox,
                 replies,
                 buckets: HashMap::new(),
-                auth_failures: Bucket {
-                    tokens: limits.auth_fail_burst,
-                    last: now,
-                },
+                auth_failures: FailureLimiter::new(
+                    FailureBudget {
+                        burst: limits.auth_fail_burst,
+                        per_sec: limits.auth_fail_per_sec,
+                    },
+                    FailureBudget {
+                        burst: limits.auth_fail_overall_burst,
+                        per_sec: limits.auth_fail_overall_per_sec,
+                    },
+                    limits.auth_fail_sources,
+                    mono,
+                ),
             }),
             notify: Notify::new(),
             admin: Mutex::new(crate::admin::Admin::new()),
@@ -306,7 +396,98 @@ impl Core {
             jobs: Mutex::new(None),
             audit: std::sync::OnceLock::new(),
             notes: std::sync::OnceLock::new(),
+            asks: Mutex::new(Vec::new()),
+            secrets,
+            env: crate::env::Env::empty(),
+            machine: None,
+            speech_handles: crate::speechio::SpeechHandles::default(),
+            speech_origin: std::sync::OnceLock::new(),
+            save_errors: AtomicU64::new(0),
+            #[cfg(feature = "hive")]
+            hive: std::sync::OnceLock::new(),
+            #[cfg(feature = "tls")]
+            updater: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Keep the started hive for the life of this core (set once; a later call is ignored).
+    #[cfg(feature = "hive")]
+    pub fn set_hive(&self, hive: crate::hive::Hive) {
+        let _ = self.hive.set(hive);
+    }
+
+    /// The hive, when it was started.
+    #[cfg(feature = "hive")]
+    #[must_use]
+    pub fn hive(&self) -> Option<&crate::hive::Hive> {
+        self.hive.get()
+    }
+
+    /// Keep the running updater for the life of this core (set once; a later call is ignored).
+    #[cfg(feature = "tls")]
+    pub fn set_updater(&self, updater: Arc<crate::update::Updater>) {
+        let _ = self.updater.set(updater);
+    }
+
+    /// The updater, when updates are running on this device.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn updater(&self) -> Option<&Arc<crate::update::Updater>> {
+        self.updater.get()
+    }
+
+    /// The speech clients' voice and language registry, owned by this core.
+    #[must_use]
+    pub fn speech_handles(&self) -> &crate::speechio::SpeechHandles {
+        &self.speech_handles
+    }
+
+    /// Remember which speech server the portal may ask for its voices (set once at start-up; a later call is
+    /// ignored).
+    pub fn set_speech_origin(&self, origin: crate::speech::SpeechOrigin) {
+        let _ = self.speech_origin.set(origin);
+    }
+
+    /// The speech server set up at start, with the key it would use now.
+    #[must_use]
+    pub fn speech_source(&self) -> Option<crate::speech::SpeechSource> {
+        self.speech_origin
+            .get()
+            .map(|o| o.resolve(&self.secrets, &self.env))
+    }
+
+    /// Give this core the environment snapshot taken at start-up (see [`crate::env`]). A core that is not
+    /// given one sees no variables, so tests never depend on the machine they run on.
+    #[must_use]
+    pub fn with_env(mut self, env: crate::env::Env) -> Self {
+        self.machine = crate::hostguard::machine_name(&env);
+        self.env = env;
+        self
+    }
+
+    /// Set the machine host name the portal answers to, instead of the one read from the system (tests, embedding).
+    #[must_use]
+    pub fn with_machine_name(mut self, name: Option<&str>) -> Self {
+        self.machine = name.map(str::to_owned);
+        self
+    }
+
+    /// The machine's host name as read at start-up, if it could be.
+    #[must_use]
+    pub fn machine_name(&self) -> Option<&str> {
+        self.machine.as_deref()
+    }
+
+    /// The environment as it was at start-up. Look variables up here, never in the process.
+    #[must_use]
+    pub fn env(&self) -> &crate::env::Env {
+        &self.env
+    }
+
+    /// The keys pasted into the portal, owned by this core.
+    #[must_use]
+    pub fn secrets(&self) -> &crate::secrets::Secrets {
+        &self.secrets
     }
 
     /// The current time.
@@ -315,10 +496,29 @@ impl Core {
         self.clock.now()
     }
 
+    /// Whole seconds on the monotonic clock, for measuring how long something has waited
+    /// ([`Clock::monotonic_secs`]).
+    #[must_use]
+    pub fn monotonic_secs(&self) -> i64 {
+        self.clock.monotonic_secs()
+    }
+
+    /// Whether the wall clock has been set ([`Clock::wall_clock_valid`]).
+    #[must_use]
+    pub fn wall_clock_valid(&self) -> bool {
+        self.clock.wall_clock_valid()
+    }
+
     /// Whether an adapter with this name exists.
     #[must_use]
     pub fn has_adapter(&self, name: &str) -> bool {
         self.adapters.get(name).is_some()
+    }
+
+    /// The adapter with this name, if there is one.
+    #[must_use]
+    pub fn adapter(&self, name: &str) -> Option<&Adapter> {
+        self.adapters.get(name)
     }
 
     /// The configured limits.
@@ -337,18 +537,99 @@ impl Core {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn persist(&self, inner: &Inner) {
+    /// Save the stores `dirty` names. The state is serialised here, under the lock; the write itself happens on
+    /// the writer thread (see [`persist`]), so the lock and the runtime do not wait for flash.
+    fn persist(&self, inner: &Inner, dirty: Dirty) {
         let Some(s) = &self.stores else { return };
-        // A failed write must not lose the in-memory event, but it must not be silent either.
-        if let Err(e) = s.endpoints.save(&inner.endpoints) {
-            crate::diag::error(&format!("could not save endpoints: {e}"));
+        if dirty.endpoints {
+            self.queue_write(&s.endpoints, s.endpoints.encode(&inner.endpoints));
         }
-        if let Err(e) = inner.inbox.save(&s.inbox) {
-            crate::diag::error(&format!("could not save inbox: {e}"));
+        if dirty.inbox {
+            self.queue_write(&s.inbox, inner.inbox.encode(&s.inbox, &*self.clock));
         }
-        if let Err(e) = inner.replies.save(&s.replies) {
-            crate::diag::error(&format!("could not save replies: {e}"));
+        if dirty.replies {
+            self.queue_write(&s.replies, inner.replies.encode(&s.replies, &*self.clock));
         }
+    }
+
+    fn queue_write(&self, store: &JsonStore, bytes: Result<Vec<u8>, StoreError>) {
+        // A failed write must not lose the in-memory event, but it must not be silent either, and the caller
+        // that waits for it must hear that it failed.
+        let bytes = match bytes {
+            Ok(b) => b,
+            Err(e) => {
+                crate::diag::error(&format!("could not save {}: {e}", store.path().display()));
+                self.save_errors.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+        };
+        match &self.writer {
+            Some(w) => {
+                w.submit(store, bytes);
+            }
+            None => {
+                if let Err(e) = store.write(&bytes) {
+                    crate::diag::error(&format!("could not save {}: {e}", store.path().display()));
+                    self.save_errors.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    /// Note where the saves stand, before a change that will be saved. Hand it to [`Core::saved_since`] after
+    /// the change.
+    #[must_use]
+    pub fn save_mark(&self) -> SaveMark {
+        SaveMark {
+            submitted: self.writer.as_ref().map_or(0, |w| w.mark()),
+            errors: self.save_errors.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Resolves once every change made to the endpoints, inbox and replies since `mark` is on disk. The HTTP layer
+    /// awaits this before it answers a webhook, announcement, acknowledgement or endpoint change, so one reported
+    /// as accepted survives a power cut (REQ-INB-004) and one that could not be saved is not reported as a success.
+    /// Returns at once when nothing is waiting or the core has no storage.
+    ///
+    /// # Errors
+    /// [`persist::SaveError`] when a write failed. The change stays in memory (it is still announced, answered or
+    /// delivered), but it will not survive a restart.
+    pub async fn saved_since(&self, mark: SaveMark) -> Result<(), persist::SaveError> {
+        if self.save_errors.load(Ordering::SeqCst) != mark.errors {
+            return Err(persist::SaveError { disk_full: false });
+        }
+        let (Some(w), Some(s)) = (&self.writer, &self.stores) else {
+            return Ok(());
+        };
+        let ours = |p: &std::path::Path| {
+            p == s.endpoints.path() || p == s.inbox.path() || p == s.replies.path()
+        };
+        w.flushed_since(mark.submitted, &ours).await?;
+        // An encoding or inline failure that happened while the writer was busy.
+        if self.save_errors.load(Ordering::SeqCst) != mark.errors {
+            return Err(persist::SaveError { disk_full: false });
+        }
+        Ok(())
+    }
+
+    /// The background writer, for stores outside the core's three (timers, usage counters) that hand it bytes.
+    /// `None` without storage, or when no thread could be started: those callers then write inline.
+    #[must_use]
+    pub fn writer(&self) -> Option<Arc<persist::Writer>> {
+        self.writer.clone()
+    }
+
+    /// Block until every change made so far is on disk. For tests and shutdown paths, not for the runtime.
+    pub fn flush_blocking(&self) {
+        if let Some(w) = &self.writer {
+            w.flush_blocking();
+        }
+    }
+
+    /// Block until every change made so far is on disk, or `limit` has passed. Returns whether it is all on disk.
+    /// For the stop on a signal, where a disk that does not answer must not keep the program from stopping.
+    pub fn flush_within(&self, limit: std::time::Duration) -> bool {
+        self.writer.as_ref().is_none_or(|w| w.flush_within(limit))
     }
 
     // ----- endpoint management (used by the portal and CLI) -----
@@ -365,7 +646,7 @@ impl Core {
         let now = self.clock.now();
         let mut g = self.lock();
         let made = g.endpoints.create(name, adapter, now)?;
-        self.persist(&g);
+        self.persist(&g, Dirty::ENDPOINTS);
         Ok(made)
     }
 
@@ -376,18 +657,37 @@ impl Core {
     pub fn rotate_endpoint(&self, name: &str) -> Result<String, endpoint::EndpointError> {
         let mut g = self.lock();
         let t = g.endpoints.rotate(name)?;
-        self.persist(&g);
+        self.persist(&g, Dirty::ENDPOINTS);
         Ok(t)
     }
 
-    /// Delete an endpoint and any replies waiting for its bridge.
+    /// Delete an endpoint, the replies waiting for its bridge, its events that are still open, a question it is
+    /// asking and its rate-limit state. All of these are keyed by the endpoint's id, which dies with it, so an
+    /// endpoint made later under the same name starts with none of them (and a path that forgot one of these
+    /// could not hand it over either).
     ///
     /// # Errors
     /// See [`endpoint::EndpointError`].
     pub fn revoke_endpoint(&self, name: &str) -> Result<(), endpoint::EndpointError> {
         let mut g = self.lock();
+        let id = g
+            .endpoints
+            .get(name)
+            .map(|e| e.id.clone())
+            .ok_or(endpoint::EndpointError::NotFound)?;
         g.endpoints.revoke(name)?;
-        self.persist(&g);
+        g.buckets.remove(&id);
+        self.ask_drop_endpoint(&id);
+        let replies = g.replies.drop_for(&id);
+        let events = g.inbox.drop_open_for(&id);
+        self.persist(
+            &g,
+            Dirty {
+                endpoints: true,
+                inbox: events > 0,
+                replies: replies > 0,
+            },
+        );
         Ok(())
     }
 
@@ -400,7 +700,7 @@ impl Core {
             .map(|e| f(&mut e.filter))
             .is_some();
         if found {
-            self.persist(&g);
+            self.persist(&g, Dirty::ENDPOINTS);
         }
         found
     }
@@ -418,17 +718,13 @@ impl Core {
         g: &mut Inner,
         name: &str,
         token: &str,
-        now: Ts,
+        peer: IpAddr,
+        mono: i64,
     ) -> Result<Endpoint, HookError> {
         if let Some(ep) = g.endpoints.authenticate(name, token) {
             return Ok(ep.clone());
         }
-        let ok = take(
-            &mut g.auth_failures,
-            now,
-            self.limits.auth_fail_burst,
-            self.limits.auth_fail_per_sec,
-        );
+        let ok = g.auth_failures.spend(peer, mono);
         Err(if ok {
             HookError::Unauthorized
         } else {
@@ -436,7 +732,8 @@ impl Core {
         })
     }
 
-    /// Handle a posted event: authenticate, rate-limit, parse, map, filter, queue, persist.
+    /// Handle a posted event: authenticate, rate-limit, parse, map, filter, queue, persist. `peer` is the
+    /// address the request came from; a wrong token is counted against it alone.
     ///
     /// # Errors
     /// See [`HookError`].
@@ -444,18 +741,19 @@ impl Core {
         &self,
         name: &str,
         token: &str,
+        peer: IpAddr,
         body: &[u8],
     ) -> Result<HookOutcome, HookError> {
-        let now = self.clock.now();
+        let (now, mono) = (self.clock.now(), self.clock.monotonic_secs());
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, now)?;
-        let bucket = g.buckets.entry(ep.name.clone()).or_insert(Bucket {
+        let ep = self.authenticate(&mut g, name, token, peer, mono)?;
+        let bucket = g.buckets.entry(ep.id.clone()).or_insert(Bucket {
             tokens: self.limits.hook_burst,
-            last: now,
+            last: mono,
         });
         if !take(
             bucket,
-            now,
+            mono,
             self.limits.hook_burst,
             self.limits.hook_per_sec,
         ) {
@@ -465,13 +763,13 @@ impl Core {
             serde_json::from_slice(body).map_err(|_| HookError::BadJson)?;
         let adapter = self.adapters.get(&ep.adapter).ok_or(HookError::NoAdapter)?;
         let mapped = adapter.map(&payload).ok_or(HookError::Unmappable)?;
-        let outcome = match g.inbox.ingest(now, &ep, mapped) {
+        let outcome = match g.inbox.ingest(Moment { wall: now, mono }, &ep, mapped) {
             Ingest::Accepted(id) => HookOutcome::Accepted(id),
             Ingest::Coalesced(id) => HookOutcome::Coalesced(id),
             Ingest::Filtered(r) => HookOutcome::Filtered(r),
         };
         if !matches!(outcome, HookOutcome::Filtered(_)) {
-            self.persist(&g);
+            self.persist(&g, Dirty::INBOX);
             self.notify.notify_waiters();
         }
         Ok(outcome)
@@ -487,14 +785,15 @@ impl Core {
         &self,
         name: &str,
         token: &str,
+        peer: IpAddr,
         after: u64,
     ) -> Result<Vec<Reply>, HookError> {
-        let now = self.clock.now();
+        let mono = self.clock.monotonic_secs();
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, now)?;
-        g.replies.expire(now);
+        let ep = self.authenticate(&mut g, name, token, peer, mono)?;
+        g.replies.expire(Moment::of(&*self.clock));
         Ok(g.replies
-            .pending_for(&ep.name, after)
+            .pending_for(&ep.id, after)
             .into_iter()
             .cloned()
             .collect())
@@ -504,13 +803,19 @@ impl Core {
     ///
     /// # Errors
     /// [`HookError::Unauthorized`] or [`HookError::RateLimited`].
-    pub fn bridge_ack(&self, name: &str, token: &str, reply_id: u64) -> Result<bool, HookError> {
-        let now = self.clock.now();
+    pub fn bridge_ack(
+        &self,
+        name: &str,
+        token: &str,
+        peer: IpAddr,
+        reply_id: u64,
+    ) -> Result<bool, HookError> {
+        let mono = self.clock.monotonic_secs();
         let mut g = self.lock();
-        let ep = self.authenticate(&mut g, name, token, now)?;
-        let acked = g.replies.ack(&ep.name, reply_id);
+        let ep = self.authenticate(&mut g, name, token, peer, mono)?;
+        let acked = g.replies.ack(&ep.id, reply_id);
         if acked {
-            self.persist(&g);
+            self.persist(&g, Dirty::REPLIES);
         }
         Ok(acked)
     }
@@ -519,10 +824,11 @@ impl Core {
     ///
     /// # Errors
     /// [`HookError::Unauthorized`] or [`HookError::RateLimited`].
-    pub fn bridge_check(&self, name: &str, token: &str) -> Result<(), HookError> {
-        let now = self.clock.now();
+    pub fn bridge_check(&self, name: &str, token: &str, peer: IpAddr) -> Result<(), HookError> {
+        let mono = self.clock.monotonic_secs();
         let mut g = self.lock();
-        self.authenticate(&mut g, name, token, now).map(|_| ())
+        self.authenticate(&mut g, name, token, peer, mono)
+            .map(|_| ())
     }
 
     // ----- web UI administration (REQ-CFG-018..024) -----
@@ -531,16 +837,16 @@ impl Core {
         self.admin.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Spend one attempt from the shared authentication rate limit. False when the budget is used up.
-    fn spend_attempt(&self) -> bool {
-        let now = self.clock.now();
-        let mut g = self.lock();
-        take(
-            &mut g.auth_failures,
-            now,
-            self.limits.auth_fail_burst,
-            self.limits.auth_fail_per_sec,
-        )
+    /// Spend one attempt from `peer`'s authentication budget (and the backstop over everyone). False when either
+    /// is used up.
+    fn spend_attempt(&self, peer: IpAddr) -> bool {
+        let mono = self.clock.monotonic_secs();
+        self.lock().auth_failures.spend(peer, mono)
+    }
+
+    /// Give back an attempt that turned out to be a success, so signing in with the right password costs nothing.
+    fn refund_attempt(&self, peer: IpAddr) {
+        self.lock().auth_failures.refund(peer);
     }
 
     /// Tell the administrator logic where the core listens (decides whether open mode is allowed).
@@ -551,13 +857,13 @@ impl Core {
     /// The administrator state the page needs to decide what to show.
     #[must_use]
     pub fn admin_state(&self) -> serde_json::Value {
-        let now = self.clock.now();
+        let mono = self.clock.monotonic_secs();
         let mut a = self.admin_lock();
         serde_json::json!({
             "mode": a.mode().label(),
             "legacy": a.legacy(),
             "open_allowed": a.open_allowed(),
-            "reset_window_secs": a.window_left(now),
+            "reset_window_secs": a.window_left(mono),
         })
     }
 
@@ -567,27 +873,29 @@ impl Core {
         self.admin_lock().mode()
     }
 
-    /// Whether a request may use the administrator API. Wrong sessions share the authentication rate limit.
+    /// Whether a request may use the administrator API. A wrong session counts against the caller's address.
     ///
     /// # Errors
     /// [`AdminError::SetupRequired`], [`AdminError::NotPrivate`], [`AdminError::Unauthorized`], or
     /// [`AdminError::RateLimited`].
     pub fn check_admin(&self, bearer: Option<&str>, peer: IpAddr) -> Result<(), AdminError> {
-        let now = self.clock.now();
-        let r = self.admin_lock().authorize(bearer, peer, now);
+        let mono = self.clock.monotonic_secs();
+        let r = self.admin_lock().authorize(bearer, peer, mono);
         match r {
-            Err(AdminError::Unauthorized) if !self.spend_attempt() => Err(AdminError::RateLimited),
+            Err(AdminError::Unauthorized) if !self.spend_attempt(peer) => {
+                Err(AdminError::RateLimited)
+            }
             r => r,
         }
     }
 
-    /// Whether setup may proceed from `peer`. Every call spends an attempt, so setup attempts share the
-    /// authentication rate limit (call this before doing any expensive hashing).
+    /// Whether setup may proceed from `peer`. Every call spends an attempt from the peer's budget (call this
+    /// before doing any expensive hashing).
     ///
     /// # Errors
     /// See [`AdminError`].
     pub fn admin_check_setup(&self, peer: IpAddr) -> Result<(), AdminError> {
-        if !self.spend_attempt() {
+        if !self.spend_attempt(peer) {
             return Err(AdminError::RateLimited);
         }
         self.admin_lock().check_setup(peer)
@@ -606,34 +914,44 @@ impl Core {
     /// # Errors
     /// See [`AdminError`].
     pub fn admin_setup_password(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
-        let now = self.clock.now();
-        self.admin_lock().setup_password(peer, hash, now)
+        let mono = self.clock.monotonic_secs();
+        self.admin_lock().setup_password(peer, hash, mono)
     }
 
-    /// Start a sign-in: spends an attempt and returns the stored hash to verify (do that off the async
-    /// thread, it is deliberately slow).
+    /// Start a sign-in from `peer`: spends an attempt from its budget and returns the stored hash to verify
+    /// (do that off the async thread, it is deliberately slow). The attempt is spent before the check so that
+    /// many sign-ins at once cannot all pass a budget that has one attempt left; [`Core::admin_login_finish`]
+    /// gives it back when the password was right.
     ///
     /// # Errors
     /// [`AdminError::RateLimited`]; [`AdminError::SetupRequired`] or [`AdminError::Unauthorized`] when there
     /// is no password to check.
-    pub fn admin_login_begin(&self) -> Result<String, AdminError> {
-        if !self.spend_attempt() {
+    pub fn admin_login_begin(&self, peer: IpAddr) -> Result<String, AdminError> {
+        if !self.spend_attempt(peer) {
             return Err(AdminError::RateLimited);
         }
         let a = self.admin_lock();
-        match a.mode() {
+        let stored = match a.mode() {
             AdminMode::Setup => Err(AdminError::SetupRequired),
             _ => a.password_hash().ok_or(AdminError::Unauthorized),
+        };
+        drop(a);
+        if stored.is_err() {
+            // Nothing was guessed: there was no password to check.
+            self.refund_attempt(peer);
         }
+        stored
     }
 
-    /// Open a session after the password checked out.
+    /// Open a session after the password checked out, and give back the attempt [`Core::admin_login_begin`]
+    /// spent for `peer`.
     ///
     /// # Errors
     /// If the OS cannot supply random bytes.
-    pub fn admin_login_finish(&self) -> Result<String, AdminError> {
-        let now = self.clock.now();
-        self.admin_lock().new_session(now)
+    pub fn admin_login_finish(&self, peer: IpAddr) -> Result<String, AdminError> {
+        let mono = self.clock.monotonic_secs();
+        self.refund_attempt(peer);
+        self.admin_lock().new_session(mono)
     }
 
     /// End the session `bearer`.
@@ -641,14 +959,74 @@ impl Core {
         self.admin_lock().end_session(bearer);
     }
 
-    /// Replace the administrator password (the caller has already passed [`Core::check_admin`] and hashed the
-    /// new password). Ends every session and returns a new one.
+    /// Start a password change from `peer` (REQ-CFG-024): spends an attempt from its budget and returns the
+    /// credential the caller must prove it knows, to verify off the async thread (deliberately slow). `None` in
+    /// open mode, where there is no password to prove and the private address is the credential. The caller has
+    /// already passed [`Core::check_admin`].
     ///
     /// # Errors
-    /// Storage and randomness failures.
-    pub fn admin_set_password(&self, hash: String) -> Result<String, AdminError> {
-        let now = self.clock.now();
-        self.admin_lock().set_password(hash, now)
+    /// [`AdminError::RateLimited`]; [`AdminError::SetupRequired`] while no setting exists.
+    pub fn admin_password_begin(&self, peer: IpAddr) -> Result<Option<String>, AdminError> {
+        if !self.spend_attempt(peer) {
+            return Err(AdminError::RateLimited);
+        }
+        let a = self.admin_lock();
+        let stored = match a.mode() {
+            AdminMode::Setup => Err(AdminError::SetupRequired),
+            _ => Ok(a.password_hash()),
+        };
+        drop(a);
+        if !matches!(stored, Ok(Some(_))) {
+            // Open mode (or no setting): nothing was guessed.
+            self.refund_attempt(peer);
+        }
+        stored
+    }
+
+    /// Replace the administrator password (the caller has passed [`Core::check_admin`], proved the current
+    /// password against what [`Core::admin_password_begin`] returned, and hashed the new one). Ends every session
+    /// and returns a new one. `proved` is that credential: if the stored one changed meanwhile (another change
+    /// got in first), nothing is replaced. The attempt `begin` spent is given back. Setting a password in open
+    /// mode, and changing one, are written to the audit log and the problem log.
+    ///
+    /// # Errors
+    /// [`AdminError::WrongCurrent`] when the stored credential is no longer the one that was checked; storage and
+    /// randomness failures.
+    pub fn admin_set_password(
+        &self,
+        peer: IpAddr,
+        proved: Option<&str>,
+        hash: String,
+    ) -> Result<String, AdminError> {
+        let mono = self.clock.monotonic_secs();
+        let mut a = self.admin_lock();
+        if a.password_hash().as_deref() != proved {
+            return Err(AdminError::WrongCurrent);
+        }
+        let r = a.set_password(hash, mono);
+        drop(a);
+        self.refund_attempt(peer);
+        match (&r, proved) {
+            (Ok(_), None) => self.audit_admin_event(
+                "admin_password",
+                "administrator password set while the portal was open",
+                "password set in open mode",
+                true,
+            ),
+            (Ok(_), Some(_)) => self.audit_admin_event(
+                "admin_password",
+                "administrator password changed",
+                "password changed",
+                true,
+            ),
+            (Err(_), _) => self.audit_admin_event(
+                "admin_password",
+                "administrator password change failed",
+                "password change failed",
+                false,
+            ),
+        }
+        r
     }
 
     /// Open the local reset window on a device's request (REQ-CFG-069). Returns the seconds it is open.
@@ -656,8 +1034,8 @@ impl Core {
     /// # Errors
     /// [`AdminError::NoPassword`] unless a password is set; [`AdminError::RateLimited`] during the cooldown.
     pub fn admin_open_reset_window(&self) -> Result<i64, AdminError> {
-        let now = self.clock.now();
-        let r = self.admin_lock().open_window(now);
+        let mono = self.clock.monotonic_secs();
+        let r = self.admin_lock().open_window(mono);
         match &r {
             Ok(_) => self.audit_admin("reset window opened", true),
             Err(_) => self.audit_admin("reset window refused", false),
@@ -671,11 +1049,11 @@ impl Core {
     /// [`AdminError::RateLimited`], [`AdminError::NotPrivate`], [`AdminError::WindowClosed`],
     /// [`AdminError::NoPassword`].
     pub fn admin_window_begin(&self, peer: IpAddr) -> Result<(), AdminError> {
-        if !self.spend_attempt() {
+        if !self.spend_attempt(peer) {
             return Err(AdminError::RateLimited);
         }
-        let now = self.clock.now();
-        self.admin_lock().check_window(peer, now)
+        let mono = self.clock.monotonic_secs();
+        self.admin_lock().check_window(peer, mono)
     }
 
     /// Finish a reset through the window (REQ-CFG-069). Returns a new session.
@@ -683,8 +1061,8 @@ impl Core {
     /// # Errors
     /// As [`Core::admin_window_begin`], plus storage and randomness failures.
     pub fn admin_window_finish(&self, peer: IpAddr, hash: String) -> Result<String, AdminError> {
-        let now = self.clock.now();
-        let r = self.admin_lock().reset_in_window(peer, hash, now);
+        let mono = self.clock.monotonic_secs();
+        let r = self.admin_lock().reset_in_window(peer, hash, mono);
         if r.is_ok() {
             self.audit_admin("reset window used", true);
         }
@@ -693,7 +1071,18 @@ impl Core {
 
     /// One line in the problem log and one audit record for an administrator password-reset event. Never a secret.
     fn audit_admin(&self, what: &str, ok: bool) {
-        crate::diag::warn(&format!("administrator reset: {what}"));
+        self.audit_admin_event(
+            "admin_reset",
+            &format!("administrator reset: {what}"),
+            what,
+            ok,
+        );
+    }
+
+    /// One line (`line`) in the problem log and one audit record under `tool`, with the short `what` as its note,
+    /// for an administrator event. Never a secret.
+    fn audit_admin_event(&self, tool: &'static str, line: &str, what: &str, ok: bool) {
+        crate::diag::warn(line);
         if let Some(log) = self.audit.get() {
             let now = self.clock.now();
             log.record(
@@ -703,7 +1092,7 @@ impl Core {
                 "admin",
                 None,
                 &crate::audit::Act {
-                    tool: "admin_reset",
+                    tool,
                     tier: None,
                     args: &serde_json::Value::Null,
                     decision: if ok {
@@ -733,6 +1122,15 @@ impl Core {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Replace one top-level field of the published snapshot, so a change that happens while the main loop is busy
+    /// (a realtime conversation) shows at once. Does nothing before the first snapshot.
+    pub fn patch_ui_status(&self, key: &str, value: serde_json::Value) {
+        let mut g = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(o) = g.as_object_mut() {
+            o.insert(key.to_owned(), value);
+        }
     }
 
     /// Ask the speaker to say `text` (the UI's "test speak"). At most [`MAX_PENDING_SPEECH`] requests wait, each
@@ -777,7 +1175,7 @@ impl Core {
         device_idle: bool,
         minute_of_day: u16,
     ) -> Option<NextAnnouncement> {
-        let now = self.clock.now();
+        let now = Moment::of(&*self.clock);
         let g = self.lock();
         let plan = g
             .inbox
@@ -805,7 +1203,7 @@ impl Core {
     pub fn mark_announced(&self, ids: &[u64]) {
         let mut g = self.lock();
         g.inbox.mark_announced(ids);
-        self.persist(&g);
+        self.persist(&g, Dirty::INBOX);
     }
 
     /// The event a spoken reply would go to.
@@ -820,25 +1218,78 @@ impl Core {
     /// # Errors
     /// [`ReplyError::NothingToReplyTo`] or [`ReplyError::QueueFull`].
     pub fn reply(&self, kind: ReplyKind, text: &str) -> Result<Replied, ReplyError> {
-        let now = self.clock.now();
-        let mut g = self.lock();
+        let g = self.lock();
         let ev = g
             .inbox
             .reply_target()
             .cloned()
             .ok_or(ReplyError::NothingToReplyTo)?;
-        g.replies
-            .push(now, &ev.endpoint, ev.id, ev.session_ref.clone(), kind, text)
-            .map_err(|_| ReplyError::QueueFull)?;
-        if kind == ReplyKind::Ack {
+        self.reply_locked(g, ev, kind, text)
+    }
+
+    /// Answer one named event, as [`Core::reply`] does for the current one. A reply the user approved is sent
+    /// here with the id it was bound to when it was read back, so a later announcement cannot take it
+    /// elsewhere (REQ-SEC-011, REQ-INB-023). The event must still be waiting for an answer.
+    ///
+    /// # Errors
+    /// [`ReplyError::NoLongerWaiting`] when the event is not open any more, or [`ReplyError::QueueFull`].
+    pub fn reply_to(
+        &self,
+        event_id: u64,
+        kind: ReplyKind,
+        text: &str,
+    ) -> Result<Replied, ReplyError> {
+        let g = self.lock();
+        let ev = g
+            .inbox
+            .get(event_id)
+            .filter(|e| e.state == EventState::Announced && !e.no_reply)
+            .cloned()
+            .ok_or(ReplyError::NoLongerWaiting)?;
+        self.reply_locked(g, ev, kind, text)
+    }
+
+    /// Queue the answer to `ev` (already checked to be open) and record it.
+    fn reply_locked(
+        &self,
+        mut g: MutexGuard<'_, Inner>,
+        ev: Event,
+        kind: ReplyKind,
+        text: &str,
+    ) -> Result<Replied, ReplyError> {
+        let now = Moment::of(&*self.clock);
+        // A question an agent asked out loud (REQ-EXT-012): the answer goes to the one waiting caller, as
+        // data, and to no bridge.
+        let end = if kind == ReplyKind::Ack {
+            AskEnd::Acknowledged
+        } else {
+            AskEnd::Answered(text.to_owned())
+        };
+        if self.deliver_ask(ev.id, end) {
             g.inbox.acknowledge(ev.id);
+            self.persist(&g, Dirty::INBOX);
+            return Ok(Replied {
+                event_id: ev.id,
+                origin: ev.origin_name().to_owned(),
+                title: ev.title,
+            });
         }
-        self.persist(&g);
+        g.replies
+            .push(now, &ev, kind, text)
+            .map_err(|_| ReplyError::QueueFull)?;
+        // Only an acknowledgement changes the event; an instruction only adds a reply for the bridge.
+        let dirty = if kind == ReplyKind::Ack {
+            g.inbox.acknowledge(ev.id);
+            Dirty::INBOX_AND_REPLIES
+        } else {
+            Dirty::REPLIES
+        };
+        self.persist(&g, dirty);
         self.notify.notify_waiters();
         Ok(Replied {
             event_id: ev.id,
+            origin: ev.origin_name().to_owned(),
             title: ev.title,
-            source: ev.source,
         })
     }
 
@@ -849,19 +1300,20 @@ impl Core {
             return false;
         };
         let done = g.inbox.dismiss(id);
-        self.persist(&g);
+        self.deliver_ask(id, AskEnd::Dismissed);
+        self.persist(&g, Dirty::INBOX);
         done
     }
 
     /// Postpone the current event.
     pub fn snooze_current(&self, secs: i64) -> bool {
-        let now = self.clock.now();
+        let now = Moment::of(&*self.clock);
         let mut g = self.lock();
         let Some(id) = g.inbox.reply_target().map(|e| e.id) else {
             return false;
         };
-        let done = g.inbox.snooze(id, now + secs);
-        self.persist(&g);
+        let done = g.inbox.snooze(id, now, secs);
+        self.persist(&g, Dirty::INBOX);
         done
     }
 
@@ -885,13 +1337,16 @@ impl Core {
 
     /// Housekeeping: drop expired replies and old handled events.
     pub fn maintain(&self) {
-        let now = self.clock.now();
+        let now = Moment::of(&*self.clock);
         let mut g = self.lock();
         let expired = g.replies.expire(now);
-        g.inbox.prune(now, 24 * 3600);
+        let pruned = g.inbox.prune(now, 24 * 3600);
         let lapsed = g.inbox.expire(now);
-        if expired > 0 || lapsed > 0 {
-            self.persist(&g);
+        if expired > 0 {
+            self.persist(&g, Dirty::REPLIES);
+        }
+        if pruned + lapsed > 0 {
+            self.persist(&g, Dirty::INBOX);
         }
     }
 
@@ -908,270 +1363,7 @@ impl Core {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::inbox::event::EventKind;
-    use crate::store::testutil::TempDir;
-    use std::sync::atomic::{AtomicI64, Ordering};
+mod tests;
 
-    pub(crate) struct TestClock(pub AtomicI64);
-    impl Clock for TestClock {
-        fn now(&self) -> Ts {
-            self.0.load(Ordering::Relaxed)
-        }
-    }
-
-    fn core() -> (Core, Arc<TestClock>) {
-        let clock = Arc::new(TestClock(AtomicI64::new(1_800_000_000)));
-        (
-            Core::in_memory(clock.clone(), Adapters::builtin(), Limits::default()),
-            clock,
-        )
-    }
-
-    const STOP: &str = r#"{"session_id":"s1","cwd":"/home/a/clawdot","hook_event_name":"Stop","last_assistant_message":"Done. All tests pass."}"#;
-
-    #[test]
-    fn a_valid_claude_code_hook_lands_in_the_inbox() {
-        let (c, _) = core();
-        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        let out = c
-            .ingest_hook("claude-code", &token, STOP.as_bytes())
-            .unwrap();
-        assert_eq!(out, HookOutcome::Accepted(1));
-        let ev = &c.events()[0];
-        assert_eq!(
-            (ev.kind, ev.title.as_str(), ev.session_ref.as_deref()),
-            (EventKind::Done, "clawdot finished", Some("s1"))
-        );
-    }
-
-    #[test]
-    fn bad_credentials_are_refused_identically_for_unknown_endpoints_and_wrong_tokens() {
-        let (c, _) = core();
-        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        assert_eq!(
-            c.ingest_hook("claude-code", "cdt_wrong", b"{}"),
-            Err(HookError::Unauthorized)
-        );
-        assert_eq!(
-            c.ingest_hook("no-such", &token, b"{}"),
-            Err(HookError::Unauthorized)
-        );
-        assert!(c.events().is_empty());
-    }
-
-    #[test]
-    fn repeated_bad_guesses_get_rate_limited() {
-        let (c, _) = core();
-        c.create_endpoint("x", "generic").unwrap();
-        let mut limited = false;
-        for _ in 0..100 {
-            if c.ingest_hook("x", "cdt_guess", b"{}") == Err(HookError::RateLimited) {
-                limited = true;
-                break;
-            }
-        }
-        assert!(limited, "brute force must hit a limit");
-    }
-
-    #[test]
-    fn a_flood_from_a_valid_endpoint_is_throttled_then_recovers() {
-        let (c, clock) = core();
-        let (_, token) = c.create_endpoint("x", "generic").unwrap();
-        let mut accepted = 0;
-        let mut limited = 0;
-        for i in 0..60 {
-            match c.ingest_hook(
-                "x",
-                &token,
-                format!(r#"{{"title":"t{i}","session_ref":"s{i}"}}"#).as_bytes(),
-            ) {
-                Ok(_) => accepted += 1,
-                Err(HookError::RateLimited) => limited += 1,
-                Err(e) => panic!("unexpected {e:?}"),
-            }
-        }
-        assert!(
-            accepted >= 20 && limited > 0,
-            "accepted {accepted}, limited {limited}"
-        );
-        clock.0.fetch_add(10, Ordering::Relaxed);
-        assert!(
-            c.ingest_hook("x", &token, br#"{"title":"later"}"#).is_ok(),
-            "tokens refill"
-        );
-    }
-
-    #[test]
-    fn malformed_input_is_rejected_cleanly() {
-        let (c, _) = core();
-        let (_, token) = c.create_endpoint("x", "generic").unwrap();
-        assert_eq!(
-            c.ingest_hook("x", &token, b"not json"),
-            Err(HookError::BadJson)
-        );
-        let (_, t2) = c.create_endpoint("y", "no-such-adapter").unwrap();
-        assert_eq!(c.ingest_hook("y", &t2, b"{}"), Err(HookError::NoAdapter));
-    }
-
-    #[test]
-    fn muted_endpoints_accept_but_do_not_queue() {
-        let (c, _) = core();
-        let (_, token) = c.create_endpoint("x", "generic").unwrap();
-        c.update_filter("x", |f| f.muted = true);
-        let out = c.ingest_hook("x", &token, br#"{"title":"hi"}"#).unwrap();
-        assert!(matches!(out, HookOutcome::Filtered(FilterReason::Muted)));
-        assert!(c.events().is_empty());
-    }
-
-    #[test]
-    fn announce_reply_and_the_bridge_round_trip() {
-        let (c, _) = core();
-        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
-            .unwrap();
-
-        let next = c.next_announcement(true, 600).unwrap();
-        assert_eq!(next.event.title, "clawdot finished");
-        assert!(c.next_announcement(false, 600).is_none(), "not while busy");
-        c.mark_announced(&[next.event.id]);
-        assert!(
-            c.next_announcement(true, 600).is_none(),
-            "announced events are not repeated"
-        );
-
-        let replied = c
-            .reply(ReplyKind::Instruct, "keep going and add tests")
-            .unwrap();
-        assert_eq!(replied.event_id, next.event.id);
-
-        // The bridge pulls it with its own credentials, and only its own.
-        let pending = c.bridge_pending("claude-code", &token, 0).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].session_ref.as_deref(), Some("s1"));
-        assert_eq!(pending[0].text, "keep going and add tests");
-        assert!(c.bridge_ack("claude-code", &token, pending[0].id).unwrap());
-        assert!(
-            c.bridge_pending("claude-code", &token, 0)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn saying_thanks_ill_handle_it_acknowledges_locally_and_tells_the_agent() {
-        let (c, _) = core();
-        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
-            .unwrap();
-        let id = c.next_announcement(true, 0).unwrap().event.id;
-        c.mark_announced(&[id]);
-        c.reply(ReplyKind::Ack, "").unwrap();
-        assert_eq!(c.events()[0].state, EventState::Acknowledged);
-        assert_eq!(
-            c.bridge_pending("claude-code", &token, 0).unwrap()[0].kind,
-            ReplyKind::Ack
-        );
-        assert_eq!(
-            c.reply(ReplyKind::Ack, ""),
-            Err(ReplyError::NothingToReplyTo),
-            "nothing open any more"
-        );
-    }
-
-    #[test]
-    fn replying_with_nothing_announced_is_an_error_not_a_guess() {
-        let (c, _) = core();
-        assert_eq!(
-            c.reply(ReplyKind::Instruct, "do it"),
-            Err(ReplyError::NothingToReplyTo)
-        );
-    }
-
-    #[test]
-    fn a_bridge_never_sees_another_endpoints_replies() {
-        let (c, _) = core();
-        let (_, a) = c.create_endpoint("a", "generic").unwrap();
-        let (_, b) = c.create_endpoint("b", "generic").unwrap();
-        c.ingest_hook("a", &a, br#"{"title":"for a","session_ref":"sa"}"#)
-            .unwrap();
-        let id = c.next_announcement(true, 0).unwrap().event.id;
-        c.mark_announced(&[id]);
-        c.reply(ReplyKind::Instruct, "x").unwrap();
-        assert!(c.bridge_pending("b", &b, 0).unwrap().is_empty());
-        assert_eq!(c.bridge_pending("a", &a, 0).unwrap().len(), 1);
-        assert_eq!(
-            c.bridge_pending("a", &b, 0),
-            Err(HookError::Unauthorized),
-            "b's token is not a's"
-        );
-    }
-
-    #[test]
-    fn dismissing_and_snoozing_the_current_event() {
-        let (c, clock) = core();
-        let (_, token) = c.create_endpoint("x", "generic").unwrap();
-        c.ingest_hook("x", &token, br#"{"title":"one","session_ref":"1"}"#)
-            .unwrap();
-        let id = c.next_announcement(true, 0).unwrap().event.id;
-        c.mark_announced(&[id]);
-        assert!(c.snooze_current(600));
-        assert!(c.next_announcement(true, 0).is_none());
-        clock.0.fetch_add(601, Ordering::Relaxed);
-        let again = c.next_announcement(true, 0).unwrap();
-        c.mark_announced(&[again.event.id]);
-        assert!(c.dismiss_current());
-        assert!(c.next_announcement(true, 0).is_none());
-        assert!(!c.dismiss_current(), "nothing left to dismiss");
-    }
-
-    #[test]
-    fn state_survives_a_restart_including_pending_replies() {
-        let dir = TempDir::new("core");
-        let clock = Arc::new(TestClock(AtomicI64::new(1_800_000_000)));
-        let token;
-        {
-            let c = Core::open(
-                clock.clone(),
-                Adapters::builtin(),
-                Limits::default(),
-                Stores::in_dir(&dir.0),
-            )
-            .unwrap();
-            token = c.create_endpoint("claude-code", "claude-code").unwrap().1;
-            c.ingest_hook("claude-code", &token, STOP.as_bytes())
-                .unwrap();
-            let id = c.next_announcement(true, 0).unwrap().event.id;
-            c.mark_announced(&[id]);
-            c.reply(ReplyKind::Instruct, "carry on").unwrap();
-        }
-        let c = Core::open(
-            clock,
-            Adapters::builtin(),
-            Limits::default(),
-            Stores::in_dir(&dir.0),
-        )
-        .unwrap();
-        assert_eq!(c.events().len(), 1);
-        assert_eq!(
-            c.bridge_pending("claude-code", &token, 0).unwrap()[0].text,
-            "carry on"
-        );
-        assert!(
-            c.ingest_hook("claude-code", &token, STOP.as_bytes())
-                .is_ok(),
-            "the old token still works"
-        );
-    }
-
-    #[test]
-    fn status_reports_what_is_open() {
-        let (c, _) = core();
-        let (_, token) = c.create_endpoint("claude-code", "claude-code").unwrap();
-        c.ingest_hook("claude-code", &token, STOP.as_bytes())
-            .unwrap();
-        let st = c.status();
-        assert_eq!((st[0].source.as_str(), st[0].finished), ("Claude Code", 1));
-    }
-}
+#[cfg(test)]
+mod id_tests;

@@ -13,6 +13,7 @@ use hyper::body::Bytes;
 use hyper::header::{AUTHORIZATION, CONTENT_TYPE};
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -21,6 +22,24 @@ use tokio::time::timeout;
 const MAX_BODY: usize = 1024 * 1024;
 /// Largest error body kept for diagnostics.
 const MAX_ERROR_BODY: usize = 2048;
+
+/// Longest message from a provider that is passed on to be shown.
+const MAX_SHOWN: usize = 300;
+
+/// A remote server's message made safe to show: its first line only, with `secret` replaced everywhere (before the
+/// cut, so a key straddling the limit leaves no prefix behind), at most `max` characters.
+pub(crate) fn scrub(text: &str, secret: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    let line = if secret.is_empty() {
+        line.to_owned()
+    } else {
+        line.replace(secret, "***")
+    };
+    if line.chars().count() <= max {
+        return line;
+    }
+    line.chars().take(max).collect::<String>() + "…"
+}
 
 /// A parsed `http(s)://host[:port][/base]` URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +55,34 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// The value of the `Host` header: the port is part of it unless it is the scheme's default (RFC 9110
+    /// section 7.2). A name-based proxy in front of a server on its own port picks the site by it.
+    #[must_use]
+    pub fn host_header(&self) -> String {
+        if self.port == if self.tls { 443 } else { 80 } {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+
+    /// A request to `path` on this server, with the headers every client here sends: `host`, `connection: close`
+    /// (one request per connection) and `user-agent`. The caller adds the rest and the body.
+    #[must_use]
+    pub fn request_builder(
+        &self,
+        method: Method,
+        path: &str,
+        user_agent: &str,
+    ) -> hyper::http::request::Builder {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", self.host_header())
+            .header("connection", "close")
+            .header("user-agent", user_agent)
+    }
+
     /// Parse a base URL such as `https://openrouter.ai/api/v1`.
     ///
     /// # Errors
@@ -53,7 +100,14 @@ impl Endpoint {
             Some((h, p)) => (h, p.parse::<u16>().map_err(|_| format!("bad port `{p}`"))?),
             None => (hostport, if tls { 443 } else { 80 }),
         };
-        if host.is_empty() || host.contains(char::is_whitespace) {
+        // Letters, digits, dots, dashes and underscores only: no user name (`user@host`), query, fragment or
+        // bracket. Such a text is not a name that resolves, but it can end in `.local` or `localhost` and so pass
+        // the plain-http rule for the home network (REQ-SEC-001) while naming something else.
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        {
             return Err("the URL has no valid host".into());
         }
         let base = path.trim_matches('/');
@@ -76,6 +130,19 @@ pub struct HttpBackend {
     api_key: String,
     deadline: Duration,
     connector: Connector,
+    /// Set once the server has refused `stream_options`; later requests leave the field out, so a server
+    /// that is strict about unknown fields costs one failed request, not one per turn.
+    plain_stream: AtomicBool,
+}
+
+/// Whether a provider's error reads as a refusal of the `stream_options` field: it names the field, or it is
+/// a bare 400 or 422 (servers that reject an unknown field often say nothing more).
+fn refuses_usage_option(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("stream_options")
+        || m.contains("include_usage")
+        || m.starts_with("http 400")
+        || m.starts_with("http 422")
 }
 
 impl std::fmt::Debug for HttpBackend {
@@ -97,7 +164,7 @@ impl HttpBackend {
         let endpoint = Endpoint::parse(base_url)?;
         // The key, the conversation and agent summaries travel here: same rule as the speech clients
         // (REQ-SEC-001), plain http only for this machine and the home network.
-        if !endpoint.tls && !crate::speech::is_private_host(&endpoint.host) {
+        if crate::netpolicy::crosses_internet_unencrypted(&endpoint) {
             return Err(format!(
                 "{base_url}: the language model API key and conversation must not cross the internet unencrypted; use https:// (plain http:// is for localhost and the home network)"
             ));
@@ -111,6 +178,7 @@ impl HttpBackend {
             endpoint,
             api_key: api_key.to_owned(),
             deadline,
+            plain_stream: AtomicBool::new(false),
         })
     }
 
@@ -123,7 +191,35 @@ impl HttpBackend {
         req: &ChatRequest,
         mut on_text: impl FnMut(&str) + Send,
     ) -> Result<Completion, LlmError> {
-        match timeout(self.deadline, self.exchange(req, &mut on_text)).await {
+        let first = self.attempt(req, &mut on_text).await;
+        // The usage report is asked for with `stream_options`. A server that refuses the field is asked
+        // again without it, once, and remembered; its replies then carry no usage and the spend cap
+        // prices them from sizes instead (REQ-AST-011). A failed request is not billed.
+        if let Err(LlmError::Provider(m)) = &first
+            && !self.plain_stream.load(Ordering::Relaxed)
+            && refuses_usage_option(m)
+        {
+            self.plain_stream.store(true, Ordering::Relaxed);
+            let second = self.attempt(req, &mut on_text).await;
+            if second.is_err() {
+                // The field was not the cause (a bare 400 can be anything): keep asking for usage.
+                self.plain_stream.store(false, Ordering::Relaxed);
+            }
+            return second;
+        }
+        first
+    }
+
+    async fn attempt(
+        &self,
+        req: &ChatRequest,
+        on_text: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<Completion, LlmError> {
+        match timeout(self.deadline, self.exchange(req, on_text)).await {
+            // The provider's words are shown to the person: never with the key in them.
+            Ok(Err(LlmError::Provider(m))) => {
+                Err(LlmError::Provider(scrub(&m, &self.api_key, MAX_SHOWN)))
+            }
             Ok(r) => r,
             Err(_) => Err(LlmError::Transport(format!(
                 "no complete response within {} s",
@@ -132,27 +228,38 @@ impl HttpBackend {
         }
     }
 
+    /// The POST for one chat request: the body, headers and, when set, the bearer key.
+    fn build_request(&self, req: &ChatRequest) -> Result<Request<Full<Bytes>>, LlmError> {
+        let mut json = req.to_json(true);
+        if self.plain_stream.load(Ordering::Relaxed)
+            && let Some(o) = json.as_object_mut()
+        {
+            o.remove("stream_options");
+        }
+        let body = serde_json::to_vec(&json).map_err(|e| LlmError::Malformed(e.to_string()))?;
+        let mut builder = self
+            .endpoint
+            .request_builder(
+                Method::POST,
+                &format!("{}/chat/completions", self.endpoint.base),
+                "clawdot",
+            )
+            .header(CONTENT_TYPE, "application/json")
+            .header("accept", "text/event-stream, application/json");
+        if !self.api_key.is_empty() {
+            builder = builder.header(AUTHORIZATION, format!("Bearer {}", self.api_key));
+        }
+        builder
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|e| LlmError::Malformed(e.to_string()))
+    }
+
     async fn exchange(
         &self,
         req: &ChatRequest,
         on_text: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Completion, LlmError> {
-        let body = serde_json::to_vec(&req.to_json(true))
-            .map_err(|e| LlmError::Malformed(e.to_string()))?;
-        let mut builder = Request::builder()
-            .method(Method::POST)
-            .uri(format!("{}/chat/completions", self.endpoint.base))
-            .header("host", &self.endpoint.host)
-            .header(CONTENT_TYPE, "application/json")
-            .header("accept", "text/event-stream, application/json")
-            .header("connection", "close")
-            .header("user-agent", "clawdot");
-        if !self.api_key.is_empty() {
-            builder = builder.header(AUTHORIZATION, format!("Bearer {}", self.api_key));
-        }
-        let request = builder
-            .body(Full::new(Bytes::from(body)))
-            .map_err(|e| LlmError::Malformed(e.to_string()))?;
+        let request = self.build_request(req)?;
         let response = self
             .connector
             .request(&self.endpoint, request)
@@ -165,77 +272,96 @@ impl HttpBackend {
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.contains("text/event-stream"));
-        let mut body = response.into_body();
+        let body = response.into_body();
 
         if !status.is_success() {
-            let mut kept = Vec::new();
-            while let Some(frame) = body.frame().await {
-                let Ok(frame) = frame else { break };
-                if let Some(data) = frame.data_ref() {
-                    kept.extend_from_slice(data);
-                    if kept.len() >= MAX_ERROR_BODY {
-                        break;
-                    }
-                }
-            }
-            let text =
-                String::from_utf8_lossy(&kept[..kept.len().min(MAX_ERROR_BODY)]).into_owned();
-            // A JSON error body carries the provider's own message; otherwise show the status.
-            return Err(match parse_completion(&text) {
-                Err(e @ LlmError::Provider(_)) => e,
-                _ => LlmError::Provider(format!("HTTP {status}")),
-            });
+            return Err(read_error(body, status).await);
         }
-
         if !streaming {
-            let mut all = Vec::new();
-            while let Some(frame) = body.frame().await {
-                let frame = frame.map_err(|e| LlmError::Transport(format!("read: {e}")))?;
-                if let Some(data) = frame.data_ref() {
-                    all.extend_from_slice(data);
-                    if all.len() > MAX_BODY {
-                        return Err(LlmError::Malformed("response too large".into()));
-                    }
-                }
-            }
-            let completion = parse_completion(&String::from_utf8_lossy(&all))?;
-            if !completion.text.is_empty() {
-                on_text(&completion.text);
-            }
-            return Ok(completion);
+            return read_whole(body, on_text).await;
         }
-
-        let mut acc = StreamAccumulator::default();
-        let mut buf: Vec<u8> = Vec::new();
-        let mut done = false;
-        while !done {
-            let Some(frame) = body.frame().await else {
-                break;
-            };
-            let frame = frame.map_err(|e| LlmError::Transport(format!("read: {e}")))?;
-            let Some(data) = frame.data_ref() else {
-                continue;
-            };
-            buf.extend_from_slice(data);
-            if buf.len() > MAX_BODY {
-                return Err(LlmError::Malformed("stream line too long".into()));
-            }
-            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                let line: Vec<u8> = buf.drain(..=pos).collect();
-                let line = String::from_utf8_lossy(&line);
-                for ev in acc.feed_line(line.trim_end_matches(['\n', '\r']))? {
-                    match ev {
-                        StreamEvent::Text(t) => on_text(&t),
-                        StreamEvent::Done => done = true,
-                    }
-                }
-            }
-        }
-        Ok(acc.finish())
+        read_stream(body, on_text).await
     }
 }
 
+/// The error for a non-success reply: the provider's own message from a JSON error body, else the status.
+async fn read_error(mut body: hyper::body::Incoming, status: hyper::StatusCode) -> LlmError {
+    let mut kept = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else { break };
+        if let Some(data) = frame.data_ref() {
+            kept.extend_from_slice(data);
+            if kept.len() >= MAX_ERROR_BODY {
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&kept[..kept.len().min(MAX_ERROR_BODY)]).into_owned();
+    // A JSON error body carries the provider's own message; otherwise show the status.
+    match parse_completion(&text) {
+        Err(e @ LlmError::Provider(_)) => e,
+        _ => LlmError::Provider(format!("HTTP {status}")),
+    }
+}
+
+/// A reply that is not streamed: read it whole (capped), parse it, and pass its text on at once.
+async fn read_whole(
+    mut body: hyper::body::Incoming,
+    on_text: &mut (dyn FnMut(&str) + Send),
+) -> Result<Completion, LlmError> {
+    let mut all = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| LlmError::Transport(format!("read: {e}")))?;
+        if let Some(data) = frame.data_ref() {
+            all.extend_from_slice(data);
+            if all.len() > MAX_BODY {
+                return Err(LlmError::Malformed("response too large".into()));
+            }
+        }
+    }
+    let completion = parse_completion(&String::from_utf8_lossy(&all))?;
+    if !completion.text.is_empty() {
+        on_text(&completion.text);
+    }
+    Ok(completion)
+}
+
+/// A server-sent-events reply: parse it line by line as it arrives.
+async fn read_stream(
+    mut body: hyper::body::Incoming,
+    on_text: &mut (dyn FnMut(&str) + Send),
+) -> Result<Completion, LlmError> {
+    let mut acc = StreamAccumulator::default();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut done = false;
+    while !done {
+        let Some(frame) = body.frame().await else {
+            break;
+        };
+        let frame = frame.map_err(|e| LlmError::Transport(format!("read: {e}")))?;
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+        buf.extend_from_slice(data);
+        if buf.len() > MAX_BODY {
+            return Err(LlmError::Malformed("stream line too long".into()));
+        }
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            for ev in acc.feed_line(line.trim_end_matches(['\n', '\r']))? {
+                match ev {
+                    StreamEvent::Text(t) => on_text(&t),
+                    StreamEvent::Done => done = true,
+                }
+            }
+        }
+    }
+    Ok(acc.finish())
+}
+
 /// Opens a connection (with TLS when the URL asks for it) and performs one HTTP/1.1 request.
+#[derive(Clone)]
 pub struct Connector {
     #[cfg(feature = "tls")]
     tls: tokio_rustls::TlsConnector,
@@ -269,25 +395,61 @@ impl Connector {
         endpoint: &Endpoint,
         request: Request<Full<Bytes>>,
     ) -> Result<hyper::Response<hyper::body::Incoming>, String> {
+        let io = self.dial(endpoint).await.map_err(|e| e.to_string())?;
+        roundtrip(TokioIo::new(io), request).await
+    }
+
+    /// Open a connection to `endpoint`, with TLS when its URL asks for it, and hand back the stream. The one
+    /// place a connection is made: HTTP requests and the realtime WebSocket both start here.
+    ///
+    /// # Errors
+    /// [`DialError`] saying which step failed.
+    pub async fn dial(&self, endpoint: &Endpoint) -> Result<Box<dyn Io>, DialError> {
         let tcp = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
             .await
-            .map_err(|e| format!("connect: {e}"))?;
+            .map_err(DialError::Connect)?;
         #[cfg(feature = "tls")]
         if endpoint.tls {
             let name = rustls::pki_types::ServerName::try_from(endpoint.host.clone())
-                .map_err(|e| format!("bad host name: {e}"))?;
-            let stream = self
-                .tls
-                .connect(name, tcp)
-                .await
-                .map_err(|e| format!("TLS: {e}"))?;
-            return roundtrip(TokioIo::new(stream), request).await;
+                .map_err(|e| DialError::HostName(e.to_string()))?;
+            let stream = self.tls.connect(name, tcp).await.map_err(DialError::Tls)?;
+            return Ok(Box::new(stream));
         }
         #[cfg(not(feature = "tls"))]
         if endpoint.tls {
-            return Err("this build has no TLS support (feature `tls`); use an http:// URL".into());
+            return Err(DialError::NoTls);
         }
-        roundtrip(TokioIo::new(tcp), request).await
+        Ok(Box::new(tcp))
+    }
+}
+
+/// A byte stream a connection runs over: plain TCP or TLS on top of it.
+pub trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+
+/// Why [`Connector::dial`] failed.
+#[derive(Debug)]
+pub enum DialError {
+    /// The TCP connection could not be made.
+    Connect(std::io::Error),
+    /// The host name is not one TLS can check.
+    HostName(String),
+    /// The TLS handshake failed.
+    Tls(std::io::Error),
+    /// `https://` in a build without the `tls` feature.
+    NoTls,
+}
+
+impl std::fmt::Display for DialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect(e) => write!(f, "connect: {e}"),
+            Self::HostName(e) => write!(f, "bad host name: {e}"),
+            Self::Tls(e) => write!(f, "TLS: {e}"),
+            Self::NoTls => {
+                f.write_str("this build has no TLS support (feature `tls`); use an http:// URL")
+            }
+        }
     }
 }
 
@@ -311,7 +473,7 @@ where
 }
 
 #[cfg(feature = "tls")]
-fn tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
+pub(crate) fn tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
     use std::sync::Arc;
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -330,6 +492,25 @@ impl ChatBackend for HttpBackend {
     }
 }
 
+/// The models a language-model server offers, from `GET <base>/models` (the OpenAI-style list that OpenRouter, Ollama
+/// and most others serve).
+///
+/// # Errors
+/// A plain description of why the list could not be had.
+pub async fn list_models(
+    base_url: &str,
+    key: &str,
+) -> Result<Vec<String>, crate::apiclient::ProviderError> {
+    crate::apiclient::list_names(
+        base_url,
+        key,
+        "/models",
+        "models",
+        &crate::apiclient::ModelList,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +525,31 @@ mod tests {
             tools: vec![],
             max_tokens: 50,
         }
+    }
+
+    #[test]
+    fn requests_carry_the_headers_every_client_sends() {
+        let ep = Endpoint::parse("http://hub.local:8123/api").unwrap();
+        let r = ep
+            .request_builder(Method::PUT, "/api/x", "agent/1")
+            .body(())
+            .unwrap();
+        assert_eq!((r.method(), r.uri().path()), (&Method::PUT, "/api/x"));
+        let h = r.headers();
+        assert_eq!(h["host"], "hub.local:8123");
+        assert_eq!(h["connection"], "close");
+        assert_eq!(h["user-agent"], "agent/1");
+    }
+
+    #[tokio::test]
+    async fn dialing_a_closed_port_says_the_connection_failed() {
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let ep = Endpoint::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let e = Connector::new().unwrap().dial(&ep).await.err().unwrap();
+        assert!(matches!(e, DialError::Connect(_)), "{e}");
+        assert!(e.to_string().starts_with("connect: "), "{e}");
     }
 
     /// Serve exactly one canned response and report the request that arrived.
@@ -401,9 +607,33 @@ mod tests {
         let l = Endpoint::parse("http://localhost:11434/v1").unwrap();
         assert_eq!((l.tls, l.port, l.base.as_str()), (false, 11434, "/v1"));
         assert_eq!(Endpoint::parse("http://h").unwrap().base, "");
-        for bad in ["ftp://h", "h", "http://", "http://h:x", "http://a b"] {
+        for (url, host) in [
+            ("http://h", "h"),
+            ("http://h:80/x", "h"),
+            ("http://h:8080", "h:8080"),
+            ("https://h:443", "h"),
+            ("https://h:8443/v1", "h:8443"),
+            ("https://h:80", "h:80"),
+        ] {
+            assert_eq!(Endpoint::parse(url).unwrap().host_header(), host, "{url}");
+        }
+        for bad in [
+            "ftp://h",
+            "h",
+            "http://",
+            "http://h:x",
+            "http://a b",
+            "http://x@evil.example.local",
+            "http://evil.example#.local/",
+            "http://evil.example?.local",
+            "http://[::1]:8080",
+            "http://h\u{e9}/",
+        ] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
+        // The plain-http rule cannot be passed with such a host.
+        let d = Duration::from_secs(1);
+        assert!(HttpBackend::new("http://evil.example#.local/v1", "", d).is_err());
     }
 
     #[test]
@@ -458,6 +688,12 @@ mod tests {
                 .contains("authorization: bearer sk-test")
         );
         assert!(seen.contains("\"stream\":true") && seen.contains("\"max_tokens\":50"));
+        // The port is part of the Host header when it is not the default one.
+        assert!(
+            seen.to_lowercase()
+                .contains(&format!("host: 127.0.0.1:{port}\r\n")),
+            "{seen}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -502,6 +738,104 @@ mod tests {
         assert!(
             matches!(b2.complete(&request()).await, Err(LlmError::Provider(m)) if m.contains("500"))
         );
+    }
+
+    // REQ-SEC-001
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_provider_that_echoes_the_key_does_not_get_it_into_the_error() {
+        const ECHO: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"Bad key sk-secret-12345 for you\"}}";
+        let (port, _s) = fake_server(ECHO, false).await;
+        let backend = HttpBackend::new(
+            &format!("http://127.0.0.1:{port}"),
+            "sk-secret-12345",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let err = backend.complete(&request()).await.unwrap_err();
+        assert!(!err.to_string().contains("sk-secret-12345"), "{err}");
+        assert!(err.to_string().contains("Bad key"), "{err}");
+    }
+
+    #[test]
+    fn scrubbing_hides_the_key_clips_and_keeps_one_line() {
+        assert_eq!(scrub("a sk-1 b", "sk-1", 100), "a *** b");
+        assert_eq!(scrub("first\nsecond", "", 100), "first");
+        assert_eq!(scrub(&"x".repeat(500), "k", 300).chars().count(), 301);
+        // A key cut by the length limit must not survive as a prefix.
+        let msg = format!("{}sk-abcdef", "x".repeat(295));
+        assert!(!scrub(&msg, "sk-abcdef", 300).contains("sk-"));
+    }
+
+    // REQ-AST-011: a server that refuses `stream_options` is asked again without it, once, and remembered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_server_that_refuses_the_usage_option_is_asked_again_without_it_and_remembered() {
+        const REFUSED: &[u8] = b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"Unrecognized request argument supplied: stream_options\"}}";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for n in 0..3 {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut seen = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let k = s.read(&mut chunk).await.unwrap();
+                    seen.extend_from_slice(&chunk[..k]);
+                    let text = String::from_utf8_lossy(&seen).into_owned();
+                    if k == 0 || text.contains("\"max_tokens\"") && text.ends_with('}') {
+                        break;
+                    }
+                }
+                bodies.push(String::from_utf8_lossy(&seen).into_owned());
+                s.write_all(if n == 0 { REFUSED } else { SSE })
+                    .await
+                    .unwrap();
+                let _ = s.shutdown().await;
+            }
+            bodies
+        });
+        let backend = HttpBackend::new(
+            &format!("http://127.0.0.1:{port}"),
+            "",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(backend.complete(&request()).await.unwrap().text, "Hello.");
+        assert_eq!(backend.complete(&request()).await.unwrap().text, "Hello.");
+        let bodies = server.await.unwrap();
+        assert!(
+            bodies[0].contains("stream_options"),
+            "first try asks for usage"
+        );
+        assert!(
+            !bodies[1].contains("stream_options"),
+            "the retry leaves it out"
+        );
+        assert!(
+            !bodies[2].contains("stream_options"),
+            "and so does the next request"
+        );
+    }
+
+    #[test]
+    fn only_a_refusal_that_reads_like_one_about_the_field_is_retried() {
+        for m in [
+            "Unrecognized request argument supplied: stream_options",
+            "HTTP 400",
+            "HTTP 422 Unprocessable",
+            "extra fields not permitted: include_usage",
+        ] {
+            assert!(refuses_usage_option(m), "{m}");
+        }
+        for m in [
+            "HTTP 401",
+            "HTTP 429",
+            "HTTP 500",
+            "Bad key",
+            "model not found",
+        ] {
+            assert!(!refuses_usage_option(m), "{m}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

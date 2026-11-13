@@ -27,14 +27,27 @@ pub struct Line {
     pub text: String,
 }
 
+// Deliberately process-wide: this is the log, like stderr. Anything in the process may write a line without being
+// handed a core, and the lines are redacted before they get here. It holds no secret and no per-core state.
 static RING: Mutex<VecDeque<Line>> = Mutex::new(VecDeque::new());
 
+/// The console line and the text kept in the ring for a message. Both are redacted: the console is the journal on a
+/// speaker with no screen, which is read and copied into bug reports, so a secret in a message must not reach it
+/// either. Only the ring's text is clipped.
+fn prepare(msg: &str) -> (String, String) {
+    let redacted = crate::audit::redact_text(msg);
+    let console = format!("clawdot: {redacted}");
+    let ring = if redacted.chars().count() > MAX_CHARS {
+        redacted.chars().take(MAX_CHARS - 1).collect::<String>() + "…"
+    } else {
+        redacted
+    };
+    (console, ring)
+}
+
 fn push(level: &'static str, msg: &str) {
-    eprintln!("clawdot: {msg}");
-    let mut text = crate::audit::redact_text(msg);
-    if text.chars().count() > MAX_CHARS {
-        text = text.chars().take(MAX_CHARS - 1).collect::<String>() + "…";
-    }
+    let (console, text) = prepare(msg);
+    eprintln!("{console}");
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
@@ -67,6 +80,25 @@ pub fn recent(limit: usize) -> Vec<Line> {
         .collect()
 }
 
+/// The commit this program was built from: the short hash, with `-dirty` when tracked files differed, or `unknown`
+/// when the build had no git (a source tarball). Set by `build.rs`.
+pub const COMMIT: &str = env!("CLAWDOT_BUILD_COMMIT");
+
+/// Whether tracked files differed from [`COMMIT`] when this was built.
+pub const DIRTY: bool = matches!(env!("CLAWDOT_BUILD_DIRTY").as_bytes(), b"1");
+
+/// The version and commit as one string, such as `0.0.0 (a1b2c3d4e)` or `0.0.0 (a1b2c3d4e-dirty)`. The version
+/// comes first and is unchanged, so anything that looks for it in the text still finds it.
+#[must_use]
+pub fn build_id() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match (COMMIT, DIRTY) {
+        ("unknown", _) => format!("{version} (unknown commit)"),
+        (c, true) => format!("{version} ({c}-dirty)"),
+        (c, false) => format!("{version} ({c})"),
+    }
+}
+
 /// What this program is: version, build profile, platform and the optional features compiled in (REQ-CFG-066).
 #[must_use]
 pub fn build_info() -> Value {
@@ -85,6 +117,9 @@ pub fn build_info() -> Value {
     }
     json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "commit": COMMIT,
+        "dirty": DIRTY,
+        "id": build_id(),
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -126,6 +161,19 @@ mod tests {
         assert!(l.ts > 1_600_000_000);
     }
 
+    // REQ-CFG-064
+    #[test]
+    fn the_console_line_is_redacted_like_the_ring() {
+        let (console, ring) =
+            prepare("call failed: Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456");
+        assert!(
+            !console.contains("abcdefghijklmnopqrstuvwxyz123456"),
+            "{console}"
+        );
+        assert!(!ring.contains("abcdefghijklmnopqrstuvwxyz123456"), "{ring}");
+        assert!(console.starts_with("clawdot: call failed"), "{console}");
+    }
+
     // REQ-CFG-066
     #[test]
     fn the_build_information_names_the_version_and_the_platform() {
@@ -134,5 +182,17 @@ mod tests {
         assert!(["debug", "release"].contains(&b["profile"].as_str().unwrap()));
         assert!(b["os"].as_str().is_some_and(|s| !s.is_empty()));
         assert!(b["features"].is_array());
+    }
+
+    #[test]
+    fn the_build_id_keeps_the_version_first_and_names_the_commit() {
+        let b = build_info();
+        let id = build_id();
+        assert!(id.starts_with(env!("CARGO_PKG_VERSION")), "{id}");
+        assert_eq!(b["id"], id);
+        assert_eq!(b["commit"], COMMIT);
+        assert_eq!(b["dirty"], DIRTY);
+        assert!(id.contains(COMMIT) || COMMIT == "unknown", "{id}");
+        assert!(COMMIT.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 }

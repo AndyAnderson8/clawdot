@@ -4,12 +4,25 @@
 //! build keeps the section unparsed and refuses it unless it is empty; see `config.rs`). The Noise key is never
 //! in the file: `psk_env` names the environment variable that holds it.
 
+use crate::config::ListeningConfig;
 use serde::Deserialize;
 
 /// Most devices one core dials.
 pub const MAX_DEVICES: usize = 4;
 /// ESPHome's native API port.
 pub const DEFAULT_PORT: u16 = 6053;
+
+/// How a spoken reply to a person reaches the device.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplyMode {
+    /// The reply is collected and delivered once it is complete (the behaviour before sentence-by-sentence
+    /// replies existed).
+    #[default]
+    Whole,
+    /// The reply is delivered while it is still being made, starting with its first sentence.
+    Streamed,
+}
 
 /// One ESPHome voice satellite to dial.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -21,6 +34,13 @@ pub struct EsphomeDevice {
     pub address: String,
     /// Name of the environment variable holding the base64 Noise key. Plaintext when unset.
     pub psk_env: Option<String>,
+    /// `"whole"` (the default) or `"streamed"`: whether a spoken reply starts on the device with its first
+    /// sentence. See `docs/architecture/esphome-satellite.md`.
+    #[serde(default)]
+    pub reply: ReplyMode,
+    /// Endpointer tuning for this device. Its values win over the `satellite.listening` section's (REQ-VOI-025).
+    #[serde(default)]
+    pub listening: ListeningConfig,
 }
 
 impl EsphomeDevice {
@@ -83,6 +103,12 @@ impl EsphomeConfig {
         if self.is_empty() {
             return Ok(());
         }
+        self.validate_devices()?;
+        self.validate_media()
+    }
+
+    /// The device list: how many, then each entry, with names unique.
+    fn validate_devices(&self) -> Result<(), String> {
         if self.devices.is_empty() {
             return Err("config: `esphome.media_listen` and `media_url` need at least one `esphome.devices` entry".into());
         }
@@ -93,52 +119,23 @@ impl EsphomeConfig {
         }
         let mut seen = std::collections::HashSet::new();
         for d in &self.devices {
-            let ok_name = !d.name.is_empty()
-                && d.name.len() <= 64
-                && d.name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-            if !ok_name {
-                return Err(format!(
-                    "config: `esphome.devices` name {:?} must be 1 to 64 letters, digits, `.`, `_` or `-`",
-                    d.name
-                ));
-            }
+            d.validate_name()?;
             if !seen.insert(d.name.as_str()) {
                 return Err(format!(
                     "config: `esphome.devices` name {:?} is used twice",
                     d.name
                 ));
             }
-            let (host, port) = split_port(&d.address);
-            if host.is_empty()
-                || host.len() > 253
-                || host
-                    .bytes()
-                    .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-            {
-                return Err(format!(
-                    "config: `esphome.devices` {:?} has a bad `address`",
-                    d.name
-                ));
-            }
-            if let Some(p) = port {
-                if p.parse::<u16>().ok().filter(|p| *p != 0).is_none() {
-                    return Err(format!(
-                        "config: `esphome.devices` {:?} has a bad port in `address`",
-                        d.name
-                    ));
-                }
-            }
-            if let Some(e) = &d.psk_env {
-                if e.is_empty() || !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                    return Err(format!(
-                        "config: `esphome.devices` {:?} `psk_env` must be an environment variable name",
-                        d.name
-                    ));
-                }
-            }
+            d.validate_address()?;
+            d.listening
+                .validate(&format!("esphome.devices[{}].listening", d.name))?;
+            d.validate_psk_env()?;
         }
+        Ok(())
+    }
+
+    /// The audio file server pair: both or neither.
+    fn validate_media(&self) -> Result<(), String> {
         match (&self.media_listen, &self.media_url) {
             (Some(l), Some(u)) => {
                 l.parse::<std::net::SocketAddr>().map_err(|e| {
@@ -166,6 +163,60 @@ impl EsphomeConfig {
     }
 }
 
+impl EsphomeDevice {
+    fn validate_name(&self) -> Result<(), String> {
+        let ok_name = !self.name.is_empty()
+            && self.name.len() <= 64
+            && self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if ok_name {
+            return Ok(());
+        }
+        Err(format!(
+            "config: `esphome.devices` name {:?} must be 1 to 64 letters, digits, `.`, `_` or `-`",
+            self.name
+        ))
+    }
+
+    fn validate_address(&self) -> Result<(), String> {
+        let (host, port) = split_port(&self.address);
+        if host.is_empty()
+            || host.len() > 253
+            || host
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        {
+            return Err(format!(
+                "config: `esphome.devices` {:?} has a bad `address`",
+                self.name
+            ));
+        }
+        if let Some(p) = port {
+            if p.parse::<u16>().ok().filter(|p| *p != 0).is_none() {
+                return Err(format!(
+                    "config: `esphome.devices` {:?} has a bad port in `address`",
+                    self.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_psk_env(&self) -> Result<(), String> {
+        if let Some(e) = &self.psk_env {
+            if e.is_empty() || !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                return Err(format!(
+                    "config: `esphome.devices` {:?} `psk_env` must be an environment variable name",
+                    self.name
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,12 +236,46 @@ mod tests {
         let d = |a: &str| EsphomeDevice {
             name: "d".into(),
             address: a.into(),
-            psk_env: None,
+            ..EsphomeDevice::default()
         };
         assert_eq!(d("dot.local").host_port(), "dot.local:6053");
         assert_eq!(d("10.0.0.2:7000").host_port(), "10.0.0.2:7000");
         assert_eq!(d("fe80::1").host_port(), "[fe80::1]:6053");
         assert_eq!(d("[fe80::1]:99").host_port(), "[fe80::1]:99");
+    }
+
+    #[test]
+    fn the_reply_mode_defaults_to_whole_and_accepts_streamed() {
+        let c = parse(
+            r#"{"devices":[{"name":"a","address":"h"},{"name":"b","address":"h","reply":"streamed"},
+                           {"name":"c","address":"h","reply":"whole"}]}"#,
+        )
+        .unwrap();
+        let modes: Vec<_> = c.devices.iter().map(|d| d.reply).collect();
+        assert_eq!(
+            modes,
+            [ReplyMode::Whole, ReplyMode::Streamed, ReplyMode::Whole]
+        );
+    }
+
+    #[test]
+    fn req_voi_025_a_device_may_carry_its_own_listening_values() {
+        let c = parse(
+            r#"{"devices":[{"name":"a","address":"h","listening":{"min_level":120,"silence_ms":1000}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(c.devices[0].listening.silence_ms, Some(1000));
+        for (text, needle) in [
+            (r#"{"min_level":0}"#, "devices[a].listening.min_level"),
+            (r#"{"preroll_ms":9999}"#, "preroll_ms"),
+            (r#"{"bogus":1}"#, "bogus"),
+        ] {
+            let e = parse(&format!(
+                r#"{{"devices":[{{"name":"a","address":"h","listening":{text}}}]}}"#
+            ))
+            .unwrap_err();
+            assert!(e.contains(needle), "{text}: {e}");
+        }
     }
 
     #[test]
@@ -231,6 +316,14 @@ mod tests {
             (
                 r#"{"devices":[{"name":"a","address":"h","typo":1}]}"#,
                 "typo",
+            ),
+            (
+                r#"{"devices":[{"name":"a","address":"h","reply":"fast"}]}"#,
+                "fast",
+            ),
+            (
+                r#"{"devices":[{"name":"a","address":"h","reply":true}]}"#,
+                "expected value",
             ),
         ] {
             let e = parse(text).unwrap_err();

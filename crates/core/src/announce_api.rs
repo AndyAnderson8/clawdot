@@ -1,6 +1,7 @@
 //! `POST /api/announce`: the HTTP side of the one-way announce path (REQ-INB-021, REQ-INB-025).
 //!
-//! Credentials are checked before the body is read. A token that starts with `cdt_` is an endpoint token;
+//! Credentials are checked before the body is read. A token that the endpoint list recognises
+//! (`Core::is_endpoint_token`: its hash matches a stored endpoint) is an endpoint token, whatever it looks like;
 //! anything else (or nothing, in open mode) is treated as an administrator session. The response never
 //! repeats the text and carries nothing the caller could mistake for a decision.
 
@@ -18,12 +19,12 @@ use std::convert::Infallible;
 use std::net::IpAddr;
 use std::time::Duration;
 
-type Resp = Response<BoxBody<Bytes, Infallible>>;
+pub(crate) type Resp = Response<BoxBody<Bytes, Infallible>>;
 
 /// A text of 2,000 characters in JSON escapes stays well under this.
 const MAX_BODY: usize = 32 * 1024;
 
-fn reply(status: StatusCode, v: &Value) -> Resp {
+pub(crate) fn reply(status: StatusCode, v: &Value) -> Resp {
     let mut r = Response::new(Full::new(Bytes::from(v.to_string())).boxed());
     *r.status_mut() = status;
     r.headers_mut()
@@ -37,18 +38,18 @@ fn reply(status: StatusCode, v: &Value) -> Resp {
     r
 }
 
-fn fail(status: StatusCode, msg: &str) -> Resp {
+pub(crate) fn fail(status: StatusCode, msg: &str) -> Resp {
     reply(status, &json!({ "error": msg }))
 }
 
-fn unauthorized() -> Resp {
+pub(crate) fn unauthorized() -> Resp {
     let mut r = fail(StatusCode::UNAUTHORIZED, "unauthorized");
     r.headers_mut()
         .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
     r
 }
 
-fn limited() -> Resp {
+pub(crate) fn limited() -> Resp {
     let mut r = fail(StatusCode::TOO_MANY_REQUESTS, "rate limited");
     r.headers_mut()
         .insert(RETRY_AFTER, HeaderValue::from_static("1"));
@@ -108,7 +109,7 @@ pub(crate) async fn handle(
         Ok(a) => a,
         Err(m) => return fail(StatusCode::BAD_REQUEST, &m),
     };
-    let caller = endpoint_token.map_or(Caller::Admin, Caller::Token);
+    let caller = endpoint_token.map_or(Caller::Admin, |t| Caller::Token(t, peer));
     match core.announce(caller, &announcement) {
         Ok(outcome) => reply(StatusCode::ACCEPTED, &outcome_json(outcome)),
         Err(AnnounceError::Hook(e)) => hook_error(&e),

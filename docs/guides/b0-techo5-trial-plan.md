@@ -353,7 +353,7 @@ chmod 755 /data/clawdot/clawdot
 ps | grep clawdot ; grep -E 'VmRSS|VmHWM' /proc/$(pidof clawdot)/status
 ```
 
-(Use ClawDot's real flags; `--listen` and the 3335 default are in `crates/core/src/main.rs`.) Take the same F1 to F4 measurements again with ClawDot idle and connected, and write the deltas.
+(Use ClawDot's real flags; `--listen` and the 3335 default are in `crates/core/src/cli.rs`.) Take the same F1 to F4 measurements again with ClawDot idle and connected, and write the deltas.
 
 **G3. Start at boot.** The documented hook does not exist on the Dot: `rc.local` is run on Show builds only and the Dot, Echo and Spot builds "do not run it yet" [S: T5 setup.md "Running something of your own at boot"; boot.sh has no such block]. The init is BusyBox `init` with `/etc/inittab` in the **slot**. The only precedent is a user's respawn line, added to `/etc/inittab` in both slots because an update replaces it [S: #3, thtro]:
 

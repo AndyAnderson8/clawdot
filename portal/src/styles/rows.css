@@ -1,0 +1,51 @@
+/* ---- Rows: the name and its explanation on the left, the control on the right ---- */
+.srow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-2) var(--spacing-8);
+  padding: var(--spacing-4) 0;
+  border-top: 1px solid var(--color-card-border);
+}
+.sgroup > .head + .srow,
+.sgroup > .head + p + .srow {
+  margin-top: var(--spacing-1);
+}
+@media (min-width: 48rem) {
+  .srow {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+    align-items: start;
+  }
+}
+.slabel label,
+label {
+  display: block;
+  margin: 0 0 var(--spacing-1);
+  font-size: 0.9375rem;
+  font-weight: 650;
+}
+.slabel label {
+  margin: 0;
+}
+.slabel p {
+  margin: var(--spacing-1) 0 0;
+  max-width: none;
+}
+.slabel .meta {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  opacity: 0.85;
+}
+.sctl {
+  min-width: 0;
+}
+.sctl > * + * {
+  margin-top: var(--spacing-2);
+}
+form.panel > label,
+.card > label {
+  margin-top: var(--spacing-3);
+}
+.sgroup > .row:last-child,
+form.panel > .row:last-child {
+  margin-bottom: 0;
+}

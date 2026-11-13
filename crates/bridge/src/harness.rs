@@ -19,12 +19,16 @@ pub struct CommandSpec {
     pub args: Vec<String>,
 }
 
-/// Turns a reply into a command, or `None` when no command is needed or possible.
-pub trait Harness {
-    /// Short name for logs.
+/// Turns a reply into the command that resumes one kind of agent.
+pub trait Harness: std::fmt::Debug + Send + Sync {
+    /// Short name for logs and for `--harness`.
     fn name(&self) -> &str;
+
     /// The command for this reply.
-    fn command(&self, reply: &Reply) -> Option<CommandSpec>;
+    ///
+    /// # Errors
+    /// The reason no command applies.
+    fn plan(&self, reply: &Reply) -> Result<CommandSpec, Skip>;
 }
 
 /// Why a reply produced no command.
@@ -72,12 +76,12 @@ impl Default for ClaudeCode {
     }
 }
 
-impl ClaudeCode {
-    /// Decide what to do with a reply, saying why when nothing is run.
-    ///
-    /// # Errors
-    /// The reason no command applies.
-    pub fn plan(&self, reply: &Reply) -> Result<CommandSpec, Skip> {
+impl Harness for ClaudeCode {
+    fn name(&self) -> &str {
+        "claude-code"
+    }
+
+    fn plan(&self, reply: &Reply) -> Result<CommandSpec, Skip> {
         if reply.kind == ReplyKind::Ack {
             return Err(Skip::Ack);
         }
@@ -97,15 +101,6 @@ impl ClaudeCode {
             program: self.bin.clone(),
             args,
         })
-    }
-}
-
-impl Harness for ClaudeCode {
-    fn name(&self) -> &str {
-        "claude-code"
-    }
-    fn command(&self, reply: &Reply) -> Option<CommandSpec> {
-        self.plan(reply).ok()
     }
 }
 
@@ -212,6 +207,5 @@ mod tests {
             h.plan(&reply(ReplyKind::Instruct, None, "go")),
             Err(Skip::NoSession)
         );
-        assert!(h.command(&reply(ReplyKind::Ack, Some("s"), "")).is_none());
     }
 }

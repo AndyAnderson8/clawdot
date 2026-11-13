@@ -9,16 +9,16 @@
 
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full, Limited};
+use hyper::Method;
 use hyper::body::Bytes;
-use hyper::header::{ACCEPT, HOST, LOCATION, USER_AGENT};
-use hyper::{Method, Request};
+use hyper::header::{ACCEPT, LOCATION};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The version this program is.
@@ -34,7 +34,7 @@ const MAX_FEED: usize = 512 * 1024;
 /// The signed list of hashes and its signature are tiny.
 const MAX_SMALL: usize = 64 * 1024;
 /// The largest program file accepted.
-const MAX_BINARY: usize = 96 * 1024 * 1024;
+const MAX_BINARY: usize = 16 * 1024 * 1024;
 /// How long the install may take from start to finish.
 const APPLY_DEADLINE: Duration = Duration::from_secs(15 * 60);
 /// The names of the files a release must carry besides the program itself.
@@ -161,15 +161,39 @@ pub fn parse_release(body: &str) -> Result<Release, String> {
     })
 }
 
-/// The name of the program file for this machine in a release, for example `clawdot-linux-armv7`.
+/// The architecture word in a release file name, from the compiler's name for the build target
+/// (`armv7-unknown-linux-musleabihf`, `aarch64-unknown-linux-gnu`) and the architecture the standard library
+/// reports. 32-bit ARM is `armv7` only when the target says so; any other 32-bit ARM target (an ARMv6 board) is
+/// `armv6`, which no release ships, so such a build is never offered an `armv7` file it cannot run. Other
+/// architectures keep the name the compiler gives them.
+fn arch_label<'a>(arch: &'a str, target: &str) -> &'a str {
+    if arch != "arm" {
+        return arch;
+    }
+    let first = target.split('-').next().unwrap_or("");
+    if first.starts_with("armv7") || first.starts_with("thumbv7") {
+        "armv7"
+    } else {
+        "armv6"
+    }
+}
+
+/// The file name from its parts, for example `clawdot-linux-armv7`. Split out so any machine can be tested.
+fn asset_name_for(os: &str, arch: &str, target: &str, windows: bool) -> String {
+    let ext = if windows { ".exe" } else { "" };
+    format!("clawdot-{os}-{}{ext}", arch_label(arch, target))
+}
+
+/// The name of the program file for this machine in a release, for example `clawdot-linux-armv7`. It is named
+/// from the target the program was built for, not from what the machine reports.
 #[must_use]
 pub fn asset_name() -> String {
-    let arch = match std::env::consts::ARCH {
-        "arm" => "armv7",
-        a => a,
-    };
-    let ext = if cfg!(windows) { ".exe" } else { "" };
-    format!("clawdot-{}-{arch}{ext}", std::env::consts::OS)
+    asset_name_for(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        env!("CLAWDOT_BUILD_TARGET"),
+        cfg!(windows),
+    )
 }
 
 /// Read a `SHA256SUMS` file: lines of `<64 hex digits>  <file name>`.
@@ -205,6 +229,14 @@ pub fn verify_signature(key: &[u8; 32], message: &[u8], sig_hex: &str) -> bool {
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
         .verify(message, &sig)
         .is_ok()
+}
+
+/// Whether the output of `--version` names exactly `version`. Matching a whole word matters: a substring test
+/// would accept an older `10.2.0` when `0.2.0` was asked for, which is the one check that ties a signed (but
+/// possibly replayed) program to the version the feed announced.
+fn reports_version(said: &str, version: &str) -> bool {
+    said.split_whitespace()
+        .any(|w| w.trim_start_matches(['v', 'V']) == version)
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -246,7 +278,11 @@ impl UpdateConfig {
     ///
     /// # Errors
     /// A plain description of a bad key or address.
-    pub fn new(url: Option<&str>, public_key_hex: Option<&str>) -> Result<Self, String> {
+    pub fn new(
+        url: Option<&str>,
+        public_key_hex: Option<&str>,
+        env: &crate::env::Env,
+    ) -> Result<Self, String> {
         let url = url.map_or(DEFAULT_URL, str::trim).to_owned();
         let ep = Endpoint::parse(&url).map_err(|e| format!("updates.url: {e}"))?;
         if !ep.tls && !is_loopback(&ep.host) {
@@ -264,9 +300,41 @@ impl UpdateConfig {
         Ok(Self {
             url,
             public_key,
-            supervised: std::env::var_os("CLAWDOT_SUPERVISED").is_some()
-                || std::env::var_os("INVOCATION_ID").is_some(),
+            supervised: env.is_set("CLAWDOT_SUPERVISED") || env.is_set("INVOCATION_ID"),
         })
+    }
+}
+
+/// Where an install is. The status JSON carries [`Phase::as_str`], so these names are part of the API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Phase {
+    #[default]
+    Idle,
+    Downloading,
+    Verifying,
+    Installing,
+    Installed,
+    Restarting,
+    Failed,
+}
+
+impl Phase {
+    /// The wire name; empty when idle.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "",
+            Self::Downloading => "downloading",
+            Self::Verifying => "verifying",
+            Self::Installing => "installing",
+            Self::Installed => "installed",
+            Self::Restarting => "restarting",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Whether a new install may start: nothing is running (a failed one may be retried).
+    const fn can_start(self) -> bool {
+        matches!(self, Self::Idle | Self::Failed)
     }
 }
 
@@ -275,8 +343,7 @@ struct State {
     last_checked: Option<u64>,
     latest: Option<Release>,
     error: Option<String>,
-    /// `downloading`, `verifying`, `installing`, `installed`, `restarting`, `failed`; empty when idle.
-    phase: String,
+    phase: Phase,
     apply_error: Option<String>,
     installed: Option<String>,
 }
@@ -294,7 +361,17 @@ pub struct Updater {
     probe: bool,
     /// Exit after installing so the supervisor starts the new version (off in tests).
     exit_after: bool,
+    /// How to ask the owner for an orderly stop once the update is installed; without one the program just exits.
+    stop: Option<StopFn>,
 }
+
+/// Asks the owner of the program for an orderly stop with this exit code (flush what is queued, then exit). The
+/// updater only knows this one function; it does not know what the owner has to save. The function should not return;
+/// it runs on a blocking thread, and the updater exits by itself if it has not finished in [`STOP_WAIT`].
+pub type StopFn = Arc<dyn Fn(i32) + Send + Sync>;
+
+/// How long the owner gets to stop in order before the program exits anyway.
+const STOP_WAIT: Duration = Duration::from_secs(10);
 
 impl std::fmt::Debug for Updater {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -304,36 +381,33 @@ impl std::fmt::Debug for Updater {
     }
 }
 
-static GLOBAL: OnceLock<Updater> = OnceLock::new();
-
-/// The updater of this run, once [`start`] has made it.
-#[must_use]
-pub fn global() -> Option<&'static Updater> {
-    GLOBAL.get()
-}
-
 /// Make the updater of this run, start its daily check, and settle any update that was waiting to prove itself.
+/// The caller keeps the returned handle (the core holds it); the check task holds its own clone.
+///
+/// `stop` is called (with exit code 0) when an installed update needs the program to restart; see [`StopFn`].
 ///
 /// # Errors
 /// The updater could not be made (a TLS configuration failure).
-pub fn start(cfg: UpdateConfig, enabled: bool, data_dir: Option<PathBuf>) -> Result<(), String> {
+pub fn start(
+    cfg: UpdateConfig,
+    enabled: bool,
+    data_dir: Option<PathBuf>,
+    stop: StopFn,
+) -> Result<Arc<Updater>, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
-    let u = Updater::new(cfg, enabled, data_dir, exe, true, true)?;
+    let mut u = Updater::new(cfg, enabled, data_dir, exe, true, true)?;
+    u.stop = Some(stop);
     u.load();
     u.settle_pending();
-    if GLOBAL.set(u).is_err() {
-        return Ok(());
-    }
-    if let Some(u) = GLOBAL.get() {
-        tokio::spawn(u.run());
-    }
-    Ok(())
+    let u = Arc::new(u);
+    tokio::spawn(Arc::clone(&u).run());
+    Ok(u)
 }
 
-/// Turn the daily check on or off (the person's choice in the portal).
-pub fn set_enabled(on: bool) {
-    if let Some(u) = global() {
-        u.enabled.store(on, AtomicOrdering::Relaxed);
+impl Updater {
+    /// Turn the daily check on or off (the person's choice in the portal).
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, AtomicOrdering::Relaxed);
     }
 }
 
@@ -363,6 +437,7 @@ impl Updater {
             connector: Connector::new()?,
             probe,
             exit_after,
+            stop: None,
         })
     }
 
@@ -377,7 +452,7 @@ impl Updater {
     }
 
     /// Wake once an hour; ask for the newest release when it has been a day.
-    async fn run(&'static self) {
+    async fn run(self: Arc<Self>) {
         tokio::time::sleep(Duration::from_secs(90)).await;
         loop {
             let due = self
@@ -406,22 +481,13 @@ impl Updater {
             if !ep.tls && !is_loopback(&ep.host) {
                 return Err("updates are only fetched over https".into());
             }
-            let default_port = if ep.tls { 443 } else { 80 };
-            let host = if ep.port == default_port {
-                ep.host.clone()
-            } else {
-                format!("{}:{}", ep.host, ep.port)
-            };
             let path = if ep.base.is_empty() {
                 "/"
             } else {
                 ep.base.as_str()
             };
-            let req = Request::builder()
-                .method(Method::GET)
-                .uri(path)
-                .header(HOST, host)
-                .header(USER_AGENT, format!("clawdot/{CURRENT}"))
+            let req = ep
+                .request_builder(Method::GET, path, &format!("clawdot/{CURRENT}"))
                 .header(ACCEPT, accept)
                 .body(Full::new(Bytes::new()))
                 .map_err(|e| format!("bad request: {e}"))?;
@@ -504,13 +570,18 @@ impl Updater {
             "latest": s.latest.as_ref().map(release_json),
         });
         drop(s);
-        let tmp = path.with_extension("tmp");
+        let tmp = crate::store::temp_path(&path);
         if std::fs::write(&tmp, doc.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
     }
 
     fn load(&self) {
+        // The temporary file of a save cut short, and the name older versions gave it.
+        if let Some(p) = self.file("update.json") {
+            let _ = std::fs::remove_file(crate::store::temp_path(&p));
+            let _ = std::fs::remove_file(p.with_extension("tmp"));
+        }
         let Some(text) = self
             .file("update.json")
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -549,7 +620,7 @@ impl Updater {
             "can_apply": can_apply,
             "cannot_apply_because": why_not,
             "supervised": self.cfg.supervised,
-            "phase": s.phase,
+            "phase": s.phase.as_str(),
             "apply_error": s.apply_error,
             "installed": s.installed,
         })
@@ -580,43 +651,44 @@ impl Updater {
     ///
     /// # Errors
     /// A plain reason why nothing was started.
-    pub fn start_apply(&'static self, version: &str) -> Result<(), String> {
+    pub fn start_apply(self: &Arc<Self>, version: &str) -> Result<(), String> {
+        // Check and claim under one lock, so two requests cannot both start an install.
         let release = {
-            let s = self.lock();
-            if !s.phase.is_empty() && s.phase != "failed" {
+            let mut s = self.lock();
+            if !s.phase.can_start() {
                 return Err("An update is already being installed.".into());
             }
-            s.latest
+            let release = s
+                .latest
                 .clone()
-                .ok_or("No update has been found yet. Check for updates first.")?
-        };
-        if release.version != version.trim_start_matches(['v', 'V'])
-            || !is_newer(CURRENT, &release.version)
-        {
-            return Err(
-                "That version is not a newer one than this. Check for updates again.".into(),
-            );
-        }
-        if let (false, Some(why)) = self.can_apply(&release) {
-            return Err(why);
-        }
-        {
-            let mut s = self.lock();
-            s.phase = "downloading".into();
+                .ok_or("No update has been found yet. Check for updates first.")?;
+            if release.version != version.trim_start_matches(['v', 'V'])
+                || !is_newer(CURRENT, &release.version)
+            {
+                return Err(
+                    "That version is not a newer one than this. Check for updates again.".into(),
+                );
+            }
+            if let (false, Some(why)) = self.can_apply(&release) {
+                return Err(why);
+            }
+            s.phase = Phase::Downloading;
             s.apply_error = None;
-        }
+            release
+        };
+        let this = Arc::clone(self);
         tokio::spawn(async move {
-            let r = tokio::time::timeout(APPLY_DEADLINE, self.apply(&release)).await;
-            let mut s = self.lock();
+            let r = tokio::time::timeout(APPLY_DEADLINE, this.apply(&release)).await;
+            let mut s = this.lock();
             match r {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     crate::diag::error(&format!("update to {} failed: {e}", release.version));
-                    s.phase = "failed".into();
+                    s.phase = Phase::Failed;
                     s.apply_error = Some(format!("The update was not installed: {e}"));
                 }
                 Err(_) => {
-                    s.phase = "failed".into();
+                    s.phase = Phase::Failed;
                     s.apply_error = Some(
                         "The update took too long and was stopped. Nothing was changed.".into(),
                     );
@@ -626,11 +698,13 @@ impl Updater {
         Ok(())
     }
 
-    fn set_phase(&self, p: &str) {
-        self.lock().phase = p.to_owned();
+    fn set_phase(&self, p: Phase) {
+        self.lock().phase = p;
     }
 
-    async fn apply(&self, r: &Release) -> Result<(), String> {
+    /// Fetch the release's program and check it: the list of hashes against the project's key, then the program
+    /// against its entry in that list. Moves through the Verifying and Downloading phases.
+    async fn download_verified(&self, r: &Release) -> Result<Vec<u8>, String> {
         let key = self.cfg.public_key.ok_or("this build has no update key")?;
         let asset = |name: &str| {
             r.assets
@@ -646,14 +720,14 @@ impl Updater {
         let sig_text = self
             .fetch(&sig.url, MAX_SMALL, "application/octet-stream", small)
             .await?;
-        self.set_phase("verifying");
+        self.set_phase(Phase::Verifying);
         if !verify_signature(&key, &sums_bytes, &String::from_utf8_lossy(&sig_text)) {
             return Err("the list of file hashes is not signed by the project's key".into());
         }
         let expected = parse_sums(&String::from_utf8_lossy(&sums_bytes))
             .remove(&bin.name)
             .ok_or_else(|| format!("the signed list has no hash for {}", bin.name))?;
-        self.set_phase("downloading");
+        self.set_phase(Phase::Downloading);
         let data = self
             .fetch(
                 &bin.url,
@@ -662,13 +736,42 @@ impl Updater {
                 Duration::from_secs(10 * 60),
             )
             .await?;
-        self.set_phase("verifying");
+        self.set_phase(Phase::Verifying);
         if sha256_hex(&data) != expected {
             return Err("the downloaded file does not match its signed hash".into());
         }
-        self.set_phase("installing");
-        self.install(&data, &r.version)?;
-        self.set_phase("installed");
+        Ok(data)
+    }
+
+    async fn apply(&self, r: &Release) -> Result<(), String> {
+        let data = self.download_verified(r).await?;
+        self.install(data, r).await?;
+        if self.exit_after && self.cfg.supervised {
+            self.restart().await;
+        }
+        Ok(())
+    }
+
+    /// Write the verified program in place of this one, then record the version as installed.
+    async fn install(&self, data: Vec<u8>, r: &Release) -> Result<(), String> {
+        self.set_phase(Phase::Installing);
+        // Writing, fsyncing and running the new program (`--version`) take real time and block; keep them off the
+        // runtime thread, which also runs the voice loop, the timers and the portal.
+        let (exe, pending, probe) = (self.exe.clone(), self.file(PENDING_FILE), self.probe);
+        let version = r.version.clone();
+        tokio::task::spawn_blocking(move || {
+            install_program(
+                &exe,
+                pending.as_deref(),
+                probe,
+                &data,
+                &version,
+                &|from, to| std::fs::rename(from, to),
+            )
+        })
+        .await
+        .map_err(|e| format!("the install stopped unexpectedly: {e}"))??;
+        self.set_phase(Phase::Installed);
         {
             let mut s = self.lock();
             s.installed = Some(r.version.clone());
@@ -677,64 +780,25 @@ impl Updater {
             "updated to {}; the previous program is kept as .prev",
             r.version
         ));
-        if self.exit_after && self.cfg.supervised {
-            self.set_phase("restarting");
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-            std::process::exit(0);
-        }
         Ok(())
     }
 
-    /// Put the new program next to the running one, check that it starts, and swap them. The old one stays as
-    /// `.prev`. A failure at any step leaves the running program exactly as it was.
-    fn install(&self, data: &[u8], version: &str) -> Result<(), String> {
-        let name = self
-            .exe
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or("cannot tell where this program is")?
-            .to_owned();
-        let new = self.exe.with_file_name(format!("{name}.new"));
-        let prev = self.exe.with_file_name(format!("{name}.prev"));
-        std::fs::write(&new, data)
-            .map_err(|e| format!("cannot write the new program next to this one: {e}"))?;
-        let cleanup = |e: String| {
-            let _ = std::fs::remove_file(&new);
-            e
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
-                .map_err(|e| cleanup(format!("cannot make the new program runnable: {e}")))?;
-        }
-        if self.probe {
-            let out = std::process::Command::new(&new)
-                .arg("--version")
-                .output()
-                .map_err(|e| {
-                    cleanup(format!(
-                        "the new program does not start on this device: {e}"
-                    ))
-                })?;
-            let said = String::from_utf8_lossy(&out.stdout);
-            if !out.status.success() || !said.contains(version) {
-                return Err(cleanup(
-                    "the new program did not report the expected version".into(),
-                ));
+    /// Stop the program so the supervisor starts the new one.
+    async fn restart(&self) {
+        self.set_phase(Phase::Restarting);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        match self.stop.clone() {
+            // An orderly stop: the owner flushes what it has queued, then exits with this code. It runs off
+            // the runtime thread (it may wait for the disk); if it takes too long the program exits anyway,
+            // because the supervisor must get its restart.
+            Some(stop) => {
+                let asked = tokio::task::spawn_blocking(move || stop(0));
+                if tokio::time::timeout(STOP_WAIT, asked).await.is_err() {
+                    std::process::exit(0);
+                }
             }
+            None => std::process::exit(0),
         }
-        if let Some(p) = self.file(PENDING_FILE) {
-            let _ = std::fs::write(p, version);
-        }
-        let _ = std::fs::remove_file(&prev);
-        std::fs::rename(&self.exe, &prev)
-            .map_err(|e| cleanup(format!("cannot set the old program aside: {e}")))?;
-        if let Err(e) = std::fs::rename(&new, &self.exe) {
-            let _ = std::fs::rename(&prev, &self.exe);
-            return Err(cleanup(format!("cannot put the new program in place: {e}")));
-        }
-        Ok(())
     }
 
     /// At start: an update that was just installed must run for a while before the old program is let go.
@@ -754,6 +818,124 @@ impl Updater {
             let _ = std::fs::remove_file(&path);
         });
     }
+}
+
+/// Put the new program `data` next to the running one `exe`, check that it starts (when `probe`), and swap them. The old
+/// one stays as `<name>.prev`. A failure at any step leaves the running program exactly as it was. `rename` is the
+/// file rename, passed in so a test can make a step fail. Blocking: call it from a blocking thread.
+fn install_program(
+    exe: &Path,
+    pending: Option<&Path>,
+    probe: bool,
+    data: &[u8],
+    version: &str,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let name = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("cannot tell where this program is")?
+        .to_owned();
+    let new = exe.with_file_name(format!("{name}.new"));
+    let prev = exe.with_file_name(format!("{name}.prev"));
+    // Flush it to the disk before the rename below makes it the program: after a power cut a renamed but
+    // unflushed file can come back empty, and the speaker would then have no program at all.
+    let written = std::fs::File::create(&new).and_then(|mut f| {
+        std::io::Write::write_all(&mut f, data)?;
+        f.sync_all()
+    });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&new);
+        return Err(format!(
+            "cannot write the new program next to this one: {e}"
+        ));
+    }
+    let cleanup = |e: String| {
+        let _ = std::fs::remove_file(&new);
+        e
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| cleanup(format!("cannot make the new program runnable: {e}")))?;
+    }
+    if probe {
+        let out = std::process::Command::new(&new)
+            .arg("--version")
+            .output()
+            .map_err(|e| {
+                cleanup(format!(
+                    "the new program does not start on this device: {e}"
+                ))
+            })?;
+        let said = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() || !reports_version(&said, version) {
+            return Err(cleanup(
+                "the new program did not report the expected version".into(),
+            ));
+        }
+    }
+    if let Some(p) = pending {
+        let _ = std::fs::write(p, version);
+    }
+    swap_in(exe, &new, &prev, rename).map_err(cleanup)
+}
+
+/// Make `new` the program at `exe` without a moment when there is no program there: first keep the running program
+/// as `prev` (a hard link, so no second copy of it on a small flash; a copy where linking is not possible), then
+/// rename `new` over `exe` in one step, then sync the directory so both names survive a power cut. If a step fails,
+/// `exe` still holds the old program.
+fn swap_in(
+    exe: &Path,
+    new: &Path,
+    prev: &Path,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    // Built under a temporary name and renamed over `prev`, so an earlier `.prev` is replaced in one step too.
+    let holding = prev.with_extension("prev-new");
+    let _ = std::fs::remove_file(&holding);
+    if std::fs::hard_link(exe, &holding).is_err() {
+        let copied = std::fs::copy(exe, &holding)
+            .and_then(|_| std::fs::File::open(&holding)?.sync_all())
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&holding);
+                format!("cannot keep the old program aside: {e}")
+            });
+        copied?;
+    }
+    if let Err(e) = rename(&holding, prev) {
+        let _ = std::fs::remove_file(&holding);
+        return Err(format!("cannot keep the old program aside: {e}"));
+    }
+    if let Err(e) = rename(new, exe) {
+        #[cfg(windows)]
+        {
+            // Windows will not replace a running program; it does allow renaming it away first.
+            let aside = exe.with_extension("running-old");
+            let _ = std::fs::remove_file(&aside);
+            if rename(exe, &aside).is_ok() {
+                if rename(new, exe).is_ok() {
+                    let _ = std::fs::remove_file(&aside);
+                    return Ok(());
+                }
+                let _ = rename(&aside, exe);
+            }
+        }
+        return Err(format!("cannot put the new program in place: {e}"));
+    }
+    sync_dir(exe);
+    Ok(())
+}
+
+/// Flush the directory that holds `file`, so a rename in it is on the disk (best effort; not possible on Windows).
+fn sync_dir(file: &Path) {
+    #[cfg(unix)]
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    #[cfg(not(unix))]
+    let _ = file;
 }
 
 /// Read back what [`release_json`] wrote. Anything that is not a version number or an https address is dropped.
@@ -812,5 +994,7 @@ pub fn pending_marker(data_dir: &Path) -> bool {
     data_dir.join(PENDING_FILE).exists()
 }
 
+#[cfg(test)]
+mod swap_tests;
 #[cfg(test)]
 mod tests;

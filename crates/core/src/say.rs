@@ -6,7 +6,7 @@
 
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
-use hyper::Request;
+use hyper::Method;
 use hyper::body::Bytes;
 use serde_json::{Map, Value, json};
 use std::time::Duration;
@@ -30,7 +30,7 @@ USAGE:
     clawdot say TEXT [options]
 
 OPTIONS:
-    --source NAME     Who is speaking; the speaker says \"From NAME: ...\" (default: the endpoint's name)
+    --source NAME     A label for the message (shown in the portal; not spoken; the endpoint is named)
     --title TEXT      A short headline (default: the first sentence of the text)
     --priority P      low, normal or urgent; only urgent is spoken in quiet hours (default: normal)
     --reply           Allow the listener to answer it (default: a one-way message)
@@ -127,12 +127,12 @@ fn explain(status: u16, body: &str) -> Result<String, String> {
 /// A one-line reason: no token, no connection, or a refusal.
 pub async fn run(a: &SayArgs, token: Option<&str>) -> Result<String, String> {
     let endpoint = Endpoint::parse(&a.url)?;
-    let mut req = Request::builder()
-        .method("POST")
-        .uri(format!("{}/api/announce", endpoint.base))
-        .header("host", &endpoint.host)
-        .header("connection", "close")
-        .header("user-agent", "clawdot-say")
+    let mut req = endpoint
+        .request_builder(
+            Method::POST,
+            &format!("{}/api/announce", endpoint.base),
+            "clawdot-say",
+        )
         .header("content-type", "application/json");
     if let Some(t) = token {
         req = req.header("authorization", format!("Bearer {t}"));

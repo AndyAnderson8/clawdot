@@ -1,0 +1,70 @@
+/* ---- Tool lists: dense rows with labelled columns ---- */
+.toolrow {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(0, 1fr) 17.5rem 5.5rem;
+  gap: var(--spacing-2) var(--spacing-4);
+  align-items: center;
+}
+ul.rows.tools {
+  margin: 0;
+}
+ul.rows.tools > li.toolrow {
+  padding: var(--spacing-3) 0;
+}
+ul.rows.tools > li.toolrow:first-child {
+  border-top: 0;
+}
+ul.rows.tools > li.toolrow:last-child {
+  padding-bottom: var(--spacing-3);
+}
+.toolrow.off .toolmain {
+  opacity: 0.55;
+}
+.toolname {
+  font-family: var(--font-family-code);
+  font-size: 0.875rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.tooldesc {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.35;
+}
+.toolorigin {
+  margin-top: 2px;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  opacity: 0.8;
+}
+.toolwhen select {
+  min-height: 2.25rem;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: 0.875rem;
+}
+.toolwhen .when {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+.toolwhen .when.ask {
+  color: var(--color-text-primary);
+}
+.tiernote {
+  margin: var(--spacing-1) 0 0;
+  font-size: 0.75rem;
+}
+.toolact {
+  justify-self: end;
+  font-size: 0.8125rem;
+}
+@media (max-width: 48rem) {
+  .toolrow {
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+  }
+  .toolwhen,
+  .toolact {
+    grid-column: 2;
+    justify-self: stretch;
+  }
+}

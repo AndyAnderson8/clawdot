@@ -7,14 +7,23 @@ import { Field } from "../parts.tsx";
 import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { ConnectionTest, McpServer } from "../types.ts";
 import { Problems } from "./Tools.tsx";
+import { ask } from "../confirm.tsx";
 
 function Source(props: { s: McpServer }) {
   const s = props.s;
-  const remove = () => {
-    if (confirm("Remove the source " + s.name + "? Its tools will disappear."))
+  const remove = async () => {
+    if (await ask("Remove the source " + s.name + "? Its tools will disappear.", "Remove"))
       void change("DELETE", "/api/connections/" + s.name, undefined, "Removed.");
   };
   const n = s.tools.length;
+  const waiting = s.needs_review ?? [];
+  const accept = (tool?: string) =>
+    change(
+      "POST",
+      "/api/connections/" + s.name + "/accept",
+      tool ? { tool } : {},
+      tool ? "Accepted." : "All accepted.",
+    );
   return (
     <li class={"toolrow srcrow" + (s.enabled ? "" : " off")}>
       <input
@@ -37,6 +46,34 @@ function Source(props: { s: McpServer }) {
         {!s.connected ? (
           <div class="tooldesc bad">
             Cannot connect: {s.error || "unknown reason"}. Check the address and token variable, then restart ClawDot.
+          </div>
+        ) : null}
+        {waiting.length ? (
+          <div class="review" id={"review-" + s.name}>
+            <p>
+              <span class="badge warn">Needs review</span>{" "}
+              {waiting.length === 1 ? "One tool is" : waiting.length + " tools are"} new or changed since you approved
+              this source. The assistant cannot use {waiting.length === 1 ? "it" : "them"} until you accept. What a tool
+              says about itself is read by the assistant, so read it first.
+            </p>
+            <ul class="reviewlist">
+              {waiting.map((t) => (
+                <li key={t.name}>
+                  <div class="toolname">{t.name}</div>
+                  <div class="tooldesc">{t.reason_text}</div>
+                  <pre class="skilltext">{t.description || "It gives no description."}</pre>
+                  {t.arguments.length ? <div class="tooldesc">It takes: {t.arguments.join(", ")}</div> : null}
+                  <button class="plain small" type="button" onClick={() => void accept(t.name)}>
+                    Accept this tool
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {waiting.length > 1 ? (
+              <button class="plain small" type="button" onClick={() => void accept()}>
+                Accept all {waiting.length}
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>

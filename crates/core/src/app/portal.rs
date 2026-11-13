@@ -7,8 +7,14 @@ use std::sync::PoisonError;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-/// How long a portal request waits for the main loop. The loop is busy while the assistant is mid-answer.
+/// How long a portal request waits for the main loop's answer. Model turns run as tasks beside the loop (ADR-0021), so
+/// an answer in progress does not hold it up; what can are a slow portal job (connecting a tool source) and a queue
+/// that is full.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a portal request waits for room in the queue to the main loop before it is refused.
+const QUEUE_WAIT: Duration = Duration::from_secs(1);
+/// What the page is told when the main loop cannot take a request now.
+const BUSY: &str = "The assistant could not take that just now. Try again in a few seconds.";
 
 /// A change to timers, alarms, and reminders asked for from the portal.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,11 +38,15 @@ pub enum Fail {
     Invalid(String),
     /// The assistant could not take the request now.
     Unavailable(String),
+    /// The change was made but could not be written to storage, so it will be lost on a restart; `true` when the
+    /// storage is full.
+    NotSaved(String, bool),
 }
 
 impl std::fmt::Display for Fail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (Self::NotFound(m) | Self::Invalid(m) | Self::Unavailable(m)) = self;
+        let (Self::NotFound(m) | Self::Invalid(m) | Self::Unavailable(m) | Self::NotSaved(m, _)) =
+            self;
         f.write_str(m)
     }
 }
@@ -52,6 +62,19 @@ pub enum Op {
     Settings(serde_json::Map<String, Value>),
     /// The language-model key was stored, replaced or removed: build the client again with it.
     Rekey,
+}
+
+impl Op {
+    /// How long the page waits for the answer. The loop answers almost at once, except for a new MCP
+    /// connection, which is made beside the loop and answers when the server has (`connects::CONNECT_LIMIT`).
+    fn wait(&self) -> Duration {
+        match self {
+            Self::Ext(crate::extensions::ExtOp::McpAdd(_)) => {
+                crate::connects::CONNECT_LIMIT + CALL_TIMEOUT
+            }
+            _ => CALL_TIMEOUT,
+        }
+    }
 }
 
 /// One request and where to send the answer.
@@ -101,7 +124,8 @@ impl Core {
     }
 
     /// Hand over the settings state (all layers and the saved file). Nothing in it is a secret.
-    pub fn set_settings(&self, state: crate::settings::SettingsState) {
+    pub fn set_settings(&self, mut state: crate::settings::SettingsState) {
+        state.set_secrets(self.secrets.clone());
         *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);
     }
 
@@ -113,6 +137,16 @@ impl Core {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map_or(Value::Null, crate::settings::SettingsState::json)
+    }
+
+    /// The effective value of one setting (`null` when unset or before the settings are handed over).
+    #[must_use]
+    pub fn setting(&self, key: &str) -> Value {
+        self.settings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map_or(Value::Null, |s| s.get(key))
     }
 
     /// The saved settings as an export file (`null` before the settings are handed over).
@@ -163,14 +197,56 @@ impl Core {
             .clone()
             .ok_or_else(|| Fail::Unavailable("The assistant is not running yet.".into()))?;
         let (reply, answer) = oneshot::channel();
-        tx.send(Job { op, reply })
-            .await
-            .map_err(|_| Fail::Unavailable("The assistant is not running.".into()))?;
-        match tokio::time::timeout(CALL_TIMEOUT, answer).await {
-            Ok(Ok(r)) => r,
-            _ => Err(Fail::Unavailable(
-                "The assistant is busy with a conversation. Try again in a few seconds.".into(),
-            )),
+        let wait = op.wait();
+        // The queue is small and the loop may be working through a slow job: wait a moment for room, not for ever.
+        match tokio::time::timeout(QUEUE_WAIT, tx.send(Job { op, reply })).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(Fail::Unavailable("The assistant is not running.".into())),
+            Err(_) => return Err(Fail::Unavailable(BUSY.into())),
         }
+        match tokio::time::timeout(wait, answer).await {
+            Ok(Ok(r)) => r,
+            _ => Err(Fail::Unavailable(BUSY.into())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::TestClock;
+    use crate::app::{Adapters, Limits};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicI64;
+
+    /// The main loop is stuck in a long conversation and the request queue is full. A request must give up after a
+    /// short wait, not hold its connection (and one of the server's few slots) until the loop is free again.
+    #[tokio::test]
+    async fn a_request_gives_up_when_the_queue_never_has_room() {
+        let clock = Arc::new(TestClock(AtomicI64::new(1_800_000_000)));
+        let core = Core::in_memory(clock, Adapters::builtin(), Limits::default());
+        let _loop_never_reads = core.attach_portal();
+        let tx = core
+            .jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap();
+        let mut held = Vec::new();
+        while tx.capacity() > 0 {
+            let (reply, answer) = oneshot::channel();
+            tx.try_send(Job {
+                op: Op::Rekey,
+                reply,
+            })
+            .unwrap();
+            held.push(answer);
+        }
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(4), core.portal_call(Op::Rekey))
+            .await
+            .expect("a request waited for room in the queue for ever");
+        assert!(matches!(r, Err(Fail::Unavailable(_))), "{r:?}");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 }

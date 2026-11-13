@@ -282,7 +282,7 @@ export function Dashboard(): JSX.Element {
           id="stat-spend"
           label="Spent today"
           value={u ? "$" + u.spend_today.toFixed(2) : "-"}
-          note="language model"
+          note={u?.spend_basis === "estimated" ? "language model, an estimate" : "language model"}
         />
         <Stat id="stat-heard" label="Last heard" value={heard ? ago(heard, now) : "Never"} note="a person talking" />
       </div>

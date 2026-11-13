@@ -10,6 +10,8 @@ export interface ReminderForm {
   days: number[];
   date: string;
   time2: string;
+  /** A reminder is after a delay or at a time. */
+  when: "delay" | "time";
 }
 
 export interface ReminderBody {
@@ -26,8 +28,9 @@ export interface ReminderBody {
 /** The body to send, or the message to show when the form is incomplete. */
 export function reminderBody(f: ReminderForm): ReminderBody | string {
   const body: ReminderBody = { kind: f.kind, label: f.label.trim() };
-  if (f.kind === "timer") {
+  if (f.kind === "timer" || (f.kind === "reminder" && f.when === "delay")) {
     body.seconds = Math.round(Number(f.amount) * Number(f.unit));
+    if (f.kind === "reminder" && !(body.seconds >= 1)) return "Enter how long to wait before the reminder.";
   } else if (f.kind === "alarm") {
     if (!f.time) return "Pick a time for the alarm.";
     const [h, m] = f.time.split(":");
@@ -122,12 +125,21 @@ export const LABEL: Record<string, string> = {
   llm_url: "Address",
   llm_model: "Model",
   speech_language: "Language you speak",
+  speech_provider: "Service",
+  realtime_enabled: "Use realtime voice",
+  realtime_url: "Address",
+  realtime_model: "Model",
+  realtime_voice: "Voice",
+  realtime_usd_per_min_in: "Cost per minute you speak",
+  realtime_usd_per_min_out: "Cost per minute it speaks",
+  realtime_max_session_secs: "Longest conversation",
   llm_key_env: "Key variable",
   voice: "Voice",
   listen: "Portal address",
   public_url: "Address other programs use",
   daily_spend_usd: "Most to spend per day",
-  board: "Board",
+  llm_usd_per_mtok_in: "Price of a million tokens sent",
+  llm_usd_per_mtok_out: "Price of a million tokens received",
   agent_max_rounds: "Rounds per request",
   agent_max_tool_calls: "Tool calls per request",
   agent_deadline_secs: "Seconds per request",
@@ -149,7 +161,7 @@ export const FROM: Record<string, string> = {
 };
 
 export type SettingKind =
-  "text" | "zone" | "area" | "board" | "number" | "money" | "bool" | "time" | "language" | "voice" | "model";
+  "text" | "zone" | "area" | "number" | "money" | "choice" | "bool" | "time" | "language" | "voice" | "model";
 export interface SettingSpec {
   key: string;
   kind: SettingKind;
@@ -162,6 +174,10 @@ export interface SettingSpec {
   /** For a whole number: the range the device accepts (shown to the browser as min and max). */
   min?: number;
   max?: number;
+  /** For a choice: each value and the words shown for it. */
+  options?: [string, string][];
+  /** Shown in an empty box. */
+  placeholder?: string;
 }
 
 export function labelOf(key: string): string {
@@ -254,6 +270,8 @@ export interface SkillDraft {
   name: string;
   instructions: string;
   tools: string[];
+  /** The file it was read from. */
+  path?: string;
 }
 export interface SkillFile {
   /** The path inside the chosen folder, or just the file name. */
@@ -295,7 +313,7 @@ export function readSkillFiles(files: SkillFile[]): { found: SkillDraft[]; skipp
       );
     else if (found.some((f) => f.name.toLowerCase() === name.toLowerCase()))
       skipped.push(where + ": the name " + name + " is already in this list");
-    else found.push({ name, instructions: d.instructions.trim(), tools: d.tools });
+    else found.push({ name, instructions: d.instructions.trim(), tools: d.tools, path: where });
   };
   for (const f of files) {
     const parts = f.path.split("/");
@@ -344,4 +362,29 @@ export function cents(typed: string): string {
   const [whole = "", ...rest] = t.split(".");
   if (!rest.length) return whole.replace(/^0+(?=\d)/, "");
   return whole.replace(/^0+(?=\d)/, "") + "." + rest.join("").slice(0, 2);
+}
+
+/** Plain-text files a skill folder may carry besides its SKILL.md. Anything else (scripts, programs) is never sent. */
+export const SKILL_HELPER = /\.(md|txt|json|ya?ml|csv|tsv|toml)$/i;
+
+/**
+ * What to send for the chosen skills. A skill that is a folder with a `SKILL.md` is sent as its raw files (the device
+ * reads the header itself and keeps the helper files); anything else (a single Markdown file, a ClawDot skills file) is
+ * sent as the name and instructions already read here.
+ */
+export function skillImports(
+  chosen: SkillDraft[],
+  all: SkillFile[],
+): { folders: SkillFile[]; plain: { name: string; instructions: string; tools: string[] }[] } {
+  const folders: SkillFile[] = [];
+  const plain: { name: string; instructions: string; tools: string[] }[] = [];
+  for (const d of chosen) {
+    const p = d.path ?? "";
+    if (/(^|\/)SKILL\.md$/i.test(p) && p.includes("/")) {
+      const dir = p.slice(0, p.lastIndexOf("/") + 1);
+      // Only the skill's own folder, not folders inside it that hold another skill.
+      for (const f of all) if (f.path.startsWith(dir) && !f.path.slice(dir.length).includes("/")) folders.push(f);
+    } else plain.push({ name: d.name, instructions: d.instructions, tools: d.tools });
+  }
+  return { folders, plain };
 }

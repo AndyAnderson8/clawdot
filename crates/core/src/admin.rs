@@ -3,7 +3,10 @@
 //!
 //! * [`hash_password`] / [`verify_password`]: PBKDF2-HMAC-SHA256 on the `sha2` crate that is already in the
 //!   build. Constant memory, no new dependency. The iteration count and salt travel with the hash.
-//! * [`Admin`]: the setting (unset, open, or password), and the in-memory sessions.
+//! * [`Admin`]: the setting (unset, open, or password), and the in-memory sessions. Every time it takes is a
+//!   *monotonic* reading ([`crate::sched::Clock::monotonic_secs`]): a session, the reset window and its
+//!   cooldown are durations, and a step of the wall clock must not lengthen or shorten them. Nothing here is
+//!   written to disk, so a reading never has to outlive the process.
 //! * [`is_private`]: which peers may complete setup or use open mode.
 //! * Forgotten password (REQ-CFG-069): a short in-memory *reset window* opened by a device button. There is no
 //!   recovery code (REQ-CFG-067, 068, 071..073 are removed).
@@ -173,6 +176,8 @@ pub enum AdminError {
     NoPassword,
     /// The local reset window is not open.
     WindowClosed,
+    /// A password change did not prove the current password: it was missing or wrong.
+    WrongCurrent,
 }
 
 impl std::fmt::Display for AdminError {
@@ -189,6 +194,7 @@ impl std::fmt::Display for AdminError {
             Self::NoRandomness => "no randomness available",
             Self::NoPassword => "no password is set",
             Self::WindowClosed => "the reset window is not open",
+            Self::WrongCurrent => "the current password is missing or wrong",
         })
     }
 }
@@ -196,7 +202,7 @@ impl std::fmt::Display for AdminError {
 impl std::error::Error for AdminError {}
 
 /// What `admin.json` holds.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum Setting {
     /// Nothing chosen yet: setup is shown.
@@ -210,6 +216,17 @@ pub enum Setting {
         hash: String,
         // Files written by older versions may carry a `recovery` hash; it is ignored on load and dropped on save.
     },
+}
+
+/// Written by hand so that no `{:?}` of an [`Admin`] (or of anything holding one) can put the password hash in a log.
+impl std::fmt::Debug for Setting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unset => f.write_str("Unset"),
+            Self::Open => f.write_str("Open"),
+            Self::Password { .. } => f.write_str("Password { hash: <hidden> }"),
+        }
+    }
 }
 
 /// The state of the administrator setting, for the UI.
@@ -240,10 +257,10 @@ impl Mode {
 pub struct Admin {
     store: Option<JsonStore>,
     setting: Setting,
-    /// (SHA-256 of the session token, expiry)
+    /// (SHA-256 of the session token, expiry on the monotonic clock)
     sessions: Vec<(String, Ts)>,
     listen: IpAddr,
-    /// When the local reset window closes, if it is open. In memory only (REQ-CFG-069).
+    /// When the local reset window closes (monotonic), if it is open. In memory only (REQ-CFG-069).
     window: Option<Ts>,
     /// When the last window ended (used or ran out); a new one waits for the cooldown.
     window_ended: Option<Ts>,
@@ -331,12 +348,12 @@ impl Admin {
         &mut self,
         peer: IpAddr,
         hash: String,
-        now: Ts,
+        mono: Ts,
     ) -> Result<String, AdminError> {
         self.check_setup(peer)?;
         self.setting = Setting::Password { hash };
         self.finish_setup()?;
-        self.new_session(now)
+        self.new_session(mono)
     }
 
     /// Whether setup may proceed from `peer`.
@@ -374,20 +391,21 @@ impl Admin {
     ///
     /// # Errors
     /// If the OS cannot supply random bytes.
-    pub fn new_session(&mut self, now: Ts) -> Result<String, AdminError> {
+    pub fn new_session(&mut self, mono: Ts) -> Result<String, AdminError> {
         let token = generate_token().map_err(|_| AdminError::NoRandomness)?;
-        self.sessions.retain(|(_, exp)| *exp > now);
+        self.sessions.retain(|(_, exp)| *exp > mono);
         if self.sessions.len() >= MAX_SESSIONS {
             self.sessions.remove(0);
         }
-        self.sessions.push((hash_token(&token), now + SESSION_SECS));
+        self.sessions
+            .push((hash_token(&token), mono + SESSION_SECS));
         Ok(token)
     }
 
     /// Whether `bearer` is a live session.
     #[must_use]
-    pub fn session_ok(&mut self, bearer: &str, now: Ts) -> bool {
-        self.sessions.retain(|(_, exp)| *exp > now);
+    pub fn session_ok(&mut self, bearer: &str, mono: Ts) -> bool {
+        self.sessions.retain(|(_, exp)| *exp > mono);
         let h = hash_token(bearer);
         self.sessions.iter().any(|(s, _)| constant_time_eq(s, &h))
     }
@@ -407,14 +425,14 @@ impl Admin {
         &mut self,
         bearer: Option<&str>,
         peer: IpAddr,
-        now: Ts,
+        mono: Ts,
     ) -> Result<(), AdminError> {
         match self.mode() {
             Mode::Setup => Err(AdminError::SetupRequired),
             Mode::Open if is_private(peer) => Ok(()),
             Mode::Open => Err(AdminError::NotPrivate),
             Mode::Password => match bearer {
-                Some(b) if self.session_ok(b, now) => Ok(()),
+                Some(b) if self.session_ok(b, mono) => Ok(()),
                 _ => Err(AdminError::Unauthorized),
             },
         }
@@ -424,21 +442,21 @@ impl Admin {
     ///
     /// # Errors
     /// Storage and randomness failures.
-    pub fn set_password(&mut self, hash: String, now: Ts) -> Result<String, AdminError> {
+    pub fn set_password(&mut self, hash: String, mono: Ts) -> Result<String, AdminError> {
         let before = std::mem::replace(&mut self.setting, Setting::Password { hash });
         if let Err(e) = self.save() {
             self.setting = before;
             return Err(e);
         }
         self.sessions.clear();
-        self.new_session(now)
+        self.new_session(mono)
     }
 
     // ----- local reset window (REQ-CFG-069) -----
 
-    fn window_tick(&mut self, now: Ts) {
+    fn window_tick(&mut self, mono: Ts) {
         if let Some(end) = self.window
-            && now >= end
+            && mono >= end
         {
             self.window = None;
             self.window_ended = Some(end);
@@ -446,9 +464,9 @@ impl Admin {
     }
 
     /// Seconds the local reset window has left (0 when closed).
-    pub fn window_left(&mut self, now: Ts) -> Ts {
-        self.window_tick(now);
-        self.window.map_or(0, |end| end - now)
+    pub fn window_left(&mut self, mono: Ts) -> Ts {
+        self.window_tick(mono);
+        self.window.map_or(0, |end| end - mono)
     }
 
     /// Open the local reset window. Returns the seconds it stays open. Asking again while it is open reports the
@@ -456,21 +474,21 @@ impl Admin {
     ///
     /// # Errors
     /// [`AdminError::NoPassword`] unless a password is set; [`AdminError::RateLimited`] during the cooldown.
-    pub fn open_window(&mut self, now: Ts) -> Result<Ts, AdminError> {
+    pub fn open_window(&mut self, mono: Ts) -> Result<Ts, AdminError> {
         if self.mode() != Mode::Password {
             return Err(AdminError::NoPassword);
         }
-        let left = self.window_left(now);
+        let left = self.window_left(mono);
         if left > 0 {
             return Ok(left);
         }
         if self
             .window_ended
-            .is_some_and(|e| now < e + RESET_COOLDOWN_SECS)
+            .is_some_and(|e| mono < e + RESET_COOLDOWN_SECS)
         {
             return Err(AdminError::RateLimited);
         }
-        self.window = Some(now + RESET_WINDOW_SECS);
+        self.window = Some(mono + RESET_WINDOW_SECS);
         Ok(RESET_WINDOW_SECS)
     }
 
@@ -478,14 +496,14 @@ impl Admin {
     ///
     /// # Errors
     /// [`AdminError::NotPrivate`], [`AdminError::NoPassword`] or [`AdminError::WindowClosed`].
-    pub fn check_window(&mut self, peer: IpAddr, now: Ts) -> Result<(), AdminError> {
+    pub fn check_window(&mut self, peer: IpAddr, mono: Ts) -> Result<(), AdminError> {
         if self.mode() != Mode::Password {
             return Err(AdminError::NoPassword);
         }
         if !is_private(peer) {
             return Err(AdminError::NotPrivate);
         }
-        if self.window_left(now) == 0 {
+        if self.window_left(mono) == 0 {
             return Err(AdminError::WindowClosed);
         }
         Ok(())
@@ -499,12 +517,12 @@ impl Admin {
         &mut self,
         peer: IpAddr,
         hash: String,
-        now: Ts,
+        mono: Ts,
     ) -> Result<String, AdminError> {
-        self.check_window(peer, now)?;
+        self.check_window(peer, mono)?;
         self.window = None;
-        self.window_ended = Some(now);
-        self.set_password(hash, now)
+        self.window_ended = Some(mono);
+        self.set_password(hash, mono)
     }
 }
 
@@ -550,8 +568,16 @@ pub fn migrate_legacy(dir: &std::path::Path) -> Result<bool, StoreError> {
 /// I/O errors other than "not found".
 pub fn reset(dir: &std::path::Path) -> std::io::Result<bool> {
     let mut removed = false;
-    for name in ["admin.json", "admin-token.hash", "admin.tmp"] {
-        match std::fs::remove_file(dir.join(name)) {
+    let store_file = dir.join("admin.json");
+    let doomed = [
+        store_file.clone(),
+        dir.join("admin-token.hash"),
+        // The temporary file of a save cut short, and the name older versions gave it.
+        crate::store::temp_path(&store_file),
+        dir.join("admin.tmp"),
+    ];
+    for path in doomed {
+        match std::fs::remove_file(path) {
             Ok(()) => removed = true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -581,6 +607,18 @@ mod tests {
             hex(&pbkdf2(b"password", b"salt", 4096)),
             "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
         );
+    }
+
+    // REQ-CFG-019
+    #[test]
+    fn the_password_hash_never_appears_in_debug_output() {
+        let hash = hash_password("correct horse").unwrap();
+        let setting = Setting::Password { hash: hash.clone() };
+        assert!(!format!("{setting:?}").contains(&hash));
+        let mut admin = Admin::new();
+        admin.setting = setting;
+        assert!(!format!("{admin:?}").contains(&hash));
+        assert!(format!("{:?}", Setting::Open).contains("Open"));
     }
 
     // REQ-CFG-019
@@ -732,6 +770,11 @@ mod tests {
         assert_eq!(Admin::open(store).unwrap().mode(), Mode::Open);
         assert!(reset(&dir.0).unwrap());
         assert!(!reset(&dir.0).unwrap());
+        // A save cut short leaves its temporary file; reset clears that too, under the name the store gives it.
+        let tmp = crate::store::temp_path(&dir.0.join("admin.json"));
+        std::fs::write(&tmp, b"{").unwrap();
+        assert!(reset(&dir.0).unwrap());
+        assert!(!tmp.exists());
         let store = JsonStore::new(dir.0.join("admin.json"), SCHEMA);
         assert_eq!(Admin::open(store).unwrap().mode(), Mode::Setup);
     }

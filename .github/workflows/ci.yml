@@ -96,7 +96,92 @@ jobs:
       - name: Dependency policy
         if: hashFiles('deny.toml') != ''
         uses: EmbarkStudios/cargo-deny-action@v2
-  # TODO(TASK-003): cross-armv7 build and the resource-budget gate join here as required jobs.
+
+  # Feature combinations on x86_64 (architecture review D1). `default` repeats the `rust` job on purpose: it keeps
+  # the three variants side by side, and the cache makes it cheap.
+  features:
+    name: "features (${{ matrix.name }}: clippy, test)"
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            flags: ""
+          - name: all-features
+            flags: "--all-features"
+          - name: no-default-features
+            flags: "--no-default-features"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+          cache-key: features-${{ matrix.name }}
+      - name: Lint (warnings are errors)
+        run: cargo clippy --workspace --all-targets --locked ${{ matrix.flags }} -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked ${{ matrix.flags }}
+      # In a workspace build another crate can switch a core feature back on, so the core is also tested alone.
+      - name: Test the core crate alone
+        run: cargo test -p clawdot-core --locked ${{ matrix.flags }}
+
+  # The binary that actually runs on the Echo Dot Gen 2 (architecture review D1, spec 0002 REQ-NFR-103):
+  # armv7 musl, release profile (stripped, see Cargo.toml), the default features plus the Dot's.
+  #   dot  = esphome-satellite,esphome-noise              what dot-ssh.md deploys
+  #   full = dot + hive,realtime                          everything the Dot could run
+  # Built with `cross` (container with a musl gcc), pinned below. Chosen over cargo-zigbuild because it needs no
+  # linker wrappers and the image is a fixed, versioned toolchain, so the result does not move with a zig release;
+  # the cost is the image pull. Fails when the stripped binary is over 8 MiB; the size and the change since the
+  # last recorded measurement go to the job summary, and the binary is kept as a workflow artifact.
+  dot-build:
+    name: "dot build (armv7 musl, ${{ matrix.name }}) and size budget"
+    needs: detect
+    if: needs.detect.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CROSS_VERSION: "0.2.5"
+      # SHA-256 of cross-x86_64-unknown-linux-gnu.tar.gz from the v0.2.5 release.
+      CROSS_SHA256: "642375d1bcf3bd88272c32ba90e999f3d983050adf45e66bd2d3887e8e838bad"
+      TARGET: armv7-unknown-linux-musleabihf
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dot
+            features: "esphome-satellite,esphome-noise"
+          - name: full
+            features: "esphome-satellite,esphome-noise,hive,realtime"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-key: dot-${{ matrix.name }}
+      - name: Install cross (pinned, checksum verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/cross.tgz" \
+            "https://github.com/cross-rs/cross/releases/download/v${CROSS_VERSION}/cross-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${CROSS_SHA256}  $RUNNER_TEMP/cross.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/cross-bin"
+          tar -xzf "$RUNNER_TEMP/cross.tgz" -C "$RUNNER_TEMP/cross-bin"
+          echo "$RUNNER_TEMP/cross-bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          # The container cannot read the checkout's git data; pass the commit in (see Cross.toml).
+          CLAWDOT_BUILD_COMMIT=$(git rev-parse --short=9 HEAD)
+          export CLAWDOT_BUILD_COMMIT CLAWDOT_BUILD_DIRTY=0
+          cross build --release --locked --target "$TARGET" -p clawdot-core --bin clawdot --features "${{ matrix.features }}"
+      - name: Size budget (spec 0002, 8 MiB)
+        run: bash .github/scripts/dot-size.sh "${{ matrix.name }}" "target/${TARGET}/release/clawdot"
+      - name: Keep the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawdot-armv7-${{ matrix.name }}
+          path: target/${{ env.TARGET }}/release/clawdot
+          if-no-files-found: error
+          retention-days: 14
 
   portal:
     name: portal (npm ci, lint, format, types, tests, built page is current, browser)
@@ -154,7 +239,7 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [detect, commits, docs, scripts, rust, portal, release-check]
+    needs: [detect, commits, docs, scripts, rust, features, dot-build, portal, release-check]
     runs-on: ubuntu-latest
     steps:
       - name: Every required job passed (skipped jobs are fine)

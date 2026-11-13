@@ -12,6 +12,7 @@ import {
   restartText,
   settingsChanges,
   settingsPatch,
+  skillImports,
   shownValue,
   skillBody,
   toolDefinition,
@@ -29,6 +30,7 @@ const base: ReminderForm = {
   days: [],
   date: "",
   time2: "",
+  when: "time",
 };
 
 test("timer body is seconds, trimmed label", () => {
@@ -66,6 +68,19 @@ test("reminder body needs a date and a time", () => {
     reminderBody({ ...base, kind: "reminder", date: "2026-12-01", time2: "" }),
     "Pick a date and a time for the reminder.",
   );
+});
+
+// REQ-TMR-009
+test("a reminder after a delay sends seconds and no date", () => {
+  const f: ReminderForm = { ...base, kind: "reminder", when: "delay", amount: "10", unit: "60", date: "2026-12-01" };
+  assert.deepEqual(reminderBody(f), { kind: "reminder", label: "tea", seconds: 600 });
+  assert.deepEqual(reminderBody({ ...f, amount: "2", unit: "3600" }), {
+    kind: "reminder",
+    label: "tea",
+    seconds: 7200,
+  });
+  assert.equal(reminderBody({ ...f, amount: "" }), "Enter how long to wait before the reminder.");
+  assert.equal(reminderBody({ ...f, amount: "0" }), "Enter how long to wait before the reminder.");
 });
 
 test("tool definition", () => {
@@ -292,4 +307,26 @@ test("a dollar amount keeps digits and a point, with at most two decimals", () =
   assert.equal(cents("abc"), "");
   assert.equal(cents("007.50"), "7.50");
   assert.equal(cents(""), "");
+});
+
+test("a skill folder is sent as its own files, and a loose file as its text", () => {
+  const all = [
+    { path: "s/tea/SKILL.md", text: "x" },
+    { path: "s/tea/notes.txt", text: "y" },
+    { path: "s/tea/inner/SKILL.md", text: "z" },
+    { path: "s/loose.md", text: "w" },
+  ];
+  const out = skillImports(
+    [
+      { name: "Tea", instructions: "x", tools: [], path: "s/tea/SKILL.md" },
+      { name: "loose", instructions: "w", tools: [], path: "s/loose.md" },
+    ],
+    all,
+  );
+  assert.deepEqual(
+    out.folders.map((f) => f.path),
+    ["s/tea/SKILL.md", "s/tea/notes.txt"],
+    "its folder only, not a skill folder inside it",
+  );
+  assert.deepEqual(out.plain, [{ name: "loose", instructions: "w", tools: [] }]);
 });

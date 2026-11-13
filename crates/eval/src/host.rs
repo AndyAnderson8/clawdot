@@ -28,6 +28,9 @@ impl ManualClock {
 }
 
 impl Clock for ManualClock {
+    fn monotonic_secs(&self) -> i64 {
+        self.now()
+    }
     fn now(&self) -> Ts {
         self.0.load(Ordering::Relaxed)
     }
@@ -60,6 +63,7 @@ impl EvalHost {
     #[must_use]
     pub fn new(s: &Scenario, clock: Arc<ManualClock>) -> Self {
         let assistant = Assistant::new(
+            clawdot_core::lang::DEFAULT,
             Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>,
             Box::new(FixedOffset(0)),
             Scheduler::new(64),

@@ -10,7 +10,7 @@ use clawdot_bridge::client::Url;
 use clawdot_bridge::harness::{ClaudeCode, CommandSpec};
 use clawdot_bridge::state::Handled;
 use clawdot_bridge::{Config, Runner, stream_once};
-use clawdot_core::app::{Adapters, Core, Limits};
+use clawdot_core::app::{Adapters, Core, LOCALHOST_PEER, Limits};
 use clawdot_core::assistant::Assistant;
 use clawdot_core::http::{ServeOptions, serve};
 use clawdot_core::sched::{FixedOffset, Scheduler, SystemClock};
@@ -62,6 +62,7 @@ fn start() -> Fixture {
     });
 
     let assistant = Assistant::new(
+        clawdot_core::lang::DEFAULT,
         clock,
         Box::new(FixedOffset(0)),
         Scheduler::new(16),
@@ -81,7 +82,7 @@ fn post(addr: SocketAddr, path: &str, token: &str, body: &str) -> u16 {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     s.write_all(req.as_bytes()).unwrap();
@@ -118,7 +119,7 @@ fn bridge_config(f: &Fixture) -> Config {
         endpoint: "claude-code".into(),
         token: f.token.clone(),
         read_timeout: Duration::from_secs(20),
-        claude: ClaudeCode::default(),
+        harness: Box::new(ClaudeCode::default()),
     }
 }
 
@@ -143,7 +144,7 @@ fn a_spoken_instruction_resumes_the_agent_session_and_is_acknowledged() {
         .assistant
         .handle("tell it to also add unit tests")
         .expect("handled locally");
-    assert_eq!(out.say, "Okay, sending that to Claude Code.");
+    assert_eq!(out.say, "Okay, sending that to claude-code.");
 
     let recorder = Recorder::default();
     let mut handled = Handled::in_memory();
@@ -164,7 +165,7 @@ fn a_spoken_instruction_resumes_the_agent_session_and_is_acknowledged() {
     // Acknowledged: nothing left to redeliver.
     assert!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );
@@ -212,7 +213,7 @@ fn thanks_ill_handle_it_acknowledges_without_running_anything() {
     announce(&f);
     assert_eq!(
         f.assistant.handle("thanks I'll handle it").unwrap().say,
-        "Okay. I'll let Claude Code know you've got it."
+        "Okay. I'll let claude-code know you've got it."
     );
 
     let recorder = Recorder::default();
@@ -230,7 +231,7 @@ fn thanks_ill_handle_it_acknowledges_without_running_anything() {
     );
     assert!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty(),
         "but it is confirmed"
@@ -259,7 +260,7 @@ fn a_command_that_could_not_start_is_redelivered_and_runs_once_fixed() {
     assert!(recorder.ran.lock().unwrap().is_empty());
     assert_eq!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .len(),
         1,
@@ -277,7 +278,7 @@ fn a_command_that_could_not_start_is_redelivered_and_runs_once_fixed() {
     assert_eq!(recorder.ran.lock().unwrap().len(), 1);
     assert!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );
@@ -291,14 +292,16 @@ fn redelivery_after_a_lost_acknowledgement_never_runs_the_instruction_twice() {
     f.assistant.handle("tell it to deploy the fix").unwrap();
     let reply = f
         .core
-        .bridge_pending("claude-code", &f.token, 0)
+        .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
         .unwrap()
         .remove(0);
 
     // The bridge handled it, but its acknowledgement was lost, so the device still has it queued.
     let recorder = Recorder::default();
     let mut handled = Handled::in_memory();
-    handled.insert(reply.id).unwrap();
+    handled
+        .insert(clawdot_bridge::state::Key::of(&reply))
+        .unwrap();
     stream_once(
         &bridge_config(&f),
         &mut handled,
@@ -312,7 +315,7 @@ fn redelivery_after_a_lost_acknowledgement_never_runs_the_instruction_twice() {
     );
     assert!(
         f.core
-            .bridge_pending("claude-code", &f.token, 0)
+            .bridge_pending("claude-code", &f.token, LOCALHOST_PEER, 0)
             .unwrap()
             .is_empty()
     );

@@ -1,8 +1,10 @@
 //! Tests of the portal's JSON API against a real listener (REQ-CFG-005, 027, 029, 030).
 #![allow(clippy::unwrap_used)]
 
+use super::models::fetch_models;
+use super::page::{PAGE, PAGE_GZ, accepts_gzip};
 use super::*;
-use crate::app::{Adapters, Limits};
+use crate::app::{Adapters, Limits, Op};
 use crate::assistant::Assistant;
 use crate::http::{ServeOptions, serve};
 use crate::sched::{Clock, FixedOffset, Scheduler, Ts};
@@ -14,12 +16,15 @@ use tokio::net::{TcpListener, TcpStream};
 /// 2026-11-09 12:00 UTC.
 struct Noon;
 impl Clock for Noon {
+    fn monotonic_secs(&self) -> i64 {
+        self.now()
+    }
     fn now(&self) -> Ts {
         1_794_225_600
     }
 }
 
-struct Portal {
+pub(super) struct Portal {
     addr: SocketAddr,
     core: Arc<Core>,
     _stop: tokio::sync::oneshot::Sender<()>,
@@ -27,17 +32,26 @@ struct Portal {
 
 /// A core plus, optionally, a stand-in for the main loop answering portal requests.
 async fn start(with_main_loop: bool) -> Portal {
-    let core = Arc::new(Core::in_memory(
-        Arc::new(Noon),
-        Adapters::builtin(),
-        Limits::default(),
-    ));
+    start_in(None, with_main_loop).await
+}
+
+/// Like [`start`], with the core's files in `dir` when given (so a pasted key has somewhere to be kept).
+pub(super) async fn start_in(dir: Option<&std::path::Path>, with_main_loop: bool) -> Portal {
+    let core = Arc::new(match dir {
+        None => Core::in_memory(Arc::new(Noon), Adapters::builtin(), Limits::default()),
+        Some(d) => Core::open(
+            Arc::new(Noon),
+            Adapters::builtin(),
+            Limits::default(),
+            crate::app::Stores::in_dir(d),
+        )
+        .unwrap(),
+    });
     let defaults = [
         ("device_name", json!("Test Dot")),
         ("zone", json!("UTC")),
         ("listen", json!("127.0.0.1:3335")),
         ("llm_key_env", json!("OPENROUTER_API_KEY")),
-        ("board", json!("none")),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v))
@@ -60,6 +74,7 @@ async fn start(with_main_loop: bool) -> Portal {
     if with_main_loop {
         let mut jobs = core.attach_portal();
         let mut assistant = Assistant::new(
+            crate::lang::DEFAULT,
             Arc::new(Noon),
             Box::new(FixedOffset(-6 * 3600)),
             Scheduler::new(8),
@@ -80,9 +95,15 @@ async fn start(with_main_loop: bool) -> Portal {
                     Op::Settings(live) => Ok(Value::Object(live)),
                     Op::Rekey => Ok(json!({ "applied": true })),
                     Op::Ext(op) => ext
-                        .apply(op, &mut http, &mut mcp, &builtin, |n| {
-                            (n == "HA_TOKEN").then(|| "x".to_owned())
-                        })
+                        .apply(
+                            op,
+                            crate::extensions::ToolSets::new(
+                                &mut http,
+                                &mut mcp,
+                                &builtin,
+                                &|n: &str| (n == "HA_TOKEN").then(|| "x".to_owned()),
+                            ),
+                        )
                         .await
                         .map(|()| ext.listing(&[], &http, &mcp)),
                 };
@@ -97,10 +118,16 @@ async fn start(with_main_loop: bool) -> Portal {
     }
 }
 
-async fn call(p: &Portal, method: &str, path: &str, auth: &str, body: &str) -> (u16, Value) {
+pub(super) async fn call(
+    p: &Portal,
+    method: &str,
+    path: &str,
+    auth: &str,
+    body: &str,
+) -> (u16, Value) {
     let mut s = TcpStream::connect(p.addr).await.unwrap();
     let mut req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     if !auth.is_empty() {
@@ -200,38 +227,21 @@ async fn every_portal_listing_needs_a_sign_in() {
     let setup = r#"{"mode":"password","password":"correct horse"}"#;
     let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
     let session = format!("Bearer {}", v["token"].as_str().unwrap());
-    for (m, path) in [
-        ("GET", "/api/schedule"),
-        ("POST", "/api/schedule"),
-        ("PUT", "/api/schedule/1"),
-        ("DELETE", "/api/schedule/1"),
-        ("GET", "/api/tools"),
-        ("GET", "/api/settings"),
-        ("PUT", "/api/settings"),
-        ("GET", "/api/about"),
-        ("POST", "/api/tools"),
-        ("DELETE", "/api/tools/x"),
-        ("POST", "/api/tools/x/enabled"),
-        ("POST", "/api/tools/x/tier"),
-        ("POST", "/api/connections"),
-        ("POST", "/api/connections/test"),
-        ("DELETE", "/api/connections/x"),
-        ("POST", "/api/connections/x/enabled"),
-        ("GET", "/api/skills"),
-        ("POST", "/api/skills"),
-        ("POST", "/api/skills/import"),
-        ("POST", "/api/skills/edit"),
-        ("POST", "/api/skills/delete"),
-        ("POST", "/api/skills/enabled"),
-        ("GET", "/api/update"),
-        ("POST", "/api/update/check"),
-        ("POST", "/api/update/apply"),
-        ("GET", "/api/models"),
-        ("GET", "/api/voices"),
-    ] {
+    // Every route the table marks as needing a sign-in, read from the table so a new route cannot be forgotten here.
+    let guarded: Vec<_> = ROUTES.iter().filter(|r| r.auth == SignedIn).collect();
+    assert!(guarded.len() > 40, "only {} guarded routes", guarded.len());
+    for route in guarded {
+        let path = crate::routes::sample_path(route.path);
         // Refused either way; after about 20 failures the rate limit answers 429 instead of 401.
-        let s = call(&p, m, path, "", "{}").await.0;
-        assert!(s == 401 || s == 429, "{m} {path}: {s}");
+        let s = call(&p, route.method, &path, "", "{}").await.0;
+        assert!(s == 401 || s == 429, "{} {path}: {s}", route.method);
+    }
+    // The extra skill actions are one row in the table (`/skills/{action}`); each is guarded the same way.
+    for action in ["import", "edit", "delete", "enabled"] {
+        let s = call(&p, "POST", &format!("/api/skills/{action}"), "", "{}")
+            .await
+            .0;
+        assert!(s == 401 || s == 429, "skills/{action}: {s}");
     }
     p.core
         .set_ui_tools(json!({"tools": [{"name": "set_timer"}], "mcp": []}));
@@ -369,6 +379,38 @@ async fn the_portal_manages_tools_connections_and_skills() {
             .0,
         400
     );
+    // REQ-SKL-001, REQ-SKL-002: a skill folder sent as files, then accepted
+    let folder = r#"{"format":"skill-folder","files":[{"path":"tea/SKILL.md","text":"---\nname: tea\ndescription: Brew tea\n---\nSteep it."},{"path":"tea/a.md","text":"notes"}]}"#;
+    let (s, v) = call(&p, "POST", "/api/skills/import", "", folder).await;
+    assert_eq!(s, 200, "{v}");
+    let tea = v["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["name"] == "tea")
+        .unwrap();
+    assert_eq!(
+        (
+            tea["description"].as_str(),
+            tea["needs_review"].as_bool(),
+            tea["source"].as_str()
+        ),
+        (Some("Brew tea"), Some(true), Some("tea/SKILL.md"))
+    );
+    assert_eq!(v["import"]["added"], 1);
+    let on = r#"{"name":"tea","enabled":true}"#;
+    assert_eq!(call(&p, "POST", "/api/skills/enabled", "", on).await.0, 400);
+    let (s, v) = call(&p, "POST", "/api/skills/accept", "", r#"{"name":"tea"}"#).await;
+    assert_eq!(s, 200);
+    assert!(
+        v["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["name"] == "tea" && k["needs_review"] == false)
+    );
+    assert_eq!(call(&p, "POST", "/api/skills/enabled", "", on).await.0, 200);
+    call(&p, "POST", "/api/skills/delete", "", r#"{"name":"tea"}"#).await;
     assert_eq!(
         call(&p, "POST", "/api/skills/unknown", "", "{}").await.0,
         404
@@ -380,6 +422,8 @@ async fn the_portal_manages_tools_connections_and_skills() {
 }
 
 // REQ-CFG-037, REQ-CFG-038, REQ-CFG-039, REQ-CFG-040, REQ-CFG-041
+// Uses named time zones, which only a build with the time zone database accepts.
+#[cfg(feature = "tz")]
 #[tokio::test]
 async fn settings_are_saved_validated_and_need_the_administrator() {
     let p = start(true).await;
@@ -483,7 +527,7 @@ async fn the_served_page_negotiates_the_encoding() {
     let p = start(false).await;
     for (accept, encoded) in [("", false), ("Accept-Encoding: gzip\r\n", true)] {
         let mut s = TcpStream::connect(p.addr).await.unwrap();
-        let req = format!("GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n{accept}\r\n");
+        let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n{accept}\r\n");
         s.write_all(req.as_bytes()).await.unwrap();
         let mut raw = Vec::new();
         s.read_to_end(&mut raw).await.unwrap();
@@ -562,6 +606,15 @@ async fn the_audit_log_is_read_through_an_authenticated_paged_endpoint() {
     let (s, v) = get("?limit=lots").await;
     assert_eq!(s, 400);
     assert!(v["error"].as_str().unwrap().contains("limit"));
+    // One decoder for every query: a broken escape is refused here too, not read as written.
+    let (_, v) = get("?tool=docker%5F%5Frestart").await;
+    assert_eq!(
+        v["records"].as_array().unwrap().len(),
+        3,
+        "an escape is decoded"
+    );
+    assert_eq!(get("?tool=docker%zz").await.0, 400);
+    assert_eq!(get("?tool=%ff%fe").await.0, 400, "not text");
     // read-only: the log cannot be changed or cleared through the API
     for m in ["POST", "PUT", "DELETE"] {
         assert_eq!(
@@ -584,7 +637,7 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     let s = call(&p, "GET", "/api/notes", "", "").await.0;
     assert!(s == 401 || s == 429, "{s}");
     assert_eq!(call(&p, "GET", "/api/notes", &session, "").await.0, 503);
-    let store = Arc::new(NoteStore::in_memory(true));
+    let store = Arc::new(NoteStore::in_memory(crate::lang::DEFAULT, true));
     p.core.set_notes(Arc::clone(&store));
     store.add("my printer is called Pixel", 10).unwrap();
     let second = store.add("the spare key is under the pot", 11).unwrap();
@@ -593,7 +646,21 @@ async fn notes_are_listed_and_forgotten_through_an_authenticated_endpoint() {
     assert_eq!(v["enabled"], true);
     assert_eq!(v["notes"].as_array().unwrap().len(), 2);
     assert_eq!(v["notes"][0]["text"], "my printer is called Pixel");
-    assert_eq!(v["limits"]["max_notes"], 50);
+    assert_eq!(v["limits"]["max_notes"], crate::notes::MAX_NOTES);
+    // REQ-MEM-004: search, best first, with the place voice commands use
+    let (s, v) = call(&p, "GET", "/api/notes?q=spare+KEY", &session, "").await;
+    assert_eq!(s, 200);
+    assert_eq!(v["query"], "spare KEY");
+    assert_eq!(v["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(v["notes"][0]["position"], 2);
+    assert_eq!(v["notes"][0]["id"], second.id);
+    let (s, v) = call(&p, "GET", "/api/notes?q=zzzz", &session, "").await;
+    assert_eq!((s, v["notes"].as_array().unwrap().len()), (200, 0));
+    assert_eq!(
+        call(&p, "GET", "/api/notes?q=key", "", "").await.0,
+        401,
+        "search needs the administrator"
+    );
     // change one in place: the list comes back, a duplicate or a missing one is refused
     let edit_path = format!("/api/notes/{}", second.id);
     let (s, v) = call(
@@ -661,7 +728,7 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
         503
     );
     // off: refused with the reason, nothing written
-    let store = Arc::new(NoteStore::in_memory(false));
+    let store = Arc::new(NoteStore::in_memory(crate::lang::DEFAULT, false));
     p.core.set_notes(Arc::clone(&store));
     let (s, v) = call(
         &p,
@@ -691,7 +758,11 @@ async fn the_administrator_adds_a_note_through_the_same_checks_as_a_spoken_one()
     for (body, status, needle) in [
         (add("my printer is pixel"), 409, "already remembered"),
         (add("   "), 400, "Write what"),
-        (add(&"a".repeat(201)), 400, "too long"),
+        (
+            add(&"a".repeat(crate::notes::MAX_NOTE_CHARS + 1)),
+            400,
+            "too long",
+        ),
         (
             add("the key is sk-abcdefghijklmnopqrstuvwxyz123456"),
             400,
@@ -741,9 +812,16 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
         "diag-api-test could not do a thing with Bearer abcdefghijklmnopqrstuvwxyz123456",
     );
 
+    // A reminder the user set: its label is their own words, so the file says only that one is scheduled.
+    p.core.set_ui_status(json!({
+        "scheduled": [{ "kind": "reminder", "label": "call the clinic about results", "seconds_left": 90 }],
+    }));
+
     let (s, d) = call(&p, "GET", "/api/diagnostics", &session, "").await;
     assert_eq!(s, 200, "{d}");
     assert_eq!(d["format"], "clawdot-diagnostics");
+    assert_eq!(d["status"]["scheduled"][0]["kind"], "reminder");
+    assert!(d["status"]["scheduled"][0].get("label").is_none(), "{d}");
     assert_eq!(d["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(d["settings"]["fields"]["device_name"]["value"], "Den");
     assert_eq!(d["settings"]["fields"]["device_name"]["source"], "saved");
@@ -754,6 +832,7 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
         token.as_str(),
         "token_hash",
         "Secret persona text",
+        "call the clinic",
         "abcdefghijklmnopqrstuvwxyz123456",
     ] {
         assert!(
@@ -803,9 +882,135 @@ async fn diagnostics_logs_export_and_build_info_need_a_sign_in_and_hold_no_secre
     let (_, a) = call(&p, "GET", "/api/about", &session, "").await;
     assert_eq!(a["build"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(a["build"]["features"].is_array());
+    // The release version is a separate field from the commit, so the updater's comparison is untouched.
+    assert_eq!(a["version"], env!("CARGO_PKG_VERSION"));
+    assert!(a["build"]["commit"].as_str().is_some_and(|c| !c.is_empty()));
+    assert!(a["build"]["dirty"].is_boolean());
+    assert!(
+        a["build"]["id"]
+            .as_str()
+            .is_some_and(|i| i.starts_with(env!("CARGO_PKG_VERSION")))
+    );
 }
 
 // ----- forgotten password: local reset window (REQ-CFG-069); there is no recovery code -----
+
+// REQ-INB-041
+#[tokio::test]
+async fn only_the_administrator_sets_the_spoken_name_and_it_is_validated() {
+    let p = start(false).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+
+    // Created with one; a bad one is refused and nothing is created.
+    let bad = r#"{"name":"kitchen","adapter":"generic","spoken_name":"<b>Mum</b>"}"#;
+    assert_eq!(
+        call(&p, "POST", "/api/endpoints", &session, bad).await.0,
+        400
+    );
+    assert!(p.core.endpoints().is_empty());
+    let good = r#"{"name":"kitchen","adapter":"generic","spoken_name":"the kitchen"}"#;
+    let (s, e) = call(&p, "POST", "/api/endpoints", &session, good).await;
+    assert_eq!((s, e["spoken_name"].as_str()), (201, Some("the kitchen")));
+    let token = e["token"].as_str().unwrap().to_owned();
+
+    // The listing carries it, and a blank clears it.
+    let (_, o) = call(&p, "GET", "/api/overview", &session, "").await;
+    assert_eq!(o["endpoints"][0]["spoken_name"], "the kitchen");
+    let (s, e) = call(
+        &p,
+        "PUT",
+        "/api/endpoints/kitchen",
+        &session,
+        r#"{"spoken_name":"Hall"}"#,
+    )
+    .await;
+    assert_eq!((s, e["spoken_name"].as_str()), (200, Some("Hall")));
+    for (body, status) in [
+        (r#"{"spoken_name":"[x](http://e.test)"}"#, 400),
+        (r#"{"spoken_name":"line\nbreak"}"#, 400),
+        (r#"{"spoken_name":"ClawDot","x":1}"#, 400),
+        (r#"{}"#, 400),
+    ] {
+        let s = call(&p, "PUT", "/api/endpoints/kitchen", &session, body)
+            .await
+            .0;
+        assert_eq!(s, status, "{body}");
+    }
+    assert_eq!(
+        call(
+            &p,
+            "PUT",
+            "/api/endpoints/nope",
+            &session,
+            r#"{"spoken_name":"x"}"#
+        )
+        .await
+        .0,
+        404
+    );
+    let (s, e) = call(
+        &p,
+        "PUT",
+        "/api/endpoints/kitchen",
+        &session,
+        r#"{"spoken_name":null}"#,
+    )
+    .await;
+    assert_eq!((s, e["spoken_name"].is_null()), (200, true));
+
+    // Neither anonymous callers nor the endpoint's own token can change it.
+    let anon = call(
+        &p,
+        "PUT",
+        "/api/endpoints/kitchen",
+        "",
+        r#"{"spoken_name":"x"}"#,
+    )
+    .await
+    .0;
+    assert!(anon == 401 || anon == 429, "{anon}");
+    let by_token = call(
+        &p,
+        "PUT",
+        "/api/endpoints/kitchen",
+        &format!("Bearer {token}"),
+        r#"{"spoken_name":"ClawDot"}"#,
+    )
+    .await
+    .0;
+    assert!(by_token == 401 || by_token == 429, "{by_token}");
+    assert!(p.core.endpoints()[0].spoken_name.is_none());
+}
+
+// REQ-EXT-019
+#[tokio::test]
+async fn accepting_a_connections_tools_needs_the_administrator_and_a_real_connection() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    let path = "/api/connections/ghost/accept";
+    let anon = call(&p, "POST", path, "", "").await.0;
+    assert!(anon == 401 || anon == 429, "{anon}");
+    // No such connection, with an empty body or a named tool.
+    assert_eq!(call(&p, "POST", path, &session, "").await.0, 404);
+    assert_eq!(
+        call(&p, "POST", path, &session, r#"{"tool":"ghost__x"}"#)
+            .await
+            .0,
+        404
+    );
+    // A body that is not {} or {"tool": text}.
+    assert_eq!(
+        call(&p, "POST", path, &session, r#"{"all":true}"#).await.0,
+        400
+    );
+    assert_eq!(call(&p, "POST", path, &session, "not json").await.0, 400);
+    // Only POST.
+    assert_eq!(call(&p, "GET", path, &session, "").await.0, 405);
+}
 
 fn token_of(v: &Value) -> String {
     format!("Bearer {}", v["token"].as_str().unwrap())
@@ -842,11 +1047,95 @@ async fn the_recovery_code_endpoints_are_gone() {
         "POST",
         "/api/admin/password",
         &session,
-        &login_body("changed password"),
+        r#"{"password":"changed password","current":"correct horse"}"#,
     )
     .await;
     assert_eq!(s, 200);
     assert!(v.get("recovery_code").is_none());
+}
+
+// REQ-CFG-024: a session alone cannot change the password; the current one must be given and be right, and a
+// wrong guess costs an attempt from the caller's budget like a sign-in does.
+#[tokio::test]
+async fn changing_the_password_needs_the_current_one() {
+    let p = start(false).await;
+    let session = set_up_with_password(&p).await;
+    for body in [
+        r#"{"password":"changed password"}"#,
+        r#"{"password":"changed password","current":""}"#,
+        r#"{"password":"changed password","current":"wrong horse"}"#,
+    ] {
+        let (s, v) = call(&p, "POST", "/api/admin/password", &session, body).await;
+        assert_eq!(s, 403, "{body}");
+        assert_eq!(v["error"], "the current password is missing or wrong");
+    }
+    // Nothing changed: the same session works and the old password signs in.
+    assert_eq!(call(&p, "GET", "/api/about", &session, "").await.0, 200);
+    let (s, _) = call(&p, "POST", "/api/login", "", &login_body("correct horse")).await;
+    assert_eq!(s, 200);
+    // The right one changes it, and the new one signs in.
+    let ok = r#"{"password":"changed password","current":"correct horse"}"#;
+    assert_eq!(
+        call(&p, "POST", "/api/admin/password", &session, ok)
+            .await
+            .0,
+        200
+    );
+    let (s, _) = call(
+        &p,
+        "POST",
+        "/api/login",
+        "",
+        &login_body("changed password"),
+    )
+    .await;
+    assert_eq!(s, 200);
+}
+
+// A wrong current password is a guess like any other: it is throttled per address, and a good change gives its
+// attempt back.
+#[tokio::test]
+async fn guessing_the_current_password_is_throttled() {
+    let p = start(false).await;
+    let session = set_up_with_password(&p).await;
+    let wrong = r#"{"password":"changed password","current":"wrong horse"}"#;
+    let mut limited = false;
+    for _ in 0..40 {
+        let (s, _) = call(&p, "POST", "/api/admin/password", &session, wrong).await;
+        if s == 429 {
+            limited = true;
+            break;
+        }
+        assert_eq!(s, 403);
+    }
+    assert!(limited, "guessing the current password was never throttled");
+}
+
+// In open mode there is no password to give; setting one stays possible from a private address, and is recorded.
+#[tokio::test]
+async fn setting_a_password_in_open_mode_is_recorded() {
+    use crate::audit::{AuditConfig, AuditLog, Query};
+    let p = start(false).await;
+    let log = Arc::new(AuditLog::in_memory(AuditConfig::default()));
+    p.core.set_audit(Arc::clone(&log));
+    let (s, _) = call(&p, "POST", "/api/setup", "", r#"{"mode":"open"}"#).await;
+    assert_eq!(s, 200);
+    // A `current` in open mode is ignored.
+    let body = r#"{"password":"first password","current":"whatever"}"#;
+    let (s, _) = call(&p, "POST", "/api/admin/password", "", body).await;
+    assert_eq!(s, 200);
+    let page = log.query(&Query::default());
+    let rec = page
+        .records
+        .iter()
+        .find(|r| r.tool == "admin_password")
+        .expect("the change is in the audit log");
+    assert_eq!(rec.note.as_deref(), Some("password set in open mode"));
+    assert!(
+        !serde_json::to_string(&page.records)
+            .unwrap()
+            .contains("first password")
+    );
 }
 
 // An older install that was in open mode can still move to a password.
@@ -983,6 +1272,48 @@ async fn model_and_voice_lists_need_the_administrator_and_explain_what_is_missin
     );
 }
 
+// REQ-HIV-002. The hive state is process-wide, so this is the only test that starts it.
+#[tokio::test]
+async fn hive_peers_is_administrator_only_and_holds_no_secret() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    assert_eq!(call(&p, "GET", "/api/hive/peers", "", "").await.0, 401);
+    // Not started (or not built): a plain 404, not a crash.
+    assert_eq!(
+        call(&p, "GET", "/api/hive/peers", &session, "").await.0,
+        404
+    );
+    #[cfg(feature = "hive")]
+    {
+        let dir = crate::store::testutil::TempDir::new("hive-api");
+        let opts = crate::hive::Options {
+            mode: crate::hive::Mode::Off,
+            port: 3335,
+            addr: None,
+            publish_name: false,
+            name: String::new(),
+        };
+        let started = crate::hive::start(&dir.0, &opts);
+        assert_eq!(started.problem, None);
+        p.core.set_hive(started.hive.unwrap());
+        let (s, v) = call(&p, "GET", "/api/hive/peers", &session, "").await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["self"]["name"], "Test Dot");
+        assert_eq!(v["self"]["id"].as_str().unwrap().len(), 64);
+        assert_eq!(v["self"]["port"], 3335);
+        assert_eq!(v["discovery"], "off");
+        assert_eq!(v["peers"], json!([]));
+        let text = v.to_string();
+        assert!(
+            !text.contains("pkcs8") && !text.contains("private"),
+            "{text}"
+        );
+        assert_ne!(v["self"]["id"], v["self"]["public_key"]);
+    }
+}
+
 // REQ-CFG-081
 #[test]
 fn a_query_value_is_decoded_and_a_missing_or_broken_one_is_none() {
@@ -1020,10 +1351,10 @@ fn a_query_value_is_decoded_and_a_missing_or_broken_one_is_none() {
 // REQ-CFG-082
 #[tokio::test]
 async fn a_pasted_key_is_kept_masked_and_never_returned_whole() {
-    let p = start(true).await;
     let dir = std::env::temp_dir().join(format!("clawdot-key-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    crate::secrets::init(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = start_in(Some(&dir), true).await;
     let setup = r#"{"mode":"password","password":"correct horse"}"#;
     let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
     let session = format!("Bearer {}", v["token"].as_str().unwrap());
@@ -1080,5 +1411,134 @@ async fn a_pasted_key_is_kept_masked_and_never_returned_whole() {
     // Forgotten again.
     let (s, v) = call(&p, "DELETE", "/api/llm/key", &session, "").await;
     assert_eq!((s, v["hint"].is_null()), (200, true));
+    // REQ-VOI-023: the speech key is kept apart from the language-model key, with the same rules.
+    let put = r#"{"key":"xi-speech-0123456789abcdef01"}"#;
+    assert_eq!(call(&p, "PUT", "/api/speech/key", "", put).await.0, 401);
+    assert_eq!(call(&p, "DELETE", "/api/speech/key", "", "").await.0, 401);
+    let (s, v) = call(&p, "PUT", "/api/speech/key", &session, put).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["hint"], "xi-spe…ef01");
+    assert!(!v.to_string().contains("0123456789abcdef"));
+    let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
+    assert_eq!(v["speech"]["key_hint"], "xi-spe…ef01");
+    assert_eq!(v["speech"]["key_present"], true);
+    assert!(v["llm"]["key_hint"].is_null(), "the two keys are separate");
+    assert!(!v.to_string().contains("0123456789abcdef"));
+    assert_eq!(p.core.secrets().get(crate::secrets::LLM_KEY), None);
+    for bad in [r#"{"key":"two words"}"#, r#"{"key":""}"#] {
+        assert_eq!(
+            call(&p, "PUT", "/api/speech/key", &session, bad).await.0,
+            400
+        );
+    }
+    let (s, v) = call(&p, "DELETE", "/api/speech/key", &session, "").await;
+    assert_eq!((s, v["hint"].is_null()), (200, true));
+    let (_, v) = call(&p, "GET", "/api/settings", &session, "").await;
+    assert_eq!(v["speech"]["key_present"], false);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The table is the one list of routes (architecture review C4).
+#[test]
+fn the_route_table_is_well_formed_and_no_row_hides_another() {
+    crate::routes::assert_well_formed(ROUTES);
+    for route in ROUTES {
+        assert!(route.path.starts_with("/api/"), "{}", route.path);
+        assert!(
+            matches!(route.auth, Auth::Open | Auth::SignedIn),
+            "{}: the portal's table has only the sign-in classes",
+            route.path
+        );
+    }
+}
+
+#[test]
+fn only_the_sign_in_routes_are_open() {
+    let open: Vec<_> = ROUTES
+        .iter()
+        .filter(|r| r.auth == Auth::Open)
+        .map(|r| format!("{} {}", r.method, r.path))
+        .collect();
+    assert_eq!(
+        open,
+        [
+            "GET /api/auth",
+            "POST /api/setup",
+            "POST /api/login",
+            "POST /api/recover/window",
+            "POST /api/logout"
+        ]
+    );
+}
+
+// REQ-CFG-005: a path that exists answers 405 for a wrong method, an unknown path 404, and the open routes 404.
+#[tokio::test]
+async fn unknown_paths_are_404_and_wrong_methods_405_after_the_sign_in() {
+    let p = start(true).await;
+    let setup = r#"{"mode":"password","password":"correct horse"}"#;
+    let (_, v) = call(&p, "POST", "/api/setup", "", setup).await;
+    let session = format!("Bearer {}", v["token"].as_str().unwrap());
+    assert_eq!(call(&p, "GET", "/api/nope", "", "").await.0, 404);
+    assert_eq!(call(&p, "GET", "/api/nope", &session, "").await.0, 404);
+    assert_eq!(call(&p, "GET", "/api/login", &session, "").await.0, 404);
+    assert_eq!(call(&p, "POST", "/api/auth", &session, "{}").await.0, 404);
+    assert_eq!(call(&p, "PATCH", "/api/overview", "", "").await.0, 401);
+    assert_eq!(
+        call(&p, "PATCH", "/api/overview", &session, "").await.0,
+        405
+    );
+    assert_eq!(
+        call(&p, "GET", "/api/connections", &session, "").await.0,
+        405
+    );
+    assert_eq!(
+        call(&p, "GET", "/api/connections/x", &session, "").await.0,
+        405
+    );
+    assert_eq!(
+        call(&p, "POST", "/api/overview/extra", &session, "{}")
+            .await
+            .0,
+        404
+    );
+}
+
+/// A server that answers one request with `status` and a JSON `body`.
+async fn answer_once(status: &'static str, body: &'static str) -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut c, _) = l.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = c.read(&mut buf).await;
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = c.write_all(resp.as_bytes()).await;
+    });
+    port
+}
+
+// REQ-CFG-081: the status follows the KIND of failure, not digits that happen to appear in its text.
+#[tokio::test]
+async fn model_list_status_follows_the_kind_of_failure() {
+    for (status, body, want) in [
+        (
+            "401 Unauthorized",
+            r#"{"error":{"message":"bad key"}}"#,
+            401,
+        ),
+        ("403 Forbidden", r#"{"error":{"message":"no"}}"#, 401),
+        (
+            "500 Internal Server Error",
+            r#"{"error":{"message":"request 401 failed"}}"#,
+            502,
+        ),
+        ("429 Too Many Requests", "{}", 502),
+    ] {
+        let port = answer_once(status, body).await;
+        let r = fetch_models(&format!("http://127.0.0.1:{port}/v1"), "k").await;
+        assert_eq!(r.status().as_u16(), want, "{status}");
+    }
 }

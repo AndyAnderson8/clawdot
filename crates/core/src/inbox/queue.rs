@@ -3,8 +3,9 @@
 
 use super::adapter::Mapped;
 use super::endpoint::{Endpoint, Endpoints, QuietHours};
-use super::event::{Event, EventKind, EventState, Priority};
-use crate::sched::Ts;
+use super::event::{Event, EventKind, EventState, Priority, Rel, Timing};
+use super::{Moment, Restore, saved_at};
+use crate::sched::{Clock, Ts};
 use crate::store::{JsonStore, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +57,64 @@ pub enum Ingest {
 pub struct InboxState {
     next_id: u64,
     events: Vec<Event>,
+    /// The last value given to an event's `spoken_seq`.
+    #[serde(default)]
+    spoken_seq: u64,
+    /// The wall time of the save, when the clock was valid then (see `Restore`). Read at load only.
+    #[serde(default, skip_serializing)]
+    saved_at: Option<Ts>,
+}
+
+/// An event as it is written: its own fields and its durations relative to the save.
+#[derive(Serialize)]
+struct EventOut<'a> {
+    #[serde(flatten)]
+    event: &'a Event,
+    rel: Rel,
+}
+
+/// The inbox as it is written. Borrows the events, so saving copies no event text.
+#[derive(Serialize)]
+struct Saved<'a> {
+    next_id: u64,
+    events: Vec<EventOut<'a>>,
+    spoken_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    saved_at: Option<Ts>,
+}
+
+/// An event's durations from a file: the relative form if it has one, otherwise (a file from before durations
+/// were kept apart) from its wall-clock times. A clock that is not valid cannot place an old wall time: a time
+/// to live then starts over from the event's arrival, and a snooze ends at once, so nothing is lost or kept
+/// for years.
+fn timing_from(e: &Event, rel: Option<Rel>, r: &Restore) -> Timing {
+    let mut t = match rel {
+        Some(rel) => Timing {
+            received: r.past(rel.age),
+            expires: rel.ttl_left.map(|l| r.ahead(l)),
+            snooze: rel.snooze_left.map(|l| r.ahead(l)),
+        },
+        None => Timing {
+            received: r.past(r.wall.saturating_sub(e.received_at).max(0)),
+            expires: e.expires_at.map(|t| {
+                let from = if r.valid { r.wall } else { e.received_at };
+                r.ahead(t.saturating_sub(from))
+            }),
+            snooze: match e.state {
+                EventState::Snoozed { until } => Some(r.ahead(if r.valid {
+                    until.saturating_sub(r.wall)
+                } else {
+                    0
+                })),
+                _ => None,
+            },
+        },
+    };
+    match e.state {
+        EventState::Snoozed { .. } => t.snooze = t.snooze.or(Some(r.mono)),
+        _ => t.snooze = None,
+    }
+    t
 }
 
 /// What to announce next: the most important event, and how many others are waiting.
@@ -70,8 +129,8 @@ pub struct Plan {
 /// A per-source roll-up for "what are my agents doing?" (REQ-INB-016).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceStatus {
-    /// The source name.
-    pub source: String,
+    /// Who the speaker names: the endpoint's spoken name, or its name.
+    pub origin: String,
     /// Events blocked on the user (not yet acknowledged or dismissed).
     pub waiting_on_you: usize,
     /// Finished events not yet acknowledged or dismissed.
@@ -114,24 +173,90 @@ impl Inbox {
         self.quiet
     }
 
-    /// Restore from a store.
+    /// Restore from a store and put the durations (time to live, snooze, age) back on the monotonic clock.
+    ///
+    /// A file holds each duration as seconds relative to the save, with the wall time of the save. The time
+    /// the program was off is taken off with the wall clock as far as it can be trusted (a clock that is not
+    /// valid, or is behind the save, takes off nothing). A file from before this form is read from its
+    /// wall-clock times (see `timing_from`).
     ///
     /// # Errors
     /// Storage errors.
-    pub fn load(store: &JsonStore, limits: InboxLimits) -> Result<Self, StoreError> {
+    pub fn load(
+        store: &JsonStore,
+        limits: InboxLimits,
+        clock: &dyn Clock,
+    ) -> Result<Self, StoreError> {
+        let mut state: InboxState = store.load()?;
+        let restore = Restore::new(state.saved_at.take(), clock);
+        for e in &mut state.events {
+            let rel = e.rel.take();
+            e.timing = timing_from(e, rel, &restore);
+        }
         Ok(Self {
-            state: store.load()?,
+            state,
             limits,
             quiet: None,
         })
+    }
+
+    /// Tie events saved before endpoint ids existed to an endpoint: each event with no id takes the id of the
+    /// live endpoint of its name, and is dropped when there is none (that endpoint was deleted, and the events
+    /// it left are history nothing can reach). Events that have an id are not touched. Returns how many events
+    /// changed or went, so the caller knows to save.
+    pub fn adopt_endpoint_ids(&mut self, endpoints: &Endpoints) -> usize {
+        let mut changed = 0;
+        self.state.events.retain_mut(|e| {
+            if !e.endpoint_id.is_empty() {
+                return true;
+            }
+            changed += 1;
+            match endpoints.get(&e.endpoint) {
+                Some(ep) => {
+                    e.endpoint_id.clone_from(&ep.id);
+                    true
+                }
+                None => false,
+            }
+        });
+        changed
     }
 
     /// Persist atomically.
     ///
     /// # Errors
     /// Storage errors.
-    pub fn save(&self, store: &JsonStore) -> Result<(), StoreError> {
-        store.save(&self.state)
+    pub fn save(&self, store: &JsonStore, clock: &dyn Clock) -> Result<(), StoreError> {
+        store.write(&self.encode(store, clock)?)
+    }
+
+    /// The bytes [`Inbox::save`] would write, so the caller can serialise under a lock and write later. The
+    /// durations are worked out afresh at every save, because the file is rewritten only when the inbox
+    /// changes and an old figure would be wrong.
+    ///
+    /// # Errors
+    /// A state that cannot be serialised.
+    pub fn encode(&self, store: &JsonStore, clock: &dyn Clock) -> Result<Vec<u8>, StoreError> {
+        let mono = clock.monotonic_secs();
+        let events = self
+            .state
+            .events
+            .iter()
+            .map(|e| EventOut {
+                event: e,
+                rel: Rel {
+                    age: mono.saturating_sub(e.timing.received),
+                    ttl_left: e.timing.expires.map(|t| t.saturating_sub(mono)),
+                    snooze_left: e.timing.snooze.map(|t| t.saturating_sub(mono)),
+                },
+            })
+            .collect();
+        store.encode(&Saved {
+            next_id: self.state.next_id,
+            events,
+            spoken_seq: self.state.spoken_seq,
+            saved_at: saved_at(clock),
+        })
     }
 
     /// All events, oldest first.
@@ -155,7 +280,13 @@ impl Inbox {
     }
 
     /// Queue an event from an endpoint, applying its filter.
-    pub fn ingest(&mut self, now: Ts, endpoint: &Endpoint, mapped: Mapped) -> Ingest {
+    pub fn ingest(
+        &mut self,
+        now: impl Into<Moment>,
+        endpoint: &Endpoint,
+        mapped: Mapped,
+    ) -> Ingest {
+        let now = now.into();
         let f = &endpoint.filter;
         if f.muted {
             return Ingest::Filtered(FilterReason::Muted);
@@ -170,17 +301,18 @@ impl Inbox {
         // Agents such as Claude Code fire a hook at the end of every turn; merge bursts (REQ-INB-014).
         if mapped.session_ref.is_some() {
             if let Some(existing) = self.state.events.iter_mut().rev().find(|e| {
-                e.endpoint == endpoint.name
+                e.endpoint_id == endpoint.id
                     && e.session_ref == mapped.session_ref
                     && e.kind == mapped.kind
                     && e.state == EventState::New
-                    && now - e.received_at <= f.coalesce_window_secs
+                    && now.mono.saturating_sub(e.timing.received) <= f.coalesce_window_secs
             }) {
                 existing.title = mapped.title;
                 existing.text = mapped.text;
                 existing.status = mapped.status;
                 existing.priority = existing.priority.max(mapped.priority);
-                existing.received_at = now;
+                existing.received_at = now.wall;
+                existing.timing.received = now.mono;
                 return Ingest::Coalesced(existing.id);
             }
         }
@@ -190,7 +322,9 @@ impl Inbox {
         self.state.events.push(Event {
             id,
             endpoint: endpoint.name.clone(),
+            endpoint_id: endpoint.id.clone(),
             source: mapped.source,
+            origin: endpoint.origin().to_owned(),
             kind: mapped.kind,
             title: mapped.title,
             text: mapped.text,
@@ -198,16 +332,46 @@ impl Inbox {
             priority: mapped.priority,
             session_ref: mapped.session_ref,
             no_reply: mapped.no_reply,
-            expires_at: mapped.ttl_secs.map(|t| now.saturating_add(t)),
-            received_at: now,
+            expires_at: mapped.ttl_secs.map(|t| now.wall.saturating_add(t)),
+            received_at: now.wall,
+            timing: Timing {
+                received: now.mono,
+                expires: mapped.ttl_secs.map(|t| now.mono.saturating_add(t)),
+                snooze: None,
+            },
+            rel: None,
             state: EventState::New,
+            spoken_seq: 0,
         });
         self.enforce_limits(id);
         Ingest::Accepted(id)
     }
 
+    /// The endpoint that should give up an event now: the one holding the most of whichever limit is broken
+    /// (events, or bytes if only the byte budget is), provided it holds more than half of that limit. One token
+    /// holder who floods the queue therefore evicts its own events, not those of an endpoint that holds half the
+    /// queue or less. `None` when no endpoint is past half (a single endpoint always is, once the queue is full),
+    /// and the order below then applies to every event.
+    fn heaviest_endpoint(&self) -> Option<String> {
+        let over_count = self.state.events.len() > self.limits.max_events;
+        let (limit, weigh): (usize, fn(&Event) -> usize) = if over_count {
+            (self.limits.max_events, |_| 1)
+        } else {
+            (self.limits.max_bytes, Event::size)
+        };
+        let mut held: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for e in &self.state.events {
+            *held.entry(e.endpoint_id.as_str()).or_default() += weigh(e);
+        }
+        held.into_iter()
+            .max_by_key(|&(_, n)| n)
+            .filter(|&(_, n)| n > limit / 2)
+            .map(|(name, _)| name.to_owned())
+    }
+
     /// Evict until within limits. Order: finished-with events first, then announced, then the least
-    /// important unheard. The event just added is evicted only as a last resort.
+    /// important unheard, taken from the endpoint holding the most when it holds more than half the queue (see
+    /// [`Inbox::heaviest_endpoint`]). The event just added is evicted only as a last resort.
     fn enforce_limits(&mut self, protect: u64) {
         let rank = |e: &Event| -> (u8, Priority, Ts) {
             let class = match e.state {
@@ -216,18 +380,22 @@ impl Inbox {
                 EventState::Snoozed { .. } => 2,
                 EventState::New => 3,
             };
-            (class, e.priority, e.received_at)
+            (class, e.priority, e.timing.received)
         };
         while self.state.events.len() > self.limits.max_events
             || self.total_bytes() > self.limits.max_bytes
         {
-            let victim = self
-                .state
-                .events
-                .iter()
-                .filter(|e| e.id != protect)
-                .min_by_key(|e| rank(e))
-                .map(|e| e.id)
+            let heaviest = self.heaviest_endpoint();
+            let pick = |only: Option<&str>| {
+                self.state
+                    .events
+                    .iter()
+                    .filter(|e| e.id != protect && only.is_none_or(|n| e.endpoint_id == n))
+                    .min_by_key(|e| rank(e))
+                    .map(|e| e.id)
+            };
+            let victim = pick(heaviest.as_deref())
+                .or_else(|| pick(None))
                 .or_else(|| self.state.events.first().map(|e| e.id));
             match victim {
                 Some(id) => self.state.events.retain(|e| e.id != id),
@@ -236,34 +404,67 @@ impl Inbox {
         }
     }
 
-    /// Drop finished-with events older than `keep_secs`.
-    pub fn prune(&mut self, now: Ts, keep_secs: i64) {
+    /// An endpoint's spoken name changed: events already queued are spoken under the new one.
+    pub fn set_origin_for(&mut self, endpoint_id: &str, origin: &str) {
+        for e in self
+            .state
+            .events
+            .iter_mut()
+            .filter(|e| e.endpoint_id == endpoint_id)
+        {
+            origin.clone_into(&mut e.origin);
+        }
+    }
+
+    /// Drop the events of a deleted endpoint that are still open (not yet spoken, spoken and waiting, or
+    /// snoozed); returns how many. Handled events stay as history until [`Inbox::prune`] drops them.
+    pub fn drop_open_for(&mut self, endpoint_id: &str) -> usize {
+        let before = self.state.events.len();
+        self.state.events.retain(|e| {
+            e.endpoint_id != endpoint_id
+                || matches!(e.state, EventState::Dismissed | EventState::Acknowledged)
+        });
+        before - self.state.events.len()
+    }
+
+    /// Drop finished-with events older than `keep_secs`. Returns how many, so the caller knows to save.
+    pub fn prune(&mut self, now: impl Into<Moment>, keep_secs: i64) -> usize {
+        let now = now.into();
+        let before = self.state.events.len();
         self.state.events.retain(|e| {
             !matches!(e.state, EventState::Dismissed | EventState::Acknowledged)
-                || now - e.received_at <= keep_secs
+                || now.mono.saturating_sub(e.timing.received) <= keep_secs
         });
+        before - self.state.events.len()
     }
 
     /// Drop events whose time to live ran out before they were spoken (REQ-INB-023). Returns how many.
-    pub fn expire(&mut self, now: Ts) -> usize {
+    pub fn expire(&mut self, now: impl Into<Moment>) -> usize {
+        let now = now.into();
         let before = self.state.events.len();
         self.state.events.retain(|e| !Self::lapsed(e, now));
         before - self.state.events.len()
     }
 
     /// Unspoken and past its time to live.
-    fn lapsed(e: &Event, now: Ts) -> bool {
+    fn lapsed(e: &Event, now: Moment) -> bool {
         matches!(e.state, EventState::New | EventState::Snoozed { .. })
-            && e.expires_at.is_some_and(|t| t <= now)
+            && e.timing.expires.is_some_and(|t| t <= now.mono)
     }
 
-    fn announceable(&self, e: &Event, now: Ts, minute_of_day: u16, endpoints: &Endpoints) -> bool {
+    fn announceable(
+        &self,
+        e: &Event,
+        now: Moment,
+        minute_of_day: u16,
+        endpoints: &Endpoints,
+    ) -> bool {
         if Self::lapsed(e, now) {
             return false;
         }
         let due = match e.state {
             EventState::New => true,
-            EventState::Snoozed { until } => until <= now,
+            EventState::Snoozed { .. } => e.timing.snooze.is_none_or(|t| t <= now.mono),
             _ => false,
         };
         if !due {
@@ -271,7 +472,7 @@ impl Inbox {
         }
         let quiet = self.quiet.is_some_and(|q| q.contains(minute_of_day))
             || endpoints
-                .get(&e.endpoint)
+                .get_by_id(&e.endpoint_id)
                 .and_then(|ep| ep.filter.quiet_hours)
                 .is_some_and(|q| q.contains(minute_of_day));
         !quiet || e.priority == Priority::Urgent
@@ -281,11 +482,12 @@ impl Inbox {
     #[must_use]
     pub fn plan(
         &self,
-        now: Ts,
+        now: impl Into<Moment>,
         device_idle: bool,
         minute_of_day: u16,
         endpoints: &Endpoints,
     ) -> Option<Plan> {
+        let now = now.into();
         if !device_idle {
             return None;
         }
@@ -300,7 +502,7 @@ impl Inbox {
             (
                 std::cmp::Reverse(e.priority),
                 !e.kind.wants_reply(),
-                e.received_at,
+                e.timing.received,
                 e.id,
             )
         });
@@ -311,13 +513,21 @@ impl Inbox {
         })
     }
 
-    /// Mark events as spoken to the user.
+    /// Mark events as spoken to the user, in the order given. An event spoken again (a repeat, its details)
+    /// becomes the most recently spoken one.
     pub fn mark_announced(&mut self, ids: &[u64]) {
         for id in ids {
-            if let Some(e) = self.get_mut(*id) {
-                if matches!(e.state, EventState::New | EventState::Snoozed { .. }) {
-                    e.state = EventState::Announced;
-                }
+            let seq = self.state.spoken_seq + 1;
+            let Some(e) = self.state.events.iter_mut().find(|e| e.id == *id) else {
+                continue;
+            };
+            if matches!(e.state, EventState::New | EventState::Snoozed { .. }) {
+                e.state = EventState::Announced;
+                e.timing.snooze = None;
+            }
+            if e.state == EventState::Announced {
+                e.spoken_seq = seq;
+                self.state.spoken_seq = seq;
             }
         }
     }
@@ -332,31 +542,47 @@ impl Inbox {
         self.set_state(id, EventState::Dismissed)
     }
 
-    /// Postpone an event.
-    pub fn snooze(&mut self, id: u64, until: Ts) -> bool {
-        self.set_state(id, EventState::Snoozed { until })
+    /// Postpone an event for `secs` seconds, counted on the monotonic clock.
+    pub fn snooze(&mut self, id: u64, now: impl Into<Moment>, secs: i64) -> bool {
+        let now = now.into();
+        let done = self.set_state(
+            id,
+            EventState::Snoozed {
+                until: now.wall.saturating_add(secs),
+            },
+        );
+        if let Some(e) = self.get_mut(id) {
+            e.timing.snooze = Some(now.mono.saturating_add(secs));
+        }
+        done
     }
 
+    /// Change an event's state. A snooze belongs to the state, so any other state ends it.
     fn set_state(&mut self, id: u64, state: EventState) -> bool {
         match self.get_mut(id) {
             Some(e) => {
                 e.state = state;
+                e.timing.snooze = None;
                 true
             }
             None => false,
         }
     }
 
-    /// The event a spoken reply should go to: the most recently announced one still open. A one-way
-    /// announcement is never a target, and it does not hand the reply to an older event either, so an
-    /// answer meant for a doorbell message cannot land on a coding agent (REQ-INB-023).
+    /// The event a spoken reply should go to: the one spoken most recently that is still open, which is not
+    /// always the one that arrived last (an urgent event is spoken before an older one; a snoozed one comes
+    /// back later). A one-way announcement is never a target, and it does not hand the reply to an older
+    /// event either, so an answer meant for a doorbell message cannot land on a coding agent (REQ-INB-023).
     #[must_use]
     pub fn reply_target(&self) -> Option<&Event> {
         self.state
             .events
             .iter()
-            .rev()
-            .find(|e| e.state == EventState::Announced)
+            .enumerate()
+            .filter(|(_, e)| e.state == EventState::Announced)
+            // Events saved before the order was recorded all have zero, and fall back to arrival order.
+            .max_by_key(|(i, e)| (e.spoken_seq, *i))
+            .map(|(_, e)| e)
             .filter(|e| !e.no_reply)
     }
 
@@ -368,11 +594,11 @@ impl Inbox {
             if matches!(e.state, EventState::Dismissed | EventState::Acknowledged) {
                 continue;
             }
-            let idx = match out.iter().position(|s| s.source == e.source) {
+            let idx = match out.iter().position(|s| s.origin == e.origin_name()) {
                 Some(i) => i,
                 None => {
                     out.push(SourceStatus {
-                        source: e.source.clone(),
+                        origin: e.origin_name().to_owned(),
                         waiting_on_you: 0,
                         finished: 0,
                         unheard: 0,
@@ -399,475 +625,7 @@ impl Inbox {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::inbox::endpoint::QuietHours;
-    use crate::store::testutil::TempDir;
+mod tests;
 
-    fn mapped(kind: EventKind, priority: Priority, title: &str, session: Option<&str>) -> Mapped {
-        Mapped {
-            source: "Claude Code".into(),
-            kind,
-            title: title.into(),
-            text: format!("text of {title}"),
-            status: None,
-            priority,
-            session_ref: session.map(str::to_owned),
-            no_reply: false,
-            ttl_secs: None,
-        }
-    }
-
-    fn setup() -> (Inbox, Endpoints) {
-        let mut eps = Endpoints::default();
-        eps.create("cc", "claude-code", 0).unwrap();
-        (Inbox::new(InboxLimits::default()), eps)
-    }
-
-    fn ep(eps: &Endpoints) -> Endpoint {
-        eps.get("cc").unwrap().clone()
-    }
-
-    #[test]
-    fn events_are_queued_in_order_with_increasing_ids() {
-        let (mut inbox, eps) = setup();
-        let a = inbox.ingest(
-            10,
-            &ep(&eps),
-            mapped(EventKind::Done, Priority::Normal, "a", None),
-        );
-        let b = inbox.ingest(
-            11,
-            &ep(&eps),
-            mapped(EventKind::Done, Priority::Normal, "b", None),
-        );
-        assert_eq!((a, b), (Ingest::Accepted(1), Ingest::Accepted(2)));
-        assert_eq!(inbox.events().len(), 2);
-    }
-
-    #[test]
-    fn endpoint_filters_drop_unwanted_events() {
-        let (mut inbox, mut eps) = setup();
-        eps.get_mut("cc").unwrap().filter.min_priority = Priority::Normal;
-        eps.get_mut("cc").unwrap().filter.ignore_kinds = vec![EventKind::Question];
-        let e = ep(&eps);
-        assert_eq!(
-            inbox.ingest(1, &e, mapped(EventKind::Done, Priority::Low, "x", None)),
-            Ingest::Filtered(FilterReason::BelowPriority)
-        );
-        assert_eq!(
-            inbox.ingest(
-                1,
-                &e,
-                mapped(EventKind::Question, Priority::Normal, "x", None)
-            ),
-            Ingest::Filtered(FilterReason::IgnoredKind)
-        );
-        eps.get_mut("cc").unwrap().filter.muted = true;
-        assert_eq!(
-            inbox.ingest(
-                1,
-                &ep(&eps),
-                mapped(EventKind::Done, Priority::Urgent, "x", None)
-            ),
-            Ingest::Filtered(FilterReason::Muted)
-        );
-        assert!(inbox.events().is_empty());
-    }
-
-    #[test]
-    fn a_burst_of_turn_end_hooks_from_one_session_becomes_one_event() {
-        let (mut inbox, eps) = setup();
-        let e = ep(&eps);
-        let first = inbox.ingest(
-            100,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "t1", Some("s1")),
-        );
-        let second = inbox.ingest(
-            110,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "t2", Some("s1")),
-        );
-        assert_eq!((first, second), (Ingest::Accepted(1), Ingest::Coalesced(1)));
-        assert_eq!(inbox.events().len(), 1);
-        assert_eq!(
-            inbox.get(1).unwrap().title,
-            "t2",
-            "keeps the latest content"
-        );
-        // A different session, or outside the window, is a new event.
-        assert_eq!(
-            inbox.ingest(
-                111,
-                &e,
-                mapped(EventKind::Done, Priority::Normal, "o", Some("s2"))
-            ),
-            Ingest::Accepted(2)
-        );
-        assert_eq!(
-            inbox.ingest(
-                500,
-                &e,
-                mapped(EventKind::Done, Priority::Normal, "late", Some("s1"))
-            ),
-            Ingest::Accepted(3)
-        );
-    }
-
-    #[test]
-    fn announced_events_are_not_merged_into() {
-        let (mut inbox, eps) = setup();
-        let e = ep(&eps);
-        inbox.ingest(
-            100,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "t1", Some("s1")),
-        );
-        inbox.mark_announced(&[1]);
-        assert_eq!(
-            inbox.ingest(
-                105,
-                &e,
-                mapped(EventKind::Done, Priority::Normal, "t2", Some("s1"))
-            ),
-            Ingest::Accepted(2)
-        );
-    }
-
-    #[test]
-    fn coalescing_keeps_the_higher_priority() {
-        let (mut inbox, eps) = setup();
-        let e = ep(&eps);
-        inbox.ingest(
-            100,
-            &e,
-            mapped(EventKind::Done, Priority::Low, "a", Some("s")),
-        );
-        inbox.ingest(
-            101,
-            &e,
-            mapped(EventKind::Done, Priority::Urgent, "b", Some("s")),
-        );
-        assert_eq!(inbox.get(1).unwrap().priority, Priority::Urgent);
-    }
-
-    #[test]
-    fn the_queue_is_bounded_and_evicts_the_least_important_first() {
-        let (mut inbox, eps) = setup();
-        inbox.limits.max_events = 3;
-        let e = ep(&eps);
-        inbox.ingest(
-            1,
-            &e,
-            mapped(EventKind::Done, Priority::Urgent, "urgent", Some("a")),
-        );
-        inbox.ingest(
-            2,
-            &e,
-            mapped(EventKind::Info, Priority::Low, "low", Some("b")),
-        );
-        inbox.ingest(
-            3,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "normal", Some("c")),
-        );
-        inbox.ingest(
-            4,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "newest", Some("d")),
-        );
-        let titles: Vec<_> = inbox.events().iter().map(|x| x.title.as_str()).collect();
-        assert_eq!(
-            titles,
-            vec!["urgent", "normal", "newest"],
-            "the low-priority one went"
-        );
-    }
-
-    #[test]
-    fn handled_events_are_evicted_before_unheard_ones() {
-        let (mut inbox, eps) = setup();
-        inbox.limits.max_events = 2;
-        let e = ep(&eps);
-        inbox.ingest(
-            1,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "old-handled", Some("a")),
-        );
-        inbox.dismiss(1);
-        inbox.ingest(
-            2,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "unheard", Some("b")),
-        );
-        inbox.ingest(
-            3,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "newer", Some("c")),
-        );
-        let titles: Vec<_> = inbox.events().iter().map(|x| x.title.as_str()).collect();
-        assert_eq!(titles, vec!["unheard", "newer"]);
-    }
-
-    #[test]
-    fn the_byte_budget_is_enforced_too() {
-        let (mut inbox, eps) = setup();
-        inbox.limits.max_bytes = 2_000;
-        let e = ep(&eps);
-        for i in 0..20 {
-            let mut m = mapped(
-                EventKind::Done,
-                Priority::Normal,
-                &format!("e{i}"),
-                Some(&format!("s{i}")),
-            );
-            m.text = "x".repeat(500);
-            inbox.ingest(i, &e, m);
-        }
-        assert!(
-            inbox.total_bytes() <= 2_000,
-            "{} bytes",
-            inbox.total_bytes()
-        );
-        assert!(!inbox.events().is_empty());
-    }
-
-    #[test]
-    fn announcement_order_is_urgent_then_blocked_then_oldest() {
-        let (mut inbox, eps) = setup();
-        let e = ep(&eps);
-        inbox.ingest(
-            1,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "done-old", Some("a")),
-        );
-        inbox.ingest(
-            2,
-            &e,
-            mapped(
-                EventKind::NeedsInput,
-                Priority::Normal,
-                "blocked",
-                Some("b"),
-            ),
-        );
-        inbox.ingest(
-            3,
-            &e,
-            mapped(EventKind::Done, Priority::Urgent, "urgent-done", Some("c")),
-        );
-        let plan = inbox.plan(10, true, 600, &eps).unwrap();
-        assert_eq!(inbox.get(plan.lead).unwrap().title, "urgent-done");
-        assert_eq!(plan.rest.len(), 2);
-        assert_eq!(inbox.get(plan.rest[0]).unwrap().title, "blocked");
-        assert_eq!(inbox.get(plan.rest[1]).unwrap().title, "done-old");
-    }
-
-    #[test]
-    fn nothing_is_announced_while_the_device_is_busy() {
-        let (mut inbox, eps) = setup();
-        inbox.ingest(
-            1,
-            &ep(&eps),
-            mapped(EventKind::Done, Priority::Urgent, "x", None),
-        );
-        assert!(inbox.plan(10, false, 600, &eps).is_none());
-        assert!(inbox.plan(10, true, 600, &eps).is_some());
-    }
-
-    #[test]
-    fn quiet_hours_hold_back_everything_but_urgent() {
-        let (mut inbox, mut eps) = setup();
-        eps.get_mut("cc").unwrap().filter.quiet_hours = Some(QuietHours {
-            start: 22 * 60,
-            end: 7 * 60,
-        });
-        let e = ep(&eps);
-        inbox.ingest(
-            1,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "normal", Some("a")),
-        );
-        let night = 23 * 60;
-        assert!(inbox.plan(10, true, night, &eps).is_none());
-        inbox.ingest(
-            2,
-            &e,
-            mapped(EventKind::NeedsInput, Priority::Urgent, "urgent", Some("b")),
-        );
-        let plan = inbox.plan(10, true, night, &eps).unwrap();
-        assert_eq!(inbox.get(plan.lead).unwrap().title, "urgent");
-        assert!(plan.rest.is_empty());
-        assert!(
-            inbox.plan(10, true, 12 * 60, &eps).unwrap().rest.len() == 1,
-            "normal is released in the morning"
-        );
-    }
-
-    // REQ-INB-040
-    #[test]
-    fn the_device_wide_window_holds_back_everything_but_urgent_and_can_be_cleared() {
-        let (mut inbox, eps) = setup();
-        let e = ep(&eps);
-        inbox.ingest(
-            1,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "normal", Some("a")),
-        );
-        let night = 23 * 60;
-        assert!(inbox.plan(10, true, night, &eps).is_some(), "no window yet");
-        inbox.set_quiet(Some(QuietHours {
-            start: 22 * 60,
-            end: 7 * 60,
-        }));
-        assert!(inbox.plan(10, true, night, &eps).is_none(), "held at night");
-        assert!(
-            inbox.plan(10, true, 3 * 60, &eps).is_none(),
-            "the window spans midnight"
-        );
-        inbox.ingest(
-            2,
-            &e,
-            mapped(EventKind::NeedsInput, Priority::Urgent, "urgent", Some("b")),
-        );
-        let plan = inbox.plan(10, true, night, &eps).unwrap();
-        assert_eq!(inbox.get(plan.lead).unwrap().title, "urgent");
-        assert!(plan.rest.is_empty(), "the normal one waits");
-        assert_eq!(
-            inbox.plan(10, true, 12 * 60, &eps).unwrap().rest.len(),
-            1,
-            "released after the window"
-        );
-        inbox.set_quiet(None);
-        assert_eq!(
-            inbox.plan(10, true, night, &eps).unwrap().rest.len(),
-            1,
-            "cleared at once"
-        );
-    }
-
-    #[test]
-    fn announcing_acknowledging_dismissing_and_snoozing() {
-        let (mut inbox, eps) = setup();
-        let e = ep(&eps);
-        inbox.ingest(
-            1,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "a", Some("a")),
-        );
-        inbox.ingest(
-            2,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "b", Some("b")),
-        );
-        let plan = inbox.plan(10, true, 600, &eps).unwrap();
-        inbox.mark_announced(&[plan.lead]);
-        assert_eq!(inbox.reply_target().unwrap().id, plan.lead);
-        assert!(inbox.snooze(plan.lead, 1000));
-        assert_eq!(
-            inbox.plan(10, true, 600, &eps).unwrap().lead,
-            2,
-            "snoozed one waits"
-        );
-        assert_eq!(
-            inbox.plan(1000, true, 600, &eps).unwrap().lead,
-            1,
-            "and returns when due"
-        );
-        assert!(inbox.acknowledge(2));
-        assert!(inbox.dismiss(1));
-        assert!(inbox.plan(2000, true, 600, &eps).is_none());
-        assert!(!inbox.acknowledge(99), "unknown ids are reported");
-    }
-
-    #[test]
-    fn what_are_my_agents_doing_groups_open_events_by_source() {
-        let (mut inbox, eps) = setup();
-        let e = ep(&eps);
-        inbox.ingest(
-            1,
-            &e,
-            mapped(
-                EventKind::Done,
-                Priority::Normal,
-                "build finished",
-                Some("a"),
-            ),
-        );
-        inbox.ingest(
-            2,
-            &e,
-            mapped(
-                EventKind::NeedsInput,
-                Priority::Urgent,
-                "needs permission",
-                Some("b"),
-            ),
-        );
-        let mut other = mapped(EventKind::Done, Priority::Low, "backup ok", None);
-        other.source = "Backup".into();
-        inbox.ingest(3, &e, other);
-        inbox.dismiss(3);
-        let status = inbox.status_by_source();
-        assert_eq!(status.len(), 1, "dismissed events do not count");
-        assert_eq!(
-            (
-                status[0].waiting_on_you,
-                status[0].finished,
-                status[0].unheard
-            ),
-            (1, 1, 2)
-        );
-        assert_eq!(status[0].latest, "needs permission");
-    }
-
-    #[test]
-    fn prune_removes_old_handled_events_only() {
-        let (mut inbox, eps) = setup();
-        let e = ep(&eps);
-        inbox.ingest(
-            0,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "handled-old", Some("a")),
-        );
-        inbox.dismiss(1);
-        inbox.ingest(
-            0,
-            &e,
-            mapped(EventKind::Done, Priority::Normal, "unheard-old", Some("b")),
-        );
-        inbox.prune(100_000, 86_400);
-        let titles: Vec<_> = inbox.events().iter().map(|x| x.title.as_str()).collect();
-        assert_eq!(titles, vec!["unheard-old"]);
-    }
-
-    #[test]
-    fn the_inbox_survives_a_restart() {
-        let dir = TempDir::new("inbox");
-        let store = JsonStore::new(dir.0.join("inbox.json"), SCHEMA);
-        let (mut inbox, eps) = setup();
-        inbox.ingest(
-            5,
-            &ep(&eps),
-            mapped(
-                EventKind::NeedsInput,
-                Priority::Urgent,
-                "keep me",
-                Some("s"),
-            ),
-        );
-        inbox.save(&store).unwrap();
-        let mut restored = Inbox::load(&store, InboxLimits::default()).unwrap();
-        assert_eq!(restored.events().len(), 1);
-        assert_eq!(
-            restored.ingest(
-                6,
-                &ep(&eps),
-                mapped(EventKind::Info, Priority::Low, "next", Some("t"))
-            ),
-            Ingest::Accepted(2),
-            "ids keep counting"
-        );
-    }
-}
+#[cfg(test)]
+mod id_tests;

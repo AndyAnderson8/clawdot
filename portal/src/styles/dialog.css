@@ -1,0 +1,51 @@
+/* ---- The add button, and the dialog it opens ---- */
+.addbtn {
+  border-style: dashed;
+}
+.addbtn span[aria-hidden] {
+  font-size: 1.125rem;
+  line-height: 1;
+  margin-right: 2px;
+}
+dialog.dlg {
+  width: min(34rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  padding: 0;
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-surface);
+  color: var(--color-text-primary);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 0.35);
+  overflow: auto;
+}
+dialog.dlg.wide {
+  width: min(46rem, calc(100% - 2rem));
+}
+dialog.dlg::backdrop {
+  background: rgb(14 42 51 / 0.55);
+}
+.dlgbox {
+  padding: var(--spacing-6);
+}
+.dlghead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-4);
+  margin-bottom: var(--spacing-4);
+}
+.dlghead h3 {
+  margin: 0;
+}
+.dlgform .srow:first-of-type {
+  border-top: 0;
+}
+
+/* In a dialog every row is a label above its control, so nothing is squeezed into a narrow column. */
+dialog.dlg .srow {
+  grid-template-columns: minmax(0, 1fr);
+}
+dialog.dlg .sctl > select,
+dialog.dlg .sctl > input[type="text"] {
+  max-width: none;
+}

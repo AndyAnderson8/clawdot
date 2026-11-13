@@ -1,11 +1,12 @@
 import type { JSX } from "preact";
 import { Field } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { fail, say, usePolled, zone } from "../store.ts";
 import { whenText } from "../time.ts";
 import type { Note, NotesList } from "../types.ts";
+import { ask } from "../confirm.tsx";
 
 /** What the assistant remembers: short facts, listed like tools, each with a pencil to change it and an X to forget it. */
 export function Notes(): JSX.Element {
@@ -15,6 +16,30 @@ export function Notes(): JSX.Element {
   const [err, setErr] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Note | null>(null);
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<Note[] | null>(null);
+
+  // Searching asks the device, which ranks memories the same way it picks them for a request. A short wait after
+  // typing keeps it from asking on every key.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setHits(null);
+      return;
+    }
+    let live = true;
+    const t = setTimeout(() => {
+      api<NotesList>("GET", "/api/notes?q=" + encodeURIComponent(q))
+        .then((r) => {
+          if (live) setHits(r.notes);
+        })
+        .catch(fail);
+    }, 250);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [query, data?.notes.length]);
 
   const load = async () => {
     try {
@@ -50,7 +75,7 @@ export function Notes(): JSX.Element {
     }
   };
   const forget = async (id: number) => {
-    if (!confirm("Forget this memory? The assistant will no longer know it.")) return;
+    if (!(await ask("Forget this memory? The assistant will no longer know it.", "Forget"))) return;
     try {
       await api("DELETE", "/api/notes/" + id);
       say("Forgotten.");
@@ -60,7 +85,11 @@ export function Notes(): JSX.Element {
     }
   };
   const forgetAll = async () => {
-    if (!confirm("Forget every memory? The assistant will no longer know any of them. This cannot be undone.")) return;
+    const sure = await ask(
+      "Forget every memory? The assistant will no longer know any of them. This cannot be undone.",
+      "Forget all",
+    );
+    if (!sure) return;
     try {
       await api("DELETE", "/api/notes");
       say("Everything forgotten.");
@@ -119,9 +148,30 @@ export function Notes(): JSX.Element {
                 />
               </span>
             </div>
-            {data.notes.length ? (
+            {data.notes.length > 5 || query ? (
+              <div class="toolbar">
+                <input
+                  id="notesearch"
+                  type="search"
+                  placeholder="Search memories"
+                  aria-label="Search memories"
+                  value={query}
+                  onInput={(e) => setQuery(e.currentTarget.value)}
+                />
+                {hits ? (
+                  <span class="mut" role="status" id="notehits">
+                    {hits.length} of {data.notes.length} match
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            {hits && !hits.length ? (
+              <p class="empty" id="notenone">
+                No memory matches that.
+              </p>
+            ) : data.notes.length ? (
               <ul class="rows tools" id="notelist">
-                {data.notes.map((n) => (
+                {(hits ?? data.notes).map((n) => (
                   <li key={n.id} class="toolrow memrow">
                     <div class="toolmain">
                       <div class="memtext">{n.text}</div>

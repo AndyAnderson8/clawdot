@@ -1,0 +1,99 @@
+/* ---- Choosing the picture of the device ---- */
+.lookgrid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--spacing-3);
+  margin: var(--spacing-2) 0 var(--spacing-4);
+}
+button.lookopt {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: var(--spacing-2);
+  width: 9.5rem;
+  min-height: 0;
+  padding: var(--spacing-2);
+  border: 2px solid var(--color-card-border);
+  border-radius: var(--radius-inner);
+  background: var(--color-background-muted);
+  color: var(--color-text-primary);
+  font-weight: 650;
+  text-align: center;
+}
+button.lookopt.on {
+  border-color: var(--color-live);
+  box-shadow: 0 0 0 3px var(--color-live-muted);
+}
+.lookart {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  padding: var(--spacing-1);
+  border-radius: calc(var(--radius-inner) - 4px);
+}
+.lookart .look {
+  width: 100%;
+  height: 100%;
+}
+.lookname {
+  font-size: var(--font-size-sm);
+}
+img.lookphoto {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: calc(var(--radius-inner) - 4px);
+}
+.devart img.lookphoto {
+  aspect-ratio: 4 / 3;
+}
+details.ownpic {
+  border: 0;
+  background: none;
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+details.ownpic > summary {
+  display: inline-flex;
+  min-height: 2rem;
+  padding: 0;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+details.ownpic .ownbody {
+  display: grid;
+  justify-items: center;
+  gap: var(--spacing-3);
+  margin-top: var(--spacing-3);
+  padding: var(--spacing-4);
+  border: 1px dashed var(--color-card-border);
+  border-radius: var(--radius-inner);
+}
+details.ownpic .ownbody .row {
+  justify-content: center;
+}
+details.ownpic .addressrow input {
+  width: min(24rem, 100%);
+}
+details.ownpic p {
+  margin: 0;
+  max-width: 44ch;
+}
+label.filebtn {
+  min-height: 2.5rem;
+  margin: 0;
+  padding: 0 var(--spacing-4);
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-inner);
+  background: var(--color-card);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}

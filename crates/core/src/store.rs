@@ -104,29 +104,71 @@ impl JsonStore {
         Ok(env.data)
     }
 
+    /// The bytes that [`JsonStore::write`] puts on disk for `value`: compact JSON, because these files are
+    /// rewritten often on flash and nobody is meant to edit them by hand.
+    ///
+    /// # Errors
+    /// A value that cannot be serialised.
+    pub fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, StoreError> {
+        let env = Envelope {
+            schema: self.schema,
+            data: value,
+        };
+        serde_json::to_vec(&env).map_err(|e| StoreError::Corrupt(e.to_string()))
+    }
+
     /// Atomically replace the document.
     ///
     /// # Errors
     /// I/O failures, or a value that cannot be serialised.
     pub fn save<T: Serialize>(&self, value: &T) -> Result<(), StoreError> {
-        let env = Envelope {
-            schema: self.schema,
-            data: value,
-        };
-        let bytes =
-            serde_json::to_vec_pretty(&env).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        self.write(&self.encode(value)?)
+    }
+
+    /// Atomically replace the document with bytes made by [`JsonStore::encode`].
+    ///
+    /// # Errors
+    /// I/O failures.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), StoreError> {
         if let Some(dir) = self.path.parent() {
             create_private_dir(dir)?;
         }
-        let tmp = self.path.with_extension("tmp");
+        let tmp = temp_path(&self.path);
         {
             let mut f = create_private_file(&tmp)?;
-            f.write_all(&bytes)?;
+            f.write_all(bytes)?;
             f.sync_all()?;
         }
         fs::rename(&tmp, &self.path)?;
+        // Without this the rename itself can be lost when the power goes, and the old file comes back.
+        sync_dir(self.path.parent());
         Ok(())
     }
+}
+
+/// The temporary file a save of `path` goes through: the same name with `.tmp` added, never swapped for the
+/// extension, so `a.json` and `a.toml` do not share one (`a.json.tmp`, `a.toml.tmp`).
+#[must_use]
+pub(crate) fn temp_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
+/// Flush a directory's entries to disk, so a rename in it survives a power cut. Best effort: the data is already
+/// in the file, and not every platform lets a directory be opened.
+fn sync_dir(dir: Option<&Path>) {
+    #[cfg(unix)]
+    {
+        let dir = dir
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// Create `dir` and any missing parents readable only by the service user (0700 on Unix). A directory
@@ -214,9 +256,18 @@ mod tests {
         store.save(&doc).unwrap();
         assert_eq!(store.load::<Doc>().unwrap(), doc);
         assert!(
-            !dir.0.join("sub/d.tmp").exists(),
+            !dir.0.join("sub/d.json.tmp").exists(),
             "temp file must not linger"
         );
+    }
+
+    #[test]
+    fn files_that_differ_only_in_extension_get_different_temp_files() {
+        let t = |p: &str| temp_path(Path::new(p));
+        assert_eq!(t("/d/a.json"), Path::new("/d/a.json.tmp"));
+        assert_ne!(t("/d/a.json"), t("/d/a.toml"));
+        assert_eq!(t("/d/noext"), Path::new("/d/noext.tmp"));
+        assert_eq!(t("a.json"), Path::new("a.json.tmp"));
     }
 
     #[cfg(unix)]
@@ -247,7 +298,7 @@ mod tests {
             })
             .unwrap();
         // Simulate a crash mid-save: a half-written temp file next to the real one.
-        std::fs::write(dir.0.join("d.tmp"), b"{\"schema\":1,\"da").unwrap();
+        std::fs::write(dir.0.join("d.json.tmp"), b"{\"schema\":1,\"da").unwrap();
         assert_eq!(store.load::<Doc>().unwrap().items, vec!["old".to_string()]);
     }
 

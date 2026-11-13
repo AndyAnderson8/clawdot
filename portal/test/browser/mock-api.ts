@@ -1,17 +1,12 @@
 // A stand-in for the device: serves the built page with the real Content-Security-Policy and answers the JSON API
 // with the same shapes the Rust core uses (crates/core/src/ui.rs), keeping state in memory.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Keep in step with `CSP` in crates/core/src/ui.rs (the smoke test checks the page works under it).
-export const CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 export const PASSWORD = "correct horse battery";
-/** The recovery code the mock device holds in password mode. */
-export const RECOVERY = "ABCDE-FGHJK-MNPQR-STUVW";
-const NEXT_RECOVERY = "WXYZ2-34567-89ABC-DEFGH";
 
 export interface Logged {
   method: string;
@@ -42,6 +37,23 @@ const pageFile = join(
   "src",
   "ui.html",
 );
+
+/** The `'sha256-...'` sources of every inline `<tag>...</tag>` block of the page (what crates/core/build.rs computes). */
+function inlineHashes(page: string, tag: string): string {
+  const hashes = new Set<string>();
+  const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g");
+  for (const m of page.matchAll(re)) hashes.add(`'sha256-${createHash("sha256").update(m[1]!).digest("base64")}'`);
+  if (!hashes.size) throw new Error(`the built page has no inline <${tag}>`);
+  return [...hashes].join(" ");
+}
+
+// The real Content-Security-Policy of crates/core/src/ui.rs: no 'unsafe-inline', the page's own inline script and
+// style allowed by hash (computed here from the built page the same way build.rs does, so the browser suite proves the
+// page works under it). Keep the rest in step with build.rs.
+const pageHtml = readFileSync(pageFile, "utf8");
+export const CSP =
+  `default-src 'none'; script-src ${inlineHashes(pageHtml, "script")}; style-src ${inlineHashes(pageHtml, "style")}; ` +
+  "connect-src 'self'; img-src data: https: http:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const now = () => Math.floor(Date.now() / 1000);
 
 // What a setting goes back to when it is cleared.
@@ -100,7 +112,6 @@ function seed(mode: string): Json {
     mode,
     password: "",
     session: "",
-    recovery: mode === "password" ? RECOVERY : "",
     window: 0,
     settings: {
       device_name: { value: "Kitchen Dot", source: "saved", live: true },
@@ -111,10 +122,19 @@ function seed(mode: string): Json {
       llm_key_env: { value: "API_KEY", source: "file", live: true },
       voice: { value: null, source: "default", live: true },
       speech_language: { value: null, source: "default", live: true },
+      speech_provider: { value: "openai", source: "default", live: false },
+      realtime_enabled: { value: false, source: "default", live: true },
+      realtime_url: { value: null, source: "default", live: true },
+      realtime_model: { value: null, source: "default", live: true },
+      realtime_voice: { value: "alloy", source: "default", live: true },
+      realtime_usd_per_min_in: { value: 0.03, source: "default", live: true },
+      realtime_usd_per_min_out: { value: 0.1, source: "default", live: true },
+      realtime_max_session_secs: { value: 300, source: "default", live: true },
       listen: { value: "0.0.0.0:3335", source: "flag", live: false, ignored: true },
       public_url: { value: null, source: "default", live: true },
       daily_spend_usd: { value: null, source: "default", live: true },
-      board: { value: "none", source: "default", live: false },
+      llm_usd_per_mtok_in: { value: null, source: "default", live: true },
+      llm_usd_per_mtok_out: { value: null, source: "default", live: true },
       agent_max_rounds: { value: 8, source: "default", live: true },
       agent_max_tool_calls: { value: 12, source: "file", live: true },
       agent_deadline_secs: { value: 60, source: "default", live: true },
@@ -239,6 +259,69 @@ function seed(mode: string): Json {
   };
 }
 
+/**
+ * Every API route the fake device answers, written as in docs/api/openapi.yaml (`{name}` for a path parameter).
+ * Keep it next to the handlers in startMock: test/unit/mock-routes.test.ts fails when a route here is not in the
+ * description, or when a handler below matches an exact path that is not listed here.
+ */
+export const MOCK_ROUTES: readonly { method: string; path: string }[] = [
+  { method: "GET", path: "/api/auth" },
+  { method: "POST", path: "/api/setup" },
+  { method: "POST", path: "/api/login" },
+  { method: "POST", path: "/api/recover/window" },
+  { method: "POST", path: "/api/logout" },
+  { method: "GET", path: "/api/status" },
+  { method: "GET", path: "/api/overview" },
+  { method: "POST", path: "/api/speak" },
+  { method: "GET", path: "/api/about" },
+  { method: "GET", path: "/api/models" },
+  { method: "POST", path: "/api/models" },
+  { method: "PUT", path: "/api/llm/key" },
+  { method: "DELETE", path: "/api/llm/key" },
+  { method: "PUT", path: "/api/speech/key" },
+  { method: "DELETE", path: "/api/speech/key" },
+  { method: "PUT", path: "/api/realtime/key" },
+  { method: "DELETE", path: "/api/realtime/key" },
+  { method: "GET", path: "/api/hive/peers" },
+  { method: "GET", path: "/api/voices" },
+  { method: "GET", path: "/api/update" },
+  { method: "POST", path: "/api/update/check" },
+  { method: "POST", path: "/api/update/apply" },
+  { method: "GET", path: "/api/logs" },
+  { method: "GET", path: "/api/diagnostics" },
+  { method: "GET", path: "/api/settings" },
+  { method: "PUT", path: "/api/settings" },
+  { method: "GET", path: "/api/settings/export" },
+  { method: "POST", path: "/api/admin/password" },
+  { method: "GET", path: "/api/audit" },
+  { method: "GET", path: "/api/notes" },
+  { method: "POST", path: "/api/notes" },
+  { method: "DELETE", path: "/api/notes" },
+  { method: "PUT", path: "/api/notes/{id}" },
+  { method: "DELETE", path: "/api/notes/{id}" },
+  { method: "GET", path: "/api/schedule" },
+  { method: "POST", path: "/api/schedule" },
+  { method: "PUT", path: "/api/schedule/{id}" },
+  { method: "DELETE", path: "/api/schedule/{id}" },
+  { method: "POST", path: "/api/endpoints" },
+  { method: "PUT", path: "/api/endpoints/{name}" },
+  { method: "DELETE", path: "/api/endpoints/{name}" },
+  { method: "POST", path: "/api/endpoints/{name}/rotate" },
+  { method: "GET", path: "/api/tools" },
+  { method: "POST", path: "/api/tools" },
+  { method: "DELETE", path: "/api/tools/{name}" },
+  { method: "POST", path: "/api/tools/{name}/enabled" },
+  { method: "POST", path: "/api/tools/{name}/tier" },
+  { method: "POST", path: "/api/connections" },
+  { method: "POST", path: "/api/connections/test" },
+  { method: "DELETE", path: "/api/connections/{name}" },
+  { method: "POST", path: "/api/connections/{name}/enabled" },
+  { method: "POST", path: "/api/connections/{name}/accept" },
+  { method: "GET", path: "/api/skills" },
+  { method: "POST", path: "/api/skills" },
+  { method: "POST", path: "/api/skills/{action}" },
+];
+
 export async function startMock(initial: "setup" | "password" | "open" = "open"): Promise<Mock> {
   let st = seed(initial);
   const log: Logged[] = [];
@@ -263,6 +346,13 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
     fields: st["settings"],
     restart_needed: st["restart"],
     llm: { key_present: !!st["keyHint"], key_hint: st["keyHint"] || null },
+    speech: { key_present: !!st["speechKey"], key_hint: st["speechKey"] || null },
+    realtime: {
+      configured: !!st["realtimeKey"],
+      built: st["realtimeBuilt"] !== false,
+      provider: "openai",
+      key_hint: st["realtimeKey"] || null,
+    },
     voice_info: { language: "en", stt_model: "whisper", tts_model: "voice-1", provider: "speech.example" },
     speech_configured: !!st["speechOn"],
     speakers_listen: "0.0.0.0:3336",
@@ -304,7 +394,6 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           legacy: false,
           open_allowed: true,
           peer_private: true,
-          recovery: !!st["recovery"],
           reset_window_secs: st["window"],
         });
       if (m === "POST" && path === "/api/setup") {
@@ -313,8 +402,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           st["mode"] = "password";
           st["password"] = body.password;
           st["session"] = "sess-setup";
-          st["recovery"] = RECOVERY;
-          return send(200, { mode: "password", token: st["session"], recovery_code: RECOVERY });
+          return send(200, { mode: "password", token: st["session"] });
         }
         st["mode"] = "open";
         return send(200, { mode: "open" });
@@ -324,25 +412,12 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         st["session"] = "sess-login";
         return send(200, { token: st["session"] });
       }
-      const plain = (c: unknown) =>
-        String(c)
-          .replace(/[^a-z0-9]/gi, "")
-          .toUpperCase();
-      if (m === "POST" && path === "/api/recover") {
-        if (!st["recovery"] || plain(body.code) !== plain(st["recovery"]))
-          return err(401, "That recovery code was not accepted. Check it and try again.");
-        st["password"] = body.password;
-        st["session"] = "sess-recover";
-        st["recovery"] = NEXT_RECOVERY;
-        return send(200, { mode: "password", token: st["session"], recovery_code: NEXT_RECOVERY });
-      }
       if (m === "POST" && path === "/api/recover/window") {
         if (!st["window"]) return err(403, "the reset window is not open");
         st["window"] = 0;
         st["password"] = body.password;
         st["session"] = "sess-window";
-        st["recovery"] = NEXT_RECOVERY;
-        return send(200, { mode: "password", token: st["session"], recovery_code: NEXT_RECOVERY });
+        return send(200, { mode: "password", token: st["session"] });
       }
       if (m === "POST" && path === "/api/logout") {
         st["session"] = "";
@@ -358,14 +433,16 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           now: now(),
           status: {
             hardware: {
-              board: "echo-dot",
-              model: "Test Echo Dot",
-              cpu: "MT8163",
+              board: st["hwNoLabel"] ? "unknown" : "test-board",
+              label: st["hwNoLabel"] ? "" : "Test Speaker",
+              model: "Test Model 9",
+              cpu: "TestSoC",
               cores: 4,
               ram_mb: 486,
               arch: "arm",
               os: "linux",
               parts: { leds: st["hwLeds"] !== false, bluetooth: false, wifi: true, screen: false, usb_serial: false },
+              configured_parts: st["hwLeds"] !== false ? ["leds"] : [],
             },
             clock_valid: true,
             satellites: 1,
@@ -373,6 +450,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             usage: {
               requests_today: 3,
               spend_today: 0.0123,
+              spend_basis: st["spendBasis"] ?? "reported",
               day: Math.floor(Date.now() / 86400000),
               history: [{ day: Math.floor(Date.now() / 86400000) - 1, requests: 5 }],
             },
@@ -418,13 +496,44 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         st["keyHint"] = k.slice(0, 6) + "…" + k.slice(-4);
         return send(200, { hint: st["keyHint"] });
       }
+      for (const [route, slot] of [
+        ["/api/speech/key", "speechKey"],
+        ["/api/realtime/key", "realtimeKey"],
+      ] as const) {
+        if (m === "PUT" && path === route) {
+          const k = String(body.key ?? "");
+          if (/\s/.test(k)) return err(400, "A key is one line of letters, digits and dashes, with no spaces.");
+          st[slot] = k.slice(0, 6) + "…" + k.slice(-4);
+          return send(200, { hint: st[slot] });
+        }
+        if (m === "DELETE" && path === route) {
+          st[slot] = "";
+          return send(200, { hint: null });
+        }
+      }
+      if (m === "GET" && path === "/api/hive/peers") {
+        if (!st["hive"]) return err(404, "not found");
+        return send(200, {
+          discovery: "native",
+          self: { id: "5e56829b0991be4b6be71bba3f639cac", name: "Kitchen Dot", port: 3335 },
+          peers: st["hive"],
+        });
+      }
       if (m === "DELETE" && path === "/api/llm/key") {
         st["keyHint"] = "";
         return send(200, { hint: null });
       }
       if (m === "GET" && path === "/api/voices") {
         if (!st["speechOn"]) return err(503, "No speech provider is set up, so there are no voices to choose from.");
-        return send(200, { voices: ["alloy", "nova", "onyx"], source: "builtin" });
+        return send(200, {
+          voices: ["alloy", "nova", "onyx"],
+          details: [
+            { id: "alloy", label: "alloy", category: null },
+            { id: "nova", label: "Nova (my voice)", category: "cloned" },
+            { id: "onyx", label: "onyx", category: null },
+          ],
+          source: "builtin",
+        });
       }
       if (m === "GET" && path === "/api/update") return send(200, st["update"]);
       if (m === "POST" && path === "/api/update/check") {
@@ -485,16 +594,13 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         return send(200, settingsJson("Saved."));
       }
       if (m === "POST" && path === "/api/admin/password") {
-        const first = !st["recovery"];
+        // With a password in force the current one is needed; a wrong one is a 403, which does not sign the page out.
+        if (st["mode"] === "password" && body.current !== st["password"] && body.current !== PASSWORD)
+          return err(403, "the current password is missing or wrong");
         st["mode"] = "password";
         st["password"] = body.password;
         st["session"] = "sess-pw";
-        if (first) st["recovery"] = RECOVERY;
-        return send(200, { mode: "password", token: st["session"], ...(first ? { recovery_code: RECOVERY } : {}) });
-      }
-      if (m === "POST" && path === "/api/admin/recovery") {
-        st["recovery"] = NEXT_RECOVERY;
-        return send(200, { recovery_code: NEXT_RECOVERY });
+        return send(200, { mode: "password", token: st["session"] });
       }
 
       if (seg[0] === "notes") {
@@ -504,7 +610,18 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           notes,
           limits: { max_notes: 50, max_note_chars: 200, max_total_bytes: 8192 },
         });
-        if (m === "GET") return send(200, list());
+        if (m === "GET") {
+          const q = (new URL(req.url ?? "", "http://x").searchParams.get("q") ?? "").toLowerCase().trim();
+          if (!q) return send(200, list());
+          const words = q.split(/\s+/);
+          return send(200, {
+            ...list(),
+            query: q,
+            notes: notes
+              .map((n, i): Json => ({ ...n, position: i + 1 }))
+              .filter((n) => words.some((w) => String(n["text"]).toLowerCase().includes(w))),
+          });
+        }
         if (m === "POST") {
           if (!st["notesOn"]) return err(409, "Memory is turned off. Turn it on in Settings, under Features.");
           if (/sk-/.test(body.text)) return err(400, "That looks like a password or a key, so it is not saved.");
@@ -571,12 +688,18 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           return send(200, sched());
         }
         if (body.kind === "timer" && !(body.seconds >= 1)) return err(400, "Timers run from 1 second to 24 hours.");
+        if (body.kind === "reminder" && body.seconds !== undefined) {
+          if (!body.label) return err(400, "A reminder needs some text to say.");
+          if (!(body.seconds >= 1)) return err(400, "That time does not work.");
+          if (body.date || body.time) return err(400, "Give a reminder either a delay or a date and a time, not both.");
+        }
         const item = {
           id: id || st["nextId"]++,
           kind: body.kind,
           label: body.label,
           fire_at: now() + (body.seconds ?? 3600),
           seconds_left: body.seconds ?? 3600,
+          countdown: body.kind === "timer" || (body.kind === "reminder" && body.seconds !== undefined),
           repeat:
             body.kind === "alarm" && body.days.length
               ? { hour: body.hour, minute: body.minute, days: body.days, every_day: body.days.length === 7 }
@@ -590,8 +713,22 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
         const eps = st["endpoints"] as Json[];
         if (m === "POST" && seg.length === 1) {
           if (eps.some((e) => e["name"] === body.name)) return err(409, "That name is taken.");
-          eps.push({ name: body.name, adapter: body.adapter, enabled: true, created_at: now() });
-          return send(201, { name: body.name, adapter: body.adapter, token: "tok-" + body.name + "-1" });
+          const spoken = body.spoken_name ?? null;
+          eps.push({ name: body.name, adapter: body.adapter, enabled: true, created_at: now(), spoken_name: spoken });
+          return send(201, {
+            name: body.name,
+            adapter: body.adapter,
+            spoken_name: spoken,
+            token: "tok-" + body.name + "-1",
+          });
+        }
+        if (m === "PUT" && seg.length === 2) {
+          const e = eps.find((x) => x["name"] === seg[1]);
+          if (!e) return err(404, "no such endpoint");
+          const spoken = String(body.spoken_name ?? "").trim();
+          if (spoken && !/^[\p{L}\p{N}][\p{L}\p{N} \-_'.]{0,39}$/u.test(spoken)) return err(400, "bad spoken name");
+          e["spoken_name"] = spoken || null;
+          return send(200, e);
         }
         if (m === "POST" && seg[2] === "rotate") return send(200, { name: seg[1], token: "tok-" + seg[1] + "-2" });
         if (m === "DELETE") {
@@ -601,7 +738,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
       }
 
       if (seg[0] === "tools" || seg[0] === "skills" || seg[0] === "connections") {
-        if (m === "GET") return send(200, ext());
+        if (m === "GET" && seg[0] !== "connections") return send(200, ext()); // the real device lists connections with the tools
         const tools = st["tools"] as Json[];
         if (seg[0] === "tools") {
           if (m === "POST" && seg.length === 1) {
@@ -653,6 +790,24 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             st["mcp"] = mcp.filter((s) => s["name"] !== seg[1]);
             return send(200, ext());
           }
+          if (m === "POST" && seg[2] === "accept") {
+            const src = mcp.find((x) => x["name"] === seg[1]);
+            if (!src) return err(404, "There is no such connection.");
+            const waiting = (src["needs_review"] ?? []) as Json[];
+            const taken = body.tool ? waiting.filter((t) => t["name"] === body.tool) : waiting;
+            if (body.tool && !taken.length) return err(404, "There is no such tool waiting.");
+            src["needs_review"] = waiting.filter((t) => !taken.includes(t));
+            for (const t of taken)
+              (src["tools"] as Json[]).push({
+                name: t["name"],
+                description: t["description"],
+                enabled: true,
+                confirm: true,
+                source: "mcp",
+                server: src["name"],
+              });
+            return send(200, ext());
+          }
           if (seg[2] === "enabled") {
             for (const s of mcp) if (s["name"] === seg[1]) s["enabled"] = body.enabled;
             return send(200, ext());
@@ -673,12 +828,51 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             return send(200, ext());
           }
           if (seg[1] === "enabled") {
-            for (const k of skills) if (k["name"] === body.name) k["enabled"] = body.enabled;
+            const k = skills.find((x) => x["name"] === body.name);
+            if (k && body.enabled && k["needs_review"])
+              return err(
+                400,
+                "This skill was imported and has not been reviewed. Open it, read it, and choose Accept before turning it on.",
+              );
+            if (k) k["enabled"] = body.enabled;
+            return send(200, ext());
+          }
+          if (seg[1] === "accept") {
+            const k = skills.find((x) => x["name"] === body.name);
+            if (k) k["needs_review"] = false;
             return send(200, ext());
           }
           if (seg[1] === "import") {
-            for (const k of body.skills ?? []) skills.push({ ...k, enabled: false });
-            return send(200, ext());
+            // Like the device: every imported skill is off and waits for review; a folder is read from its raw files.
+            const skipped: string[] = [];
+            let added = 0;
+            if (body.format === "skill-folder") {
+              const files = (body.files ?? []) as { path: string; text: string }[];
+              for (const f of files.filter((x) => /(^|\/)SKILL\.md$/i.test(x.path))) {
+                const dir = f.path.slice(0, f.path.lastIndexOf("/") + 1);
+                const head = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(f.text);
+                const get = (k: string) => new RegExp("^" + k + ":\\s*(.*)$", "m").exec(head?.[1] ?? "")?.[1] ?? "";
+                skills.push({
+                  name: get("name") || dir.replace(/\/$/, ""),
+                  description: get("description"),
+                  instructions: (head?.[2] ?? f.text).trim(),
+                  tools: [],
+                  enabled: false,
+                  needs_review: true,
+                  source: f.path,
+                  files: files
+                    .filter((x) => x !== f && x.path.startsWith(dir))
+                    .map((x) => ({ path: x.path.slice(dir.length), text: x.text })),
+                });
+                added++;
+              }
+            } else {
+              for (const k of body.skills ?? []) {
+                skills.push({ ...k, enabled: false, needs_review: true });
+                added++;
+              }
+            }
+            return send(200, { ...ext(), import: { added, skipped } });
           }
         }
       }
