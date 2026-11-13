@@ -223,6 +223,7 @@ struct Inner {
     endpoints: Endpoints,
     inbox: Inbox,
     replies: ReplyQueue,
+    /// Rate-limit state, by endpoint id (never by name: see [`Endpoint::id`]).
     buckets: HashMap<String, Bucket>,
     /// Failed attempts, counted per source address (REQ-SEC-004).
     auth_failures: FailureLimiter,
@@ -304,14 +305,28 @@ impl Core {
         limits: Limits,
         stores: Stores,
     ) -> Result<Self, StoreError> {
-        let endpoints: Endpoints = stores.endpoints.load()?;
-        let inbox = Inbox::load(&stores.inbox, InboxLimits::default(), &*clock)?;
-        let replies = ReplyQueue::load(
+        let mut endpoints: Endpoints = stores.endpoints.load()?;
+        let mut inbox = Inbox::load(&stores.inbox, InboxLimits::default(), &*clock)?;
+        let mut replies = ReplyQueue::load(
             &stores.replies,
             limits.max_pending_replies,
             limits.reply_ttl_secs,
             &*clock,
         )?;
+        // Files saved before endpoints had ids: give each endpoint one and tie what was kept by name to it. The
+        // endpoint list is written first and before anything else is, because an id that is not on disk would be
+        // a different one after the next restart, orphaning every event and reply saved with it meanwhile.
+        if endpoints
+            .assign_missing_ids()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+        {
+            stores.endpoints.save(&endpoints)?;
+        }
+        let moved = Dirty {
+            endpoints: false,
+            inbox: inbox.adopt_endpoint_ids(&endpoints) > 0,
+            replies: replies.adopt_endpoint_ids(&endpoints) > 0,
+        };
         let admin = crate::admin::Admin::open(stores.admin.clone())?;
         let mut core = Self::build(
             clock,
@@ -323,6 +338,10 @@ impl Core {
             replies,
         );
         core.admin = Mutex::new(admin);
+        if moved.inbox || moved.replies {
+            let g = core.lock();
+            core.persist(&g, moved);
+        }
         Ok(core)
     }
 
@@ -642,19 +661,25 @@ impl Core {
         Ok(t)
     }
 
-    /// Delete an endpoint, the replies waiting for its bridge and its events that are still open. Those, and
-    /// its rate-limit bucket, are keyed by the endpoint's name, so an endpoint made later under the same name would otherwise inherit
-    /// the old agent's instructions and have its queued events announced and answered.
+    /// Delete an endpoint, the replies waiting for its bridge, its events that are still open, a question it is
+    /// asking and its rate-limit state. All of these are keyed by the endpoint's id, which dies with it, so an
+    /// endpoint made later under the same name starts with none of them (and a path that forgot one of these
+    /// could not hand it over either).
     ///
     /// # Errors
     /// See [`endpoint::EndpointError`].
     pub fn revoke_endpoint(&self, name: &str) -> Result<(), endpoint::EndpointError> {
         let mut g = self.lock();
+        let id = g
+            .endpoints
+            .get(name)
+            .map(|e| e.id.clone())
+            .ok_or(endpoint::EndpointError::NotFound)?;
         g.endpoints.revoke(name)?;
-        // The rate-limit bucket is keyed by name too; a new endpoint starts with a full burst.
-        g.buckets.remove(name);
-        let replies = g.replies.drop_for(name);
-        let events = g.inbox.drop_open_for(name);
+        g.buckets.remove(&id);
+        self.ask_drop_endpoint(&id);
+        let replies = g.replies.drop_for(&id);
+        let events = g.inbox.drop_open_for(&id);
         self.persist(
             &g,
             Dirty {
@@ -722,7 +747,7 @@ impl Core {
         let (now, mono) = (self.clock.now(), self.clock.monotonic_secs());
         let mut g = self.lock();
         let ep = self.authenticate(&mut g, name, token, peer, mono)?;
-        let bucket = g.buckets.entry(ep.name.clone()).or_insert(Bucket {
+        let bucket = g.buckets.entry(ep.id.clone()).or_insert(Bucket {
             tokens: self.limits.hook_burst,
             last: mono,
         });
@@ -768,7 +793,7 @@ impl Core {
         let ep = self.authenticate(&mut g, name, token, peer, mono)?;
         g.replies.expire(Moment::of(&*self.clock));
         Ok(g.replies
-            .pending_for(&ep.name, after)
+            .pending_for(&ep.id, after)
             .into_iter()
             .cloned()
             .collect())
@@ -788,7 +813,7 @@ impl Core {
         let mono = self.clock.monotonic_secs();
         let mut g = self.lock();
         let ep = self.authenticate(&mut g, name, token, peer, mono)?;
-        let acked = g.replies.ack(&ep.name, reply_id);
+        let acked = g.replies.ack(&ep.id, reply_id);
         if acked {
             self.persist(&g, Dirty::REPLIES);
         }
@@ -1250,7 +1275,7 @@ impl Core {
             });
         }
         g.replies
-            .push(now, &ev.endpoint, ev.id, ev.session_ref.clone(), kind, text)
+            .push(now, &ev, kind, text)
             .map_err(|_| ReplyError::QueueFull)?;
         // Only an acknowledgement changes the event; an instruction only adds a reply for the bridge.
         let dirty = if kind == ReplyKind::Ack {
@@ -1339,3 +1364,6 @@ impl Core {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod id_tests;

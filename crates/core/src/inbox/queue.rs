@@ -200,6 +200,28 @@ impl Inbox {
         })
     }
 
+    /// Tie events saved before endpoint ids existed to an endpoint: each event with no id takes the id of the
+    /// live endpoint of its name, and is dropped when there is none (that endpoint was deleted, and the events
+    /// it left are history nothing can reach). Events that have an id are not touched. Returns how many events
+    /// changed or went, so the caller knows to save.
+    pub fn adopt_endpoint_ids(&mut self, endpoints: &Endpoints) -> usize {
+        let mut changed = 0;
+        self.state.events.retain_mut(|e| {
+            if !e.endpoint_id.is_empty() {
+                return true;
+            }
+            changed += 1;
+            match endpoints.get(&e.endpoint) {
+                Some(ep) => {
+                    e.endpoint_id.clone_from(&ep.id);
+                    true
+                }
+                None => false,
+            }
+        });
+        changed
+    }
+
     /// Persist atomically.
     ///
     /// # Errors
@@ -279,7 +301,7 @@ impl Inbox {
         // Agents such as Claude Code fire a hook at the end of every turn; merge bursts (REQ-INB-014).
         if mapped.session_ref.is_some() {
             if let Some(existing) = self.state.events.iter_mut().rev().find(|e| {
-                e.endpoint == endpoint.name
+                e.endpoint_id == endpoint.id
                     && e.session_ref == mapped.session_ref
                     && e.kind == mapped.kind
                     && e.state == EventState::New
@@ -300,6 +322,7 @@ impl Inbox {
         self.state.events.push(Event {
             id,
             endpoint: endpoint.name.clone(),
+            endpoint_id: endpoint.id.clone(),
             source: mapped.source,
             origin: endpoint.origin().to_owned(),
             kind: mapped.kind,
@@ -338,7 +361,7 @@ impl Inbox {
         };
         let mut held: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
         for e in &self.state.events {
-            *held.entry(e.endpoint.as_str()).or_default() += weigh(e);
+            *held.entry(e.endpoint_id.as_str()).or_default() += weigh(e);
         }
         held.into_iter()
             .max_by_key(|&(_, n)| n)
@@ -367,7 +390,7 @@ impl Inbox {
                 self.state
                     .events
                     .iter()
-                    .filter(|e| e.id != protect && only.is_none_or(|n| e.endpoint == n))
+                    .filter(|e| e.id != protect && only.is_none_or(|n| e.endpoint_id == n))
                     .min_by_key(|e| rank(e))
                     .map(|e| e.id)
             };
@@ -382,12 +405,12 @@ impl Inbox {
     }
 
     /// An endpoint's spoken name changed: events already queued are spoken under the new one.
-    pub fn set_origin_for(&mut self, endpoint: &str, origin: &str) {
+    pub fn set_origin_for(&mut self, endpoint_id: &str, origin: &str) {
         for e in self
             .state
             .events
             .iter_mut()
-            .filter(|e| e.endpoint == endpoint)
+            .filter(|e| e.endpoint_id == endpoint_id)
         {
             origin.clone_into(&mut e.origin);
         }
@@ -395,10 +418,10 @@ impl Inbox {
 
     /// Drop the events of a deleted endpoint that are still open (not yet spoken, spoken and waiting, or
     /// snoozed); returns how many. Handled events stay as history until [`Inbox::prune`] drops them.
-    pub fn drop_open_for(&mut self, endpoint: &str) -> usize {
+    pub fn drop_open_for(&mut self, endpoint_id: &str) -> usize {
         let before = self.state.events.len();
         self.state.events.retain(|e| {
-            e.endpoint != endpoint
+            e.endpoint_id != endpoint_id
                 || matches!(e.state, EventState::Dismissed | EventState::Acknowledged)
         });
         before - self.state.events.len()
@@ -449,7 +472,7 @@ impl Inbox {
         }
         let quiet = self.quiet.is_some_and(|q| q.contains(minute_of_day))
             || endpoints
-                .get(&e.endpoint)
+                .get_by_id(&e.endpoint_id)
                 .and_then(|ep| ep.filter.quiet_hours)
                 .is_some_and(|q| q.contains(minute_of_day));
         !quiet || e.priority == Priority::Urgent
@@ -603,3 +626,6 @@ impl Inbox {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod id_tests;
