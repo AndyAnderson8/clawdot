@@ -204,6 +204,86 @@ fn base(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, f)| f)
 }
 
+/// A Markdown file that is not a `README`, not a `SKILL.md` and not below any skill folder: read as a skill.
+fn is_lone_md(f: &SkillFile, file: &str, roots: &[&str]) -> bool {
+    !file.eq_ignore_ascii_case("skill.md")
+        && file.to_ascii_lowercase().ends_with(".md")
+        && !file.to_ascii_lowercase().starts_with("readme")
+        // A file below a skill folder is that skill's helper file. A SKILL.md at the top makes everything
+        // sent one skill.
+        && !roots
+            .iter()
+            .any(|r| r.is_empty() || f.path.starts_with(&format!("{r}/")))
+}
+
+/// Collapse every run of whitespace to one space.
+fn squash(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The header's description with its whitespace squashed, cut to `MAX_DESCRIPTION` characters (with a note on
+/// `said` when it was).
+fn clamp_description(description: Option<String>, where_: &str, said: &mut Vec<String>) -> String {
+    let mut description = squash(&description.unwrap_or_default());
+    if description.chars().count() > MAX_DESCRIPTION {
+        description = description.chars().take(MAX_DESCRIPTION).collect();
+        said.push(format!(
+            "{where_}: the description was shortened to {MAX_DESCRIPTION} characters"
+        ));
+    }
+    description
+}
+
+/// The helper files that belong to the skill whose `SKILL.md` is `skill`, with the reason for each skipped one
+/// pushed onto `said`.
+fn helper_files(
+    files: &[SkillFile],
+    skill: &SkillFile,
+    folder: &str,
+    roots: &[&str],
+    said: &mut Vec<String>,
+) -> Vec<SkillFile> {
+    let mut kept: Vec<SkillFile> = Vec::new();
+    let prefix = if folder.is_empty() {
+        String::new()
+    } else {
+        format!("{folder}/")
+    };
+    for h in files {
+        let Some(rel) = h.path.strip_prefix(&prefix) else {
+            continue;
+        };
+        // A file inside another skill folder below this one belongs to that skill.
+        let deeper = roots
+            .iter()
+            .any(|r| r.len() > folder.len() && h.path.starts_with(&format!("{r}/")));
+        if std::ptr::eq(h, skill) || deeper || base(rel).eq_ignore_ascii_case("skill.md") {
+            continue;
+        }
+        let kept_total: usize = kept.iter().map(|k| k.text.chars().count()).sum();
+        let n = h.text.chars().count();
+        let why = if let Some(w) = path_problem(rel) {
+            Some(w.to_owned())
+        } else if h.text.trim().is_empty() || n > MAX_FILE_CHARS || !clean(&h.text) {
+            Some(format!(
+                "it is empty, not text or over {MAX_FILE_CHARS} characters"
+            ))
+        } else if kept.len() >= MAX_FILES || kept_total + n > MAX_FILES_TOTAL {
+            Some("the skill already has as many helper files as are kept".to_owned())
+        } else {
+            None
+        };
+        match why {
+            Some(w) => said.push(format!("{}: not kept as a helper file ({w})", h.path)),
+            None => kept.push(SkillFile {
+                path: rel.to_owned(),
+                text: h.text.clone(),
+            }),
+        }
+    }
+    kept
+}
+
 /// Read skills out of the files of one or more skill folders. A folder holding a `SKILL.md` is a skill; the
 /// other small text files below it become its helper files. A lone Markdown file (not a `README`) is also
 /// read as a skill. Anything that does not fit is returned in the second list with the reason, so nothing
@@ -221,15 +301,7 @@ pub fn read(files: &[SkillFile]) -> (Vec<Draft>, Vec<String>) {
     for f in files {
         let file = base(&f.path);
         let is_skill_md = file.eq_ignore_ascii_case("skill.md");
-        let lone_md = !is_skill_md
-            && file.to_ascii_lowercase().ends_with(".md")
-            && !file.to_ascii_lowercase().starts_with("readme")
-            // A file below a skill folder is that skill's helper file. A SKILL.md at the top makes everything
-            // sent one skill.
-            && !roots
-                .iter()
-                .any(|r| r.is_empty() || f.path.starts_with(&format!("{r}/")));
-        if !is_skill_md && !lone_md {
+        if !is_skill_md && !is_lone_md(f, file, &roots) {
             continue;
         }
         let where_ = f.path.chars().take(MAX_SOURCE).collect::<String>();
@@ -244,63 +316,13 @@ pub fn read(files: &[SkillFile]) -> (Vec<Draft>, Vec<String>) {
         } else {
             file.rsplit_once('.').map_or(file, |(s, _)| s).to_owned()
         };
-        let name = name
-            .filter(|n| !n.is_empty())
-            .unwrap_or(stem)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let mut description = description
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if description.chars().count() > MAX_DESCRIPTION {
-            description = description.chars().take(MAX_DESCRIPTION).collect();
-            said.push(format!(
-                "{where_}: the description was shortened to {MAX_DESCRIPTION} characters"
-            ));
-        }
-        let mut kept: Vec<SkillFile> = Vec::new();
-        if is_skill_md {
-            let prefix = if folder.is_empty() {
-                String::new()
-            } else {
-                format!("{folder}/")
-            };
-            for h in files {
-                let Some(rel) = h.path.strip_prefix(&prefix) else {
-                    continue;
-                };
-                // A file inside another skill folder below this one belongs to that skill.
-                let deeper = roots
-                    .iter()
-                    .any(|r| r.len() > folder.len() && h.path.starts_with(&format!("{r}/")));
-                if std::ptr::eq(h, f) || deeper || base(rel).eq_ignore_ascii_case("skill.md") {
-                    continue;
-                }
-                let kept_total: usize = kept.iter().map(|k| k.text.chars().count()).sum();
-                let n = h.text.chars().count();
-                let why = if let Some(w) = path_problem(rel) {
-                    Some(w.to_owned())
-                } else if h.text.trim().is_empty() || n > MAX_FILE_CHARS || !clean(&h.text) {
-                    Some(format!(
-                        "it is empty, not text or over {MAX_FILE_CHARS} characters"
-                    ))
-                } else if kept.len() >= MAX_FILES || kept_total + n > MAX_FILES_TOTAL {
-                    Some("the skill already has as many helper files as are kept".to_owned())
-                } else {
-                    None
-                };
-                match why {
-                    Some(w) => said.push(format!("{}: not kept as a helper file ({w})", h.path)),
-                    None => kept.push(SkillFile {
-                        path: rel.to_owned(),
-                        text: h.text.clone(),
-                    }),
-                }
-            }
-        }
+        let name = squash(&name.filter(|n| !n.is_empty()).unwrap_or(stem));
+        let description = clamp_description(description, &where_, &mut said);
+        let kept = if is_skill_md {
+            helper_files(files, f, folder, &roots, &mut said)
+        } else {
+            Vec::new()
+        };
         let instructions = body.trim().to_owned();
         if name.is_empty() {
             said.push(format!("{where_}: it has no name"));

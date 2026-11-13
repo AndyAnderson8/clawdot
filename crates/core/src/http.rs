@@ -537,53 +537,71 @@ fn replies_stream(
 
     tokio::spawn(async move {
         let _guard = guard;
-        let mut last_sent = 0_u64;
-        if tx
-            .send_timeout(Bytes::from_static(b"retry: 3000\n\n"), opts.write_timeout)
-            .await
-            .is_err()
-        {
-            return;
-        }
-        loop {
-            // Register for wake-ups BEFORE reading state, so a reply queued in between is not missed.
-            let notified = core.changed().notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
-            // Re-checking credentials each round ends the stream as soon as a token is rotated or
-            // revoked (REQ-INB-002).
-            let Ok(replies) = core.bridge_pending(&name, &token, peer, last_sent) else {
-                return;
-            };
-            for r in replies {
-                let Ok(data) = serde_json::to_string(&r) else {
-                    continue;
-                };
-                let event = format!("id: {}\nevent: reply\ndata: {}\n\n", r.id, data);
-                if tx
-                    .send_timeout(Bytes::from(event), opts.write_timeout)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                last_sent = last_sent.max(r.id);
-            }
-            tokio::select! {
-                () = &mut notified => {}
-                () = tokio::time::sleep(opts.heartbeat) => {
-                    // Nothing else is queued when the heartbeat fires, so a channel that is still full means
-                    // the reader has taken nothing for a whole interval: end the stream.
-                    if tx.try_send(Bytes::from_static(b": keepalive\n\n")).is_err() {
-                        return;
-                    }
-                }
-                () = tx.closed() => return,
-            }
-        }
+        push_replies(&core, &name, &token, peer, &tx, opts).await;
     });
 
+    sse_response(rx)
+}
+
+/// Send the retry hint, then each reply as it is queued and a heartbeat when idle, until the reader goes away,
+/// stalls, or the credentials stop working.
+async fn push_replies(
+    core: &Core,
+    name: &str,
+    token: &str,
+    peer: IpAddr,
+    tx: &mpsc::Sender<Bytes>,
+    opts: ServeOptions,
+) {
+    let mut last_sent = 0_u64;
+    if tx
+        .send_timeout(Bytes::from_static(b"retry: 3000\n\n"), opts.write_timeout)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    loop {
+        // Register for wake-ups BEFORE reading state, so a reply queued in between is not missed.
+        let notified = core.changed().notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        // Re-checking credentials each round ends the stream as soon as a token is rotated or
+        // revoked (REQ-INB-002).
+        let Ok(replies) = core.bridge_pending(name, token, peer, last_sent) else {
+            return;
+        };
+        for r in replies {
+            let Ok(data) = serde_json::to_string(&r) else {
+                continue;
+            };
+            let event = format!("id: {}\nevent: reply\ndata: {}\n\n", r.id, data);
+            if tx
+                .send_timeout(Bytes::from(event), opts.write_timeout)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            last_sent = last_sent.max(r.id);
+        }
+        tokio::select! {
+            () = &mut notified => {}
+            () = tokio::time::sleep(opts.heartbeat) => {
+                // Nothing else is queued when the heartbeat fires, so a channel that is still full means
+                // the reader has taken nothing for a whole interval: end the stream.
+                if tx.try_send(Bytes::from_static(b": keepalive\n\n")).is_err() {
+                    return;
+                }
+            }
+            () = tx.closed() => return,
+        }
+    }
+}
+
+/// The streaming response whose body is `rx`.
+fn sse_response(rx: mpsc::Receiver<Bytes>) -> Resp {
     let mut r = Response::new(ChannelBody { rx }.boxed());
     let h = r.headers_mut();
     h.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
