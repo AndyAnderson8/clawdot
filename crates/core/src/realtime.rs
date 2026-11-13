@@ -140,6 +140,8 @@ pub trait Dialect {
     fn headers(&self, cfg: &RealtimeConfig) -> Vec<(String, String)>;
     /// The first message: configure the session with the offered tools.
     fn session_update(&self, cfg: &RealtimeConfig, tools: &[ToolSpec]) -> Value;
+    /// Replace the offered tools in a running session, leaving everything else as it is.
+    fn tools_update(&self, tools: &[ToolSpec]) -> Value;
     /// Append microphone audio (PCM16 at [`SAMPLE_RATE`]).
     fn audio_append(&self, pcm: &[u8]) -> Value;
     /// Hand a tool result to the model.
@@ -442,8 +444,12 @@ fn audio_usd(bytes: usize, usd_per_min: f64) -> f64 {
 /// What a session owns and changes as events arrive. Memory only (REQ-RTV-005).
 #[derive(Debug)]
 struct State {
-    /// The last utterance heard, not yet used by a tool turn.
-    last_user: Option<String>,
+    /// The words of the user's latest utterance that was not an answer to a held action. They name the turn
+    /// the model's calls belong to, so they scope its tools (a skill the user named, REQ-SEC-013), and they
+    /// stay until the next such utterance. Empty before the first one.
+    turn_text: String,
+    /// The names of the tools the model has been told it may call now.
+    offered: Vec<String>,
     reply: Reply,
     utterances: Utterances,
     spend: Spend,
@@ -483,6 +489,7 @@ where
     }
     env.usage.record_request(day);
     let tools = tools_for(&*env.host, &*env.conv, env.turn_cfg);
+    let offered = tools.iter().map(|t| t.name.clone()).collect();
     let setup = dialect.session_update(cfg, &tools);
     let mut session = Session {
         ws,
@@ -491,7 +498,8 @@ where
         io,
         env,
         st: State {
-            last_user: None,
+            turn_text: String::new(),
+            offered,
             reply: Reply::Idle,
             utterances: Utterances::default(),
             spend: Spend::default(),
@@ -638,8 +646,7 @@ where
             .map(|p| p.tool().to_owned())
             .filter(|_| may_answer);
         let Some(tool) = held_tool else {
-            self.st.last_user = Some(text.to_owned());
-            return Ok(());
+            return self.new_turn_text(text).await;
         };
         let lang = self.env.turn_cfg.lang;
         let answered = is_yes(lang, text) || is_no(lang, text);
@@ -648,8 +655,7 @@ where
         if !answered {
             // Anything else dropped the held action as an unrelated request (the host did that); it is
             // the next tool turn's text.
-            self.st.last_user = Some(text.to_owned());
-            return Ok(());
+            return self.new_turn_text(text).await;
         }
         // A confirmed action ran, failed, or found its tool gone: the tool result in the history says which.
         let released = matches!(
@@ -677,6 +683,24 @@ where
         .await
     }
 
+    /// The user said something new that is not an answer: it names the turn its calls belong to. The tool
+    /// host scopes its tools by these words exactly as for a turn of the model loop (a skill the user named
+    /// narrows them, REQ-SEC-013), and the model is told the narrowed list if it differs from the last one.
+    /// A transcript that arrives after the model has already made its calls cannot narrow those calls; the
+    /// gate scopes them by the words it had at that time.
+    async fn new_turn_text(&mut self, text: &str) -> Result<(), RealtimeError> {
+        text.clone_into(&mut self.st.turn_text);
+        self.env.host.begin_turn(text);
+        let tools = tools_for(&*self.env.host, &*self.env.conv, self.env.turn_cfg);
+        let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        if names == self.st.offered {
+            return Ok(());
+        }
+        self.st.offered = names;
+        let msg = self.dialect.tools_update(&tools);
+        self.send(&msg).await
+    }
+
     /// Ask the model to speak now, or after the response in flight.
     async fn say(&mut self, instructions: String) -> Result<(), RealtimeError> {
         if let Reply::InFlight { queued } = &mut self.st.reply {
@@ -691,13 +715,12 @@ where
 
     /// The model made function calls: run them as one turn through the host and hand the results back.
     async fn on_calls(&mut self, calls: Vec<FnCall>) -> Result<(), RealtimeError> {
-        // The user's words that led to these calls, or empty when the calls did not follow any new words. A held
-        // action that is still waiting for its answer is answered by the user's own words only (`on_transcript`).
-        // Reaching this point with one still held means the model issued a new call before the user answered; the
-        // gate then reads the empty text as "not a yes", so the held action is discarded and never run, as for "a
-        // different tool" in REQ-SEC-011. Dropping is the safe direction. Whether the model should be able to
-        // cancel a pending confirmation this way is a question for the maintainer (docs/open-questions.md).
-        let user_text = self.st.last_user.take().unwrap_or_default();
+        // The user's latest words name the turn these calls belong to and scope its tools. They are not an answer:
+        // a held action that is still waiting is answered by the user's own words only (`on_transcript`). The
+        // gate leaves it held while the model calls other tools, runs a read-only call, and refuses one that
+        // would itself need holding, until the user answers or its window runs out (REQ-SEC-011).
+        let user_text = self.st.turn_text.clone();
+        let was_held = self.env.conv.pending().is_some();
         let script: Vec<ToolCall> = calls
             .iter()
             .map(|c| ToolCall {
@@ -708,7 +731,7 @@ where
             .collect();
         let inputs = self.inputs();
         let res = run_proposed_calls(inputs, &user_text, &script).await;
-        if self.env.conv.pending().is_some() {
+        if !was_held && self.env.conv.pending().is_some() {
             self.st.utterances.hold();
         }
         let dialect = self.dialect;
