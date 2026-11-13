@@ -32,7 +32,7 @@
 //! strict Content-Security-Policy as a second line of defence.
 
 use crate::admin;
-use crate::app::{Core, SchedOp};
+use crate::app::Core;
 use crate::extensions::{self, ExtOp};
 use hyper::body::Incoming;
 use hyper::header::HeaderMap;
@@ -44,14 +44,13 @@ use std::sync::Arc;
 use self::auth::{admin_error, change_password, login, recover_window, setup};
 use self::common::{
     MAX_SKILL_BODY, MAX_TOOL_BODY, Resp, bearer, error, fail_reply, json_reply, query_param,
-    read_json, read_json_limit, saved,
+    read_json, read_json_limit,
 };
-use self::endpoints::{EndpointUpdate, create, endpoint_error, endpoint_json};
+use self::endpoints::create;
 use self::models::{llm_key_clear, llm_key_set, models, models_with_key};
 use self::notes::{notes_add, notes_edit, notes_forget, notes_list, notes_search};
 use self::page::page;
-use self::schedule::schedule;
-use self::settings::{change_settings, export_settings};
+use self::settings::export_settings;
 use self::speech::{
     realtime_key_clear, realtime_key_set, speak, speech_key_clear, speech_key_set, voices,
 };
@@ -331,38 +330,9 @@ pub(crate) async fn handle(
         ),
         Id::Speak => speak(core, body).await,
         Id::EndpointCreate => create(core, body).await,
-        Id::EndpointUpdate => match read_json::<EndpointUpdate>(body).await {
-            Ok(u) => {
-                let mark = core.save_mark();
-                let resp = match core
-                    .set_endpoint_spoken_name(p, u.spoken_name.as_deref().unwrap_or(""))
-                {
-                    Ok(e) => json_reply(StatusCode::OK, &endpoint_json(&e)),
-                    Err(e) => endpoint_error(&e),
-                };
-                saved(core, mark, resp).await
-            }
-            Err(_) => error(
-                StatusCode::BAD_REQUEST,
-                "expected {\"spoken_name\": text or null}",
-            ),
-        },
-        Id::EndpointRotate => {
-            let mark = core.save_mark();
-            let resp = match core.rotate_endpoint(p) {
-                Ok(t) => json_reply(StatusCode::OK, &json!({ "name": p, "token": t })),
-                Err(e) => endpoint_error(&e),
-            };
-            saved(core, mark, resp).await
-        }
-        Id::EndpointDelete => {
-            let mark = core.save_mark();
-            let resp = match core.revoke_endpoint(p) {
-                Ok(()) => json_reply(StatusCode::OK, &json!({ "deleted": p })),
-                Err(e) => endpoint_error(&e),
-            };
-            saved(core, mark, resp).await
-        }
+        Id::EndpointUpdate => endpoints::update(core, p, body).await,
+        Id::EndpointRotate => endpoints::rotate(core, p).await,
+        Id::EndpointDelete => endpoints::delete(core, p).await,
         Id::AdminPassword => change_password(core, peer, body).await,
         Id::ToolsList => json_reply(StatusCode::OK, &core.ui_tools()),
         Id::ToolAdd => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
@@ -403,11 +373,8 @@ pub(crate) async fn handle(
             Ok(v) => ext(core, ExtOp::SkillAdd(v)).await,
             Err((s, m)) => error(s, m),
         },
-        Id::SettingsGet => json_reply(StatusCode::OK, &core.ui_settings()),
-        Id::SettingsPut => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
-            Ok(v) => change_settings(core, &v).await,
-            Err((s, m)) => error(s, m),
-        },
+        Id::SettingsGet => settings::get(core),
+        Id::SettingsPut => settings::put(core, body).await,
         Id::SettingsExport => export_settings(core),
         Id::Diagnostics => diagnostics(core),
         Id::Logs => logs(query),
@@ -440,19 +407,9 @@ pub(crate) async fn handle(
             StatusCode::OK,
             &json!({ "version": env!("CARGO_PKG_VERSION"), "build": crate::diag::build_info(), "changelog": CHANGELOG }),
         ),
-        Id::ScheduleList => schedule(core, SchedOp::List).await,
-        Id::ScheduleAdd => match read_json::<Value>(body).await {
-            Ok(v) => schedule(core, SchedOp::Add(v)).await,
-            Err((s, m)) => error(s, m),
-        },
-        Id::ScheduleEdit => match (p.parse::<u64>(), read_json::<Value>(body).await) {
-            (Ok(id), Ok(v)) => schedule(core, SchedOp::Edit(id, v)).await,
-            (Err(_), _) => error(StatusCode::NOT_FOUND, "no such timer, alarm, or reminder"),
-            (_, Err((s, m))) => error(s, m),
-        },
-        Id::ScheduleCancel => match p.parse::<u64>() {
-            Ok(id) => schedule(core, SchedOp::Cancel(id)).await,
-            Err(_) => error(StatusCode::NOT_FOUND, "no such timer, alarm, or reminder"),
-        },
+        Id::ScheduleList => schedule::list(core).await,
+        Id::ScheduleAdd => schedule::add(core, body).await,
+        Id::ScheduleEdit => schedule::edit(core, p, body).await,
+        Id::ScheduleCancel => schedule::cancel(core, p).await,
     })
 }
