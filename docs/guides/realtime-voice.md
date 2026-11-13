@@ -49,7 +49,7 @@ When realtime is configured and a speaker is idle and unmuted, the wake word (or
 - The daily spend cap is checked **before each session opens**: a day already over its cap opens no connection and the speaker says the spending-limit message.
 - **Any failure falls back to the normal path.** If the service cannot be reached, rejects the key, is out of quota, drops the connection or sends something unusable, the speaker says the plain message in its normal voice, the status shows it in `last_error`, and for the next 60 seconds the wake word uses listen, think and speak without trying realtime again. That request is not retried for you: the audio had already gone to the session, so ask again.
 
-The code entry points are `clawdot_core::realtime::{connect, run, serve::serve, OpenAi}` (`crates/core/src/realtime.rs`, `crates/core/src/realtime/serve.rs`), the speaker side is in `crates/core/src/satellite.rs`, and the settings and status handle is `crates/core/src/rtvoice.rs`.
+The code entry points are `clawdot_core::realtime::{connect, run, serve::serve, OpenAi}` (`crates/core/src/realtime.rs`, `crates/core/src/realtime/serve.rs`), the speaker side is in `crates/core/src/satellite/realtime.rs`, and the settings and status handle is `crates/core/src/rtvoice.rs`.
 
 ## What it costs
 

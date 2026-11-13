@@ -81,7 +81,7 @@ The portal is one static page with no external assets. Settings (`settings.rs`) 
 
 ### Satellites and voice
 
-`satellite.rs` serves the satellite protocol; `voice.rs` is the dialog state machine (who may listen when), `vad.rs` finds the end of an utterance, `speech.rs` (with a file per provider under `speech/`, the shared HTTP client `apiclient.rs`, and `audio.rs` and `netpolicy.rs` for PCM/WAV and the plain-http rule) and `speechio.rs` reach the speech services, and `rtvoice.rs` plus `realtime/` are the optional realtime path. `esphome/` is the client for ESPHome voice devices. See [voice pipeline](voice-pipeline.md), [satellite server](satellite-server.md) and [ESPHome satellite](esphome-satellite.md).
+`satellite.rs` and the files under `satellite/` serve the satellite protocol (settings, announcer, handshake, session loop, realtime audio, playback, speech, turns); `voice.rs` is the dialog state machine (who may listen when), `vad.rs` finds the end of an utterance, `speech.rs` (with a file per provider under `speech/`, the shared HTTP client `apiclient.rs`, and `audio.rs` and `netpolicy.rs` for PCM/WAV and the plain-http rule) and `speechio.rs` reach the speech services, and `rtvoice.rs` plus `realtime/` are the optional realtime path. `esphome/` is the client for ESPHome voice devices. See [voice pipeline](voice-pipeline.md), [satellite server](satellite-server.md) and [ESPHome satellite](esphome-satellite.md).
 
 ## 4. Trust boundaries
 
