@@ -298,6 +298,27 @@ impl Writer {
         self.shared.work.notify_one();
     }
 
+    /// Like [`Writer::flush_blocking`], but gives up after `limit`. Returns whether everything submitted before the
+    /// call is on disk. For shutdown, where a disk that does not answer must not keep the program from stopping.
+    pub fn flush_within(&self, limit: std::time::Duration) -> bool {
+        let end = std::time::Instant::now() + limit;
+        let mut st = self.shared.lock();
+        let target = st.submitted;
+        while st.written < target {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            st = self
+                .shared
+                .done
+                .wait_timeout(st, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+
     /// Block until everything submitted before the call is on disk. For tests and shutdown, never the runtime.
     pub fn flush_blocking(&self) {
         let mut st = self.shared.lock();
@@ -511,6 +532,27 @@ mod tests {
         w.flush_blocking();
         assert!(w.is_durable(first) && w.is_durable(second));
         assert_eq!(a.load::<u32>().unwrap(), 2, "coalesced to the newer");
+    }
+
+    // REQ-CFG-085: the wait on a stop signal is bounded, so a disk that does not answer cannot hold the program.
+    #[test]
+    fn flush_within_gives_up_at_its_limit_and_reports_whether_all_is_written() {
+        let dir = TempDir::new("writer-flush-within");
+        let a = JsonStore::new(dir.0.join("a.json"), 1);
+        let w = Writer::start().unwrap();
+        assert!(
+            w.flush_within(std::time::Duration::ZERO),
+            "nothing to write"
+        );
+        w.pause();
+        w.submit(&a, a.encode(&7).unwrap());
+        let began = std::time::Instant::now();
+        assert!(!w.flush_within(std::time::Duration::from_millis(60)));
+        assert!(began.elapsed() < std::time::Duration::from_secs(5));
+        assert!(!a.path().exists());
+        w.resume();
+        assert!(w.flush_within(std::time::Duration::from_secs(30)));
+        assert_eq!(a.load::<u32>().unwrap(), 7);
     }
 
     fn block(path: &Path) -> PathBuf {

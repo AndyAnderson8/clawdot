@@ -24,8 +24,8 @@ async fn main() -> ExitCode {
         Some("say") => return say_command(&argv[1..], &env).await,
         _ => {}
     }
-    let args = match cli::parse(&argv) {
-        Ok(a) => a,
+    let (cli, file) = match cli::parse(&argv) {
+        Ok(parsed) => parsed,
         Err(m) if m.is_empty() => {
             print!("{}", cli::HELP);
             return ExitCode::SUCCESS;
@@ -35,11 +35,11 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if args.reset_admin {
-        return reset_admin(&args.data_dir);
+    if cli.reset_admin {
+        return reset_admin(&cli.data_dir(&file));
     }
-    match start(args, env).await {
-        Ok(Started::Run(app)) => app.run().await,
+    match start(cli, file, env).await {
+        Ok(Started::Run(app)) => app.run(clawdot_core::shutdown::requested()).await,
         Ok(Started::Done(code)) => code,
         Err(f) => {
             eprintln!("clawdot: {}", f.message);

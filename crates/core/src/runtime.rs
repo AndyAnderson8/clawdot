@@ -4,7 +4,6 @@
 
 use crate::app::Core;
 use crate::assistant::Assistant;
-use crate::cli::Args;
 use crate::config::AgentConfig;
 use crate::connects::{Connects, Done};
 use crate::extensions::{ExtOp, Extensions, ToolSets, WithPolicy};
@@ -12,6 +11,7 @@ use crate::httptools::{HttpTools, WithHttp};
 use crate::mcp::{McpClient, WithMcp};
 use crate::rtvoice::{self, Realtime};
 use crate::sched::{Clock, Fired, FixedOffset, Ts, Zone};
+use crate::seed::Resolved;
 #[cfg(feature = "realtime")]
 use crate::session::Conversation;
 use crate::session::{ToolHost, TurnConfig};
@@ -39,23 +39,23 @@ pub fn zone_for(name: Option<&str>) -> Result<Box<dyn Zone + Send + Sync>, Strin
 
 /// Facts shown next to the settings but not edited there: the speech provider's models and where speakers
 /// connect. Names of environment variables are shown; their values never are.
-pub fn settings_extra(args: &Args) -> serde_json::Value {
+pub fn settings_extra(r: &Resolved) -> serde_json::Value {
     serde_json::json!({
         "voice_info": {
-            "configured": args.speech.url.is_some(),
-            "language": args.speech.language,
-            "provider": args
+            "configured": r.speech.url.is_some(),
+            "language": r.speech.language,
+            "provider": r
                 .speech
                 .url
                 .as_deref()
                 .and_then(|u| crate::transport::Endpoint::parse(u).ok())
                 .map(|e| e.host),
-            "stt_model": args.speech.stt_model,
-            "tts_model": args.speech.tts_model,
-            "dialect": args.speech.dialect().name(),
+            "stt_model": r.speech.stt_model,
+            "tts_model": r.speech.tts_model,
+            "dialect": r.speech.dialect().name(),
         },
-        "speech_key_env": args.speech.key_env,
-        "speakers_listen": args.satellite.listen,
+        "speech_key_env": r.speech.key_env,
+        "speakers_listen": r.satellite.listen,
     })
 }
 

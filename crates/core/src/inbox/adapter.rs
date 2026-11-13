@@ -10,6 +10,10 @@
 //! ```
 //!
 //! Filters: `basename`, `trim`, `lower`, `truncate:N`. A literal `{` is written `{{`.
+//!
+//! An adapter file may also carry `setup`, a list of lines printed when `--create-endpoint` makes an endpoint with
+//! this adapter (how to point the sending program at it). In them `{public}`, `{endpoint}` and `{token}` stand for
+//! the public address, the endpoint's name and its token; nothing else in them is interpreted.
 
 use super::event::{EventKind, MAX_REF, MAX_TEXT, MAX_TITLE, Priority, truncate_chars};
 use serde::Deserialize;
@@ -222,6 +226,10 @@ fn default_priority() -> String {
 struct AdapterSpec {
     name: String,
     source: String,
+    /// The lines printed when an endpoint is created with this adapter, with `{public}`, `{endpoint}` and
+    /// `{token}` standing for the address, the endpoint's name and its token.
+    #[serde(default)]
+    setup: Vec<String>,
     rules: Vec<RuleSpec>,
 }
 
@@ -243,7 +251,32 @@ pub struct Adapter {
     pub name: String,
     /// Human-readable origin put on events.
     pub source: String,
+    setup: Vec<String>,
     rules: Vec<Rule>,
+}
+
+/// `text` with each `{public}`, `{endpoint}` and `{token}` replaced. One pass over the template, so a value that
+/// itself contains one of the placeholders is not expanded again.
+fn fill_setup(text: &str, public: &str, endpoint: &str, token: &str) -> String {
+    let mut out = String::with_capacity(text.len() + public.len() + endpoint.len() + token.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('{') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let (value, len) = if rest.starts_with("{public}") {
+            (public, "{public}".len())
+        } else if rest.starts_with("{endpoint}") {
+            (endpoint, "{endpoint}".len())
+        } else if rest.starts_with("{token}") {
+            (token, "{token}".len())
+        } else {
+            ("{", 1)
+        };
+        out.push_str(value);
+        rest = &rest[len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// An event's fields as produced by an adapter, before an id and timestamps are assigned.
@@ -303,8 +336,17 @@ impl Adapter {
         Ok(Self {
             name: spec.name,
             source: spec.source,
+            setup: spec.setup,
             rules,
         })
+    }
+
+    /// What to tell the person who has just created an endpoint with this adapter: how to point the sending
+    /// program at `public`/hook/`endpoint`. `None` when the definition has no set-up text.
+    #[must_use]
+    pub fn setup_text(&self, public: &str, endpoint: &str, token: &str) -> Option<String> {
+        (!self.setup.is_empty())
+            .then(|| fill_setup(&self.setup.join("\n"), public, endpoint, token))
     }
 
     /// The built-in adapters, one result per embedded definition. A definition that does not parse is a defect
@@ -486,6 +528,25 @@ mod tests {
         ] {
             assert!(Adapter::from_json(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn set_up_text_fills_its_placeholders_once() {
+        let a = Adapter::from_json(
+            r#"{"name":"x","source":"S","setup":["{public}/hook/{endpoint}","{ \"t\": \"{token}\" } {nope}"],
+                "rules":[{"kind":"info","title":"t"}]}"#,
+        )
+        .unwrap();
+        // A value that looks like a placeholder is inserted as it is.
+        assert_eq!(
+            a.setup_text("http://h:1", "{token}", "T{public}").unwrap(),
+            "http://h:1/hook/{token}\n{ \"t\": \"T{public}\" } {nope}"
+        );
+        let none = Adapter::from_json(
+            r#"{"name":"x","source":"S","rules":[{"kind":"info","title":"t"}]}"#,
+        )
+        .unwrap();
+        assert!(none.setup_text("p", "e", "t").is_none());
     }
 
     #[test]

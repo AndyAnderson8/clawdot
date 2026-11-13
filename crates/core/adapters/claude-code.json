@@ -1,6 +1,19 @@
 {
   "name": "claude-code",
   "source": "Claude Code",
+  "setup": [
+    "Claude Code hooks: add to ~/.claude/settings.json (merge with what is already there):",
+    "{",
+    "  \"hooks\": {",
+    "    \"Stop\": [{ \"hooks\": [{ \"type\": \"http\", \"url\": \"{public}/hook/{endpoint}\", \"headers\": { \"Authorization\": \"Bearer {token}\" }, \"timeout\": 5 }] }],",
+    "    \"Notification\": [{ \"hooks\": [{ \"type\": \"http\", \"url\": \"{public}/hook/{endpoint}\", \"headers\": { \"Authorization\": \"Bearer {token}\" }, \"timeout\": 5 }] }]",
+    "  }",
+    "}",
+    "",
+    "Voice replies reach the agent through the bridge, on the machine where the agent runs:",
+    "  CLAWDOT_TOKEN=<token> clawdot-bridge --url {public} --endpoint {endpoint}",
+    ""
+  ],
   "rules": [
     {
       "when": { "/hook_event_name": "Stop" },

@@ -61,6 +61,7 @@ pub mod secrets;
 pub mod seed;
 pub mod session;
 pub mod settings;
+pub mod shutdown;
 pub mod skillfolder;
 pub mod speaker;
 pub mod speakers;
