@@ -133,7 +133,7 @@ A known event whose fields are missing or out of range (for example `level` of 1
 2. `welcome`. The satellite is idle.
 3. **Spoken turn.** `detection` (or `button` `action`) → the core sends `set-indicator listening` and `stream-start` → the satellite streams `audio-chunk`s → the core finds the end of speech and sends `stream-stop` and `set-indicator thinking` → the core sends `set-indicator speaking`, `audio-start`, `audio-chunk`s, `audio-stop` → the satellite plays the reply and sends `playback-done` → the core may send `stream-start` again (a follow-up window without the wake word).
 4. **Mute.** `mute-changed` from the device, or the `mute` button (the core then answers `set-mute`). A muted satellite sends no mic audio and the core ignores the wake word.
-5. **Keepalive.** The core pings every 5 s; the satellite answers `pong`. Either side may also ping. Silence for 20 s ends the session; the satellite reconnects with exponential backoff (the reference client starts at 1 s, doubles, and caps at 30 s).
+5. **Keepalive.** The core pings every 5 s; the satellite answers `pong`. Either side may also ping. Silence for 20 s ends the session; the satellite reconnects with exponential backoff (1 s, doubling, capped at 30 s). The reconnect loop is in `clawdot-device` (`run_forever`); the reference satellite binary connects once and exits when the session ends. The backoff restarts only after a `welcome`.
 6. **Reconnection** starts a fresh session with a new `hello`; no state survives it.
 
 ## 8. Versioning
