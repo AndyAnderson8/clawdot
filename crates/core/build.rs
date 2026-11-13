@@ -23,6 +23,17 @@ fn git(args: &[&str]) -> Option<String> {
 /// Tell the program which commit it was built from: `CLAWDOT_BUILD_COMMIT` (short hash, or `unknown`) and
 /// `CLAWDOT_BUILD_DIRTY` (`1` when tracked files differ from the commit). A build outside a checkout, or with no
 /// git, gets `unknown`; `CLAWDOT_BUILD_COMMIT` in the environment overrides git (for tarball and packaging builds).
+fn stamp_target() {
+    // The compiler's own name for what is being built (for example `armv7-unknown-linux-musleabihf`). It is the
+    // only reliable way to tell ARMv7 from ARMv6: a program cannot see `target_feature = "v7"` on stable Rust.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let target: String = target
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .collect();
+    println!("cargo:rustc-env=CLAWDOT_BUILD_TARGET={target}");
+}
+
 fn stamp_commit() {
     println!("cargo:rerun-if-env-changed=CLAWDOT_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=CLAWDOT_BUILD_DIRTY");
@@ -101,6 +112,7 @@ fn inline_hashes(page: &str, tag: &str) -> Result<String, String> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     stamp_commit();
+    stamp_target();
     println!("cargo:rerun-if-changed=src/ui.html");
     println!("cargo:rerun-if-changed=build.rs");
     let page = std::fs::read_to_string("src/ui.html")?;

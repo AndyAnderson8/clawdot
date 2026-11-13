@@ -200,7 +200,8 @@ impl Dialog {
         {
             if self.interrupt.is_none() {
                 let mut vad = self.cfg.vad;
-                vad.no_speech_ms = 4_000;
+                // Derived from the tuned value so a device can tune it (REQ-VOI-025).
+                vad.no_speech_ms = vad.no_speech_ms.min(4_000);
                 self.interrupt = Some(Endpointer::new(vad));
                 return Step::Cue(Cue::Wake);
             }
@@ -634,6 +635,26 @@ mod tests {
             }
         }
         got
+    }
+
+    // REQ-VOI-025: the stop-while-working window follows the tuned no-speech value, capped at 4 seconds.
+    #[test]
+    fn the_stop_capture_window_follows_a_shorter_tuned_no_speech_value() {
+        let mut cfg = Config::default();
+        cfg.vad.no_speech_ms = 1_000;
+        let mut d = Dialog::new(cfg);
+        d.on_wake();
+        assert!(matches!(speak_into(&mut d, 0), Step::Utterance(_)));
+        d.on_wake();
+        assert_eq!(drain(&mut d, &silence(1_500)), Step::Interrupt(Vec::new()));
+        // A longer tuned value is still capped at 4 seconds.
+        let mut cfg = Config::default();
+        cfg.vad.no_speech_ms = 20_000;
+        let mut d = Dialog::new(cfg);
+        d.on_wake();
+        assert!(matches!(speak_into(&mut d, 0), Step::Utterance(_)));
+        d.on_wake();
+        assert_eq!(drain(&mut d, &silence(5_000)), Step::Interrupt(Vec::new()));
     }
 
     // REQ-VOI-020: while a turn runs and nothing is playing, a wake word opens a stop capture and nothing else.
