@@ -18,8 +18,11 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::time::timeout;
 
-/// Largest response accepted (about three minutes of 24 kHz audio).
-const MAX_RESPONSE: usize = 9 * 1024 * 1024;
+/// Largest response accepted. The whole body is held in memory, and the largest legitimate one is the speech for one
+/// request: at most `speech::MAX_TEXT` (1,000) characters. Speech runs at about 12 to 15 characters a second, so that
+/// is 67 to 83 seconds; as 24 kHz 16-bit mono PCM (48,000 bytes a second) that is 3.2 to 4.0 million bytes. 4 MiB
+/// (4,194,304 bytes, 87 seconds) holds it with a little to spare. Lists and transcripts are a few kilobytes.
+const MAX_RESPONSE: usize = 4 * 1024 * 1024;
 
 /// Why a call to a speech or model service failed, by the kinds a caller acts on. `Display` is the text a person reads;
 /// it never holds a key (the service's own message is cut to 200 characters and the key is only ever sent, not kept).

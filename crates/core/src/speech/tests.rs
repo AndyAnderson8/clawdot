@@ -974,3 +974,17 @@ async fn a_silent_server_times_out_instead_of_hanging() {
     .unwrap();
     assert!(s.synthesize("x").await.unwrap_err().contains("no response"));
 }
+
+#[tokio::test]
+async fn a_response_over_four_mebibytes_is_refused_and_one_at_the_cap_is_kept() {
+    const CAP: usize = 4 * 1024 * 1024;
+    let (port, _s) = serve_once("200 OK", "audio/pcm", vec![0u8; CAP + 2]).await;
+    let s =
+        HttpSynthesizer::new(&format!("http://127.0.0.1:{port}"), "", "m", "v", 24_000, T).unwrap();
+    let e = s.synthesize("x").await.unwrap_err();
+    assert!(e.contains("response too large"), "{e}");
+    let (port, _s) = serve_once("200 OK", "audio/pcm", vec![0u8; CAP]).await;
+    let s =
+        HttpSynthesizer::new(&format!("http://127.0.0.1:{port}"), "", "m", "v", 24_000, T).unwrap();
+    assert!(s.synthesize("x").await.is_ok());
+}
