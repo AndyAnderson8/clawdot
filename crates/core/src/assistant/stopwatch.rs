@@ -52,11 +52,6 @@ fn refusal_words(lang: &Language, r: Refusal) -> String {
             "The stopwatch is stopped at {}.",
             format_duration(lang, r.elapsed)
         ),
-        Refusal::ClockWentBack { last_good } => format!(
-            "My clock went backwards while the stopwatch was running, so I can't trust its time. \
-             The last time I can vouch for is {}.",
-            format_duration(lang, last_good)
-        ),
         Refusal::TooManyLaps => format!(
             "That is {}, the most I can keep. Stop the stopwatch to hear the total.",
             laps_word(crate::stopwatch::MAX_LAPS)
@@ -82,13 +77,13 @@ impl Assistant {
         if action != Action::Reset && !self.clock.wall_clock_valid() {
             return Err(CLOCK_UNSET.to_owned());
         }
-        let now = self.clock.now();
+        let clock = self.clock.clone();
         let said = match action {
-            Action::Start => match self.sched.stopwatch_start(now) {
+            Action::Start => match self.sched.stopwatch_start(&*clock) {
                 Ok(()) => "Stopwatch started.".to_owned(),
                 Err(r) => refusal_words(self.lang, r),
             },
-            Action::Lap => match self.sched.stopwatch_lap(now) {
+            Action::Lap => match self.sched.stopwatch_lap(&*clock) {
                 Ok(l) => format!(
                     "Lap {}, {}. Total {}.",
                     l.number,
@@ -97,11 +92,11 @@ impl Assistant {
                 ),
                 Err(r) => refusal_words(self.lang, r),
             },
-            Action::Stop => match self.sched.stopwatch_stop(now) {
+            Action::Stop => match self.sched.stopwatch_stop(&*clock) {
                 Ok(r) => stopped_words(self.lang, r),
                 Err(r) => refusal_words(self.lang, r),
             },
-            Action::Read => match self.sched.stopwatch_read(now) {
+            Action::Read => match self.sched.stopwatch_read(&*clock) {
                 Ok((r, splits)) if r.running => {
                     let mut s = format!("{} so far", format_duration(self.lang, r.elapsed));
                     if let Some(last) = splits.last() {
@@ -143,6 +138,8 @@ mod tests {
     use super::super::tests::{TestClock, setup, utc};
     use super::*;
     use crate::assistant::Assistant;
+    use crate::sched::Clock;
+    use crate::sched::testclock::StepClock;
     use crate::sched::{FixedOffset, Scheduler};
     use crate::session::{Tier, ToolHost};
     use crate::store::JsonStore;
@@ -271,27 +268,81 @@ mod tests {
         assert_eq!(say(&mut a, "lap"), "There is no stopwatch running.");
     }
 
+    fn step_assistant(clock: &Arc<StepClock>, store: Option<JsonStore>) -> Assistant {
+        let sched = store
+            .as_ref()
+            .and_then(|s| Scheduler::load(s, 16, &**clock).ok())
+            .unwrap_or_else(|| Scheduler::new(16));
+        Assistant::new(
+            crate::lang::DEFAULT,
+            clock.clone(),
+            Box::new(FixedOffset(0)),
+            sched,
+            store,
+            None,
+        )
+    }
+
     // REQ-TMR-012
     #[test]
-    fn a_clock_that_goes_backwards_is_not_turned_into_a_time() {
-        let (mut a, clock, _) = setup(false);
+    fn a_wall_clock_that_steps_does_not_change_the_reading() {
+        let clock = Arc::new(StepClock::with_mono(utc(2026, 11, 7, 14, 42), 1_000));
+        let mut a = step_assistant(&clock, None);
         say(&mut a, "start the stopwatch");
-        clock.0.fetch_add(120, Ordering::Relaxed);
+        clock.advance(30);
         say(&mut a, "lap");
-        clock.0.fetch_sub(500, Ordering::Relaxed);
-        for u in ["how long on the stopwatch", "lap", "stop the stopwatch"] {
-            let s = say(&mut a, u);
-            assert!(
-                s.contains("went backwards") && s.contains("2 minutes"),
-                "{u}: {s}"
-            );
-            assert!(!s.contains("so far"), "{u}: {s}");
-        }
-        // Back on a sane clock it carries on from the real start.
-        clock.0.fetch_add(500 + 30, Ordering::Relaxed);
-        assert!(
-            say(&mut a, "how long on the stopwatch").starts_with("2 minutes and 30 seconds so far")
+        // Network time arrives and moves the wall clock forward an hour: no time passed.
+        clock.step_wall(3_600);
+        assert_eq!(
+            say(&mut a, "how long on the stopwatch"),
+            "30 seconds so far, 1 lap, the last one 30 seconds."
         );
+        clock.advance(15);
+        assert_eq!(
+            say(&mut a, "stop the stopwatch"),
+            "Stopped at 45 seconds, 1 lap."
+        );
+        // A step backwards is not an error either, while the program stays up.
+        clock.step_wall(-86_400);
+        assert_eq!(
+            say(&mut a, "how long on the stopwatch"),
+            "The stopwatch is stopped at 45 seconds."
+        );
+        say(&mut a, "start the stopwatch");
+        clock.step_wall(-7_200);
+        clock.advance(10);
+        assert_eq!(
+            say(&mut a, "how long on the stopwatch"),
+            "10 seconds so far."
+        );
+    }
+
+    // REQ-TMR-011, REQ-TMR-012
+    #[test]
+    fn a_restart_adds_the_off_time_only_from_a_wall_clock_not_behind_the_save() {
+        let dir = crate::store::testutil::TempDir::new("stopwatch-restart");
+        let store = JsonStore::new(dir.0.join("sched.json"), crate::sched::SCHEMA);
+        for (off, expect) in [
+            (600, "12 minutes so far, 1 lap, the last one 2 minutes."),
+            (-600, "2 minutes so far, 1 lap, the last one 2 minutes."),
+        ] {
+            let clock = Arc::new(StepClock::with_mono(utc(2026, 11, 7, 14, 42), 1_000));
+            {
+                let mut a = step_assistant(&clock, Some(store.clone()));
+                say(&mut a, "reset the stopwatch");
+                say(&mut a, "start the stopwatch");
+                clock.advance(120);
+                say(&mut a, "lap");
+            }
+            // A new process: the monotonic clock starts over; the wall clock is where the case puts it.
+            let wall = clock.now();
+            let clock = Arc::new(StepClock::with_mono(wall + off, 5));
+            let mut a = step_assistant(&clock, Some(store.clone()));
+            assert_eq!(say(&mut a, "how long on the stopwatch"), expect, "{off}");
+            // It carries on from there on the monotonic clock.
+            clock.advance(60);
+            assert!(say(&mut a, "stop the stopwatch").starts_with("Stopped at"));
+        }
     }
 
     fn block<T>(f: impl std::future::Future<Output = T>) -> T {
