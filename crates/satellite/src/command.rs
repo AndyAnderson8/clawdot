@@ -311,7 +311,12 @@ impl CommandOut {
         if s.shared.pending.load(Ordering::SeqCst) + bytes.len() > MAX_QUEUED_BYTES {
             return Err(AudioError::Io("too much reply audio is queued".into()));
         }
-        s.shared.pending.fetch_add(bytes.len(), Ordering::SeqCst);
+        let before = s.shared.pending.fetch_add(bytes.len(), Ordering::SeqCst);
+        if before == 0 {
+            // The queue was empty, so nothing could have made progress: the stall clock starts now, not at
+            // begin(), or a first chunk that arrives late (slow cloud speech) reads as a stalled player.
+            lock(&s.shared.state).progress = Instant::now();
+        }
         let sent = s.tx.as_ref().map(|tx| tx.send(bytes));
         if !matches!(sent, Some(Ok(()))) {
             return Err(AudioError::Io("the playback program has gone away".into()));
@@ -1065,6 +1070,36 @@ mod tests {
         assert!(t.elapsed() < PATIENCE);
         assert_eq!(spk.poll_done(), Ok(true));
         spk.stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn req_voi_014_a_first_chunk_long_after_begin_is_not_a_stall() {
+        // Slow cloud speech: the first chunk arrives well after begin(). Nothing has been written yet when
+        // the player is polled, so only the arrival of the audio can start the stall clock. The session is
+        // built by hand, with no writer thread, so the poll cannot race a write.
+        let mut spk = CommandOut::new(sh("sleep 30"), STALL);
+        let child = spawn(&spk.spec.argv, true, false).unwrap();
+        let (tx, _rx) = channel();
+        let shared = Arc::new(OutShared {
+            pending: AtomicUsize::new(0),
+            state: Mutex::new(OutState {
+                progress: Instant::now().checked_sub(STALL * 2).unwrap(),
+                drained_at: None,
+                error: None,
+            }),
+        });
+        spk.session = Some(OutSession {
+            child,
+            tx: Some(tx),
+            shared,
+        });
+        spk.send(vec![0; 640]).unwrap();
+        assert_eq!(
+            spk.poll_done(),
+            Ok(false),
+            "audio that only just arrived has not stalled"
+        );
     }
 
     #[cfg(unix)]

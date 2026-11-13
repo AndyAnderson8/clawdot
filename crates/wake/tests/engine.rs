@@ -269,5 +269,10 @@ fn bad_word_settings_are_refused() {
     assert!(w(0.97, 65).is_err());
     assert!(w(0.0, 5).is_err());
     assert!(w(f32::NAN, 5).is_err());
+    // The cutoff range is the one `set_cutoff` clamps to (REQ-WAK-007).
+    assert!(w(0.49, 5).is_err());
+    assert!(w(1.0, 5).is_err());
+    assert!(w(0.5, 5).is_ok());
+    assert!(w(0.999, 5).is_ok());
     assert!(Engine::new(vec![]).is_err());
 }

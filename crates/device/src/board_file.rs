@@ -556,7 +556,7 @@ fn argv(v: &Value, key: &str) -> Res<Vec<String>> {
             if is_arg(s) {
                 Ok(s.to_owned())
             } else {
-                err(&k, "must be fixed text: letters, digits and . _ : + / @ = , - and space; no quotes or shell characters")
+                err(&k, "must be fixed text: letters, digits and . _ : + / @ = , - and space. No shell reads it, so this keeps a board file plain; it is not a security check, because a board file is trusted and chooses the programs that run")
             }
         })
         .collect()
@@ -778,13 +778,12 @@ fn parse_hardware(v: &Value) -> Res<Hardware> {
         _ => Arch::Riscv64,
     };
     let ram_mb = int(o.req("ram_mb")?, "hardware.ram_mb", 256, 1_048_576).or_else(|e| {
-        if o.map.get("ram_mb").and_then(Value::as_u64).is_some() {
-            err(
+        match o.map.get("ram_mb").and_then(Value::as_u64) {
+            Some(n) if n < 256 => err(
                 "hardware.ram_mb",
                 "below the 256 MB minimum: the board is unsupported (spec 0006 section 6)",
-            )
-        } else {
-            Err(e)
+            ),
+            _ => Err(e),
         }
     })?;
     let microphones = int(o.req("microphones")?, "hardware.microphones", 1, 16)?;
@@ -849,6 +848,33 @@ fn parse_buttons(v: &Value) -> Res<Vec<ButtonSpec>> {
         };
         so.finish()?;
         o.finish()?;
+        for (j, earlier) in out.iter().enumerate() {
+            let earlier: &ButtonSpec = earlier;
+            if earlier.name == name {
+                return err(
+                    &format!("{p}.name"),
+                    format!("button `{name}` is already declared in buttons[{j}]"),
+                );
+            }
+            match (&earlier.source, &source) {
+                (ButtonSource::Key(a), ButtonSource::Key(b)) if a == b => {
+                    return err(
+                        &format!("{sp}.key"),
+                        format!("key `{a}` is already used by buttons[{j}]"),
+                    );
+                }
+                (
+                    ButtonSource::Evdev { node: n1, code: c1 },
+                    ButtonSource::Evdev { node: n2, code: c2 },
+                ) if n1 == n2 && c1 == c2 => {
+                    return err(
+                        &sp,
+                        format!("{n1} code {c1} is already used by buttons[{j}]"),
+                    );
+                }
+                _ => {}
+            }
+        }
         out.push(ButtonSpec { name, source });
     }
     Ok(out)
@@ -892,10 +918,19 @@ fn parse_actions(v: &Value, buttons: &[ButtonSpec]) -> Res<Vec<(String, String)>
                 ),
             );
         }
-        if !buttons.iter().any(|b| b.name == button) {
+        let Some(spec) = buttons.iter().find(|b| b.name == button) else {
             return err(
                 &key,
                 format!("button `{button}` is not declared in `buttons`"),
+            );
+        };
+        if gesture == "long_press" && matches!(spec.source, ButtonSource::Key(_)) {
+            // A typed key arrives as a press and a release at the same instant, so a hold cannot be measured.
+            return err(
+                &key,
+                format!(
+                    "button `{button}` is a terminal key, which has no release to time; a long press needs an input-device button"
+                ),
             );
         }
         let action = choice(val, &key, &ACTIONS)?;
@@ -1363,6 +1398,57 @@ mod tests {
             }),
             "audio.capture.command",
         );
+    }
+
+    #[test]
+    fn req_dev_008_buttons_are_distinct_and_key_buttons_have_no_long_press() {
+        // The same logical button twice.
+        expect_key(
+            &with(DESKTOP, |v| v["buttons"][1]["name"] = Value::from("action")),
+            "buttons[1].name",
+        );
+        // Two buttons on the same terminal key.
+        expect_key(
+            &with(DESKTOP, |v| {
+                v["buttons"][1]["source"]["key"] = Value::from("t")
+            }),
+            "buttons[1].source.key",
+        );
+        // Two buttons on the same input code of the same device.
+        expect_key(
+            &with(DOT, |v| {
+                let first = v["buttons"][0]["source"].clone();
+                v["buttons"][1]["source"] = first;
+            }),
+            "buttons[1].source",
+        );
+        // A key press has no release to time, so a long press could never fire.
+        expect_key(
+            &with(DESKTOP, |v| {
+                v["actions"]["action.long_press"] = Value::from("stop")
+            }),
+            "actions.action.long_press",
+        );
+        // The same mapping is fine for a button read from an input device (the Dot file has one).
+        assert!(BoardFile::parse(DOT).is_ok());
+    }
+
+    #[test]
+    fn req_dev_012_the_ram_message_matches_the_direction_of_the_error() {
+        let low = BoardFile::parse(&with(DESKTOP, |v| {
+            v["hardware"]["ram_mb"] = Value::from(128)
+        }))
+        .unwrap_err();
+        assert!(
+            low.to_string().contains("below the 256 MB minimum"),
+            "{low}"
+        );
+        let high = BoardFile::parse(&with(DESKTOP, |v| {
+            v["hardware"]["ram_mb"] = Value::from(5_000_000)
+        }))
+        .unwrap_err();
+        assert_eq!(high.key, "hardware.ram_mb");
+        assert!(!high.to_string().contains("below"), "{high}");
     }
 
     #[test]

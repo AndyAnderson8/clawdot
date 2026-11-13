@@ -40,12 +40,25 @@ flowchart LR
 | Command and default audio backends (`ffmpeg`, `sox`, `arecord`, `aplay`) from the satellite crate | Used; the board file selects them with `kind: default` or `command` |
 | `alsa` audio kind, input-device (`evdev`) buttons, `ledctrl`, `frame` and `sysfs` LED drivers | Accepted by the schema, **not implemented**: LEDs and buttons degrade to absent with a reported problem; audio stops startup with a message naming the key |
 | Console LEDs, terminal-key buttons, push-to-talk | Built (the desktop board) |
-| Wake engine | Built (feature `mww`, off by default) but **not fed**: the seam exists and `MwwEngine` implements it. Always-on capture for an engine needs a change to the audio front end and arrives with the first engine |
+| Wake engine | Built (feature `mww`, off by default) and **fed**: with `--wake-model` the audio front end keeps the microphone open between turns (`--always-on`, REQ-DEV-025) and offers each 20 ms frame to the engine; a hit starts a turn. It is refused on a board whose file says `features.on_device_wake` is false. Measured on a PC only; the Dot waits for B3 |
 | Echo cancellation | **None** |
 | Ducking of other sources, Bluetooth, Spotify Connect, Wi-Fi setup, clock trust, updates | Not built; declared absent with the equivalent |
-| Quiet-hours settings from the core | Not on the wire yet (spec 0006 section 8); set with `--quiet` |
+| Quiet-hours settings from the core | Not on the wire yet (spec 0006 section 8); set with `--quiet`. The volume ceiling and the LED level (the board's `leds.quiet_brightness_pct`) are applied locally. **Deferral of announcements is not done on the device**: the core sends an announcement as an ordinary reply (`audio-start`, `audio-chunk`, `audio-stop`), so the device cannot tell it from an answer and cannot hold it back without dropping or buffering a reply. `DaemonDevice::defer_announcement` answers the policy question for the day the wire says which audio is unsolicited (spec 0006 section 8); until then the core's own quiet hours decide what it announces (open-questions, 2026-11-09). REQ-DEV-006 is partly met |
 | Local cancel reaches the core | Not on the wire yet; playback is silenced and capture closed locally |
-| Mixer routes (`audio.mixer_routes`) | Validated, not applied (needs the ALSA backend) |
+| Reconnecting | `connect_core` gives each attempt 2 s; the backoff (1 s doubling to 30 s) restarts only after a `welcome`, and buttons, LEDs and tones are served between attempts. Name resolution has no timeout of its own |
+
+### Declared in the board file but not used yet
+
+These are validated at load and appear in `--check`, but nothing in the daemon reads them. The conformance suite does not claim they work (REQ-DEV-016 is skipped for that reason).
+
+| Field | Why it is unused |
+|---|---|
+| `audio.playback.duck` (`kind`, `level_pct`) | The daemon has no other audio source to lower. `GainOut` can duck, but nothing calls it |
+| `audio.playback.volume_control` | A hardware mixer control needs the ALSA backend; volume is applied in software by `GainOut` |
+| `audio.mixer_routes` | Needs the ALSA backend |
+| `leds.count` | Only the `frame` driver would use it, and that driver is not built |
+| `mute.state_file` | A hardware mute switch needs a reader; only software mute exists |
+| `detect` | Board detection belongs to the image recipe; the daemon loads the file it is given |
 
 ## Proving a board
 

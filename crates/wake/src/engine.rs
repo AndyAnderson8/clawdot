@@ -69,6 +69,8 @@ struct Word {
     next: usize,
     filled: usize,
     cutoff: f32,
+    /// Inferences that failed to run. A model that plans but never runs would otherwise just never fire.
+    faults: u64,
 }
 
 /// Frontend plus one interpreter per word.
@@ -83,9 +85,9 @@ impl Word {
         if cfg.window == 0 || cfg.window > 64 {
             return Err(Error::Invalid("sliding window size must be 1 to 64".into()));
         }
-        if !(cfg.cutoff > 0.0 && cfg.cutoff <= 1.0) {
+        if !(0.5..=0.999).contains(&cfg.cutoff) {
             return Err(Error::Invalid(
-                "probability cutoff must be above 0 and at most 1".into(),
+                "probability cutoff must be from 0.5 to 0.999".into(),
             ));
         }
         let hash = sha256(&cfg.model);
@@ -109,6 +111,7 @@ impl Word {
             next: 0,
             filled: 0,
             cutoff: cfg.cutoff,
+            faults: 0,
         })
     }
 
@@ -137,7 +140,9 @@ impl Word {
         }
         self.gathered = 0;
         if self.interp.invoke(&self.features).is_err() {
-            // A model that planned but fails to run produces no detection rather than a panic.
+            // A model that planned but fails to run produces no detection rather than a panic; it is counted so
+            // the caller can tell a silent model from a broken one (`Engine::faults`).
+            self.faults += 1;
             return None;
         }
         let p = self.interp.output_value();
@@ -209,6 +214,13 @@ impl Engine {
                 .sum::<usize>()
     }
 
+    /// How many inferences failed to run, over all words, since construction. Zero for a healthy model; a
+    /// non-zero count that keeps rising means a word that can never fire.
+    #[must_use]
+    pub fn faults(&self) -> u64 {
+        self.words.iter().map(|w| w.faults).sum()
+    }
+
     /// Samples consumed since construction or the last [`Engine::reset`].
     #[must_use]
     pub fn samples(&self) -> u64 {
@@ -251,5 +263,26 @@ impl Engine {
     /// Feed audio and collect detections.
     pub fn process(&mut self, pcm: &[i16], out: &mut Vec<RawDetection>) {
         self.process_with(pcm, |_, _, _| {}, |d| out.push(d));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MODEL: &[u8] = include_bytes!("../tests/golden/models/okay_nabu.tflite");
+
+    #[test]
+    fn req_wak_002_a_model_that_fails_to_run_is_counted_not_silent() {
+        let mut e = Engine::new(vec![WordConfig::new(MODEL.to_vec(), 0.97, 5)]).unwrap();
+        let silence = vec![0i16; 16_000];
+        let mut out = Vec::new();
+        e.process(&silence, &mut out);
+        assert_eq!(e.faults(), 0, "a healthy model has no faults");
+        // Make every inference fail: the input handed to the interpreter no longer has the model's length.
+        e.words[0].features.push(0);
+        e.process(&silence, &mut out);
+        assert!(e.faults() > 0, "failed inferences are counted");
+        assert!(out.is_empty());
     }
 }
