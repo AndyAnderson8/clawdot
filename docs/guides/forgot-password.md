@@ -5,7 +5,7 @@ ClawDot has one administrator password for the web page. There is no recovery co
 | You have | Use |
 |---|---|
 | A speaker whose program reports its button to ClawDot, or a PC running the device program | [Option 1](#1-the-action-button-or-the-pc-key) |
-| A PC or server where you can open a terminal | [Option 2](#2-the-command-line) |
+| A PC or server where you can open a terminal, or a speaker connected through ESPHome | [Option 2](#2-the-command-line) |
 | An Echo Dot on the TECHO5 image | [Option 3](#3-an-echo-dot-on-the-techo5-image) |
 
 ## 1. The action button, or the PC key
@@ -34,6 +34,8 @@ clawdot --reset-admin --data-dir <your data directory>
 ```
 
 Start ClawDot again and open the page: the first-run screen asks for a new password. This needs a shell on the machine, which is why Option 1 exists.
+
+A speaker connected through ESPHome (a voice satellite flashed with ESPHome) has no button hold that ClawDot can see: the hold is part of ClawDot's own satellite protocol, and ESPHome has no such event. For that speaker, run this command on the machine where ClawDot runs, not on the speaker.
 
 ## 3. An Echo Dot on the TECHO5 image
 

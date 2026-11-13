@@ -1945,8 +1945,9 @@ components:
       additionalProperties: false
       description: |
         `timer` needs `seconds` (1 second to 7 days). `alarm` needs `hour` and `minute`, and rings once unless
-        `days` is given. `reminder` needs `label` (the text to say), `date` and `time` in the device's time zone,
-        in the future and within a year. Nothing can be scheduled until the device clock is set.
+        `days` is given. `reminder` needs `label` (the text to say) and either `seconds` (a delay of 1 second to a
+        year, run as a countdown) or `date` and `time` in the device's time zone, in the future and within a year; not
+        both. Without the device clock only a timer or a reminder with `seconds` can be set.
       properties:
         kind: { type: string, enum: [timer, alarm, reminder] }
         label: { type: string, maxLength: 100 }
@@ -1968,6 +1969,7 @@ components:
         label: { type: string }
         fire_at: { type: integer, description: "Unix seconds." }
         seconds_left: { type: integer }
+        countdown: { type: boolean, description: "True for a timer and a reminder after a delay, which count down on the monotonic clock." }
         repeat:
           oneOf:
             - type: object

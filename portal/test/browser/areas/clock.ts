@@ -66,6 +66,24 @@ export async function clock(c: Ctx): Promise<void> {
     await T(`submit('#clockdialog form')`);
     await eq(`T.text('#msg')`, "Pick a date and a time for the reminder.", "validation message");
     await eq(`(T.text('#clocklist p.mut') ?? '').length > 0`, true, "zone note present");
+    // Reminders after a delay (REQ-TMR-009): the same amount-and-unit fields as a timer, listed with time left.
+    await T(`set('#rwhen', 'delay')`);
+    await b.until(`!!T.q('#ramount') && T.q('#rdate') === null`, "the delay fields replace the date and time");
+    await T(`set('#ramount', '15')`);
+    await T(`set('#rlabel', 'stand up')`);
+    await T(`submit('#clockdialog form')`);
+    await b.until(
+      `T.rows().length === 1 && T.q('#clockdialog').open === false`,
+      "reminder after a delay added, and the dialog closes",
+    );
+    const rem = mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").pop()!;
+    assert.deepEqual(rem.body, { kind: "reminder", label: "stand up", seconds: 900 });
+    await eq(`T.rows()[0].includes('Says it in 15 min')`, true, "listed with its time left");
+    await T(`clickText('#panel ul.rows > li:nth-child(1)', 'Edit')`);
+    await eq(`T.q('#rwhen').value`, "delay", "edit opens on the delay choice");
+    await eq(`T.q('#ramount').value`, "15", "and the amount");
+    await T(`click('#clockdialog .dlgfoot .plain')`);
+    await b.until(`T.q('#clockdialog').open === false`, "edit closed");
     // Stopwatch: used by voice, so this page explains and offers nothing that would not work.
     await b.ev(`location.hash = '#/clock/stopwatch'`);
     await b.until(`!!T.q('#stopwatchcard')`, "the stopwatch page");

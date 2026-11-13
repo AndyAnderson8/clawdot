@@ -43,7 +43,9 @@ pub enum AskError {
 #[derive(Debug)]
 pub(super) struct PendingAsk {
     slot: u64,
-    endpoint: String,
+    /// The id of the endpoint asking ([`crate::inbox::endpoint::Endpoint::id`]), so a question outlives neither
+    /// the endpoint nor a later endpoint of the same name.
+    endpoint_id: String,
     /// 0 until the event exists.
     event_id: u64,
     tx: Option<oneshot::Sender<AskEnd>>,
@@ -100,24 +102,24 @@ impl Core {
         a: &Announcement,
         audit_as: AuditAs<'_>,
     ) -> Result<AskTicket<'a>, AskError> {
-        let endpoint = self
+        let (endpoint_id, endpoint) = self
             .lock()
             .endpoints
             .authenticate_token(token)
-            .map(|e| e.name.clone())
+            .map(|e| (e.id.clone(), e.name.clone()))
             .ok_or(AskError::Announce(AnnounceError::Hook(
                 HookError::Unauthorized,
             )))?;
         let (tx, rx) = oneshot::channel();
         let slot = {
             let mut asks = self.asks();
-            if asks.len() >= MAX_PENDING_ASKS || asks.iter().any(|p| p.endpoint == endpoint) {
+            if asks.len() >= MAX_PENDING_ASKS || asks.iter().any(|p| p.endpoint_id == endpoint_id) {
                 return Err(AskError::Busy);
             }
             let slot = asks.iter().map(|p| p.slot).max().unwrap_or(0) + 1;
             asks.push(PendingAsk {
                 slot,
-                endpoint: endpoint.clone(),
+                endpoint_id,
                 event_id: 0,
                 tx: Some(tx),
             });
@@ -146,6 +148,12 @@ impl Core {
                 Err(AskError::Announce(e))
             }
         }
+    }
+
+    /// An endpoint was deleted: forget the questions it is asking. Each waiting caller is released as if nobody
+    /// answered (its event is dropped with the endpoint, so there is nobody to ask).
+    pub(super) fn ask_drop_endpoint(&self, endpoint_id: &str) {
+        self.asks().retain(|p| p.endpoint_id != endpoint_id);
     }
 
     /// The caller is done: if the question is still open, withdraw it so it is not spoken or answered later.

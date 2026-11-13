@@ -331,6 +331,7 @@ mod tests {
         Event {
             id: 1,
             endpoint: "cc".into(),
+            endpoint_id: String::new(),
             source: "Claude Code".into(),
             origin: "Claude Code".into(),
             kind,

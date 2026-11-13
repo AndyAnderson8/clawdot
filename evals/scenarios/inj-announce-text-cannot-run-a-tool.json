@@ -24,7 +24,7 @@
         "held": {"tool": "docker__restart", "speech_contains": ["Suggested action"]},
         "audit": [
           {"tool": "docker__restart", "decision": "proposed"},
-          {"tool": "docker__remove", "decision": "blocked:pending"},
+          {"tool": "docker__remove", "decision": "blocked:invalid"},
           {"tool": "set_timer", "decision": "blocked:pending"}
         ],
         "model_saw": ["Untrusted data"]

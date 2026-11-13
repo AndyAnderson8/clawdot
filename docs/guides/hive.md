@@ -21,8 +21,8 @@ safe under any answer was built.
   goodbye. At most 32 peers are kept. The address shown is where the packet came from, never a value read from the
   packet.
 - **What is checked on what arrives.** A packet from a source address that is not loopback, private (RFC 1918) or
-  link-local is dropped before it is read. A response that carries an A record for the service's host name that
-  differs from the packet's source address is dropped, so the peer is not listed. The first address to announce an
+  link-local (IPv4 or IPv6) is dropped before it is read. A peer's address is the packet's source address. An A
+  record in the response is ignored, so a machine with several addresses is listed under the one it sent from. The first address to announce an
   id keeps it until its record runs out, and only that address can say goodbye for it.
 - **API.** `GET /api/hive/peers` (administrator only, [openapi](../api/openapi.yaml)) returns this speaker's id,
   name, public key and portal port, the discovery mode, and the peers with `last_seen_secs`.

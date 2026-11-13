@@ -11,8 +11,8 @@
 //!
 //! * A packet whose source address is not loopback, private (RFC 1918) or link-local is dropped before it is
 //!   parsed, so an answer from the internet is never looked at.
-//! * A peer's address is the packet's source address, never a value taken from the packet. If the response
-//!   carries an address record for the service's host name that differs from the source, the peer is dropped.
+//! * A peer's address is the packet's source address, never a value taken from the packet. An address record in
+//!   the response is ignored, so a machine with several addresses is listed under the one it sent from.
 //! * The first address to announce an id keeps it until its record runs out, and only that address can say
 //!   goodbye for it.
 //! * The table holds at most [`MAX_PEERS`] peers and TTLs are capped.
@@ -131,16 +131,6 @@ impl Peers {
     }
 }
 
-/// Whether the response carries an address record for the service's host name that is not the address the packet
-/// came from. A speaker announces its own address, so a mismatch is a forwarded or forged answer, and the
-/// peer is not recorded. A response with no address record is accepted; the packet's source stands in.
-fn advertises_another_address(msg: &dns::Message, target: &str, src: IpAddr) -> bool {
-    msg.records.iter().any(|r| match &r.data {
-        Rdata::A(a) => r.name == target && IpAddr::V4(*a) != src,
-        _ => false,
-    })
-}
-
 /// Whether a packet from `from` is looked at at all: only loopback, private and link-local senders are, since
 /// mDNS never legitimately crosses the internet. This is a check on the sender's address only.
 fn source_is_local(from: IpAddr) -> bool {
@@ -172,15 +162,13 @@ fn apply_response(
                 .find(|r| &r.name == inst && want(&r.data))
                 .map(|r| &r.data)
         };
-        let (Some(Rdata::Srv { port, target }), Some(Rdata::Txt(txt))) = (
+        // An advertised address record is not read: the peer's address is the packet's source (REQ-CFG-009).
+        let (Some(Rdata::Srv { port, .. }), Some(Rdata::Txt(txt))) = (
             find(|d| matches!(d, Rdata::Srv { .. })),
             find(|d| matches!(d, Rdata::Txt(_))),
         ) else {
             continue;
         };
-        if advertises_another_address(msg, target, src) {
-            continue;
-        }
         let get = |k: &str| {
             txt.iter()
                 .find(|(key, _)| key == k)
@@ -484,6 +472,7 @@ mod tests {
             "169.254.3.4",
             "::1",
             "fd00::5",
+            "fe80::1",
         ] {
             assert!(source_is_local(ok.parse().unwrap()), "{ok}");
         }
@@ -498,22 +487,30 @@ mod tests {
         }
     }
 
-    // REQ-CFG-009: an address record that is not the sender's own address means the peer is not recorded.
+    // REQ-CFG-009: an address record is ignored; the peer is listed under the address the packet came from.
     #[test]
-    fn a_peer_whose_advertised_address_is_not_the_packet_source_is_dropped() {
+    fn a_peer_is_listed_under_the_packet_source_whatever_address_it_advertises() {
         let (mut ad, id) = advert(7, 3335, Some("Den"));
         ad.addr = Some(Ipv4Addr::new(192, 168, 1, 50));
         let msg = dns::parse(&ad.response(100).unwrap()).unwrap();
         let t0 = Instant::now();
         let mut peers = Peers::default();
-        // Sent by some other host: dropped.
+        // Sent from another private address than the one it names: listed, under the source.
         apply_response(&mut peers, &msg, IpAddr::from([192, 168, 1, 66]), None, t0);
-        assert!(peers.live(t0).is_empty());
-        // Sent from the address it names: recorded.
-        apply_response(&mut peers, &msg, IpAddr::from([192, 168, 1, 50]), None, t0);
         let live = peers.live(t0);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].id, id);
+        assert_eq!(live[0].address, IpAddr::from([192, 168, 1, 66]));
+        // Sent from the address it names: the same peer, the same address.
+        let mut peers = Peers::default();
+        apply_response(&mut peers, &msg, IpAddr::from([192, 168, 1, 50]), None, t0);
+        assert_eq!(peers.live(t0)[0].address, IpAddr::from([192, 168, 1, 50]));
+        // A link-local IPv6 source is accepted by the source filter and kept as the address.
+        let ll: IpAddr = "fe80::7".parse().unwrap();
+        assert!(source_is_local(ll));
+        let mut peers = Peers::default();
+        apply_response(&mut peers, &msg, ll, None, t0);
+        assert_eq!(peers.live(t0)[0].address, ll);
         // A response with no address record is accepted, with the source as the address.
         let (bare, _) = advert(8, 1, None);
         let m = dns::parse(&bare.response(100).unwrap()).unwrap();

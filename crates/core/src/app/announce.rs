@@ -196,7 +196,7 @@ impl Core {
             .get(name)
             .cloned()
             .ok_or(crate::inbox::endpoint::EndpointError::NotFound)?;
-        g.inbox.set_origin_for(name, ep.origin());
+        g.inbox.set_origin_for(&ep.id, ep.origin());
         self.persist(
             &g,
             super::persist::Dirty {
@@ -294,7 +294,7 @@ impl Core {
                 }
             }
         };
-        let bucket = g.buckets.entry(ep.name.clone()).or_insert(Bucket {
+        let bucket = g.buckets.entry(ep.id.clone()).or_insert(Bucket {
             tokens: self.limits.hook_burst,
             last: mono,
         });

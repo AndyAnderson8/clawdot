@@ -222,6 +222,10 @@ async fn speak_waiting(v: &Voice, waiting: &mut VecDeque<Waiting>) {
         if !v.announcer.announce(&line).await {
             break;
         }
+        // The terminal shows the line that was spoken, when it was spoken, worded as missed when it waited.
+        if v.echo {
+            println!("speaker> {line}");
+        }
         waiting.pop_front();
         spoke = true;
     }
@@ -250,7 +254,8 @@ pub async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
                 }
             }
             Say::Line(fired) => {
-                if v.echo {
+                // A line that waits for a satellite is shown when it is spoken, in `speak_waiting`.
+                if v.echo && !v.waits_for_satellite {
                     println!("speaker> {}", describe_fired(&fired));
                 }
                 if v.waits_for_satellite {

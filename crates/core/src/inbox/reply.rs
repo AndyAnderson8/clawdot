@@ -5,6 +5,8 @@
 //! reconnecting bridge. The queue is bounded and expires old replies so a missing bridge cannot grow it
 //! without limit.
 
+use super::endpoint::Endpoints;
+use super::event::Event;
 use super::{Moment, Restore, saved_at};
 use crate::sched::{Clock, Ts};
 use crate::store::{JsonStore, StoreError};
@@ -37,6 +39,11 @@ impl std::error::Error for Full {}
 struct Queued {
     #[serde(flatten)]
     reply: Reply,
+    /// The id of the endpoint the reply is for (`Endpoint::id`). What a reply is kept, found and acknowledged by;
+    /// `reply.endpoint`, the name, is only what the bridge is shown. Empty in a file from before ids existed, until
+    /// `adopt_endpoint_ids` runs at load.
+    #[serde(default)]
+    endpoint_id: String,
     /// Seconds it had waited when the file was written. Read at load only; a file from before this form has
     /// none, and the wait is then worked out from `created_at`.
     #[serde(default)]
@@ -60,6 +67,7 @@ struct State {
 struct QueuedOut<'a> {
     #[serde(flatten)]
     reply: &'a Reply,
+    endpoint_id: &'a str,
     age_secs: i64,
 }
 
@@ -142,6 +150,7 @@ impl ReplyQueue {
                 .iter()
                 .map(|q| QueuedOut {
                     reply: &q.reply,
+                    endpoint_id: &q.endpoint_id,
                     age_secs: mono.saturating_sub(q.born),
                 })
                 .collect(),
@@ -149,16 +158,15 @@ impl ReplyQueue {
         })
     }
 
-    /// Queue a reply for the endpoint's bridge.
+    /// Queue a reply to `event` for its endpoint's bridge. The reply is kept under the event's endpoint id, and
+    /// carries the endpoint name (as the bridge knows it) and the event's session reference.
     ///
     /// # Errors
     /// [`Full`] when `max_pending` unexpired replies are already waiting.
     pub fn push(
         &mut self,
         now: impl Into<Moment>,
-        endpoint: &str,
-        event_id: u64,
-        session_ref: Option<String>,
+        event: &Event,
         kind: ReplyKind,
         text: &str,
     ) -> Result<u64, Full> {
@@ -172,13 +180,14 @@ impl ReplyQueue {
         self.state.pending.push(Queued {
             reply: Reply {
                 id,
-                endpoint: endpoint.to_owned(),
-                event_id,
-                session_ref,
+                endpoint: event.endpoint.clone(),
+                event_id: event.id,
+                session_ref: event.session_ref.clone(),
                 kind,
                 text: text.chars().take(MAX_REPLY_CHARS).collect(),
                 created_at: now.wall,
             },
+            endpoint_id: event.endpoint_id.clone(),
             age_secs: None,
             born: now.mono,
         });
@@ -188,28 +197,49 @@ impl ReplyQueue {
     /// Unacknowledged replies for an endpoint with an id greater than `after`, oldest first. A new
     /// connection passes 0 and so receives everything still unacknowledged (at-least-once).
     #[must_use]
-    pub fn pending_for(&self, endpoint: &str, after: u64) -> Vec<&Reply> {
+    pub fn pending_for(&self, endpoint_id: &str, after: u64) -> Vec<&Reply> {
         self.state
             .pending
             .iter()
+            .filter(|q| q.endpoint_id == endpoint_id && q.reply.id > after)
             .map(|q| &q.reply)
-            .filter(|r| r.endpoint == endpoint && r.id > after)
             .collect()
     }
 
     /// The bridge confirmed it handled a reply. Acknowledging from the wrong endpoint does nothing.
-    pub fn ack(&mut self, endpoint: &str, id: u64) -> bool {
+    pub fn ack(&mut self, endpoint_id: &str, id: u64) -> bool {
         let before = self.state.pending.len();
         self.state
             .pending
-            .retain(|q| !(q.reply.id == id && q.reply.endpoint == endpoint));
+            .retain(|q| !(q.reply.id == id && q.endpoint_id == endpoint_id));
         self.state.pending.len() != before
     }
 
-    /// Drop every reply waiting for `endpoint` (it was deleted); returns how many.
-    pub fn drop_for(&mut self, endpoint: &str) -> usize {
+    /// Tie replies saved before endpoint ids existed to an endpoint: each reply with no id takes the id of the
+    /// live endpoint of its name, and is dropped when there is none (nothing can ever ask for it). Replies that
+    /// have an id are not touched. Returns how many changed or went, so the caller knows to save.
+    pub fn adopt_endpoint_ids(&mut self, endpoints: &Endpoints) -> usize {
+        let mut changed = 0;
+        self.state.pending.retain_mut(|q| {
+            if !q.endpoint_id.is_empty() {
+                return true;
+            }
+            changed += 1;
+            match endpoints.get(&q.reply.endpoint) {
+                Some(ep) => {
+                    q.endpoint_id.clone_from(&ep.id);
+                    true
+                }
+                None => false,
+            }
+        });
+        changed
+    }
+
+    /// Drop every reply waiting for the endpoint with this id (it was deleted); returns how many.
+    pub fn drop_for(&mut self, endpoint_id: &str) -> usize {
         let before = self.state.pending.len();
-        self.state.pending.retain(|q| q.reply.endpoint != endpoint);
+        self.state.pending.retain(|q| q.endpoint_id != endpoint_id);
         before - self.state.pending.len()
     }
 
@@ -244,16 +274,38 @@ mod tests {
     use crate::sched::testclock::StepClock;
     use crate::store::testutil::TempDir;
 
+    /// The id the tests give the endpoint named `name`.
+    fn eid(name: &str) -> String {
+        format!("id-{name}")
+    }
+
+    /// An open event of the endpoint named `name`.
+    fn ev(name: &str, session: Option<&str>) -> Event {
+        Event {
+            id: 1,
+            endpoint: name.into(),
+            endpoint_id: eid(name),
+            source: String::new(),
+            origin: String::new(),
+            kind: crate::inbox::event::EventKind::Question,
+            title: String::new(),
+            text: String::new(),
+            status: None,
+            priority: crate::inbox::event::Priority::Normal,
+            session_ref: session.map(Into::into),
+            no_reply: false,
+            expires_at: None,
+            received_at: 0,
+            timing: crate::inbox::event::Timing::default(),
+            rel: None,
+            state: crate::inbox::event::EventState::Announced,
+            spoken_seq: 0,
+        }
+    }
+
     fn push(q: &mut ReplyQueue, now: Ts, endpoint: &str, text: &str) -> u64 {
-        q.push(
-            now,
-            endpoint,
-            1,
-            Some("s".into()),
-            ReplyKind::Instruct,
-            text,
-        )
-        .unwrap()
+        q.push(now, &ev(endpoint, Some("s")), ReplyKind::Instruct, text)
+            .unwrap()
     }
 
     #[test]
@@ -262,14 +314,14 @@ mod tests {
         let a = push(&mut q, 0, "cc", "first");
         let b = push(&mut q, 1, "cc", "second");
         let _other = push(&mut q, 2, "ci", "elsewhere");
-        let ids: Vec<u64> = q.pending_for("cc", 0).iter().map(|r| r.id).collect();
+        let ids: Vec<u64> = q.pending_for(&eid("cc"), 0).iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![a, b]);
         assert_eq!(
-            q.pending_for("cc", a).len(),
+            q.pending_for(&eid("cc"), a).len(),
             1,
             "cursor within a connection"
         );
-        assert_eq!(q.pending_for("nobody", 0).len(), 0);
+        assert_eq!(q.pending_for(&eid("nobody"), 0).len(), 0);
     }
 
     #[test]
@@ -277,19 +329,19 @@ mod tests {
         let mut q = ReplyQueue::new(10, 3600);
         let id = push(&mut q, 0, "cc", "do it");
         // First connection saw it but died before acknowledging.
-        assert_eq!(q.pending_for("cc", 0).len(), 1);
+        assert_eq!(q.pending_for(&eid("cc"), 0).len(), 1);
         // Reconnect: still there.
-        assert_eq!(q.pending_for("cc", 0).len(), 1);
-        assert!(q.ack("cc", id));
-        assert!(q.pending_for("cc", 0).is_empty());
-        assert!(!q.ack("cc", id), "a second ack is harmless");
+        assert_eq!(q.pending_for(&eid("cc"), 0).len(), 1);
+        assert!(q.ack(&eid("cc"), id));
+        assert!(q.pending_for(&eid("cc"), 0).is_empty());
+        assert!(!q.ack(&eid("cc"), id), "a second ack is harmless");
     }
 
     #[test]
     fn a_bridge_cannot_acknowledge_another_endpoints_reply() {
         let mut q = ReplyQueue::new(10, 3600);
         let id = push(&mut q, 0, "cc", "x");
-        assert!(!q.ack("ci", id));
+        assert!(!q.ack(&eid("ci"), id));
         assert_eq!(q.len(), 1);
     }
 
@@ -299,7 +351,7 @@ mod tests {
         push(&mut q, 0, "cc", "stale");
         push(&mut q, 90, "cc", "fresh");
         assert_eq!(q.expire(150), 1);
-        assert_eq!(q.pending_for("cc", 0)[0].text, "fresh");
+        assert_eq!(q.pending_for(&eid("cc"), 0)[0].text, "fresh");
     }
 
     #[test]
@@ -307,9 +359,9 @@ mod tests {
         let mut q = ReplyQueue::new(2, 3600);
         push(&mut q, 0, "cc", "a");
         push(&mut q, 0, "cc", "b");
-        assert_eq!(q.push(0, "cc", 1, None, ReplyKind::Ack, ""), Err(Full));
+        assert_eq!(q.push(0, &ev("cc", None), ReplyKind::Ack, ""), Err(Full));
         // Expired replies make room.
-        assert!(q.push(10_000, "cc", 1, None, ReplyKind::Ack, "").is_ok());
+        assert!(q.push(10_000, &ev("cc", None), ReplyKind::Ack, "").is_ok());
     }
 
     #[test]
@@ -317,7 +369,7 @@ mod tests {
         let mut q = ReplyQueue::new(2, 3600);
         push(&mut q, 0, "cc", &"x".repeat(MAX_REPLY_CHARS * 2));
         assert_eq!(
-            q.pending_for("cc", 0)[0].text.chars().count(),
+            q.pending_for(&eid("cc"), 0)[0].text.chars().count(),
             MAX_REPLY_CHARS
         );
     }
@@ -331,7 +383,7 @@ mod tests {
         let clock = StepClock::at(T0);
         q.save(&store, &clock).unwrap();
         let mut restored = ReplyQueue::load(&store, 10, 3600, &clock).unwrap();
-        assert_eq!(restored.pending_for("cc", 0).len(), 1);
+        assert_eq!(restored.pending_for(&eid("cc"), 0).len(), 1);
         assert_eq!(push(&mut restored, 1, "cc", "next"), 2, "ids keep counting");
     }
 
@@ -341,9 +393,7 @@ mod tests {
     fn queue_at(q: &mut ReplyQueue, clock: &StepClock) -> u64 {
         q.push(
             Moment::of(clock),
-            "cc",
-            1,
-            None,
+            &ev("cc", None),
             ReplyKind::Instruct,
             "do it",
         )
@@ -361,7 +411,7 @@ mod tests {
         clock.step_wall(JUMP);
         assert_eq!(q.expire(Moment::of(&clock)), 0);
         assert_eq!(
-            q.pending_for("cc", 0)[0].created_at,
+            q.pending_for(&eid("cc"), 0)[0].created_at,
             T0,
             "the bridge sees wall time"
         );
@@ -412,7 +462,10 @@ mod tests {
         std::fs::write(store.path(), old).unwrap();
         let clock = StepClock::at(T0);
         let mut r = ReplyQueue::load(&store, 10, 100, &clock).unwrap();
-        assert_eq!(r.pending_for("cc", 0).len(), 1);
+        let mut eps = Endpoints::default();
+        eps.create("cc", "generic", 0).unwrap();
+        assert_eq!(r.adopt_endpoint_ids(&eps), 1);
+        assert_eq!(r.pending_for(&eps.get("cc").unwrap().id, 0).len(), 1);
         clock.advance(19);
         assert_eq!(r.expire(Moment::of(&clock)), 0);
         clock.advance(2);
@@ -421,5 +474,56 @@ mod tests {
         let unset = StepClock::with_mono(5, 3);
         let r = ReplyQueue::load(&store, 10, 100, &unset).unwrap();
         assert_eq!(r.len(), 1);
+    }
+
+    // REQ-INB-013: a reply saved with only an endpoint name goes to the live endpoint of that name and is
+    // dropped when there is none; one that has an id keeps it. The file keeps the id once saved.
+    #[test]
+    fn replies_saved_with_a_name_only_are_tied_to_the_live_endpoint_or_dropped() {
+        let dir = TempDir::new("replies-adopt");
+        let store = JsonStore::new(dir.0.join("replies.json"), SCHEMA);
+        let reply = |id: u32, name: &str, extra: &str| {
+            format!(
+                r#"{{"id":{id},"endpoint":"{name}",{extra}"event_id":{id},"session_ref":null,"kind":"ack","text":"","created_at":{T0}}}"#
+            )
+        };
+        let old = format!(
+            r#"{{"schema":1,"data":{{"next_id":3,"pending":[{},{},{}]}}}}"#,
+            reply(1, "cc", ""),
+            reply(2, "gone", ""),
+            reply(3, "cc", r#""endpoint_id":"kept","#)
+        );
+        std::fs::write(store.path(), old).unwrap();
+        let clock = StepClock::at(T0);
+        let mut r = ReplyQueue::load(&store, 10, 100, &clock).unwrap();
+        let mut eps = Endpoints::default();
+        eps.create("cc", "generic", 0).unwrap();
+        let id = eps.get("cc").unwrap().id.clone();
+        assert_eq!(r.adopt_endpoint_ids(&eps), 2, "one adopted, one dropped");
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.pending_for(&id, 0).len(), 1);
+        assert_eq!(r.pending_for("kept", 0).len(), 1);
+        assert_eq!(
+            r.adopt_endpoint_ids(&eps),
+            0,
+            "a second pass changes nothing"
+        );
+        r.save(&store, &clock).unwrap();
+        let again = ReplyQueue::load(&store, 10, 100, &clock).unwrap();
+        assert_eq!(again.pending_for(&id, 0).len(), 1);
+    }
+
+    // ADR-0006: what a bridge is sent is the name and the old fields only, however the queue keys its replies.
+    #[test]
+    fn the_wire_form_of_a_queued_reply_names_the_endpoint_and_has_no_id() {
+        let mut q = ReplyQueue::new(10, 3600);
+        push(&mut q, T0, "cc", "go");
+        let sent = serde_json::to_string(q.pending_for(&eid("cc"), 0)[0]).unwrap();
+        assert_eq!(
+            sent,
+            format!(
+                r#"{{"id":1,"endpoint":"cc","event_id":1,"session_ref":"s","kind":"instruct","text":"go","created_at":{T0}}}"#
+            )
+        );
     }
 }

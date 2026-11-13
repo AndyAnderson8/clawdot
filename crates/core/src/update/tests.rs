@@ -484,6 +484,48 @@ fn the_configuration_is_checked() {
     assert!(asset_name().starts_with("clawdot-"));
 }
 
+// REQ-UPD-004: the file is named from the build target, so an ARMv6 build is not offered armv7.
+#[test]
+fn the_asset_is_named_from_the_architecture_the_program_was_built_for() {
+    let name = |arch, target| asset_name_for("linux", arch, target, false);
+    assert_eq!(
+        name("arm", "armv7-unknown-linux-musleabihf"),
+        "clawdot-linux-armv7"
+    );
+    assert_eq!(
+        name("arm", "armv7-unknown-linux-gnueabihf"),
+        "clawdot-linux-armv7"
+    );
+    assert_eq!(
+        name("arm", "arm-unknown-linux-musleabi"),
+        "clawdot-linux-armv6"
+    );
+    assert_eq!(
+        name("arm", "arm-unknown-linux-gnueabihf"),
+        "clawdot-linux-armv6"
+    );
+    assert_eq!(
+        name("aarch64", "aarch64-unknown-linux-gnu"),
+        "clawdot-linux-aarch64"
+    );
+    assert_eq!(
+        name("x86_64", "x86_64-unknown-linux-gnu"),
+        "clawdot-linux-x86_64"
+    );
+    assert_eq!(
+        asset_name_for("windows", "x86_64", "x86_64-pc-windows-msvc", true),
+        "clawdot-windows-x86_64.exe"
+    );
+}
+
+// The build script hands over a real target name, so the file this very build asks for can be worked out.
+#[test]
+fn the_build_target_is_known() {
+    let t = env!("CLAWDOT_BUILD_TARGET");
+    assert!(t.contains('-'), "{t:?}");
+    assert!(asset_name().starts_with("clawdot-"));
+}
+
 #[test]
 fn supervision_is_read_from_the_environment_snapshot() {
     let on = |pairs: &[(&str, &str)]| {
