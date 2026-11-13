@@ -120,7 +120,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
     (data
       ? (data.clock_valid
           ? ""
-          : "The device clock is not set yet. Timers still count down and ring; alarms and reminders wait until it is. ") +
+          : "The device clock is not set yet. Timers and reminders after a delay still count down and ring; alarms and reminders at a time wait until it is. ") +
         "Times are in " +
         zoneName(zone()) +
         ", the device's time zone."

@@ -162,13 +162,13 @@ pub async fn start(cli: Cli, file: Config, env: Env) -> Result<Started, Failure>
     Ok(Started::Run(Box::new(app)))
 }
 
-/// Warn when the wall clock is not set: alarms and reminders wait until it is (REQ-TMR-006); a countdown timer
-/// does not need it (REQ-TMR-009).
+/// Warn when the wall clock is not set: alarms and reminders at a time wait until it is (REQ-TMR-006); a countdown
+/// (a timer, or a reminder after a delay) does not need it (REQ-TMR-009).
 fn check_clock() -> Arc<dyn Clock + Send + Sync> {
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
     if !clock.wall_clock_valid() {
         eprintln!(
-            "clawdot: warning: the system clock is not set (no network time yet). Timers still count down and ring; alarms and reminders will not fire, and the time cannot be told, until it is set (REQ-TMR-006, REQ-TMR-009)."
+            "clawdot: warning: the system clock is not set (no network time yet). Timers and reminders after a delay still count down and ring; alarms and reminders at a time will not fire, and the time cannot be told, until it is set (REQ-TMR-006, REQ-TMR-009)."
         );
     }
     clock
@@ -423,6 +423,7 @@ fn open_records(r: &Resolved, core: &Core) -> Result<(Arc<AuditLog>, Arc<NoteSto
             format!("cannot open the audit log in {}: {e}", r.data_dir.display()),
         )
     })?;
+    audit.set_writer(core.writer());
     let audit_for_conv = Arc::clone(&audit);
     core.set_audit(audit);
     core.set_quiet_hours(r.quiet);

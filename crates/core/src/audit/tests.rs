@@ -699,3 +699,120 @@ fn a_key_is_secret_by_its_words_not_by_letters_it_happens_to_contain() {
     assert_eq!(v["keywords"], "tea, kettle");
     assert_eq!(v["api_key"], REDACTED);
 }
+
+fn ran(log: &AuditLog, day: i64, tier: Tier, n: u32) {
+    for _ in 0..n {
+        log.record(
+            1,
+            day,
+            1,
+            "voice",
+            None,
+            &act("t", tier, &json!({}), decision::RAN),
+        );
+    }
+}
+
+fn counts_file(dir: &TempDir) -> JsonStore {
+    JsonStore::new(dir.0.join("audit-counts.json"), COUNTS_SCHEMA)
+}
+
+// REQ-SEC-015, REQ-SEC-016: a day busy enough to rotate the log twice must not loosen the caps at restart.
+#[test]
+fn the_day_s_count_survives_a_restart_after_the_log_rotated_it_away() {
+    let dir = TempDir::new("audit-counts-rotated");
+    {
+        let log = AuditLog::open(&dir.0, cfg(1_500)).unwrap();
+        ran(&log, 5, Tier::Reversible, 30);
+        ran(&log, 5, Tier::Costly, 30);
+        assert_eq!(log.today(5), (60, 30));
+        let kept = log
+            .query(&Query {
+                limit: Some(MAX_PAGE),
+                ..Query::default()
+            })
+            .records
+            .len();
+        assert!(kept < 60, "the log should have forgotten some ({kept})");
+    }
+    let log = AuditLog::open(&dir.0, cfg(1_500)).unwrap();
+    assert_eq!(log.today(5), (60, 30));
+}
+
+// REQ-SEC-015: no counts file (an older version, or deleted) means the recount from the log, as before.
+#[test]
+fn a_missing_or_damaged_counts_file_falls_back_to_the_log() {
+    let dir = TempDir::new("audit-counts-fallback");
+    {
+        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+        ran(&log, 5, Tier::Costly, 3);
+    }
+    std::fs::remove_file(dir.0.join("audit-counts.json")).unwrap();
+    assert_eq!(
+        AuditLog::open(&dir.0, AuditConfig::default())
+            .unwrap()
+            .today(5),
+        (3, 3)
+    );
+    std::fs::write(dir.0.join("audit-counts.json"), b"{ not json").unwrap();
+    assert_eq!(
+        AuditLog::open(&dir.0, AuditConfig::default())
+            .unwrap()
+            .today(5),
+        (3, 3)
+    );
+}
+
+// REQ-SEC-015: when both exist the larger count wins, per figure; another day's file is ignored.
+#[test]
+fn the_larger_of_the_file_and_the_log_is_used() {
+    let dir = TempDir::new("audit-counts-larger");
+    {
+        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+        ran(&log, 5, Tier::Costly, 3);
+    }
+    let store = counts_file(&dir);
+    let save = |day, actions, costly| {
+        store
+            .save(&SavedCounts {
+                day,
+                actions,
+                costly,
+            })
+            .unwrap();
+    };
+    save(5, 50, 1);
+    let open = || AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+    assert_eq!(open().today(5), (50, 3));
+    save(5, 1, 40);
+    assert_eq!(open().today(5), (3, 40));
+    save(4, 99, 99);
+    assert_eq!(open().today(5), (3, 3));
+}
+
+// REQ-SEC-016: the background writer carries the file when the core has one.
+#[test]
+fn the_counts_go_through_the_background_writer_when_there_is_one() {
+    let dir = TempDir::new("audit-counts-writer");
+    let writer = Arc::new(Writer::start().unwrap());
+    let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+    log.set_writer(Some(Arc::clone(&writer)));
+    ran(&log, 5, Tier::Reversible, 2);
+    writer.flush_blocking();
+    let saved: SavedCounts = counts_file(&dir).load().unwrap();
+    assert_eq!((saved.day, saved.actions, saved.costly), (5, 2, 0));
+}
+
+// REQ-SEC-016: a counts file that cannot be written does not turn the caps off, and the log is still written.
+#[test]
+fn an_unwritable_counts_file_still_counts() {
+    let dir = TempDir::new("audit-counts-unwritable");
+    let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+    ran(&log, 5, Tier::Costly, 1);
+    let path = dir.0.join("audit-counts.json");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    ran(&log, 5, Tier::Costly, 1);
+    assert_eq!(log.today(5), (2, 2));
+    assert_eq!(log.query(&Query::default()).records.len(), 2);
+}

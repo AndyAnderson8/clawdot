@@ -15,7 +15,6 @@
 //! the channels this loop listens on are [`Sources`].
 
 use crate::app::{Core, Job};
-use crate::assistant::describe_fired;
 use crate::connects::Done;
 use crate::rtvoice;
 use crate::runtime::{Brain, SpeakerView};
@@ -266,7 +265,7 @@ impl App {
             speaker.say(Say::Phrase { text, preview });
         }
         for fired in self.brain.tick() {
-            speaker.say(Say::Line(describe_fired(&fired)));
+            speaker.say(Say::Line(fired));
         }
         if !speaker.voice.polling.swap(true, Ordering::Relaxed) {
             let poll = Say::Poll {

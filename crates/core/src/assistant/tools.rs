@@ -333,8 +333,7 @@ static TOOLS: &[Tool] = &[
         || json!({ "text": {"type":"string"}, "seconds": {"type":"integer","description":"Delay in seconds"} }),
         &["text", "seconds"],
         Assistant::run_set_reminder,
-    )
-    .needs_clock(),
+    ),
     Tool::new(
         "set_reminder_at",
         "Remind the user of something at the next occurrence of a local time.",
