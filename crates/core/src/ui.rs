@@ -1,5 +1,10 @@
 //! The embedded web UI and its JSON API (REQ-CFG-001, 003..006, 008, 018..024).
 //!
+//! This file holds the route table ([`ROUTES`]) and the dispatcher ([`handle`]); the handlers are in `ui/` by area:
+//! `auth`, `endpoints`, `status` (overview, logs, diagnostics, audit), `tools` (tools, connections, skills), `notes`,
+//! `settings`, `models` (the model list and the LLM key), `speech` (voices, the test phrase, the speech and realtime
+//! keys), `schedule`, `update` and `page`, with the shared reply and body helpers in `common`.
+//!
 //! * `GET /` and `GET /ui`: one static page. No external assets, works on a phone, built from `portal/` (Preact
 //!   and TypeScript, bundled into the one file). It holds no data, so it needs no credentials; everything it
 //!   shows comes from the API below.
