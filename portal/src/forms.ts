@@ -197,13 +197,17 @@ export function hintText(sp: SettingSpec, f: SettingField | undefined): string {
   return [sp.hint ?? "", range].filter(Boolean).join(" ");
 }
 
-/** Only the values that changed, ready for `PUT /api/settings`; an emptied box becomes null (back to the default). */
+/**
+ * Only the values that changed, ready for `PUT /api/settings`; an emptied box becomes null (back to the default).
+ * A number that is not a number is refused with a plain sentence, never sent (it would arrive as null, which resets
+ * the setting to its default).
+ */
 export function settingsPatch(
   fields: Record<string, SettingField>,
   specs: SettingSpec[],
   current: Record<string, string>,
   edited: Record<string, string>,
-): Record<string, string | number | boolean | null> {
+): Record<string, string | number | boolean | null> | string {
   const body: Record<string, string | number | boolean | null> = {};
   for (const sp of specs) {
     if (sp.off) continue;
@@ -211,6 +215,8 @@ export function settingsPatch(
     const v = (edited[sp.key] ?? "").trim();
     if (v === was) continue;
     const kind = fields[sp.key]?.kind;
+    if (v !== "" && (kind === "whole" || kind === "money") && !Number.isFinite(Number(v)))
+      return "“" + labelOf(sp.key) + "” needs a number. Fix it or empty the box.";
     body[sp.key] =
       v === "" ? null : kind === "whole" || kind === "money" ? Number(v) : kind === "flag" ? v === "true" : v;
   }

@@ -174,6 +174,17 @@ test("settings patch sends only what changed", () => {
   );
 });
 
+test("a number that is not a number is refused, not sent as null (which would reset the setting)", () => {
+  const cur = Object.fromEntries(specs.map((s) => [s.key, currentText(settings, s.key)]));
+  const got = settingsPatch(settings.fields, specs, cur, { ...cur, daily_spend_usd: "." });
+  assert.equal(typeof got, "string");
+  assert.match(typeof got === "string" ? got : "", /needs a number/);
+  assert.equal(typeof settingsPatch(settings.fields, specs, cur, { ...cur, daily_spend_usd: "x1" }), "string");
+  assert.deepEqual(settingsPatch(settings.fields, specs, cur, { ...cur, daily_spend_usd: "0.50" }), {
+    daily_spend_usd: 0.5,
+  });
+});
+
 test("labels", () => {
   assert.equal(labelOf("llm_key_env"), "Key variable");
   assert.equal(labelOf("unknown_key"), "unknown_key");

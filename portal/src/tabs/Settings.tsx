@@ -132,7 +132,9 @@ function Control(props: {
           disabled={sp.off}
           value={v}
           onInput={(e) => put(cents(e.currentTarget.value))}
-          onBlur={() => v && put(Number(v || 0).toFixed(2))}
+          onBlur={() => {
+            if (v && Number.isFinite(Number(v))) put(Number(v).toFixed(2));
+          }}
         />
       </div>
     );
@@ -214,6 +216,11 @@ export function Group(props: {
     ev.preventDefault();
     setErr("");
     const body = settingsPatch(settings.fields, specs, current, vals);
+    if (typeof body === "string") {
+      setErr(body);
+      errRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
     if (!Object.keys(body).length) {
       say("Nothing to save: you have not changed anything here.");
       return;
