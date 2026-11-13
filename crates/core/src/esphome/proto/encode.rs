@@ -1,4 +1,6 @@
 //! Message encoding: one small function per message type that has fields, and `Msg::encode` as the dispatch.
+//! The type number and the payload are matched apart, each over every variant, so a new message cannot be
+//! added to one and forgotten in the other.
 
 use super::wire::{put_bool, put_bytes, put_fixed32, put_uint};
 use super::{Msg, ty};
@@ -8,105 +10,100 @@ impl Msg {
     #[must_use]
     pub fn encode(&self) -> (u32, Vec<u8>) {
         let mut o = Vec::new();
-        let t = match self {
-            Self::HelloRequest {
-                client_info,
-                major,
-                minor,
-            } => {
-                hello_request(&mut o, client_info, *major, *minor);
-                ty::HELLO_REQUEST
-            }
-            Self::HelloResponse {
-                major,
-                minor,
-                server_info,
-                name,
-            } => {
-                hello_response(&mut o, *major, *minor, server_info, name);
-                ty::HELLO_RESPONSE
-            }
+        self.put_payload(&mut o);
+        (self.type_number(), o)
+    }
+
+    /// The message type number (an unknown message keeps the number it came with).
+    fn type_number(&self) -> u32 {
+        match self {
+            Self::HelloRequest { .. } => ty::HELLO_REQUEST,
+            Self::HelloResponse { .. } => ty::HELLO_RESPONSE,
             Self::DisconnectRequest => ty::DISCONNECT_REQUEST,
             Self::DisconnectResponse => ty::DISCONNECT_RESPONSE,
             Self::PingRequest => ty::PING_REQUEST,
             Self::PingResponse => ty::PING_RESPONSE,
             Self::DeviceInfoRequest => ty::DEVICE_INFO_REQUEST,
+            Self::DeviceInfoResponse { .. } => ty::DEVICE_INFO_RESPONSE,
+            Self::ListEntitiesRequest => ty::LIST_ENTITIES_REQUEST,
+            Self::ListEntitiesDone => ty::LIST_ENTITIES_DONE,
+            Self::ListEntitiesMediaPlayer { .. } => ty::LIST_ENTITIES_MEDIA_PLAYER,
+            Self::MediaPlayerCommand { .. } => ty::MEDIA_PLAYER_COMMAND,
+            Self::SubscribeVoice { .. } => ty::SUBSCRIBE_VOICE,
+            Self::VoiceRequest { .. } => ty::VOICE_REQUEST,
+            Self::VoiceResponse { .. } => ty::VOICE_RESPONSE,
+            Self::VoiceEvent { .. } => ty::VOICE_EVENT,
+            Self::VoiceAudio { .. } => ty::VOICE_AUDIO,
+            Self::AnnounceRequest { .. } => ty::ANNOUNCE_REQUEST,
+            Self::AnnounceFinished { .. } => ty::ANNOUNCE_FINISHED,
+            Self::Unknown(t) => *t,
+        }
+    }
+
+    /// Append the message's fields to `o`. A message with no fields appends nothing.
+    fn put_payload(&self, o: &mut Vec<u8>) {
+        match self {
+            Self::HelloRequest {
+                client_info,
+                major,
+                minor,
+            } => hello_request(o, client_info, *major, *minor),
+            Self::HelloResponse {
+                major,
+                minor,
+                server_info,
+                name,
+            } => hello_response(o, *major, *minor, server_info, name),
             Self::DeviceInfoResponse {
                 name,
                 esphome_version,
                 friendly_name,
                 voice_flags,
-            } => {
-                device_info_response(&mut o, name, esphome_version, friendly_name, *voice_flags);
-                ty::DEVICE_INFO_RESPONSE
-            }
-            Self::ListEntitiesRequest => ty::LIST_ENTITIES_REQUEST,
-            Self::ListEntitiesDone => ty::LIST_ENTITIES_DONE,
+            } => device_info_response(o, name, esphome_version, friendly_name, *voice_flags),
             Self::ListEntitiesMediaPlayer {
                 object_id,
                 key,
                 name,
-            } => {
-                list_entities_media_player(&mut o, object_id, *key, name);
-                ty::LIST_ENTITIES_MEDIA_PLAYER
-            }
+            } => list_entities_media_player(o, object_id, *key, name),
             Self::MediaPlayerCommand {
                 key,
                 command,
                 volume,
                 media_url,
                 announcement,
-            } => {
-                media_player_command(
-                    &mut o,
-                    *key,
-                    *command,
-                    *volume,
-                    media_url.as_deref(),
-                    *announcement,
-                );
-                ty::MEDIA_PLAYER_COMMAND
-            }
-            Self::SubscribeVoice { subscribe, flags } => {
-                subscribe_voice(&mut o, *subscribe, *flags);
-                ty::SUBSCRIBE_VOICE
-            }
+            } => media_player_command(
+                o,
+                *key,
+                *command,
+                *volume,
+                media_url.as_deref(),
+                *announcement,
+            ),
+            Self::SubscribeVoice { subscribe, flags } => subscribe_voice(o, *subscribe, *flags),
             Self::VoiceRequest {
                 start,
                 conversation_id,
                 flags,
                 wake_word_phrase,
-            } => {
-                voice_request(&mut o, *start, conversation_id, *flags, wake_word_phrase);
-                ty::VOICE_REQUEST
-            }
-            Self::VoiceResponse { port, error } => {
-                voice_response(&mut o, *port, *error);
-                ty::VOICE_RESPONSE
-            }
-            Self::VoiceEvent { kind, data } => {
-                voice_event(&mut o, *kind, data);
-                ty::VOICE_EVENT
-            }
-            Self::VoiceAudio { data, end } => {
-                voice_audio(&mut o, data, *end);
-                ty::VOICE_AUDIO
-            }
+            } => voice_request(o, *start, conversation_id, *flags, wake_word_phrase),
+            Self::VoiceResponse { port, error } => voice_response(o, *port, *error),
+            Self::VoiceEvent { kind, data } => voice_event(o, *kind, data),
+            Self::VoiceAudio { data, end } => voice_audio(o, data, *end),
             Self::AnnounceRequest {
                 media_id,
                 text,
                 start_conversation,
-            } => {
-                announce_request(&mut o, media_id, text, *start_conversation);
-                ty::ANNOUNCE_REQUEST
-            }
-            Self::AnnounceFinished { success } => {
-                announce_finished(&mut o, *success);
-                ty::ANNOUNCE_FINISHED
-            }
-            Self::Unknown(t) => *t,
-        };
-        (t, o)
+            } => announce_request(o, media_id, text, *start_conversation),
+            Self::AnnounceFinished { success } => announce_finished(o, *success),
+            Self::DisconnectRequest
+            | Self::DisconnectResponse
+            | Self::PingRequest
+            | Self::PingResponse
+            | Self::DeviceInfoRequest
+            | Self::ListEntitiesRequest
+            | Self::ListEntitiesDone
+            | Self::Unknown(_) => {}
+        }
     }
 }
 
