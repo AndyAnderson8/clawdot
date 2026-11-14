@@ -1,6 +1,6 @@
 //! Signing in, first-run setup, and changing the administrator password (REQ-CFG-018, 024, 069).
 
-use super::common::{Resp, error, json_reply, read_json};
+use super::common::{Resp, error, json_or_reply, json_reply};
 use crate::admin::{self, AdminError};
 use crate::app::Core;
 use hyper::StatusCode;
@@ -55,9 +55,9 @@ struct Setup {
 
 /// First-run setup (REQ-CFG-018): a password or open mode, from a private address only.
 pub(super) async fn setup(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
-    let req: Setup = match read_json(body).await {
+    let req: Setup = match json_or_reply(body).await {
         Ok(r) => r,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     // Refuse strangers before any expensive work.
     if let Err(e) = core.admin_check_setup(peer) {
@@ -96,9 +96,9 @@ struct Login {
 
 /// Sign in with the password (or, after an upgrade, the old administrator token); returns a session token.
 pub(super) async fn login(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
-    let req: Login = match read_json(body).await {
+    let req: Login = match json_or_reply(body).await {
         Ok(r) => r,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     if core.admin_mode() == admin::Mode::Open {
         return error(StatusCode::CONFLICT, "no password is set");
@@ -135,9 +135,9 @@ struct ChangePassword {
 /// take the account over. The check spends an attempt from the caller's address like a sign-in does, and runs off
 /// the async thread because it is deliberately slow.
 pub(super) async fn change_password(core: &Arc<Core>, peer: IpAddr, body: Incoming) -> Resp {
-    let req: ChangePassword = match read_json(body).await {
+    let req: ChangePassword = match json_or_reply(body).await {
         Ok(r) => r,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     if !admin::password_ok(&req.password) {
         return admin_error(AdminError::BadPassword);
@@ -180,9 +180,9 @@ pub(super) async fn recover_window(core: &Arc<Core>, peer: IpAddr, body: Incomin
     struct Pw {
         password: String,
     }
-    let req: Pw = match read_json(body).await {
+    let req: Pw = match json_or_reply(body).await {
         Ok(r) => r,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     if !admin::password_ok(&req.password) {
         return admin_error(AdminError::BadPassword);

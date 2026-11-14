@@ -787,6 +787,8 @@ impl State {
             if self.counts.day == 0 {
                 // Counted before any real day was known: keep it, on the first real day.
                 self.counts.day = day;
+                // The file still says day 0; without this a restart before the next action would lose them.
+                self.save_counts();
                 return day;
             }
         }
@@ -795,15 +797,25 @@ impl State {
             .as_ref()
             .and_then(|st| st.load::<SavedCounts>().ok());
         let mut day = day;
+        // The oldest real day anywhere in the log or the counts file. A record written before the clock was
+        // valid carries day 0, and a day is only ever recorded as 0 while no real day was known, so every such
+        // record is older than every real one: it belongs on the first real day, which is this one.
+        let mut oldest = saved.map_or(0, |s| s.day).max(0);
+        let mut newest = oldest;
+        self.source().each_line(|line| {
+            if let Some(r) = parse_line(line).filter(|r| r.day > 0) {
+                newest = newest.max(r.day);
+                oldest = if oldest == 0 {
+                    r.day
+                } else {
+                    oldest.min(r.day)
+                };
+            }
+        });
         if !self.counts.known {
-            let mut newest = saved.map_or(0, |s| s.day);
-            self.source().each_line(|line| {
-                if let Some(r) = parse_line(line) {
-                    newest = newest.max(r.day);
-                }
-            });
             day = day.max(newest);
         }
+        let first_real = if oldest == 0 { day } else { oldest };
         let mut c = Counts {
             day,
             known: true,
@@ -812,7 +824,7 @@ impl State {
         };
         self.source().each_line(|line| {
             let Some(r) = parse_line(line) else { return };
-            if r.day != day {
+            if (if r.day == 0 { first_real } else { r.day }) != day {
                 return;
             }
             if r.decision == decision::RAN || r.decision == decision::APPROVED {
@@ -826,7 +838,8 @@ impl State {
         });
         // The log may have rotated away some of the day; the counts file has not forgotten them. Take the larger.
         // A missing or unreadable file changes nothing: the recount stands.
-        if let Some(saved) = saved.filter(|saved| saved.day == day) {
+        let saved_day = |s: &SavedCounts| if s.day == 0 { first_real } else { s.day };
+        if let Some(saved) = saved.filter(|s| saved_day(s) == day) {
             c.actions = c.actions.max(saved.actions);
             c.costly = c.costly.max(saved.costly);
         }
