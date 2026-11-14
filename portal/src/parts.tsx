@@ -89,20 +89,6 @@ export function Field(props: { id: string; label: string; hint?: string; childre
   );
 }
 
-export function ConfirmBadge(props: { confirm: boolean }): JSX.Element {
-  return (
-    <span class={"badge" + (props.confirm ? " good" : "")}>{props.confirm ? "Asks you first" : "Runs right away"}</span>
-  );
-}
-
-export function OffBadge(props: { enabled: boolean }): JSX.Element | null {
-  return props.enabled ? null : <span class="badge bad">Off</span>;
-}
-
-export function go(tab: string): void {
-  location.hash = "#/" + tab;
-}
-
 /** Offer `text` to the browser as a file to save (no request is made). */
 export function saveFile(name: string, text: string): void {
   const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));

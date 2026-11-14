@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../api.ts";
-import { fail, say } from "../store.ts";
+import { attempt, say } from "../store.ts";
 
 /** What the speaker says to let someone hear a voice. */
 export const SAMPLE = "Hello. This is how I sound. I can set timers, answer questions and read you what comes in.";
@@ -30,12 +30,10 @@ export function VoiceControl(props: {
       });
   }, [props.off]);
   const sample = async () => {
-    try {
+    await attempt(async () => {
       await api("POST", "/api/speak", { text: SAMPLE, voice: props.value });
       say("Playing a sample. Listen for the speaker.");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const list = voices ? (voices.includes(props.value) || !props.value ? voices : [props.value, ...voices]) : null;
   return (

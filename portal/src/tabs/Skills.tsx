@@ -16,7 +16,7 @@ import {
   type SkillFile,
 } from "../forms.ts";
 import { Field, useBusy } from "../parts.tsx";
-import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
+import { attempt, change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { Skill } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
@@ -295,15 +295,13 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
 function SkillReview(props: { skill: Skill; onDone: () => void }): JSX.Element {
   const k = props.skill;
   const accept = async (alsoOn: boolean) => {
-    try {
+    await attempt(async () => {
       await api("POST", "/api/skills/accept", { name: k.name });
       if (alsoOn) await api("POST", "/api/skills/enabled", { name: k.name, enabled: true });
       await loadExt();
       say(alsoOn ? "Accepted and turned on." : "Accepted. Turn it on when you want it used.");
       props.onDone();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const remove = async () => {
     if (await ask("Delete the skill " + k.name + "?", "Delete"))
@@ -375,11 +373,9 @@ export function Skills(): JSX.Element {
   const setMany = async (list: Skill[], enabled: boolean) => {
     // A skill that has not been read and accepted cannot be turned on, so it is left alone here.
     const todo = list.filter((k) => k.enabled !== enabled && !(enabled && k.needs_review));
-    try {
+    await attempt(async () => {
       for (const k of todo) await api("POST", "/api/skills/enabled", { name: k.name, enabled });
-    } catch (x) {
-      fail(x);
-    }
+    });
     await loadExt();
     if (todo.length)
       say(todo.length + (todo.length === 1 ? " skill turned " : " skills turned ") + (enabled ? "on." : "off."));

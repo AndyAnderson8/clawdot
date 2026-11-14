@@ -21,7 +21,8 @@ export function snippets(
   tok: string | undefined,
   setup: string[],
 ): [string, string][] {
-  const url = base + "/hook/" + name;
+  const root = base.replace(/\/+$/, "");
+  const url = root + "/hook/" + name;
   const t = tok || "YOUR_TOKEN";
   const out: [string, string][] = [
     ["curl, from a terminal", `curl -X POST ${url} \\\n  -H 'Authorization: Bearer ${t}' \\\n  -d '${BODY}'`],
@@ -42,7 +43,7 @@ export function snippets(
   ];
   // The plain adapter's own lines are the curl example above. Any other adapter brings its set-up text from the
   // device (the same lines `clawdot --create-endpoint` prints), which is filled in here and not written again.
-  if (adapter !== GENERIC_ADAPTER) out.push(...adapterSnippets(setup, { public: base, endpoint: name, token: t }));
+  if (adapter !== GENERIC_ADAPTER) out.push(...adapterSnippets(setup, { public: root, endpoint: name, token: t }));
   return out;
 }
 

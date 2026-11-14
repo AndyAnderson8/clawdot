@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
-import { fail } from "../store.ts";
+import { attempt, fail } from "../store.ts";
 import { ago } from "../time.ts";
 import type { UpdateStatus } from "../types.ts";
 import { ask } from "../confirm.tsx";
@@ -66,13 +66,10 @@ export function Updates(): JSX.Element | null {
 
   const check = async () => {
     setChecking(true);
-    try {
+    await attempt(async () => {
       setU(await api<UpdateStatus>("POST", "/api/update/check"));
-    } catch (x) {
-      fail(x);
-    } finally {
-      setChecking(false);
-    }
+    });
+    setChecking(false);
   };
   const install = async () => {
     const v = u?.latest?.version;
@@ -86,11 +83,9 @@ export function Updates(): JSX.Element | null {
     );
     if (!sure) return;
     before.current = u.current;
-    try {
+    await attempt(async () => {
       setU(await api<UpdateStatus>("POST", "/api/update/apply", { version: v }));
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   if (missing) return null;

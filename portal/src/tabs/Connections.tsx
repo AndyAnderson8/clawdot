@@ -4,7 +4,7 @@ import { api, enc } from "../api.ts";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { connectionDefinition } from "../forms.ts";
 import { Field, useBusy } from "../parts.tsx";
-import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
+import { attempt, change, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { ConnectionTest, McpServer } from "../types.ts";
 import { Problems } from "./Tools.tsx";
 import { ask } from "../confirm.tsx";
@@ -113,24 +113,20 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
     };
 
   const check = async () => {
-    try {
+    await attempt(async () => {
       const r = await api<ConnectionTest>("POST", "/api/connections/test", def());
       setFound(r.tools.map((t) => t.name));
       setOff([]);
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const add = async () => {
     const ok = await change("POST", "/api/connections", def(), "");
     if (ok) {
       // Every tool comes in; the ones left unticked are switched off.
       for (const t of off) {
-        try {
+        await attempt(async () => {
           await api("POST", "/api/tools/" + enc(t) + "/enabled", { enabled: false });
-        } catch (x) {
-          fail(x);
-        }
+        });
       }
       await loadExt();
       say(found ? "Added. " + (found.length - off.length) + " of its " + found.length + " tools are on." : "Added.");

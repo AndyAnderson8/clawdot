@@ -1,7 +1,7 @@
 import type { JSX } from "preact";
 import { api } from "../api.ts";
 import { currentText } from "../forms.ts";
-import { adopt, fail, say, useApp } from "../store.ts";
+import { adopt, attempt, say, useApp } from "../store.ts";
 import type { Settings as SettingsData } from "../types.ts";
 
 interface Feature {
@@ -57,13 +57,11 @@ function FeatureCard(props: { f: Feature; s: SettingsData }): JSX.Element | null
   const on = currentText(s, f.key) === "true";
   const toggle = async (ev: Event) => {
     const next = (ev.currentTarget as HTMLInputElement).checked;
-    try {
+    await attempt(async () => {
       const saved = await api<SettingsData>("PUT", "/api/settings", { [f.key]: next });
       adopt(saved);
       say(f.title + (next ? " is on." : " is off."));
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const id = "feat-" + f.key;
   return (

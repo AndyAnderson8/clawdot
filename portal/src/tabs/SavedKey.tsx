@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { useBusy } from "../parts.tsx";
 import { api } from "../api.ts";
-import { fail } from "../store.ts";
+import { attempt } from "../store.ts";
 import { ask } from "../confirm.tsx";
 
 /**
@@ -56,14 +56,12 @@ export function SavedKey(props: {
   };
   const remove = async () => {
     if (!(await ask("Remove the saved key?", "Remove"))) return;
-    try {
+    await attempt(async () => {
       await api("DELETE", props.path);
       setLocal("");
       setMsg("");
       props.onChange?.("");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   return (
     <div class="srow" id={props.id + "row"}>

@@ -1,10 +1,10 @@
 import type { JSX } from "preact";
-import { useRef, useState } from "preact/hooks";
+import { useMemo, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { currentText, FROM, hintText, labelOf, settingsPatch, type SettingSpec, cents } from "../forms.ts";
 import { providerFor } from "../providers.ts";
 import { TimeField } from "../timefield.tsx";
-import { adopt, fail, say, useApp } from "../store.ts";
+import { attempt, adopt, fail, say, useApp } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
 import type { SettingField, Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
@@ -19,14 +19,18 @@ function browserZone(): string {
     return "";
   }
 }
+let zonesKnown: string[] | null | undefined;
+/** Every time zone the browser knows, listed once. Null where it cannot list them. */
 function zoneList(): string[] | null {
+  if (zonesKnown !== undefined) return zonesKnown;
+  zonesKnown = null;
   try {
     const l = Intl.supportedValuesOf("timeZone");
-    if (l.length) return ["UTC", ...l];
+    if (l.length) zonesKnown = ["UTC", ...l];
   } catch {
     /* an older browser: fall back to a text box */
   }
-  return null;
+  return zonesKnown;
 }
 
 /**
@@ -53,6 +57,8 @@ function Control(props: {
 }): JSX.Element {
   const { sp, field, id, saved, put, url, hasKey, keyRev, zones, browserZone, unfinished } = props;
   const v = props.value;
+  const zoneChoices = useMemo(() => (field.kind === "zone" && zones ? zoneOptions(zones) : []), [field.kind, zones]);
+  const languages = useMemo(() => (field.kind === "language" ? languageOptions(v) : []), [field.kind, v]);
   const input = (e: Event) => put((e.currentTarget as HTMLInputElement).value);
   if (sp.widget === "model") {
     // A provider that needs a key is asked for its models only once a key is in place.
@@ -74,7 +80,7 @@ function Control(props: {
   if (field.kind === "zone") {
     return zones ? (
       <select id={id} value={v} onChange={input}>
-        {zoneOptions(zones).map((z) => (
+        {zoneChoices.map((z) => (
           <option key={z.id} value={z.id}>
             {z.label}
           </option>
@@ -88,7 +94,7 @@ function Control(props: {
     return (
       <select id={id} value={v} disabled={sp.off} onChange={input}>
         <option value="">Detect it automatically</option>
-        {languageOptions(v).map((l) => (
+        {languages.map((l) => (
           <option key={l.code} value={l.code}>
             {l.label}
           </option>
@@ -208,9 +214,11 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
   const current: Record<string, string> = {};
   const start0: Record<string, string> = {};
   const hints: Record<string, string> = {};
-  const zones: string[] = [];
   const bz = browserZone();
   const zs = zoneList();
+  const zoneSpec = specs.find((sp) => settings.fields[sp.key]?.kind === "zone");
+  const zoneNow = zoneSpec ? currentText(settings, zoneSpec.key) : "";
+  const zones = useMemo(() => (zs ? (zs.includes(zoneNow) ? zs : [zoneNow, ...zs]) : null), [zs, zoneNow]);
   for (const sp of specs) {
     const f = settings.fields[sp.key];
     if (!f) continue;
@@ -219,7 +227,6 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
     start0[sp.key] = cur;
     hints[sp.key] = hintText(sp, f);
     if (f.kind === "zone" && zs) {
-      zones.push(...(zs.includes(cur) ? zs : [cur, ...zs]));
       if (f.source === "default" && bz && zs.includes(bz)) {
         start0[sp.key] = bz;
         hints[sp.key] =
@@ -279,7 +286,7 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
       "Reset them",
     );
     if (!sure) return;
-    try {
+    await attempt(async () => {
       const next = await api<SettingsData>(
         "PUT",
         "/api/settings",
@@ -288,9 +295,7 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
       adopt(next);
       props.onSaved();
       say("Back to the defaults.");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   return (
@@ -341,7 +346,7 @@ function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
                 url={vals["llm_url"] ?? ""}
                 hasKey={settings.llm?.key_present === true}
                 keyRev={keyRev}
-                zones={zs ? zones : null}
+                zones={zones}
                 browserZone={bz}
                 unfinished={(yes) => setHalfTimes((h) => (h[sp.key] === yes ? h : { ...h, [sp.key]: yes }))}
               />

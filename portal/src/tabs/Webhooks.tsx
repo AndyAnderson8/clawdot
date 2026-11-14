@@ -5,11 +5,11 @@ import { useState } from "preact/hooks";
 import { api, ApiError, enc } from "../api.ts";
 import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
 import { CopyButton, useBusy } from "../parts.tsx";
-import { fail, get, load, say, set, sv, useApp } from "../store.ts";
+import { attempt, fail, get, load, say, set, sv, useApp } from "../store.ts";
 import type { Endpoint, WebhookToken } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
-const base = () => String(sv("public_url") || location.origin);
+const base = () => String(sv("public_url") || location.origin).replace(/\/+$/, "");
 
 function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void }) {
   const { e } = props;
@@ -22,28 +22,24 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
       "Make a new token",
     );
     if (!sure) return;
-    try {
+    await attempt(async () => {
       const r = await api<WebhookToken>("POST", "/api/endpoints/" + enc(e.name) + "/rotate");
       set({ fresh: { ...get().fresh, [e.name]: r.token } });
       say("New token made. Copy it now; it is shown once.");
       props.setOpen(true);
       await load();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const remove = async () => {
     if (!(await ask("Remove the webhook " + e.name + "? Anything sending to it will be turned away.", "Remove")))
       return;
-    try {
+    await attempt(async () => {
       await api("DELETE", "/api/endpoints/" + enc(e.name));
       const { [e.name]: _gone, ...rest } = get().fresh;
       set({ fresh: rest });
       say("Deleted.");
       await load();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   const [renaming, setRenaming] = useState(false);
@@ -162,7 +158,7 @@ export function Webhooks(): JSX.Element {
   const create = async (ev: Event) => {
     ev.preventDefault();
     await run(async () => {
-      try {
+      await attempt(async () => {
         const body: Record<string, string> = { name: name.trim(), adapter };
         if (spokenName.trim()) body["spoken_name"] = spokenName.trim();
         const r = await api<WebhookToken>("POST", "/api/endpoints", body);
@@ -174,9 +170,7 @@ export function Webhooks(): JSX.Element {
         say("Created. Copy the token now; it is shown once.");
         await load();
         document.getElementById("snip-" + r.name)?.scrollIntoView({ block: "center" });
-      } catch (x) {
-        fail(x);
-      }
+      });
     });
   };
 

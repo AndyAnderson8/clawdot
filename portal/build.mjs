@@ -20,6 +20,7 @@ const js = await esbuild.build({
   jsx: "automatic",
   jsxImportSource: "preact",
   legalComments: "none",
+  banner: { js: "/*! Preact, (c) Jason Miller, MIT License: https://github.com/preactjs/preact */" },
   write: false,
   define: { "process.env.NODE_ENV": '"production"' },
   logLevel: "warning",

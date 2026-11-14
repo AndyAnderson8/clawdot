@@ -58,7 +58,7 @@ export async function createContext(chrome: string): Promise<Ctx> {
   async function open(mode: "setup" | "password" | "open", hash = "", extra: Record<string, unknown> = {}) {
     // Start from a clean browser session on the device's origin, then a clean device.
     await b.goto(mock.url + "/api/auth");
-    await b.ev("sessionStorage.clear()");
+    await b.ev("sessionStorage.clear(); localStorage.clear()");
     mock.reset(mode);
     for (const [k, v] of Object.entries(extra)) {
       const have = mock.state[k];

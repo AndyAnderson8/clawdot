@@ -4,7 +4,7 @@ import { api, ApiError } from "../api.ts";
 import { parseSettingsFile, settingsChanges, type SettingChange } from "../forms.ts";
 import { saveFile } from "../parts.tsx";
 import { Updates } from "./Updates.tsx";
-import { adopt, fail, get, say, useApp } from "../store.ts";
+import { attempt, adopt, fail, get, say, useApp } from "../store.ts";
 import type { About as AboutData, Settings } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
@@ -27,13 +27,11 @@ export function About(): JSX.Element {
   }, []);
 
   const exportSettings = async () => {
-    try {
+    await attempt(async () => {
       const doc = await api<unknown>("GET", "/api/settings/export");
       saveFile("clawdot-settings.json", JSON.stringify(doc, null, 2));
       say("Saved your settings. The file holds no passwords or keys.");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const resetAll = async () => {
     const saved = Object.entries(get().settings?.fields ?? {}).filter(([, f]) => f.saved);
@@ -48,13 +46,11 @@ export function About(): JSX.Element {
       "Reset them",
     );
     if (!sure) return;
-    try {
+    await attempt(async () => {
       const next = await api<Settings>("PUT", "/api/settings", Object.fromEntries(saved.map(([k]) => [k, null])));
       adopt(next, true);
       say("All settings are back to their defaults.");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const choose = async (ev: Event) => {
     const input = ev.currentTarget as HTMLInputElement;

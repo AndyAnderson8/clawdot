@@ -2,7 +2,7 @@ import { Fragment, type JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, keep, ApiError } from "../api.ts";
 import { restartText, type SettingSpec } from "../forms.ts";
-import { fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
+import { attempt, fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
 import { zoneName } from "../time.ts";
 import type { HardwareInfo, Settings as SettingsData } from "../types.ts";
 import { About } from "./About.tsx";
@@ -57,10 +57,6 @@ const LIMITS: Spec = [
     hint: "A tool that has not answered by then counts as failed.",
   },
 ];
-
-function ThemesSection(): JSX.Element {
-  return <Themes />;
-}
 
 function General(props: { s: SettingsData }): JSX.Element {
   return (
@@ -129,13 +125,11 @@ function KeyRow(props: {
   };
   const remove = async () => {
     if (!(await ask("Remove the saved key? The assistant will stop answering until you add one.", "Remove"))) return;
-    try {
+    await attempt(async () => {
       await api("DELETE", "/api/llm/key");
       setMsg("");
       await keyChanged();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const showing = hint && !replacing;
   return (
@@ -510,10 +504,6 @@ function SkillsSection(): JSX.Element {
   );
 }
 
-function MemorySection(): JSX.Element {
-  return <Notes />;
-}
-
 function Security(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
@@ -620,14 +610,6 @@ function Security(): JSX.Element {
   );
 }
 
-function AboutSection(): JSX.Element {
-  return (
-    <>
-      <About />
-    </>
-  );
-}
-
 interface Section {
   id: string;
   label: string;
@@ -643,13 +625,13 @@ interface Section {
 const GROUPS = ["Basics", "Assistant", "Integrations", "System"] as const;
 export const SECTIONS: [Section, ...Section[]] = [
   { id: "general", label: "General", group: "Basics", view: General },
-  { id: "themes", label: "Themes", group: "Basics", view: ThemesSection },
+  { id: "themes", label: "Themes", group: "Basics", view: Themes },
   { id: "features", label: "Features", group: "Basics", view: FeaturesSection },
   { id: "assistant", label: "Assistant", group: "Assistant", view: Assistant },
   { id: "voice", label: "Voice", group: "Assistant", view: VoiceSection },
   { id: "tools", label: "Tools", group: "Assistant", view: ToolsSection },
   { id: "skills", label: "Skills", group: "Assistant", view: SkillsSection },
-  { id: "memory", label: "Memory", group: "Assistant", view: MemorySection },
+  { id: "memory", label: "Memory", group: "Assistant", view: Notes },
   { id: "media", label: "Media", group: "Integrations", view: MediaSettings },
   {
     id: "lights",
@@ -660,7 +642,7 @@ export const SECTIONS: [Section, ...Section[]] = [
     why: "No light ring was found on this device, so these settings would do nothing here.",
   },
   { id: "webhooks", label: "Webhooks", group: "Integrations", view: Notifications },
-  { id: "speakers", label: "Speakers", group: "Integrations", view: () => <Speakers /> },
+  { id: "speakers", label: "Speakers", group: "Integrations", view: Speakers },
   {
     id: "homeassistant",
     label: "Home Assistant",
@@ -695,7 +677,7 @@ export const SECTIONS: [Section, ...Section[]] = [
     planned: true,
   },
   { id: "security", label: "Security", group: "System", view: Security },
-  { id: "about", label: "About", group: "System", view: AboutSection },
+  { id: "about", label: "About", group: "System", view: About },
 ];
 
 /** The sections to list: those the device can use, and the rest only when asked for. */
