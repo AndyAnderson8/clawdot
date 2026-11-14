@@ -1244,39 +1244,14 @@ fn bytes(file: &[u8], b: Bytes) -> Result<&[u8]> {
     .ok_or(Error::Malformed("constant range"))
 }
 
+fn overlap() -> Error {
+    Error::Invalid("operator ranges overlap".into())
+}
+
 fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) -> Result<()> {
-    let overlap = || Error::Invalid("operator ranges overlap".into());
     match step {
-        Step::Conv(c) => {
-            let [i, o, ..] = carve(arena, &[&c.input, &c.output]).ok_or_else(overlap)?;
-            let filter = bytes(file, c.filter)?;
-            let bias = match c.bias {
-                Some(b) => bytes(file, b)?,
-                None => &[],
-            };
-            if c.depthwise {
-                depthwise_conv2d(&c.geometry, &c.quant, i, filter, bias, o);
-            } else {
-                conv2d(&c.geometry, &c.quant, i, filter, bias, o);
-            }
-        }
-        Step::Fc(f) => {
-            let [i, o, ..] = carve(arena, &[&f.input, &f.output]).ok_or_else(overlap)?;
-            let bias = match f.bias {
-                Some(b) => bytes(file, b)?,
-                None => &[],
-            };
-            fully_connected(
-                f.batches,
-                f.depth,
-                f.out_c,
-                &f.quant,
-                i,
-                bytes(file, f.weights)?,
-                bias,
-                o,
-            );
-        }
+        Step::Conv(c) => run_conv(c, file, arena)?,
+        Step::Fc(f) => run_fc(f, file, arena)?,
         Step::Copy { src, dst } => {
             let [s, d, ..] = carve(arena, &[src, dst]).ok_or_else(overlap)?;
             if s.len() != d.len() {
@@ -1288,79 +1263,13 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
             inputs,
             output,
             outer,
-        } => {
-            let n = inputs.len();
-            let mut ranges: [&Range<usize>; 2 * FAN] = [output; 2 * FAN];
-            for (slot, (r, _)) in ranges.iter_mut().zip(inputs.iter()) {
-                *slot = r;
-            }
-            ranges[n] = output;
-            let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
-            let total: usize = inputs.iter().map(|(_, c)| *c).sum();
-            // The inputs come first in the array order asked for, the output after them.
-            let (ins, rest) = slots.split_at_mut(n);
-            let out = rest.first_mut().ok_or_else(overlap)?;
-            for o in 0..*outer {
-                let mut at = o * total;
-                for (k, (_, chunk)) in inputs.iter().enumerate() {
-                    let src = ins
-                        .get(k)
-                        .and_then(|s| s.get(o * chunk..(o + 1) * chunk))
-                        .ok_or_else(overlap)?;
-                    out.get_mut(at..at + chunk)
-                        .ok_or_else(overlap)?
-                        .copy_from_slice(src);
-                    at += chunk;
-                }
-            }
-        }
+        } => run_concat(inputs, output, *outer, arena)?,
         Step::Split {
             input,
             outputs,
             outer,
-        } => {
-            let n = outputs.len();
-            let mut ranges: [&Range<usize>; 2 * FAN] = [input; 2 * FAN];
-            for (slot, (r, _)) in ranges.iter_mut().skip(1).zip(outputs.iter()) {
-                *slot = r;
-            }
-            let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
-            let total: usize = outputs.iter().map(|(_, c)| *c).sum();
-            let (head, outs) = slots.split_at_mut(1);
-            let inp = head.first().ok_or_else(overlap)?;
-            for o in 0..*outer {
-                let mut at = o * total;
-                for (k, (_, chunk)) in outputs.iter().enumerate() {
-                    let src = inp.get(at..at + chunk).ok_or_else(overlap)?;
-                    outs.get_mut(k)
-                        .and_then(|s| s.get_mut(o * chunk..(o + 1) * chunk))
-                        .ok_or_else(overlap)?
-                        .copy_from_slice(src);
-                    at += chunk;
-                }
-            }
-        }
-        Step::Slice(s) => {
-            let [i, o, ..] = carve(arena, &[&s.input, &s.output]).ok_or_else(overlap)?;
-            let mut at = 0usize;
-            for a in 0..s.out_shape[0] {
-                for b in 0..s.out_shape[1] {
-                    for c in 0..s.out_shape[2] {
-                        for d in 0..s.out_shape[3] {
-                            let idx = [a, b, c, d];
-                            let mut off = 0usize;
-                            #[allow(clippy::needless_range_loop)]
-                            for ax in 0..4 {
-                                off = off * s.in_shape[ax] + s.begin[ax] + idx[ax] * s.stride[ax];
-                            }
-                            *o.get_mut(at).ok_or_else(overlap)? =
-                                *i.get(off).ok_or_else(overlap)?;
-                            at += 1;
-                        }
-                    }
-                }
-            }
-        }
+        } => run_split(input, outputs, *outer, arena)?,
+        Step::Slice(s) => run_slice(s, arena)?,
         Step::Logistic {
             input,
             output,
@@ -1402,6 +1311,124 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
                 return Err(overlap());
             }
             v.copy_from_slice(s);
+        }
+    }
+    Ok(())
+}
+
+fn run_conv(c: &Conv, file: &[u8], arena: &mut [i8]) -> Result<()> {
+    let [i, o, ..] = carve(arena, &[&c.input, &c.output]).ok_or_else(overlap)?;
+    let filter = bytes(file, c.filter)?;
+    let bias = match c.bias {
+        Some(b) => bytes(file, b)?,
+        None => &[],
+    };
+    if c.depthwise {
+        depthwise_conv2d(&c.geometry, &c.quant, i, filter, bias, o);
+    } else {
+        conv2d(&c.geometry, &c.quant, i, filter, bias, o);
+    }
+    Ok(())
+}
+
+fn run_fc(f: &Fc, file: &[u8], arena: &mut [i8]) -> Result<()> {
+    let [i, o, ..] = carve(arena, &[&f.input, &f.output]).ok_or_else(overlap)?;
+    let bias = match f.bias {
+        Some(b) => bytes(file, b)?,
+        None => &[],
+    };
+    fully_connected(
+        f.batches,
+        f.depth,
+        f.out_c,
+        &f.quant,
+        i,
+        bytes(file, f.weights)?,
+        bias,
+        o,
+    );
+    Ok(())
+}
+
+fn run_concat(
+    inputs: &[(Range<usize>, usize)],
+    output: &Range<usize>,
+    outer: usize,
+    arena: &mut [i8],
+) -> Result<()> {
+    let n = inputs.len();
+    let mut ranges: [&Range<usize>; 2 * FAN] = [output; 2 * FAN];
+    for (slot, (r, _)) in ranges.iter_mut().zip(inputs.iter()) {
+        *slot = r;
+    }
+    ranges[n] = output;
+    let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
+    let total: usize = inputs.iter().map(|(_, c)| *c).sum();
+    // The inputs come first in the array order asked for, the output after them.
+    let (ins, rest) = slots.split_at_mut(n);
+    let out = rest.first_mut().ok_or_else(overlap)?;
+    for o in 0..outer {
+        let mut at = o * total;
+        for (k, (_, chunk)) in inputs.iter().enumerate() {
+            let src = ins
+                .get(k)
+                .and_then(|s| s.get(o * chunk..(o + 1) * chunk))
+                .ok_or_else(overlap)?;
+            out.get_mut(at..at + chunk)
+                .ok_or_else(overlap)?
+                .copy_from_slice(src);
+            at += chunk;
+        }
+    }
+    Ok(())
+}
+
+fn run_split(
+    input: &Range<usize>,
+    outputs: &[(Range<usize>, usize)],
+    outer: usize,
+    arena: &mut [i8],
+) -> Result<()> {
+    let n = outputs.len();
+    let mut ranges: [&Range<usize>; 2 * FAN] = [input; 2 * FAN];
+    for (slot, (r, _)) in ranges.iter_mut().skip(1).zip(outputs.iter()) {
+        *slot = r;
+    }
+    let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
+    let total: usize = outputs.iter().map(|(_, c)| *c).sum();
+    let (head, outs) = slots.split_at_mut(1);
+    let inp = head.first().ok_or_else(overlap)?;
+    for o in 0..outer {
+        let mut at = o * total;
+        for (k, (_, chunk)) in outputs.iter().enumerate() {
+            let src = inp.get(at..at + chunk).ok_or_else(overlap)?;
+            outs.get_mut(k)
+                .and_then(|s| s.get_mut(o * chunk..(o + 1) * chunk))
+                .ok_or_else(overlap)?
+                .copy_from_slice(src);
+            at += chunk;
+        }
+    }
+    Ok(())
+}
+
+fn run_slice(s: &Slice, arena: &mut [i8]) -> Result<()> {
+    let [i, o, ..] = carve(arena, &[&s.input, &s.output]).ok_or_else(overlap)?;
+    let mut at = 0usize;
+    for a in 0..s.out_shape[0] {
+        for b in 0..s.out_shape[1] {
+            for c in 0..s.out_shape[2] {
+                for d in 0..s.out_shape[3] {
+                    let idx = [a, b, c, d];
+                    let mut off = 0usize;
+                    #[allow(clippy::needless_range_loop)]
+                    for ax in 0..4 {
+                        off = off * s.in_shape[ax] + s.begin[ax] + idx[ax] * s.stride[ax];
+                    }
+                    *o.get_mut(at).ok_or_else(overlap)? = *i.get(off).ok_or_else(overlap)?;
+                    at += 1;
+                }
+            }
         }
     }
     Ok(())
