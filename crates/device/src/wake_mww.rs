@@ -151,6 +151,13 @@ impl MwwEngine {
         self.engine.memory_bytes()
     }
 
+    /// How many inferences failed to run, over all words. Zero for a healthy model; a count that keeps rising
+    /// means a word that can never fire.
+    #[must_use]
+    pub fn faults(&self) -> u64 {
+        self.engine.faults()
+    }
+
     /// The cutoff currently in force for a word.
     #[must_use]
     pub fn cutoff(&self, word: WordId) -> Option<f32> {
@@ -223,6 +230,25 @@ pub struct MwwSink {
     engine: MwwEngine,
     scratch: Vec<Detection>,
     name: String,
+    fault_report: FaultReport,
+}
+
+/// Decides when a rising fault count is worth a log line: the first failure, then each time the total has at
+/// least doubled since the last report, so a broken model is noticed without flooding the log.
+#[derive(Debug, Default)]
+struct FaultReport {
+    next: u64,
+}
+
+impl FaultReport {
+    /// `Some(total)` when `total` should be reported now.
+    fn check(&mut self, total: u64) -> Option<u64> {
+        if total == 0 || total < self.next {
+            return None;
+        }
+        self.next = total.saturating_mul(2);
+        Some(total)
+    }
 }
 
 impl MwwSink {
@@ -239,6 +265,7 @@ impl MwwSink {
             engine,
             scratch: Vec::new(),
             name,
+            fault_report: FaultReport::default(),
         }
     }
 }
@@ -251,6 +278,11 @@ impl clawdot_satellite::front::WakeSink for MwwSink {
     fn feed(&mut self, pcm: &[i16]) -> Option<String> {
         self.scratch.clear();
         self.engine.process(pcm, &mut self.scratch);
+        if let Some(n) = self.fault_report.check(self.engine.faults()) {
+            eprintln!(
+                "clawdot-device: the wake word model failed to run {n} time(s); a word may never fire"
+            );
+        }
         let d = self.scratch.first()?;
         self.engine
             .words()
@@ -450,6 +482,32 @@ mod tests {
         let e = load_word(WordId(1), &dir.join("w.tflite"), "Apache-2.0").unwrap_err();
         assert!(e.contains("w.json"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn req_dev_025_engine_faults_are_reported_on_the_first_failure_and_each_doubling() {
+        let mut r = FaultReport::default();
+        assert_eq!(r.check(0), None, "a healthy model says nothing");
+        assert_eq!(r.check(1), Some(1));
+        assert_eq!(r.check(1), None, "the same count is not reported twice");
+        assert_eq!(r.check(2), Some(2));
+        assert_eq!(r.check(3), None);
+        assert_eq!(r.check(4), Some(4));
+        assert_eq!(r.check(1_000), Some(1_000), "a jump is reported once");
+        assert_eq!(
+            r.check(1_001),
+            None,
+            "a steady trickle does not flood the log"
+        );
+    }
+
+    #[test]
+    fn req_dev_025_a_healthy_engine_reports_no_faults() {
+        let mut sink = MwwSink::new(engine());
+        for c in pcm("phrase_a.s16").chunks(320) {
+            sink.feed(c);
+        }
+        assert_eq!(sink.engine.faults(), 0);
     }
 
     #[test]

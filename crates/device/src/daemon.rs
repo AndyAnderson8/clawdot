@@ -620,14 +620,39 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Open a connection to the core within `timeout`. The plain `TcpStream::connect` waits for the system's own
 /// limit (about two minutes for an address that never answers), during which stop, mute, the LEDs and tones would
-/// not be served (REQ-DEV-020). Name resolution is the system's and has no limit here.
+/// not be served (REQ-DEV-020). Name resolution is the system's and cannot be interrupted, so it runs on its own
+/// thread and is given the same `timeout`; a resolver that never answers leaves that one thread behind, not the
+/// daemon.
 ///
 /// # Errors
 /// The address does not resolve, or no address answered in time; the text names the address.
 pub fn connect_core(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
-    let addrs = addr
-        .to_socket_addrs()
-        .map_err(|e| format!("cannot resolve {addr}: {e}"))?;
+    connect_with(addr, timeout, |a| {
+        a.to_socket_addrs().map(Iterator::collect)
+    })
+}
+
+/// [`connect_core`] with the name lookup given, so a lookup that hangs can be tested.
+fn connect_with(
+    addr: &str,
+    timeout: Duration,
+    resolve: impl FnOnce(&str) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
+) -> Result<TcpStream, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = addr.to_owned();
+    thread::spawn(move || {
+        // The receiver is gone if the caller gave up; nothing to do then.
+        let _ = tx.send(resolve(&name));
+    });
+    let addrs = match rx.recv_timeout(timeout) {
+        Ok(found) => found.map_err(|e| format!("cannot resolve {addr}: {e}"))?,
+        Err(_) => {
+            return Err(format!(
+                "cannot resolve {addr}: no answer within {} ms",
+                timeout.as_millis()
+            ));
+        }
+    };
     let mut last = format!("{addr} has no address");
     for a in addrs {
         match TcpStream::connect_timeout(&a, timeout) {
@@ -641,4 +666,39 @@ pub fn connect_core(addr: &str, timeout: Duration) -> Result<TcpStream, String> 
 /// Sleep the real way.
 pub fn real_sleep(d: Duration) {
     thread::sleep(d);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn req_dev_020_a_name_lookup_that_never_answers_does_not_hold_the_daemon() {
+        let started = Instant::now();
+        let r = connect_with("core.invalid:1", Duration::from_millis(100), |_| {
+            thread::sleep(Duration::from_secs(5));
+            Ok(Vec::new())
+        });
+        let e = r.unwrap_err();
+        assert!(
+            e.contains("core.invalid:1") && e.contains("no answer"),
+            "{e}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn req_dev_020_a_lookup_error_names_the_address() {
+        let r = connect_with("core.invalid:1", Duration::from_secs(1), |_| {
+            Err(std::io::Error::other("nope"))
+        });
+        assert!(
+            r.unwrap_err()
+                .contains("cannot resolve core.invalid:1: nope")
+        );
+    }
 }
