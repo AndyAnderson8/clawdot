@@ -505,50 +505,51 @@ impl StreamAccumulator {
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 for c in calls {
-                    let id = c
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .filter(|i| !i.is_empty());
-                    let name = c.pointer("/function/name").and_then(Value::as_str);
-                    let args = c.pointer("/function/arguments").and_then(Value::as_str);
-                    let index = match c
-                        .get("index")
-                        .and_then(Value::as_u64)
-                        .and_then(|i| usize::try_from(i).ok())
-                    {
-                        Some(i) => i,
-                        // No index: the chunk belongs to the newest call, unless it opens another one
-                        // (a new id, or a second name).
-                        None => self.calls.iter().next_back().map_or(0, |(i, last)| {
-                            let new_id = id.is_some_and(|id| !last.id.is_empty() && id != last.id);
-                            let new_name = name
-                                .is_some_and(|n| !n.is_empty() && !last.name.is_empty())
-                                && id.is_none_or(|id| id != last.id);
-                            if new_id || new_name { i + 1 } else { *i }
-                        }),
-                    };
-                    if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
-                        return Err(LlmError::Malformed("too many tool calls".into()));
-                    }
-                    self.keep(
-                        id.map_or(0, str::len)
-                            + name.map_or(0, str::len)
-                            + args.map_or(0, str::len),
-                    )?;
-                    let p = self.calls.entry(index).or_default();
-                    if let Some(id) = id {
-                        p.id = id.to_owned();
-                    }
-                    if let Some(name) = name {
-                        p.name.push_str(name);
-                    }
-                    if let Some(args) = args {
-                        p.arguments.push_str(args);
-                    }
+                    self.feed_tool_call(c)?;
                 }
             }
         }
         Ok(events)
+    }
+
+    /// Add one streamed tool-call fragment to the call it belongs to.
+    fn feed_tool_call(&mut self, c: &Value) -> Result<(), LlmError> {
+        let id = c
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|i| !i.is_empty());
+        let name = c.pointer("/function/name").and_then(Value::as_str);
+        let args = c.pointer("/function/arguments").and_then(Value::as_str);
+        let index = match c
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|i| usize::try_from(i).ok())
+        {
+            Some(i) => i,
+            // No index: the chunk belongs to the newest call, unless it opens another one
+            // (a new id, or a second name).
+            None => self.calls.iter().next_back().map_or(0, |(i, last)| {
+                let new_id = id.is_some_and(|id| !last.id.is_empty() && id != last.id);
+                let new_name = name.is_some_and(|n| !n.is_empty() && !last.name.is_empty())
+                    && id.is_none_or(|id| id != last.id);
+                if new_id || new_name { i + 1 } else { *i }
+            }),
+        };
+        if !self.calls.contains_key(&index) && self.calls.len() >= MAX_STREAMED_CALLS {
+            return Err(LlmError::Malformed("too many tool calls".into()));
+        }
+        self.keep(id.map_or(0, str::len) + name.map_or(0, str::len) + args.map_or(0, str::len))?;
+        let p = self.calls.entry(index).or_default();
+        if let Some(id) = id {
+            p.id = id.to_owned();
+        }
+        if let Some(name) = name {
+            p.name.push_str(name);
+        }
+        if let Some(args) = args {
+            p.arguments.push_str(args);
+        }
+        Ok(())
     }
 
     /// Count `n` more bytes kept, failing once a response is larger than any sane reply.
