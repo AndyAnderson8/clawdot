@@ -335,6 +335,21 @@ impl Client {
         self.key.clone()
     }
 
+    /// The error for a non-success status. The body is JSON with a message; that is shown, never anything else.
+    fn failure(&self, status: u16, body: &[u8], key: &str) -> ProviderError {
+        let msg = serde_json::from_slice::<Value>(body)
+            .ok()
+            .map(|v| self.wire.error_message(&v))
+            .unwrap_or_default();
+        // A server that echoes the Authorization header must not put the key on the status page.
+        let msg = crate::transport::scrub(&msg, key, 200);
+        let text = self.wire.failure(status, &msg);
+        match status {
+            401 | 403 => ProviderError::Unauthorized(text),
+            _ => ProviderError::Other(text),
+        }
+    }
+
     /// Send `call` and return the answer's body.
     ///
     /// # Errors
@@ -384,18 +399,7 @@ impl Client {
             if status.is_success() {
                 Ok(all)
             } else {
-                // Provider error bodies are JSON with a message; show that, never anything else.
-                let msg = serde_json::from_slice::<Value>(&all)
-                    .ok()
-                    .map(|v| self.wire.error_message(&v))
-                    .unwrap_or_default();
-                // A server that echoes the Authorization header must not put the key on the status page.
-                let msg = crate::transport::scrub(&msg, &key, 200);
-                let text = self.wire.failure(status.as_u16(), &msg);
-                Err(match status.as_u16() {
-                    401 | 403 => ProviderError::Unauthorized(text),
-                    _ => ProviderError::Other(text),
-                })
+                Err(self.failure(status.as_u16(), &all, &key))
             }
         };
         timeout(self.deadline, work).await.map_err(|_| {
