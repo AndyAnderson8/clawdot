@@ -22,6 +22,12 @@ use std::time::{Duration, Instant};
 
 /// Volume change per button press, percent.
 const VOLUME_STEP: u8 = 10;
+/// The most a volume or duck level can be, percent.
+const MAX_PERCENT: u8 = 100;
+/// How often the daemon serves its buttons and LEDs while it waits to reconnect.
+const PUMP_STEP: Duration = Duration::from_millis(50);
+/// Volume ceiling in quiet hours when `--quiet-volume` is not given, percent.
+const DEFAULT_QUIET_VOLUME_PCT: u8 = 20;
 
 /// An output that applies a volume and a duck level in software, to the daemon's own audio only.
 #[derive(Debug)]
@@ -36,8 +42,8 @@ impl<O: AudioOut> GainOut<O> {
     pub fn new(inner: O) -> Self {
         Self {
             inner,
-            volume: 100,
-            duck: 100,
+            volume: MAX_PERCENT,
+            duck: MAX_PERCENT,
         }
     }
 
@@ -89,11 +95,11 @@ impl<O: AudioOut> AudioOut for GainOut<O> {
     }
 
     fn duck(&mut self, level: u8) {
-        self.duck = level.min(100);
+        self.duck = level.min(MAX_PERCENT);
     }
 
     fn set_volume(&mut self, level: u8) {
-        self.volume = level.min(100);
+        self.volume = level.min(MAX_PERCENT);
     }
 }
 
@@ -233,7 +239,7 @@ impl DaemonDevice {
             trigger: tx,
             name: parts.name,
             problems: parts.problems,
-            requested_volume: 100,
+            requested_volume: MAX_PERCENT,
             muted: false,
             pending_mute: None,
             playing: false,
@@ -363,7 +369,9 @@ impl DaemonDevice {
             }
             Action::VolumeUp | Action::VolumeDown => {
                 self.requested_volume = if a == Action::VolumeUp {
-                    self.requested_volume.saturating_add(VOLUME_STEP).min(100)
+                    self.requested_volume
+                        .saturating_add(VOLUME_STEP)
+                        .min(MAX_PERCENT)
                 } else {
                     self.requested_volume.saturating_sub(VOLUME_STEP)
                 };
@@ -470,7 +478,7 @@ impl Device for DaemonDevice {
     }
 
     fn set_volume(&mut self, level: u8) {
-        self.requested_volume = level.min(100);
+        self.requested_volume = level.min(MAX_PERCENT);
         self.apply_volume();
     }
 
@@ -590,7 +598,7 @@ pub fn run_forever(
             if device.finished() {
                 return Ok(last);
             }
-            let step = Duration::from_millis(50);
+            let step = PUMP_STEP;
             sleep(step);
             waited += step;
         }
@@ -609,7 +617,13 @@ pub fn quiet_policy(
     board_quiet_led_pct: u8,
 ) -> Result<QuietPolicy, String> {
     let hours = window
-        .map(|w| QuietHours::parse(w, volume.unwrap_or(20), board_quiet_led_pct))
+        .map(|w| {
+            QuietHours::parse(
+                w,
+                volume.unwrap_or(DEFAULT_QUIET_VOLUME_PCT),
+                board_quiet_led_pct,
+            )
+        })
         .transpose()
         .map_err(|e| format!("--quiet: {e}"))?;
     Ok(QuietPolicy::new(hours))

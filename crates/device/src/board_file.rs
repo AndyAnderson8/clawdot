@@ -11,6 +11,16 @@ use std::fmt;
 /// The schema version this loader understands.
 pub const SCHEMA_VERSION: u64 = 1;
 
+/// Defaults the schema documents for a board file that leaves them out.
+/// Press time that makes a long press, in milliseconds.
+pub const DEFAULT_LONG_PRESS_MS: u32 = 700;
+/// Two presses within this many milliseconds make a double press.
+pub const DEFAULT_DOUBLE_PRESS_MS: u32 = 350;
+/// LED brightness in normal hours, percent.
+pub const DEFAULT_LED_BRIGHTNESS_PCT: u8 = 100;
+/// LED brightness in quiet hours, percent.
+pub const DEFAULT_LED_QUIET_BRIGHTNESS_PCT: u8 = 10;
+
 /// Why a board file was refused. `key` is the dotted path of the offending key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardError {
@@ -232,8 +242,8 @@ pub struct Gestures {
 impl Default for Gestures {
     fn default() -> Self {
         Self {
-            long_press_ms: 700,
-            double_press_ms: 350,
+            long_press_ms: DEFAULT_LONG_PRESS_MS,
+            double_press_ms: DEFAULT_DOUBLE_PRESS_MS,
         }
     }
 }
@@ -957,7 +967,7 @@ fn parse_leds(v: &Value) -> Res<LedSpec> {
         .transpose()?;
     let brightness_pct = match o.opt("brightness_pct") {
         Some(b) => int(b, "leds.brightness_pct", 0, 100)? as u8,
-        None => 100,
+        None => DEFAULT_LED_BRIGHTNESS_PCT,
     };
     let quiet_brightness_pct = match o.opt("quiet_brightness_pct") {
         Some(b) => int(b, "leds.quiet_brightness_pct", 0, 100)? as u8,

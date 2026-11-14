@@ -3,7 +3,7 @@
 //! What the daemon declares is what the board file allows **and** what this build implements. A capability that
 //! is absent is declared absent with its documented equivalent; nothing is faked (REQ-DEV-013).
 
-use crate::board_file::{BoardFile, DuckKind, MuteKind, UpdateMode};
+use crate::board_file::{BoardFile, ButtonSource, DuckKind, LedDriverKind, MuteKind, UpdateMode};
 use clawdot_protocol::message::{AudioCodec, Capabilities};
 
 /// What this build of the daemon implements. Raised as features are added; a board file cannot declare more.
@@ -33,6 +33,29 @@ impl Build {
         bluetooth: false,
         spotify_connect: false,
     };
+
+    /// Whether this build can drive the board's LEDs. The one place that decides it: the capability model and the
+    /// board assembly both ask here, so what is declared is what is built.
+    #[must_use]
+    pub fn drives_leds(&self, board: &BoardFile) -> bool {
+        board
+            .leds
+            .as_ref()
+            .is_some_and(|l| l.driver == LedDriverKind::Console)
+            && self.console_leds
+    }
+
+    /// Whether this build can read every button the board declares (and there is at least one). The one place
+    /// that decides it.
+    #[must_use]
+    pub fn reads_buttons(&self, board: &BoardFile) -> bool {
+        !board.buttons.is_empty()
+            && board
+                .buttons
+                .iter()
+                .all(|b| matches!(b.source, ButtonSource::Key(_)))
+            && self.key_buttons
+    }
 }
 
 /// Required, Should or Optional (spec 0006 section 5.1).
@@ -239,25 +262,16 @@ impl Declared {
             board.audio.playback.kind != AudioKind::Alsa,
             "the ALSA backend is not built; use `default` or `command`",
         );
-        let led_console = board
-            .leds
-            .as_ref()
-            .is_some_and(|l| l.driver == crate::board_file::LedDriverKind::Console);
         gate(
             C::Leds,
             board.leds.is_some(),
-            led_console && build.console_leds,
+            build.drives_leds(board),
             "this build has only the console LED driver",
         );
-        let key_buttons = !board.buttons.is_empty()
-            && board
-                .buttons
-                .iter()
-                .all(|b| matches!(b.source, crate::board_file::ButtonSource::Key(_)));
         gate(
             C::Buttons,
             !board.buttons.is_empty(),
-            key_buttons && build.key_buttons,
+            build.reads_buttons(board),
             "this build reads terminal keys only, not input devices",
         );
         gate(
