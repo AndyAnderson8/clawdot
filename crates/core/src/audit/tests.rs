@@ -875,6 +875,64 @@ fn actions_run_before_the_clock_is_set_count_on_the_first_real_day() {
     assert_eq!(log.today(20_000), (1, 0));
 }
 
+// Records written before the wall clock is valid carry day 0. They belong to the first real day, and a restart
+// must not forget them (REQ-SEC-015).
+#[test]
+fn day_zero_records_count_on_the_first_real_day_after_a_restart() {
+    let dir = TempDir::new("audit-restamp");
+    let c = AuditConfig {
+        policy: ActionPolicy {
+            max_actions_per_day: 3,
+            ..ActionPolicy::default()
+        },
+        ..AuditConfig::default()
+    };
+    {
+        let log = AuditLog::open(&dir.0, c.clone()).unwrap();
+        ran(&log, 0, Tier::Reversible, 2);
+    }
+    // Restarted still with no clock: nothing changes.
+    {
+        let log = AuditLog::open(&dir.0, c.clone()).unwrap();
+        assert_eq!(log.today(0), (2, 0));
+    }
+    // Restarted with the clock set: the two actions count against that day.
+    let log = AuditLog::open(&dir.0, c).unwrap();
+    assert_eq!(log.today(20_000), (2, 0));
+    ran(&log, 20_000, Tier::Reversible, 1);
+    assert_eq!(
+        log.gate(20_000, Tier::Reversible),
+        Gate::Capped(CapHit::Actions(3))
+    );
+}
+
+#[test]
+fn day_zero_records_stay_on_their_day_once_a_later_day_exists() {
+    let dir = TempDir::new("audit-restamp-old");
+    {
+        let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+        ran(&log, 0, Tier::Reversible, 2);
+        // The clock arrives: those two are re-stamped onto day 100, and one more runs.
+        ran(&log, 100, Tier::Reversible, 1);
+    }
+    // The log alone has to carry the day: the counts file is gone.
+    std::fs::remove_file(dir.0.join("audit-counts.json")).unwrap();
+    let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+    assert_eq!(log.today(100), (3, 0));
+    assert_eq!(log.today(101), (0, 0), "a later day starts clean");
+}
+
+#[test]
+fn the_counts_file_moves_to_the_real_day_when_the_clock_arrives() {
+    let dir = TempDir::new("audit-restamp-file");
+    let log = AuditLog::open(&dir.0, AuditConfig::default()).unwrap();
+    ran(&log, 0, Tier::Costly, 1);
+    assert_eq!(log.today(20_000), (1, 1));
+    // No further action: a restart still finds the count on the real day.
+    let saved: SavedCounts = counts_file(&dir).load().unwrap();
+    assert_eq!((saved.day, saved.actions, saved.costly), (20_000, 1, 1));
+}
+
 // REQ-SEC-014: a secret named by a key, then a colon, then its value as the next word.
 #[test]
 fn a_key_with_a_colon_hides_the_next_word() {
