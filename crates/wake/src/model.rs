@@ -304,95 +304,103 @@ fn read_options(kind: OpKind, op: &Table<'_>) -> Result<Options> {
     // A missing options table means "all defaults", which several of these operators do not allow.
     let need = |what: &'static str| opts.ok_or(Error::Invalid(format!("{what} has no options")));
     Ok(match kind {
-        OpKind::Conv2d => {
-            let t = need("CONV_2D")?;
-            Options::Conv {
-                padding: padding(t.i8(0, 0)?)?,
-                stride_w: small(t.i32(1, 1)?, "stride_w")?,
-                stride_h: small(t.i32(2, 1)?, "stride_h")?,
-                activation: activation(t.i8(3, 0)?, "CONV_2D")?,
-                dilation_w: small(t.i32(4, 1)?, "dilation_w")?,
-                dilation_h: small(t.i32(5, 1)?, "dilation_h")?,
-                depth_multiplier: 1,
-            }
-        }
-        OpKind::DepthwiseConv2d => {
-            let t = need("DEPTHWISE_CONV_2D")?;
-            Options::Conv {
-                padding: padding(t.i8(0, 0)?)?,
-                stride_w: small(t.i32(1, 1)?, "stride_w")?,
-                stride_h: small(t.i32(2, 1)?, "stride_h")?,
-                depth_multiplier: small(t.i32(3, 1)?, "depth_multiplier")?,
-                activation: activation(t.i8(4, 0)?, "DEPTHWISE_CONV_2D")?,
-                dilation_w: small(t.i32(5, 1)?, "dilation_w")?,
-                dilation_h: small(t.i32(6, 1)?, "dilation_h")?,
-            }
-        }
-        OpKind::FullyConnected => {
-            let t = need("FULLY_CONNECTED")?;
-            if t.i8(1, 0)? != 0 {
-                return Err(Error::Unsupported(
-                    "FULLY_CONNECTED shuffled weights".into(),
-                ));
-            }
-            if t.bool(3, false)? {
-                return Err(Error::Unsupported(
-                    "FULLY_CONNECTED asymmetric input quantisation".into(),
-                ));
-            }
-            Options::FullyConnected {
-                activation: activation(t.i8(0, 0)?, "FULLY_CONNECTED")?,
-            }
-        }
-        OpKind::Concatenation => {
-            let t = need("CONCATENATION")?;
-            Options::Concat {
-                axis: t.i32(0, 0)?,
-                activation: activation(t.i8(1, 0)?, "CONCATENATION")?,
-            }
-        }
-        OpKind::StridedSlice => {
-            let t = need("STRIDED_SLICE")?;
-            if t.bool(5, false)? {
-                return Err(Error::Unsupported("STRIDED_SLICE offset mode".into()));
-            }
-            Options::StridedSlice {
-                begin_mask: t.i32(0, 0)?,
-                end_mask: t.i32(1, 0)?,
-                ellipsis_mask: t.i32(2, 0)?,
-                new_axis_mask: t.i32(3, 0)?,
-                shrink_axis_mask: t.i32(4, 0)?,
-            }
-        }
-        OpKind::SplitV => {
-            let t = need("SPLIT_V")?;
-            Options::SplitV {
-                num_splits: small(t.i32(0, 0)?, "num_splits")?,
-            }
-        }
-        OpKind::CallOnce => {
-            let t = need("CALL_ONCE")?;
-            let i = t.i32(0, 0)?;
-            if i < 0 {
-                return Err(Error::Invalid(
-                    "CALL_ONCE subgraph index is negative".into(),
-                ));
-            }
-            Options::CallOnce {
-                init_subgraph: i as usize,
-            }
-        }
-        OpKind::VarHandle => {
-            let t = need("VAR_HANDLE")?;
-            Options::VarHandle {
-                shared_name: t.string(1)?.unwrap_or_default().to_vec(),
-            }
-        }
+        OpKind::Conv2d => conv_options(need("CONV_2D")?)?,
+        OpKind::DepthwiseConv2d => depthwise_options(need("DEPTHWISE_CONV_2D")?)?,
+        OpKind::FullyConnected => fully_connected_options(need("FULLY_CONNECTED")?)?,
+        OpKind::Concatenation => concat_options(need("CONCATENATION")?)?,
+        OpKind::StridedSlice => strided_slice_options(need("STRIDED_SLICE")?)?,
+        OpKind::SplitV => split_v_options(need("SPLIT_V")?)?,
+        OpKind::CallOnce => call_once_options(need("CALL_ONCE")?)?,
+        OpKind::VarHandle => var_handle_options(need("VAR_HANDLE")?)?,
         OpKind::Reshape
         | OpKind::Logistic
         | OpKind::Quantize
         | OpKind::ReadVariable
         | OpKind::AssignVariable => Options::None,
+    })
+}
+
+fn conv_options(t: Table<'_>) -> Result<Options> {
+    Ok(Options::Conv {
+        padding: padding(t.i8(0, 0)?)?,
+        stride_w: small(t.i32(1, 1)?, "stride_w")?,
+        stride_h: small(t.i32(2, 1)?, "stride_h")?,
+        activation: activation(t.i8(3, 0)?, "CONV_2D")?,
+        dilation_w: small(t.i32(4, 1)?, "dilation_w")?,
+        dilation_h: small(t.i32(5, 1)?, "dilation_h")?,
+        depth_multiplier: 1,
+    })
+}
+
+fn depthwise_options(t: Table<'_>) -> Result<Options> {
+    Ok(Options::Conv {
+        padding: padding(t.i8(0, 0)?)?,
+        stride_w: small(t.i32(1, 1)?, "stride_w")?,
+        stride_h: small(t.i32(2, 1)?, "stride_h")?,
+        depth_multiplier: small(t.i32(3, 1)?, "depth_multiplier")?,
+        activation: activation(t.i8(4, 0)?, "DEPTHWISE_CONV_2D")?,
+        dilation_w: small(t.i32(5, 1)?, "dilation_w")?,
+        dilation_h: small(t.i32(6, 1)?, "dilation_h")?,
+    })
+}
+
+fn fully_connected_options(t: Table<'_>) -> Result<Options> {
+    if t.i8(1, 0)? != 0 {
+        return Err(Error::Unsupported(
+            "FULLY_CONNECTED shuffled weights".into(),
+        ));
+    }
+    if t.bool(3, false)? {
+        return Err(Error::Unsupported(
+            "FULLY_CONNECTED asymmetric input quantisation".into(),
+        ));
+    }
+    Ok(Options::FullyConnected {
+        activation: activation(t.i8(0, 0)?, "FULLY_CONNECTED")?,
+    })
+}
+
+fn concat_options(t: Table<'_>) -> Result<Options> {
+    Ok(Options::Concat {
+        axis: t.i32(0, 0)?,
+        activation: activation(t.i8(1, 0)?, "CONCATENATION")?,
+    })
+}
+
+fn strided_slice_options(t: Table<'_>) -> Result<Options> {
+    if t.bool(5, false)? {
+        return Err(Error::Unsupported("STRIDED_SLICE offset mode".into()));
+    }
+    Ok(Options::StridedSlice {
+        begin_mask: t.i32(0, 0)?,
+        end_mask: t.i32(1, 0)?,
+        ellipsis_mask: t.i32(2, 0)?,
+        new_axis_mask: t.i32(3, 0)?,
+        shrink_axis_mask: t.i32(4, 0)?,
+    })
+}
+
+fn split_v_options(t: Table<'_>) -> Result<Options> {
+    Ok(Options::SplitV {
+        num_splits: small(t.i32(0, 0)?, "num_splits")?,
+    })
+}
+
+fn call_once_options(t: Table<'_>) -> Result<Options> {
+    let i = t.i32(0, 0)?;
+    if i < 0 {
+        return Err(Error::Invalid(
+            "CALL_ONCE subgraph index is negative".into(),
+        ));
+    }
+    Ok(Options::CallOnce {
+        init_subgraph: i as usize,
+    })
+}
+
+fn var_handle_options(t: Table<'_>) -> Result<Options> {
+    Ok(Options::VarHandle {
+        shared_name: t.string(1)?.unwrap_or_default().to_vec(),
     })
 }
 
