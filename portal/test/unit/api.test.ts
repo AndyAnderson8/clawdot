@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { api, ApiError, failText, hasToken, keep } from "../../src/api.ts";
+import { api, ApiError, enc, failText, hasToken, keep } from "../../src/api.ts";
 
 interface Call {
   url: string;
@@ -76,4 +76,24 @@ test("failText wording", () => {
   assert.deepEqual(failText(new ApiError("Nope.", 400)), { text: "Nope.", signIn: false });
   assert.deepEqual(failText("weird"), { text: "Something went wrong. Try again.", signIn: false });
   assert.deepEqual(failText(new Error("")), { text: "Something went wrong. Try again.", signIn: false });
+});
+
+test("a name in a request path cannot change the path", () => {
+  assert.equal(enc("light"), "light");
+  assert.equal(enc("a/b c?d#e"), "a%2Fb%20c%3Fd%23e");
+  assert.equal(enc(7), "7");
+});
+
+test("a call that gets no answer gives up and says so", async () => {
+  globalThis.fetch = ((_url: string, init: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    })) as typeof fetch;
+  await assert.rejects(api("GET", "/api/status", undefined, 20), /did not answer in time/);
+});
+
+test("a browser's wording for an unreachable device becomes a plain sentence", () => {
+  for (const m of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."])
+    assert.match(failText(new TypeError(m)).text, /^Cannot reach the device/);
+  assert.equal(failText(new Error("The device said no.")).text, "The device said no.");
 });

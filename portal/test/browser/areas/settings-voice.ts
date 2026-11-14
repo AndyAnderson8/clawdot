@@ -128,6 +128,16 @@ export async function settingsVoice(c: Ctx): Promise<void> {
         "zones that move say so",
       );
 
+      // A provider that is slow to answer, and an address that stops being askable meanwhile: not left "loading".
+      await open("open", "#/settings/assistant", { modelsDelay: 2500 });
+      await b.until(`T.q('#f-llm_model')?.getAttribute('aria-busy') === 'true'`, "the models are being asked for");
+      await T(`set('#provider', 'custom')`);
+      await b.until(
+        `T.q('#f-llm_model')?.tagName === 'INPUT'`,
+        "a box to type the model, not a list stuck loading",
+        1000,
+      );
+
       // The assistant: provider, then its key, then the model as a list the provider supplied.
       await open("open", "#/settings/assistant");
       await b.until(`T.q('#f-llm_model')?.tagName === 'SELECT' && !T.q('#f-llm_model').disabled`, "the model list");
@@ -137,7 +147,7 @@ export async function settingsVoice(c: Ctx): Promise<void> {
         "the models the provider offers",
       );
       const labels = await b.ev<string[]>(
-        `T.all('#panel form.panel:first-of-type .slabel label').map((l) => l.textContent.replace('Optional', '').trim())`,
+        `T.all('#panel form.panel:first-of-type .slabel label, #panel form.panel:first-of-type .slabel .ltitle').map((l) => l.textContent.replace('Optional', '').trim())`,
       );
       assert.deepEqual(
         labels.slice(0, 5),

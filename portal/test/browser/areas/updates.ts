@@ -55,6 +55,28 @@ export async function updates(c: Ctx): Promise<void> {
     assert.ok(mock.log.some((l) => l.method === "POST" && l.path === "/api/update/check"));
   });
 
+  await step(
+    "Updates: only an https release link is shown, and an unsupervised install stops the polling",
+    async () => {
+      await open("open", "#/settings/about", {
+        update: { ...NEWER, latest: { ...NEWER.latest, page: "java" + "script:alert(1)" }, can_apply: true },
+      });
+      await b.until(`!!T.q('#updateavail')`, "found");
+      await eq(`T.q('#updates a[target="_blank"]') === null`, true, "no link for a release page that is not https");
+      const asks = () => mock.log.filter((l) => l.method === "GET" && l.path === "/api/update").length;
+      await open("open", "#/settings/about", {
+        update: { ...NEWER, can_apply: true, supervised: false, phase: "installed" },
+      });
+      await b.until(
+        `T.text('#updatephase').startsWith('Installed. Restart ClawDot')`,
+        "installed, to be restarted by hand",
+      );
+      const seen = asks();
+      await b.ev(`new Promise((r) => setTimeout(r, 4500))`);
+      assert.equal(asks(), seen, "nothing keeps asking while it waits for a person");
+    },
+  );
+
   await step("Updates: a build with no key says why it cannot install, and a failed look says so", async () => {
     await open("open", "#/settings/about", {
       update: {

@@ -39,6 +39,19 @@ export async function settingsAbout(c: Ctx): Promise<void> {
     input.dispatchEvent(new Event('change', { bubbles: true }));
     await T.settle(); await T.settle();
   })()`;
+    // a file the browser cannot read is explained, and the chooser is empty again so the same file can be chosen
+    await b.ev(`(async () => {
+    const dt = new DataTransfer();
+    const f = new File(['{}'], 'settings.json', { type: 'application/json' });
+    Object.defineProperty(f, 'text', { value: () => Promise.reject(new Error('gone')) });
+    dt.items.add(f);
+    const input = document.querySelector('#importfile');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await T.settle(); await T.settle();
+  })()`);
+    await eq(`T.text('#importform .errtext')`, "That file could not be read. Choose it again.", "an unreadable file");
+    await eq(`T.q('#importfile').value`, "", "the chooser is reset");
     await b.ev(pick("{not json"));
     await b.until(`T.text('#importform .errtext').startsWith('That is not a ClawDot settings file')`, "plain refusal");
     await b.ev(

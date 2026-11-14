@@ -57,28 +57,14 @@ export function Media(): JSX.Element {
               <label for="btswitch">Bluetooth</label>
               <p class="mut">Turn it on to pair and connect speakers, headphones and phones.</p>
             </div>
-            <input
-              id="btswitch"
-              class="switch"
-              type="checkbox"
-              disabled
-              checked={false}
-              aria-label="Bluetooth is off"
-            />
+            <input id="btswitch" class="switch" type="checkbox" disabled checked={false} />
           </div>
           <div class="switchrow">
             <div>
               <label for="btvisible">Let phones find this speaker</label>
               <p class="mut">Visible while you pair, so a phone can play its sound through this speaker.</p>
             </div>
-            <input
-              id="btvisible"
-              class="switch"
-              type="checkbox"
-              disabled
-              checked={false}
-              aria-label="Visible to phones"
-            />
+            <input id="btvisible" class="switch" type="checkbox" disabled checked={false} />
           </div>
           <div class="switchrow">
             <div>

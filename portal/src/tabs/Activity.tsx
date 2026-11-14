@@ -106,6 +106,8 @@ function Row(props: { r: AuditRecord; now: number }): JSX.Element {
 
 export function Activity(props: { embedded?: boolean } = {}): JSX.Element {
   const s = useApp();
+  // What is typed in the form, and what the list on show was fetched with. Show older and Refresh use the second.
+  const [draft, setDraft] = useState<AuditFilters>(NO_FILTERS);
   const [filters, setFilters] = useState<AuditFilters>(NO_FILTERS);
   const [rows, setRows] = useState<AuditRecord[] | null>(null);
   const [next, setNext] = useState<number | null>(null);
@@ -142,6 +144,7 @@ export function Activity(props: { embedded?: boolean } = {}): JSX.Element {
   }, []);
 
   const apply = (f: AuditFilters) => {
+    setDraft(f);
     setFilters(f);
     void load(f, null);
   };
@@ -165,7 +168,7 @@ export function Activity(props: { embedded?: boolean } = {}): JSX.Element {
           <ul class="rows" id="eventlist">
             {s.overview && !s.overview.events.length ? (
               <li class="empty">
-                Nothing has arrived yet. Messages from other programs show up here once you add a webhook in
+                Nothing has arrived yet. Messages from other programs show up here once you add a webhook in{" "}
                 <a href="#/settings/webhooks">Settings</a>.
               </li>
             ) : null}
@@ -208,7 +211,7 @@ export function Activity(props: { embedded?: boolean } = {}): JSX.Element {
                   id="auditfilter"
                   onSubmit={(ev) => {
                     ev.preventDefault();
-                    apply(filters);
+                    apply(draft);
                   }}
                 >
                   <Field id="a-tool" label="Tool" hint="The exact tool name, for example set_timer.">
@@ -218,8 +221,8 @@ export function Activity(props: { embedded?: boolean } = {}): JSX.Element {
                       list="a-tools"
                       autoCapitalize="none"
                       autoComplete="off"
-                      value={filters.tool}
-                      onInput={(e) => setFilters({ ...filters, tool: e.currentTarget.value })}
+                      value={draft.tool}
+                      onInput={(e) => setDraft({ ...draft, tool: e.currentTarget.value })}
                     />
                     <datalist id="a-tools">
                       {names.map((n) => (
@@ -230,23 +233,23 @@ export function Activity(props: { embedded?: boolean } = {}): JSX.Element {
                   <Select
                     id="a-tier"
                     label="How careful it is"
-                    value={filters.tier}
+                    value={draft.tier}
                     options={TIERS}
-                    onChange={(v) => apply({ ...filters, tier: v })}
+                    onChange={(v) => apply({ ...draft, tier: v })}
                   />
                   <Select
                     id="a-decision"
                     label="What happened"
-                    value={filters.decision}
+                    value={draft.decision}
                     options={DECISIONS}
-                    onChange={(v) => apply({ ...filters, decision: v })}
+                    onChange={(v) => apply({ ...draft, decision: v })}
                   />
                   <Select
                     id="a-trigger"
                     label="What started it"
-                    value={filters.trigger}
+                    value={draft.trigger}
                     options={TRIGGERS}
-                    onChange={(v) => apply({ ...filters, trigger: v })}
+                    onChange={(v) => apply({ ...draft, trigger: v })}
                   />
                   <div class="row">
                     <button>Show</button>

@@ -65,13 +65,18 @@ function UsageChart(props: { days: Day[] | null }): JSX.Element {
 }
 
 /** Choose the picture of the device: one of the drawings. Your own picture is a side option below them. Kept in this browser only. */
-function LookPicker(props: { value: LookId; onPick: (id: LookId) => void }): JSX.Element {
+function LookPicker(props: {
+  value: LookId;
+  photo: string;
+  onPhoto: (url: string) => void;
+  onPick: (id: LookId) => void;
+}): JSX.Element {
   const [open, setOpen] = useState(false);
-  const [photo, setPhotoState] = useState(photoPref());
+  const photo = props.photo;
   const [address, setAddress] = useState("");
   const keep = (url: string) => {
     setPhoto(url);
-    setPhotoState(url);
+    props.onPhoto(url);
     props.onPick(url ? "photo" : "puck");
   };
   const upload = async (ev: Event) => {
@@ -132,7 +137,7 @@ function LookPicker(props: { value: LookId; onPick: (id: LookId) => void }): JSX
               onClick={() => props.onPick("photo")}
             >
               <span class="lookart">
-                <Look id="photo" />
+                <Look id="photo" photo={photo} />
               </span>
               <span class="lookname">Your picture</span>
             </button>
@@ -190,6 +195,7 @@ export function Dashboard(): JSX.Element {
   const [records, setRecords] = useState<AuditRecord[] | null>(null);
   const [update, setUpdate] = useState<UpdateStatus | null>(null);
   const [look, setLook] = useState<LookId>(lookPref());
+  const [photo, setPhotoUrl] = useState(photoPref());
 
   usePolled(async () => {
     try {
@@ -199,7 +205,7 @@ export function Dashboard(): JSX.Element {
       setUpdate(null);
     }
     try {
-      setRecords((await api<AuditPage>("GET", "/api/audit?limit=200")).records);
+      setRecords((await api<AuditPage>("GET", "/api/audit?limit=30")).records);
     } catch (x) {
       // No activity log on this device is a normal state, not a failure.
       if (x instanceof ApiError && x.status === 503) setRecords([]);
@@ -222,7 +228,7 @@ export function Dashboard(): JSX.Element {
     <div class="home">
       <section class="card device d-status" id="statusblock">
         <div class="devart">
-          <Look id={look} state={view.ring} />
+          <Look id={look} state={view.ring} photo={photo} />
         </div>
         <div class="devtext" role="status">
           <h2 id="devname">{name}</h2>
@@ -238,6 +244,8 @@ export function Dashboard(): JSX.Element {
           {model ? <p class="mut">Thinks with {model}</p> : null}
           <LookPicker
             value={look}
+            photo={photo}
+            onPhoto={setPhotoUrl}
             onPick={(id) => {
               setLook(id);
               setLookPref(id);

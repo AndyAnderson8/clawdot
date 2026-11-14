@@ -1,7 +1,8 @@
 // A forgotten password on a speaker with no shell: the way back in (REQ-CFG-071..073), and the box that appears while a reset window is open.
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api, keep } from "./api.ts";
+import { api, failText, keep } from "./api.ts";
+import { useBusy } from "./parts.tsx";
 import { say, start, useApp } from "./store.ts";
 
 const GUIDE = "https://github.com/AndyAnderson8/clawdot/blob/dev/docs/guides/forgot-password.md";
@@ -10,19 +11,21 @@ const GUIDE = "https://github.com/AndyAnderson8/clawdot/blob/dev/docs/guides/for
 export function Forgot(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
+  const [busy, run] = useBusy();
 
   const send = async (ev: Event) => {
     ev.preventDefault();
-    const password = pw;
-    setPw("");
-    try {
-      const r = await api<{ token: string }>("POST", "/api/recover/window", { password });
-      keep(r.token);
-      say("");
-      await start();
-    } catch (x) {
-      say(x instanceof Error ? x.message : "Something went wrong. Try again.", true);
-    }
+    await run(async () => {
+      try {
+        const r = await api<{ token: string }>("POST", "/api/recover/window", { password: pw });
+        setPw("");
+        keep(r.token);
+        say("");
+        await start();
+      } catch (x) {
+        say(failText(x).text, true);
+      }
+    });
   };
 
   return (
@@ -52,7 +55,7 @@ export function Forgot(): JSX.Element {
               value={pw}
               onInput={(e) => setPw(e.currentTarget.value)}
             />
-            <button>Set password</button>
+            <button disabled={busy}>Set password</button>
           </div>
         </form>
       ) : null}

@@ -93,5 +93,18 @@ export async function settingsGeneral(c: Ctx): Promise<void> {
       "with its address and when it was last seen",
     );
     await eq(`T.q('#peerlist a').getAttribute('href')`, "http://192.0.2.7:3335/", "and a way to its own page");
+    await open("open", "#/settings/speakers", {
+      hive: [
+        { id: "a1", name: "Six", address: "fe80::1", port: 3335, last_seen_secs: 5 },
+        { id: "b2", name: "Odd", address: "java" + "script:alert(1)//", port: 3335, last_seen_secs: 5 },
+      ],
+    });
+    await b.until(`T.rows('#peerlist > li').length === 2`, "two speakers");
+    await eq(
+      `T.q('#peerlist > li:nth-child(1) a').getAttribute('href')`,
+      "http://[fe80::1]:3335/",
+      "IPv6 is bracketed",
+    );
+    await eq(`T.q('#peerlist > li:nth-child(2) a') === null`, true, "an address that is not an IP is not a link");
   });
 }

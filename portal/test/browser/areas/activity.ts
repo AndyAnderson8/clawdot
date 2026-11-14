@@ -72,12 +72,23 @@ export async function activityLog(c: Ctx): Promise<void> {
     await T(`set("#a-tool", "set_light")`);
     await T(`submit("#auditfilter")`);
     await b.until(`T.rows("#auditlist > li").length === 3`, "tool filter");
+    // a filter that is typed but not shown yet is not used by Refresh
+    await T(`set("#a-tool", "nothing_like_it")`);
+    await T(`clickText("#auditfilter", "Refresh")`);
+    await b.ev(`new Promise((r) => setTimeout(r, 200))`);
+    await eq(`T.rows("#auditlist > li").length`, 3, "Refresh keeps the filter that is on show");
     const q = mock.log.filter((l) => l.path === "/api/audit").pop()!;
     assert.equal(q.method, "GET");
     assert.ok(
       mock.log.every((l) => l.path !== "/api/audit" || l.method === "GET"),
       "only reads",
     );
+  });
+
+  await step("Activity: with nothing received, the page says where to add a webhook", async () => {
+    await open("open", "#/activity", { events: [] });
+    await b.until(`!!T.q("#eventlist .empty")`, "the empty message");
+    await eq(`T.text("#eventlist .empty").includes("webhook in Settings.")`, true, "a space before the link");
   });
 
   await step("Activity: older records load a page at a time", async () => {

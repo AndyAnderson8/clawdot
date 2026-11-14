@@ -49,14 +49,20 @@ export function ago(ts: number, now: number): string {
   return s < 60 ? "just now" : span(s) + " ago";
 }
 
+/** The calendar day after `date` ("2026-11-01" gives "2026-11-02"); a day is not always 86400 seconds long. */
+function nextDay(date: string): string {
+  const [y = 0, m = 1, d = 1] = date.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+}
+
 export function whenText(ts: number, now: number, zone: string): string {
   const a = parts(ts, zone);
   const b = parts(now, zone);
-  const tom = parts(now + 86400, zone);
+  const tom = nextDay(b.date);
   const day =
     a.date === b.date
       ? "Today"
-      : a.date === tom.date
+      : a.date === tom
         ? "Tomorrow"
         : fmt(ts, zone, { weekday: "short", month: "short", day: "numeric" });
   return day + " at " + fmt(ts, zone, { hour: "numeric", minute: "2-digit" });

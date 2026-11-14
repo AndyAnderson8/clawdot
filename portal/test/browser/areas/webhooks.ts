@@ -16,9 +16,15 @@ export async function webhooks(c: Ctx): Promise<void> {
     await T(`set('#wname', 'ci')`);
     await T(`set('#wadapter', 'generic')`);
     await T(`set('#wspoken', 'Build server')`);
-    await T(`submit('#webhookdialog form')`);
+    // a double click sends one request, not two
+    await b.ev(`(() => { const f = T.q('#webhookdialog form'); f.requestSubmit(); f.requestSubmit(); })()`);
     await b.until(`T.q('#snip-ci')?.open === true && T.q('#snip-ci code.token')`, "token shown");
     await eq(`T.q('#webhookdialog').open`, false, "the dialog closes once the webhook is added");
+    assert.equal(
+      mock.log.filter((l) => l.method === "POST" && l.path === "/api/endpoints").length,
+      1,
+      "one request for a double click",
+    );
     await eq(`T.text('#snip-ci code.token')`, "tok-ci-1", "token");
     // What the speaker says a message is from is the user's choice, set here and changed here.
     assert.deepEqual(mock.log.find((l) => l.method === "POST" && l.path === "/api/endpoints")!.body, {
@@ -32,7 +38,10 @@ export async function webhooks(c: Ctx): Promise<void> {
     await b.until(`T.q('#spoken-ci').open === true`, "a dialog to change it");
     await T(`set('#spokenname-ci', '<b>Mum</b>')`);
     await T(`submit('#spoken-ci form')`);
-    await b.until(`T.text('#spoken-ci .errtext').startsWith('Use up to 40')`, "markup is refused, with the rule");
+    await b.until(
+      `T.text('#spoken-ci .errtext').startsWith('the spoken name is plain words')`,
+      "markup is refused, with the device's words",
+    );
     await T(`set('#spokenname-ci', 'Garage')`);
     await T(`submit('#spoken-ci form')`);
     await b.until(`T.text('#panel li:nth-child(2) .spokenas q') === 'From Garage'`, "changed");
@@ -51,6 +60,17 @@ export async function webhooks(c: Ctx): Promise<void> {
       "other webhooks still use the placeholder",
     );
     await T(`clickText('#snip-ci', 'Copy token')`); // clipboard is unavailable over http; the fallback must not throw
+    await eq(
+      `document.activeElement?.tagName + ':' + document.activeElement?.closest('#snip-ci')?.id`,
+      "BUTTON:snip-ci",
+      "focus stays on the button after a copy (it is not lost to the page)",
+    );
+    await eq(`T.q('#snip-ci button + [role=status]') !== null`, true, "and Copied is said in a live region");
+    await eq(
+      `T.q('#panel li:nth-child(2) button.danger').getAttribute('aria-label')`,
+      "Delete ci",
+      "a row's button says which row",
+    );
     await T(`clickText('#panel li:nth-child(2)', 'New token')`);
     await b.until(`T.text('#snip-ci code.token') === 'tok-ci-2'`, "rotated token");
     await T(`clickText('#panel li:nth-child(2)', 'Delete')`);

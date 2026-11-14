@@ -84,3 +84,14 @@ test("zones carry their offset, sort west to east, and say when the offset moves
   assert.equal(offsetText(-300), "UTC-05:00");
   assert.equal(offsetText(0), "UTC");
 });
+
+test("Tomorrow is the next calendar day, even on a day that is not 24 hours long", () => {
+  // New York falls back on 2026-11-01: that day has 25 hours, so now + 86400 s is still the same day.
+  const now = Date.UTC(2026, 10, 1, 4, 30) / 1000; // 00:30 EDT on the 1st
+  const next = Date.UTC(2026, 10, 2, 13, 0) / 1000; // 08:00 EST on the 2nd
+  assert.match(whenText(next, now, "America/New_York"), /^Tomorrow at /);
+  // and the other way: the spring-forward day has 23 hours
+  const spring = Date.UTC(2026, 2, 8, 5, 30) / 1000; // 00:30 EST on 2026-03-08
+  const after = Date.UTC(2026, 2, 9, 12, 0) / 1000; // 08:00 EDT on the 9th
+  assert.match(whenText(after, spring, "America/New_York"), /^Tomorrow at /);
+});

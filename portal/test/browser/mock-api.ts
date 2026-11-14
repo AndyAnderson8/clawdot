@@ -13,6 +13,8 @@ export interface Logged {
   path: string;
   body: unknown;
   auth: string;
+  /** The part of the address after the question mark. */
+  query: string;
 }
 // The fake device keeps whatever JSON the page sends, so its bodies and state are deliberately untyped. eslint.config.mjs
 // relaxes the no-explicit-any and no-unsafe-* rules for this one file.
@@ -421,7 +423,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
       const m = req.method ?? "GET";
       const body = raw ? JSON.parse(raw) : null;
       const auth = String(req.headers["authorization"] ?? "");
-      log.push({ method: m, path, body, auth });
+      log.push({ method: m, path, body, auth, query: (req.url ?? "").split("?")[1] ?? "" });
       const seg = path.slice(5).split("/");
       const err = (code: number, message: string) => send(code, { error: message });
 
@@ -528,7 +530,11 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
             401,
             "The service did not accept that key. Check that it is the whole key and that it is for this service.",
           );
-        return send(200, { models: ["model-b", "model-a", "free/model-c"] });
+        const models = () => send(200, { models: ["model-b", "model-a", "free/model-c"] });
+        const wait = Number(st["modelsDelay"] ?? 0);
+        if (!wait) return models();
+        setTimeout(models, wait); // a slow provider
+        return;
       }
       if (m === "PUT" && path === "/api/llm/key") {
         const k = String(body.key ?? "");
@@ -765,7 +771,11 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
           const e = eps.find((x) => x["name"] === seg[1]);
           if (!e) return err(404, "no such endpoint");
           const spoken = String(body.spoken_name ?? "").trim();
-          if (spoken && !/^[\p{L}\p{N}][\p{L}\p{N} \-_'.]{0,39}$/u.test(spoken)) return err(400, "bad spoken name");
+          if (spoken && !/^[\p{L}\p{N}][\p{L}\p{N} \-_'.]{0,39}$/u.test(spoken))
+            return err(
+              400,
+              "the spoken name is plain words of up to 40 characters: letters, digits, spaces, - _ ' and .",
+            );
           e["spoken_name"] = spoken || null;
           return send(200, e);
         }

@@ -19,6 +19,7 @@ export async function toolsSourcesSkills(c: Ctx): Promise<void> {
     await b.ev(`window.__answer = () => false`);
     await T(`set('#tier-set_light', 'read_only')`);
     assert.ok(!mock.log.some((l) => l.path === "/api/tools/set_light/tier"), "declining the warning sends nothing");
+    await eq(`T.q('#tier-set_light').value`, "costly", "declining puts the box back to the real level");
     await b.ev(`window.__answer = () => true`);
     await T(`set('#tier-set_light', 'reversible')`);
     await b.until(
@@ -29,6 +30,7 @@ export async function toolsSourcesSkills(c: Ctx): Promise<void> {
     await T(`set('#tier-set_light', '')`);
     await b.until(`T.q('#tier-set_light').value === 'costly'`, "back to the usual level");
     assert.deepEqual(mock.log.filter((l) => l.path === "/api/tools/set_light/tier").pop()!.body, { tier: null });
+    await eq(`T.q('#on-set_light').getAttribute('aria-label')`, "set_light", "a switch is named, not told its state");
     await T(`click('#on-set_light')`);
     await b.until(`T.q('#on-set_light').checked === false && T.q('.toolrow.off') !== null`, "switched off");
     assert.deepEqual(mock.log.find((l) => l.path === "/api/tools/set_light/enabled")!.body, { enabled: false });
@@ -49,9 +51,14 @@ export async function toolsSourcesSkills(c: Ctx): Promise<void> {
     await T(`set('#tool-url', 'https://h/{room}')`);
     await T(`click('#adddetail')`);
     await T(`set('#tooldialog input[aria-label="Detail name"]', 'room')`);
-    await T(`submit('#tooldialog form')`);
+    await b.ev(`(() => { const f = T.q('#tooldialog form'); f.requestSubmit(); f.requestSubmit(); })()`);
     await b.until(`T.q('#tooldialog').open === false`, "the dialog closes once it is added");
     await b.until(`T.rows('#toolcard ul.rows > li').length === ${total} + 1`, "tool added");
+    assert.equal(
+      mock.log.filter((l) => l.method === "POST" && l.path === "/api/tools").length,
+      1,
+      "one request for a double click",
+    );
     const post = mock.log.find((l) => l.method === "POST" && l.path === "/api/tools")!;
     assert.deepEqual(post.body, {
       name: "lamp",
@@ -230,6 +237,28 @@ export async function toolsSourcesSkills(c: Ctx): Promise<void> {
       ["skills/tidy/SKILL.md", "skills/tidy/rooms.txt"],
       "the skill and its text file; the script is never sent",
     );
+    // more files than the device takes at once is refused before anything is sent
+    const imports = () => mock.log.filter((l) => l.path === "/api/skills/import").length;
+    const sentBefore = imports();
+    await T(`click('#addskill')`);
+    await T(`clickText('#skilladddialog .seg', 'From a folder or files')`);
+    await b.until(`!!T.q('#skillfiles')`, "the file chooser again");
+    await b.ev(`(() => {
+    const dt = new DataTransfer();
+    for (let i = 0; i < 65; i++) {
+      const f = new File(['---\\nname: Bulk ' + i + '\\n---\\nDo it.'], 'SKILL.md');
+      Object.defineProperty(f, 'webkitRelativePath', { value: 'bulk/s' + i + '/SKILL.md' });
+      dt.items.add(f);
+    }
+    const input = document.getElementById('skillfiles');
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+    await b.until(`!!T.q('#skillfound .picklist')`, "the many skills are found");
+    await T(`click('#skilladd')`);
+    await b.until(`T.text('#msg').includes('at most 64')`, "too many files are refused with the limit");
+    assert.equal(imports(), sentBefore, "nothing was sent");
+    await b.ev(`T.q('#skilladddialog').close()`);
     // an imported skill waits: it cannot be turned on until it has been read and accepted
     await eq(`T.rows('${rows}')[2].includes('Needs review')`, true, "marked as waiting for review");
     await eq(`T.q('${rows}:nth-child(3) input.switch').disabled`, true, "and its switch does nothing yet");

@@ -9,6 +9,12 @@ export async function shellAndHome(c: Ctx): Promise<void> {
     await b.until(`!!T.q('#band') && !!T.q('#statusline')`, "the dashboard");
     await eq(`T.text('#devname')`, "Kitchen Dot", "the speaker's name is on Home");
     await eq(`T.q('#home').getAttribute('aria-label')`, "ClawDot, go to Home", "the logo is the way home");
+    await b.ev(`new Promise((r) => setTimeout(r, 400))`);
+    const asked = mock.log.filter((l) => l.path === "/api/audit").map((l) => l.query);
+    assert.ok(
+      asked.length > 0 && asked.every((q) => Number(/limit=(\d+)/.exec(q)?.[1]) <= 30),
+      "Home asks for a few records",
+    );
     await eq(
       `T.all('#tabs a').map((a) => a.textContent)`,
       ["Home", "Clock", "Media", "Logs", "Settings"],
@@ -123,6 +129,20 @@ export async function shellAndHome(c: Ctx): Promise<void> {
     await T(`click('#lookremove')`);
     await b.until(`T.q('#statusblock img.lookphoto') === null`, "removed");
     await eq(`localStorage.getItem('clawdot-look')`, "puck", "back to a drawing");
+    // where the browser will not keep it (a private window), the photo still shows: it is held in the page
+    await b.ev(`Storage.prototype.setItem = () => { throw new Error('private window'); }`);
+    await b.ev(`(async () => {
+    const c = document.createElement('canvas'); c.width = 100; c.height = 50;
+    const g = c.getContext('2d'); g.fillStyle = '#33c'; g.fillRect(0, 0, 100, 50);
+    const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+    const dt = new DataTransfer(); dt.items.add(new File([blob], 'room2.png', { type: 'image/png' }));
+    const input = document.getElementById('lookfile'); input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+    await b.until(
+      `(T.q('#statusblock img.lookphoto')?.getAttribute('src') ?? '').startsWith('data:image/')`,
+      "the photo shows although it could not be stored",
+    );
   });
 
   await step("Test the speaker (Settings, Voice): sends the phrase, and says why it cannot, with a fix", async () => {

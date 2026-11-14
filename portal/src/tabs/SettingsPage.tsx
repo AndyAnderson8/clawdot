@@ -2,14 +2,14 @@ import { Fragment, type JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, keep, ApiError } from "../api.ts";
 import { restartText, type SettingSpec } from "../forms.ts";
-import { fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
+import { attempt, fail, get, say, set, signedOut, start, sv, useApp } from "../store.ts";
 import { zoneName } from "../time.ts";
 import type { HardwareInfo, Settings as SettingsData } from "../types.ts";
 import { About } from "./About.tsx";
 import { Sources } from "./Connections.tsx";
 import { Notes } from "./Notes.tsx";
 import { Group } from "./Settings.tsx";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { PROVIDERS, providerFor } from "../providers.ts";
 import { TestSpeaker } from "./TestSpeaker.tsx";
 import { FeaturesSection } from "./Features.tsx";
@@ -58,10 +58,6 @@ const LIMITS: Spec = [
   },
 ];
 
-function ThemesSection(): JSX.Element {
-  return <Themes />;
-}
-
 function General(props: { s: SettingsData }): JSX.Element {
   return (
     <>
@@ -88,7 +84,7 @@ function KeyRow(props: {
   const prov = providerFor(url);
   const [typed, setTyped] = useState("");
   const [replacing, setReplacing] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = useBusy();
   const [msg, setMsg] = useState("");
   const [bad, setBad] = useState(false);
   if (!prov) return null;
@@ -108,40 +104,38 @@ function KeyRow(props: {
       setBad(true);
       return;
     }
-    setBusy(true);
     setMsg("");
-    try {
-      // The service is asked first, so a key that does not work is never kept.
-      const r = await api<{ models: string[] }>("POST", "/api/models", { url, key });
-      await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
-      await keyChanged();
-      setTyped("");
-      setReplacing(false);
-      setBad(false);
-      setMsg(
-        "Key accepted. " + r.models.length + (r.models.length === 1 ? " model is" : " models are") + " available.",
-      );
-    } catch (x) {
-      setBad(true);
-      setMsg(x instanceof Error ? x.message : "The key could not be checked.");
-    }
-    setBusy(false);
+    await run(async () => {
+      try {
+        // The service is asked first, so a key that does not work is never kept.
+        const r = await api<{ models: string[] }>("POST", "/api/models", { url, key });
+        await api<{ hint: string | null }>("PUT", "/api/llm/key", { key });
+        await keyChanged();
+        setTyped("");
+        setReplacing(false);
+        setBad(false);
+        setMsg(
+          "Key accepted. " + r.models.length + (r.models.length === 1 ? " model is" : " models are") + " available.",
+        );
+      } catch (x) {
+        setBad(true);
+        setMsg(x instanceof Error ? x.message : "The key could not be checked.");
+      }
+    });
   };
   const remove = async () => {
     if (!(await ask("Remove the saved key? The assistant will stop answering until you add one.", "Remove"))) return;
-    try {
+    await attempt(async () => {
       await api("DELETE", "/api/llm/key");
       setMsg("");
       await keyChanged();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const showing = hint && !replacing;
   return (
     <div class="srow" id="keyrow">
       <div class="slabel">
-        <label for="apikey">API key</label>
+        {showing ? <span class="ltitle">API key</span> : <label for="apikey">API key</label>}
         <p class="mut">
           {prov.id === "custom"
             ? "If the service needs one. It is checked, then kept on this device; only its first and last few characters are shown."
@@ -510,15 +504,12 @@ function SkillsSection(): JSX.Element {
   );
 }
 
-function MemorySection(): JSX.Element {
-  return <Notes />;
-}
-
 function Security(): JSX.Element {
   const s = useApp();
   const [pw, setPw] = useState("");
   const [cur, setCur] = useState("");
   const [pwErr, setPwErr] = useState("");
+  const [saving, run] = useBusy();
   const hasPassword = s.mode === "password";
   const savePassword = async (ev: Event) => {
     ev.preventDefault();
@@ -528,23 +519,25 @@ function Security(): JSX.Element {
       return;
     }
     const password = pw;
-    try {
-      const r = await api<{ token: string }>(
-        "POST",
-        "/api/admin/password",
-        hasPassword ? { password, current: cur } : { password },
-      );
-      setPw("");
-      setCur("");
-      keep(r.token);
-      say("Password saved.");
-      await start();
-    } catch (x) {
-      // A wrong current password is said next to the boxes, and what was typed stays so it can be corrected.
-      if (x instanceof ApiError && x.status === 403)
-        setPwErr("That is not the current password. Check it and try again.");
-      else fail(x);
-    }
+    await run(async () => {
+      try {
+        const r = await api<{ token: string }>(
+          "POST",
+          "/api/admin/password",
+          hasPassword ? { password, current: cur } : { password },
+        );
+        setPw("");
+        setCur("");
+        keep(r.token);
+        say("Password saved.");
+        await start();
+      } catch (x) {
+        // A wrong current password is said next to the boxes, and what was typed stays so it can be corrected.
+        if (x instanceof ApiError && x.status === 403)
+          setPwErr("That is not the current password. Check it and try again.");
+        else fail(x);
+      }
+    });
   };
   const signOut = async () => {
     try {
@@ -596,14 +589,14 @@ function Security(): JSX.Element {
           {pwErr}
         </p>
         <div class="row">
-          <button>Save password</button>
+          <button disabled={saving}>Save password</button>
         </div>
       </form>
       <section class="card sgroup">
         <h3>This browser</h3>
         <div class="srow">
           <div class="slabel">
-            <label>Sign out</label>
+            <span class="ltitle">Sign out</span>
             <p class="mut">You will need the password to come back.</p>
           </div>
           <div class="sctl">
@@ -613,14 +606,6 @@ function Security(): JSX.Element {
           </div>
         </div>
       </section>
-    </>
-  );
-}
-
-function AboutSection(): JSX.Element {
-  return (
-    <>
-      <About />
     </>
   );
 }
@@ -640,13 +625,13 @@ interface Section {
 const GROUPS = ["Basics", "Assistant", "Integrations", "System"] as const;
 export const SECTIONS: [Section, ...Section[]] = [
   { id: "general", label: "General", group: "Basics", view: General },
-  { id: "themes", label: "Themes", group: "Basics", view: ThemesSection },
+  { id: "themes", label: "Themes", group: "Basics", view: Themes },
   { id: "features", label: "Features", group: "Basics", view: FeaturesSection },
   { id: "assistant", label: "Assistant", group: "Assistant", view: Assistant },
   { id: "voice", label: "Voice", group: "Assistant", view: VoiceSection },
   { id: "tools", label: "Tools", group: "Assistant", view: ToolsSection },
   { id: "skills", label: "Skills", group: "Assistant", view: SkillsSection },
-  { id: "memory", label: "Memory", group: "Assistant", view: MemorySection },
+  { id: "memory", label: "Memory", group: "Assistant", view: Notes },
   { id: "media", label: "Media", group: "Integrations", view: MediaSettings },
   {
     id: "lights",
@@ -657,7 +642,7 @@ export const SECTIONS: [Section, ...Section[]] = [
     why: "No light ring was found on this device, so these settings would do nothing here.",
   },
   { id: "webhooks", label: "Webhooks", group: "Integrations", view: Notifications },
-  { id: "speakers", label: "Speakers", group: "Integrations", view: () => <Speakers /> },
+  { id: "speakers", label: "Speakers", group: "Integrations", view: Speakers },
   {
     id: "homeassistant",
     label: "Home Assistant",
@@ -692,7 +677,7 @@ export const SECTIONS: [Section, ...Section[]] = [
     planned: true,
   },
   { id: "security", label: "Security", group: "System", view: Security },
-  { id: "about", label: "About", group: "System", view: AboutSection },
+  { id: "about", label: "About", group: "System", view: About },
 ];
 
 /** The sections to list: those the device can use, and the rest only when asked for. */

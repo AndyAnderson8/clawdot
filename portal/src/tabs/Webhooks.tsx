@@ -2,16 +2,14 @@ import type { JSX } from "preact";
 import { Field } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { useState } from "preact/hooks";
-import { api, ApiError } from "../api.ts";
+import { api, ApiError, enc } from "../api.ts";
 import { ADAPTERS, adapterName, snippets } from "../snippets.ts";
-import { CopyButton } from "../parts.tsx";
-import { fail, get, load, say, set, sv, useApp } from "../store.ts";
+import { CopyButton, useBusy } from "../parts.tsx";
+import { attempt, fail, get, load, say, set, sv, useApp } from "../store.ts";
 import type { Endpoint, WebhookToken } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
-const base = () => String(sv("public_url") || location.origin);
-
-const SPOKEN_RULE = "Use up to 40 letters, numbers, spaces and - _ ' . and start with a letter or a number.";
+const base = () => String(sv("public_url") || location.origin).replace(/\/+$/, "");
 
 function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void }) {
   const { e } = props;
@@ -24,45 +22,44 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
       "Make a new token",
     );
     if (!sure) return;
-    try {
-      const r = await api<WebhookToken>("POST", "/api/endpoints/" + e.name + "/rotate");
+    await attempt(async () => {
+      const r = await api<WebhookToken>("POST", "/api/endpoints/" + enc(e.name) + "/rotate");
       set({ fresh: { ...get().fresh, [e.name]: r.token } });
       say("New token made. Copy it now; it is shown once.");
       props.setOpen(true);
       await load();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const remove = async () => {
     if (!(await ask("Remove the webhook " + e.name + "? Anything sending to it will be turned away.", "Remove")))
       return;
-    try {
-      await api("DELETE", "/api/endpoints/" + e.name);
+    await attempt(async () => {
+      await api("DELETE", "/api/endpoints/" + enc(e.name));
       const { [e.name]: _gone, ...rest } = get().fresh;
       set({ fresh: rest });
       say("Deleted.");
       await load();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   const [renaming, setRenaming] = useState(false);
   const [spoken, setSpoken] = useState(e.spoken_name ?? "");
   const [nameErr, setNameErr] = useState("");
+  const [saving, run] = useBusy();
   const saveSpoken = async (ev: Event) => {
     ev.preventDefault();
     setNameErr("");
-    try {
-      await api("PUT", "/api/endpoints/" + e.name, { spoken_name: spoken.trim() || null });
-      setRenaming(false);
-      say("Saved.");
-      await load();
-    } catch (x) {
-      if (x instanceof ApiError && x.status === 400) setNameErr(SPOKEN_RULE);
-      else fail(x);
-    }
+    await run(async () => {
+      try {
+        await api("PUT", "/api/endpoints/" + enc(e.name), { spoken_name: spoken.trim() || null });
+        setRenaming(false);
+        say("Saved.");
+        await load();
+      } catch (x) {
+        if (x instanceof ApiError && x.status === 400) setNameErr(x.message);
+        else fail(x);
+      }
+    });
   };
 
   return (
@@ -73,7 +70,12 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
       </div>
       <p class="mut spokenas">
         The speaker says <q>From {e.spoken_name || e.name}</q> before its messages.{" "}
-        <button class="plain small" type="button" onClick={() => setRenaming(true)}>
+        <button
+          class="plain small"
+          type="button"
+          aria-label={"Change what the speaker says for " + e.name}
+          onClick={() => setRenaming(true)}
+        >
           Change what it says
         </button>
       </p>
@@ -103,17 +105,17 @@ function Hook(props: { e: Endpoint; open: boolean; setOpen: (v: boolean) => void
             {nameErr}
           </p>
           <div class="row">
-            <button>Save</button>
+            <button disabled={saving}>Save</button>
           </div>
         </form>
       </Dialog>
       <code>{url}</code>
       <div class="acts">
         <CopyButton text={url} label="Copy address" />
-        <button class="plain" type="button" onClick={rotate}>
+        <button class="plain" type="button" aria-label={"New token for " + e.name} onClick={rotate}>
           New token
         </button>
-        <button class="danger" type="button" onClick={remove}>
+        <button class="danger" type="button" aria-label={"Delete " + e.name} onClick={remove}>
           Delete
         </button>
       </div>
@@ -150,25 +152,26 @@ export function Webhooks(): JSX.Element {
   const [adapter, setAdapter] = useState("generic");
   const [spokenName, setSpokenName] = useState("");
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [creating, run] = useBusy();
   const ov = s.overview;
 
   const create = async (ev: Event) => {
     ev.preventDefault();
-    try {
-      const body: Record<string, string> = { name: name.trim(), adapter };
-      if (spokenName.trim()) body["spoken_name"] = spokenName.trim();
-      const r = await api<WebhookToken>("POST", "/api/endpoints", body);
-      set({ fresh: { ...get().fresh, [r.name]: r.token } });
-      setName("");
-      setSpokenName("");
-      setAdding(false);
-      setOpen((o) => ({ ...o, [r.name]: true }));
-      say("Created. Copy the token now; it is shown once.");
-      await load();
-      document.getElementById("snip-" + r.name)?.scrollIntoView({ block: "center" });
-    } catch (x) {
-      fail(x);
-    }
+    await run(async () => {
+      await attempt(async () => {
+        const body: Record<string, string> = { name: name.trim(), adapter };
+        if (spokenName.trim()) body["spoken_name"] = spokenName.trim();
+        const r = await api<WebhookToken>("POST", "/api/endpoints", body);
+        set({ fresh: { ...get().fresh, [r.name]: r.token } });
+        setName("");
+        setSpokenName("");
+        setAdding(false);
+        setOpen((o) => ({ ...o, [r.name]: true }));
+        say("Created. Copy the token now; it is shown once.");
+        await load();
+        document.getElementById("snip-" + r.name)?.scrollIntoView({ block: "center" });
+      });
+    });
   };
 
   return (
@@ -243,7 +246,7 @@ export function Webhooks(): JSX.Element {
             </select>
           </Field>
           <div class="row">
-            <button>Add webhook</button>
+            <button disabled={creating}>Add webhook</button>
           </div>
         </form>
       </Dialog>

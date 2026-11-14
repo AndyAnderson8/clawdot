@@ -1,7 +1,28 @@
 // Small pieces several tabs share.
 import type { ComponentChildren, JSX } from "preact";
-import { useState } from "preact/hooks";
+import { useRef, useState } from "preact/hooks";
 import { say } from "./store.ts";
+
+/**
+ * One send at a time. `run(job)` starts the job unless one is already running (a double click, Enter held down),
+ * and `busy` is true meanwhile so the button can be disabled.
+ */
+export function useBusy(): [boolean, (job: () => Promise<void>) => Promise<void>] {
+  const [busy, setBusy] = useState(false);
+  const running = useRef(false);
+  const run = async (job: () => Promise<void>) => {
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
+    try {
+      await job();
+    } finally {
+      running.current = false;
+      setBusy(false);
+    }
+  };
+  return [busy, run];
+}
 
 /** Copy `text` to the clipboard, with a fallback for pages served over plain http on a home network. */
 export async function copyText(text: string): Promise<boolean> {
@@ -32,17 +53,26 @@ export async function copyText(text: string): Promise<boolean> {
 
 export function CopyButton(props: { text: string | (() => string); label?: string }): JSX.Element {
   const [done, setDone] = useState(false);
-  const click = async () => {
+  const click = async (ev: Event) => {
+    const button = ev.currentTarget as HTMLElement;
     const text = typeof props.text === "function" ? props.text() : props.text;
-    if (await copyText(text)) {
+    const ok = await copyText(text);
+    // The plain-http way of copying selects a hidden box, which takes the focus with it when it goes.
+    if (document.activeElement !== button) button.focus({ preventScroll: true });
+    if (ok) {
       setDone(true);
       setTimeout(() => setDone(false), 1500);
     } else say("Copy failed. Select the text and copy it by hand.", true);
   };
   return (
-    <button class="plain" type="button" onClick={click}>
-      {done ? "Copied" : (props.label ?? "Copy")}
-    </button>
+    <>
+      <button class="plain" type="button" onClick={click}>
+        {done ? "Copied" : (props.label ?? "Copy")}
+      </button>
+      <span class="sr" role="status">
+        {done ? "Copied" : ""}
+      </span>
+    </>
   );
 }
 
@@ -57,20 +87,6 @@ export function Field(props: { id: string; label: string; hint?: string; childre
       <div class="sctl">{props.children}</div>
     </div>
   );
-}
-
-export function ConfirmBadge(props: { confirm: boolean }): JSX.Element {
-  return (
-    <span class={"badge" + (props.confirm ? " good" : "")}>{props.confirm ? "Asks you first" : "Runs right away"}</span>
-  );
-}
-
-export function OffBadge(props: { enabled: boolean }): JSX.Element | null {
-  return props.enabled ? null : <span class="badge bad">Off</span>;
-}
-
-export function go(tab: string): void {
-  location.hash = "#/" + tab;
 }
 
 /** Offer `text` to the browser as a file to save (no request is made). */

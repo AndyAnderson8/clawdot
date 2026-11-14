@@ -9,16 +9,18 @@ import {
   SKILL_HELPER,
   readSkillFiles,
   skillImports,
+  skillSendProblem,
+  SKILL_TOOLS_MAX,
   skillBody,
   type SkillDraft,
   type SkillFile,
 } from "../forms.ts";
-import { Field } from "../parts.tsx";
-import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
+import { Field, useBusy } from "../parts.tsx";
+import { attempt, change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { Skill } from "../types.ts";
 import { ask } from "../confirm.tsx";
 
-const MAX_FILE_BYTES = 70000;
+const MAX_FILE_BYTES = 64 * 1024;
 const MAX_FILES = 300;
 
 /** Make a skill, or change one in place. `skill` is the one being changed; none means a new one. */
@@ -27,22 +29,30 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
   const [name, setName] = useState(k?.name ?? "");
   const [text, setText] = useState(k?.instructions ?? "");
   const [tools, setTools] = useState((k?.tools ?? []).join(", "));
+  const [busy, run] = useBusy();
   const submit = async (ev: Event) => {
     ev.preventDefault();
-    const ok = k
-      ? await change(
-          "POST",
-          "/api/skills/edit",
-          { name: k.name, skill: skillBody(name, text, tools, k.enabled) },
-          "Saved.",
-        )
-      : await change(
-          "POST",
-          "/api/skills",
-          skillBody(name, text, tools, true),
-          "Added. The assistant uses it from now on.",
-        );
-    if (ok) props.onDone();
+    const sent = skillBody(name, text, tools, k ? k.enabled : true);
+    if (sent.tools.length > SKILL_TOOLS_MAX) {
+      say("A skill may use at most " + SKILL_TOOLS_MAX + " tools; this one lists " + sent.tools.length + ".", true);
+      return;
+    }
+    await run(async () => {
+      const ok = k
+        ? await change(
+            "POST",
+            "/api/skills/edit",
+            { name: k.name, skill: skillBody(name, text, tools, k.enabled) },
+            "Saved.",
+          )
+        : await change(
+            "POST",
+            "/api/skills",
+            skillBody(name, text, tools, true),
+            "Added. The assistant uses it from now on.",
+          );
+      if (ok) props.onDone();
+    });
   };
   const remove = async () => {
     if (k && (await ask("Delete the skill " + k.name + "?", "Delete")))
@@ -90,7 +100,7 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
         />
       </Field>
       <div class="row dlgfoot">
-        <button>{k ? "Save changes" : "Add skill"}</button>
+        <button disabled={busy}>{k ? "Save changes" : "Add skill"}</button>
         <button class="plain" type="button" onClick={props.onDone}>
           Cancel
         </button>
@@ -108,10 +118,11 @@ function SkillForm(props: { skill: Skill | null; onDone: () => void }): JSX.Elem
 function SkillImport(props: { onDone: () => void }): JSX.Element {
   const [list, setList] = useState<{ found: SkillDraft[]; skipped: string[] } | null>(null);
   const [off, setOff] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = useBusy();
   const [raw, setRaw] = useState<SkillFile[]>([]);
 
-  const read = async (files: FileList | null) => {
+  const read = async (input: HTMLInputElement) => {
+    const files = input.files;
     if (!files?.length) return;
     const all = Array.from(files).filter((f) => SKILL_HELPER.test(f.name));
     if (all.length > MAX_FILES) {
@@ -123,8 +134,15 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     for (const f of all) {
       const path = f.webkitRelativePath || f.name;
       if (f.size > MAX_FILE_BYTES) skippedBig.push(path + ": it is larger than 64 KB");
-      else read.push({ path, text: await f.text() });
+      else
+        try {
+          read.push({ path, text: await f.text() });
+        } catch {
+          skippedBig.push(path + ": it could not be read");
+        }
     }
+    // So that choosing the same folder again, after a change, is noticed.
+    input.value = "";
     setRaw(read);
     // A folder with a SKILL.md is one skill; its other text files are helper files, not skills of their own.
     const isSkillMd = (p: string) => /(^|\/)SKILL\.md$/i.test(p);
@@ -139,12 +157,17 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     setList({ found: r.found, skipped: [...skippedBig, ...r.skipped] });
     setOff([]);
   };
-  const add = async () => {
+  const add = () => run(addNow);
+  const addNow = async () => {
     if (!list) return;
-    setBusy(true);
     const skills = list.found.filter((s) => !off.includes(s.name));
     try {
       const { folders, plain } = skillImports(skills, raw);
+      const tooBig = skillSendProblem(folders, plain);
+      if (tooBig) {
+        say(tooBig, true);
+        return;
+      }
       let added = 0;
       const left: string[] = [];
       const send = async (body: unknown) => {
@@ -170,7 +193,6 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
     } catch (x) {
       fail(x);
     }
-    setBusy(false);
   };
   const chosen = list ? list.found.length - off.length : 0;
   return (
@@ -188,7 +210,7 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
             type="file"
             class="sr"
             ref={(el) => el?.setAttribute("webkitdirectory", "")}
-            onChange={(e) => void read(e.currentTarget.files)}
+            onChange={(e) => void read(e.currentTarget)}
           />
         </label>
         <label class="plain small filebtn">
@@ -199,7 +221,7 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
             class="sr"
             multiple
             accept=".md,.json,text/markdown,application/json"
-            onChange={(e) => void read(e.currentTarget.files)}
+            onChange={(e) => void read(e.currentTarget)}
           />
         </label>
       </div>
@@ -273,15 +295,13 @@ function SkillImport(props: { onDone: () => void }): JSX.Element {
 function SkillReview(props: { skill: Skill; onDone: () => void }): JSX.Element {
   const k = props.skill;
   const accept = async (alsoOn: boolean) => {
-    try {
+    await attempt(async () => {
       await api("POST", "/api/skills/accept", { name: k.name });
       if (alsoOn) await api("POST", "/api/skills/enabled", { name: k.name, enabled: true });
       await loadExt();
       say(alsoOn ? "Accepted and turned on." : "Accepted. Turn it on when you want it used.");
       props.onDone();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const remove = async () => {
     if (await ask("Delete the skill " + k.name + "?", "Delete"))
@@ -353,11 +373,9 @@ export function Skills(): JSX.Element {
   const setMany = async (list: Skill[], enabled: boolean) => {
     // A skill that has not been read and accepted cannot be turned on, so it is left alone here.
     const todo = list.filter((k) => k.enabled !== enabled && !(enabled && k.needs_review));
-    try {
+    await attempt(async () => {
       for (const k of todo) await api("POST", "/api/skills/enabled", { name: k.name, enabled });
-    } catch (x) {
-      fail(x);
-    }
+    });
     await loadExt();
     if (todo.length)
       say(todo.length + (todo.length === 1 ? " skill turned " : " skills turned ") + (enabled ? "on." : "off."));
@@ -422,7 +440,7 @@ export function Skills(): JSX.Element {
                   checked={k.enabled}
                   disabled={k.needs_review === true}
                   title={k.needs_review ? "Read and accept this skill before turning it on." : undefined}
-                  aria-label={k.name + (k.needs_review ? " needs review" : k.enabled ? " is on" : " is off")}
+                  aria-label={k.name}
                   onChange={() => void toggle(k)}
                 />
                 <div class="toolmain">
@@ -436,11 +454,11 @@ export function Skills(): JSX.Element {
                 </div>
                 <div class="toolact">
                   {k.needs_review ? (
-                    <button type="button" class="small" onClick={() => setReviewing(k)}>
+                    <button type="button" class="small" aria-label={"Review " + k.name} onClick={() => setReviewing(k)}>
                       Review
                     </button>
                   ) : null}
-                  <button class="plain small" type="button" onClick={() => setEditing(k)}>
+                  <button class="plain small" type="button" aria-label={"Edit " + k.name} onClick={() => setEditing(k)}>
                     Edit
                   </button>
                 </div>

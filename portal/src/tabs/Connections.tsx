@@ -1,10 +1,10 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api } from "../api.ts";
+import { api, enc } from "../api.ts";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { connectionDefinition } from "../forms.ts";
-import { Field } from "../parts.tsx";
-import { change, fail, loadExt, say, useApp, usePolled } from "../store.ts";
+import { Field, useBusy } from "../parts.tsx";
+import { attempt, change, loadExt, say, useApp, usePolled } from "../store.ts";
 import type { ConnectionTest, McpServer } from "../types.ts";
 import { Problems } from "./Tools.tsx";
 import { ask } from "../confirm.tsx";
@@ -13,14 +13,14 @@ function Source(props: { s: McpServer }) {
   const s = props.s;
   const remove = async () => {
     if (await ask("Remove the source " + s.name + "? Its tools will disappear.", "Remove"))
-      void change("DELETE", "/api/connections/" + s.name, undefined, "Removed.");
+      void change("DELETE", "/api/connections/" + enc(s.name), undefined, "Removed.");
   };
   const n = s.tools.length;
   const waiting = s.needs_review ?? [];
   const accept = (tool?: string) =>
     change(
       "POST",
-      "/api/connections/" + s.name + "/accept",
+      "/api/connections/" + enc(s.name) + "/accept",
       tool ? { tool } : {},
       tool ? "Accepted." : "All accepted.",
     );
@@ -30,11 +30,11 @@ function Source(props: { s: McpServer }) {
         class="switch"
         type="checkbox"
         checked={s.enabled}
-        aria-label={s.name + (s.enabled ? " is on" : " is off")}
+        aria-label={s.name}
         onChange={() =>
           change(
             "POST",
-            "/api/connections/" + s.name + "/enabled",
+            "/api/connections/" + enc(s.name) + "/enabled",
             { enabled: !s.enabled },
             s.name + (s.enabled ? " turned off." : " turned on."),
           )
@@ -83,7 +83,7 @@ function Source(props: { s: McpServer }) {
       </div>
       <div class="toolact">
         {s.deletable ? (
-          <button class="danger small" type="button" onClick={remove}>
+          <button class="danger small" type="button" aria-label={"Remove " + s.name} onClick={remove}>
             Remove
           </button>
         ) : (
@@ -102,7 +102,7 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
   const [confirmFirst, setConfirmFirst] = useState(true);
   const [found, setFound] = useState<string[] | null>(null);
   const [off, setOff] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = useBusy();
   const def = () => connectionDefinition({ name, url, tokenVar, confirm: confirmFirst });
   const changed =
     <T,>(set: (v: T) => void) =>
@@ -113,27 +113,20 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
     };
 
   const check = async () => {
-    setBusy(true);
-    try {
+    await attempt(async () => {
       const r = await api<ConnectionTest>("POST", "/api/connections/test", def());
       setFound(r.tools.map((t) => t.name));
       setOff([]);
-    } catch (x) {
-      fail(x);
-    }
-    setBusy(false);
+    });
   };
   const add = async () => {
-    setBusy(true);
     const ok = await change("POST", "/api/connections", def(), "");
     if (ok) {
       // Every tool comes in; the ones left unticked are switched off.
       for (const t of off) {
-        try {
-          await api("POST", "/api/tools/" + t + "/enabled", { enabled: false });
-        } catch (x) {
-          fail(x);
-        }
+        await attempt(async () => {
+          await api("POST", "/api/tools/" + enc(t) + "/enabled", { enabled: false });
+        });
       }
       await loadExt();
       say(found ? "Added. " + (found.length - off.length) + " of its " + found.length + " tools are on." : "Added.");
@@ -145,11 +138,10 @@ function AddSource(props: { open: boolean; onClose: () => void }) {
       setOff([]);
       props.onClose();
     }
-    setBusy(false);
   };
   const submit = (ev: Event) => {
     ev.preventDefault();
-    void (found ? add() : check());
+    void run(found ? add : check);
   };
 
   return (

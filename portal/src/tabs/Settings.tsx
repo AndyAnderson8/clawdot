@@ -1,15 +1,16 @@
 import type { JSX } from "preact";
-import { useRef, useState } from "preact/hooks";
+import { useMemo, useRef, useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { currentText, FROM, hintText, labelOf, settingsPatch, type SettingSpec, cents } from "../forms.ts";
 import { providerFor } from "../providers.ts";
 import { TimeField } from "../timefield.tsx";
-import { fail, get, say, set, useApp } from "../store.ts";
+import { attempt, adopt, fail, say, useApp } from "../store.ts";
 import { zoneName, zoneOptions } from "../time.ts";
 import type { SettingField, Settings as SettingsData } from "../types.ts";
 import { languageOptions } from "../languages.ts";
 import { ModelSelect, VoiceControl } from "./Voice.tsx";
 import { ask } from "../confirm.tsx";
+import { useBusy } from "../parts.tsx";
 
 function browserZone(): string {
   try {
@@ -18,14 +19,18 @@ function browserZone(): string {
     return "";
   }
 }
+let zonesKnown: string[] | null | undefined;
+/** Every time zone the browser knows, listed once. Null where it cannot list them. */
 function zoneList(): string[] | null {
+  if (zonesKnown !== undefined) return zonesKnown;
+  zonesKnown = null;
   try {
     const l = Intl.supportedValuesOf("timeZone");
-    if (l.length) return ["UTC", ...l];
+    if (l.length) zonesKnown = ["UTC", ...l];
   } catch {
     /* an older browser: fall back to a text box */
   }
-  return null;
+  return zonesKnown;
 }
 
 /**
@@ -47,9 +52,13 @@ function Control(props: {
   /** The time zones to offer, or null where the browser cannot list them. */
   zones: string[] | null;
   browserZone: string;
+  /** A time is half typed, so "no time" would be a wrong reading of the box. */
+  unfinished: (yes: boolean) => void;
 }): JSX.Element {
-  const { sp, field, id, saved, put, url, hasKey, keyRev, zones, browserZone } = props;
+  const { sp, field, id, saved, put, url, hasKey, keyRev, zones, browserZone, unfinished } = props;
   const v = props.value;
+  const zoneChoices = useMemo(() => (field.kind === "zone" && zones ? zoneOptions(zones) : []), [field.kind, zones]);
+  const languages = useMemo(() => (field.kind === "language" ? languageOptions(v) : []), [field.kind, v]);
   const input = (e: Event) => put((e.currentTarget as HTMLInputElement).value);
   if (sp.widget === "model") {
     // A provider that needs a key is asked for its models only once a key is in place.
@@ -71,7 +80,7 @@ function Control(props: {
   if (field.kind === "zone") {
     return zones ? (
       <select id={id} value={v} onChange={input}>
-        {zoneOptions(zones).map((z) => (
+        {zoneChoices.map((z) => (
           <option key={z.id} value={z.id}>
             {z.label}
           </option>
@@ -85,7 +94,7 @@ function Control(props: {
     return (
       <select id={id} value={v} disabled={sp.off} onChange={input}>
         <option value="">Detect it automatically</option>
-        {languageOptions(v).map((l) => (
+        {languages.map((l) => (
           <option key={l.code} value={l.code}>
             {l.label}
           </option>
@@ -117,7 +126,19 @@ function Control(props: {
     );
   }
   if (field.kind === "time") {
-    return <TimeField id={id} value={v} disabled={sp.off} clearable onChange={put} />;
+    return (
+      <TimeField
+        id={id}
+        label={labelOf(sp.key)}
+        value={v}
+        disabled={sp.off}
+        clearable
+        onChange={(x, partial) => {
+          unfinished(partial === true);
+          put(x);
+        }}
+      />
+    );
   }
   if (field.kind === "money") {
     return (
@@ -132,7 +153,9 @@ function Control(props: {
           disabled={sp.off}
           value={v}
           onInput={(e) => put(cents(e.currentTarget.value))}
-          onBlur={() => v && put(Number(v || 0).toFixed(2))}
+          onBlur={() => {
+            if (v && Number.isFinite(Number(v))) put(Number(v).toFixed(2));
+          }}
         />
       </div>
     );
@@ -165,8 +188,7 @@ function Control(props: {
   );
 }
 
-/** One group of settings with its own Save button. Only the values you changed are sent. */
-export function Group(props: {
+interface GroupProps {
   title: string;
   intro?: string;
   specs: SettingSpec[];
@@ -175,15 +197,28 @@ export function Group(props: {
   extra?: (f: { vals: Record<string, string>; setVals: (v: Record<string, string>) => void }) => JSX.Element;
   /** More rows after the settings, before the Save button (a key, a status line). */
   below?: () => JSX.Element | null;
-}): JSX.Element {
+}
+
+/**
+ * One group of settings with its own Save button. Only the values you changed are sent. Saving starts this group
+ * again from the saved values; the other groups keep what has been typed in them.
+ */
+export function Group(props: GroupProps): JSX.Element {
+  const [round, setRound] = useState(0);
+  return <GroupForm key={round} {...props} onSaved={() => setRound((n) => n + 1)} />;
+}
+
+function GroupForm(props: GroupProps & { onSaved: () => void }): JSX.Element {
   const { title, intro, specs, settings } = props;
   const keyRev = useApp().keyRev;
   const current: Record<string, string> = {};
   const start0: Record<string, string> = {};
   const hints: Record<string, string> = {};
-  const zones: string[] = [];
   const bz = browserZone();
   const zs = zoneList();
+  const zoneSpec = specs.find((sp) => settings.fields[sp.key]?.kind === "zone");
+  const zoneNow = zoneSpec ? currentText(settings, zoneSpec.key) : "";
+  const zones = useMemo(() => (zs ? (zs.includes(zoneNow) ? zs : [zoneNow, ...zs]) : null), [zs, zoneNow]);
   for (const sp of specs) {
     const f = settings.fields[sp.key];
     if (!f) continue;
@@ -192,7 +227,6 @@ export function Group(props: {
     start0[sp.key] = cur;
     hints[sp.key] = hintText(sp, f);
     if (f.kind === "zone" && zs) {
-      zones.push(...(zs.includes(cur) ? zs : [cur, ...zs]));
       if (f.source === "default" && bz && zs.includes(bz)) {
         start0[sp.key] = bz;
         hints[sp.key] =
@@ -208,20 +242,34 @@ export function Group(props: {
     Object.fromEntries(specs.filter((sp) => sp.optional).map((sp) => [sp.key, (start0[sp.key] ?? "") !== ""])),
   );
   const [err, setErr] = useState("");
+  // The settings whose time boxes hold something that is not yet a time.
+  const [halfTimes, setHalfTimes] = useState<Record<string, boolean>>({});
   const errRef = useRef<HTMLParagraphElement>(null);
+  const [busy, run] = useBusy();
 
-  const submit = async (ev: Event) => {
+  const submit = (ev: Event) => {
     ev.preventDefault();
+    return run(() => save());
+  };
+  const save = async () => {
     setErr("");
-    const body = settingsPatch(settings.fields, specs, current, vals);
+    const half = specs.find((sp) => halfTimes[sp.key] && !sp.hideWhen?.(vals) && (!sp.optional || shown[sp.key]));
+    const body = half
+      ? "Finish the time for “" + labelOf(half.key) + "” (an hour and a minute), or empty both boxes."
+      : settingsPatch(settings.fields, specs, current, vals);
+    if (typeof body === "string") {
+      setErr(body);
+      errRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
     if (!Object.keys(body).length) {
       say("Nothing to save: you have not changed anything here.");
       return;
     }
     try {
       const next = await api<SettingsData>("PUT", "/api/settings", body);
-      const merged = Object.assign({}, get().settings, next);
-      set({ settings: merged, settingsRev: get().settingsRev + 1 });
+      const merged = adopt(next);
+      props.onSaved();
       say(merged.note || "Saved.");
     } catch (x) {
       if (x instanceof ApiError && x.status === 400) {
@@ -238,18 +286,16 @@ export function Group(props: {
       "Reset them",
     );
     if (!sure) return;
-    try {
+    await attempt(async () => {
       const next = await api<SettingsData>(
         "PUT",
         "/api/settings",
         Object.fromEntries(saved.map((sp) => [sp.key, null])),
       );
-      const merged = Object.assign({}, get().settings, next);
-      set({ settings: merged, settingsRev: get().settingsRev + 1 });
+      adopt(next);
+      props.onSaved();
       say("Back to the defaults.");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   return (
@@ -300,8 +346,9 @@ export function Group(props: {
                 url={vals["llm_url"] ?? ""}
                 hasKey={settings.llm?.key_present === true}
                 keyRev={keyRev}
-                zones={zs ? zones : null}
+                zones={zones}
                 browserZone={bz}
+                unfinished={(yes) => setHalfTimes((h) => (h[sp.key] === yes ? h : { ...h, [sp.key]: yes }))}
               />
               {sp.optional ? (
                 <button
@@ -310,6 +357,7 @@ export function Group(props: {
                   onClick={() => {
                     setVals({ ...vals, [sp.key]: "" });
                     setShown({ ...shown, [sp.key]: false });
+                    setHalfTimes({ ...halfTimes, [sp.key]: false });
                   }}
                 >
                   Remove
@@ -344,7 +392,7 @@ export function Group(props: {
         {err}
       </p>
       <div class="row">
-        <button>{"Save " + title.charAt(0).toLowerCase() + title.slice(1)}</button>
+        <button disabled={busy}>{"Save " + title.charAt(0).toLowerCase() + title.slice(1)}</button>
       </div>
     </form>
   );

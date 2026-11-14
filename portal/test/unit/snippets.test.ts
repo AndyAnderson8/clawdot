@@ -87,3 +87,9 @@ test("the page prints exactly the adapter's setup lines, filled in", () => {
     CLAUDE.filter((l) => l.endsWith(":")),
   );
 });
+
+test("an address that ends with a slash does not give a double slash", () => {
+  const out = snippets("http://dot.local:3335/", "ci", "generic", "tok", []);
+  assert.ok(out.every(([, text]) => !text.includes("3335//")));
+  assert.ok(out[0]![1].includes("http://dot.local:3335/hook/ci"));
+});

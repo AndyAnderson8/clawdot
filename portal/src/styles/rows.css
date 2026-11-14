@@ -17,13 +17,15 @@
   }
 }
 .slabel label,
+.slabel .ltitle,
 label {
   display: block;
   margin: 0 0 var(--spacing-1);
   font-size: 0.9375rem;
   font-weight: 650;
 }
-.slabel label {
+.slabel label,
+.slabel .ltitle {
   margin: 0;
 }
 .slabel p {
