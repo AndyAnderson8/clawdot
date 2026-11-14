@@ -351,6 +351,21 @@ async fn setup<IO>(link: &mut Link<IO>, t: &Timing) -> Result<Info, String>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    hello(link, t).await?;
+    let (friendly, voice_flags) = device_info(link, t).await?;
+    let media_key = first_media_player(link, t).await?;
+    Ok(Info {
+        friendly,
+        flags: voice_flags,
+        media_key,
+    })
+}
+
+/// Say hello and check the device speaks a compatible API version.
+async fn hello<IO>(link: &mut Link<IO>, t: &Timing) -> Result<(), String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     link.send(&Msg::HelloRequest {
         client_info: "ClawDot".into(),
         major: API_MAJOR,
@@ -367,7 +382,15 @@ where
             "the device speaks ESPHome API {major}.{minor}; this client supports {API_MAJOR}.x"
         ));
     }
+    Ok(())
+}
 
+/// Ask for the device info; returns the name to show and the voice feature flags, after checking the device can
+/// be a voice assistant that carries audio over the API.
+async fn device_info<IO>(link: &mut Link<IO>, t: &Timing) -> Result<(String, u32), String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     link.send(&Msg::DeviceInfoRequest).await?;
     let Msg::DeviceInfoResponse {
         name,
@@ -386,7 +409,19 @@ where
             "the device cannot carry audio over the API (no API_AUDIO feature flag)".into(),
         );
     }
+    let friendly = if friendly_name.is_empty() {
+        name
+    } else {
+        friendly_name
+    };
+    Ok((friendly, voice_flags))
+}
 
+/// List the entities and return the key of the first media player, if any.
+async fn first_media_player<IO>(link: &mut Link<IO>, t: &Timing) -> Result<Option<u32>, String>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     link.send(&Msg::ListEntitiesRequest).await?;
     let mut media_key = None;
     for _ in 0..MAX_MEDIA_PLAYERS {
@@ -404,15 +439,7 @@ where
             _ => break,
         }
     }
-    Ok(Info {
-        friendly: if friendly_name.is_empty() {
-            name
-        } else {
-            friendly_name
-        },
-        flags: voice_flags,
-        media_key,
-    })
+    Ok(media_key)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
