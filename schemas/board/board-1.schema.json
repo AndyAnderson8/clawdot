@@ -61,7 +61,7 @@
       }
     },
     "buttons": {
-      "description": "Raw inputs mapped to logical button names. Absent or empty means no buttons.",
+      "description": "Raw inputs mapped to logical button names. Absent or empty means no buttons. JSON Schema cannot say that each `name` may appear once, or that two buttons may not share a source; the loader checks both and refuses the file (REQ-DEV-008).",
       "type": "array", "maxItems": 8,
       "items": {
         "type": "object", "additionalProperties": false, "required": ["name", "source"],

@@ -165,22 +165,23 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether every Must case passed or was skipped with a reason, and none failed.
+    /// Whether every case passed or was skipped with a reason, and none failed. A skip that gives no reason counts
+    /// as a failure: a skipped case must say why it was not run.
     #[must_use]
     pub fn passed(&self) -> bool {
-        !self
-            .rows
-            .iter()
-            .any(|(_, _, _, o)| matches!(o, Outcome::Fail(_)))
+        self.failures().is_empty()
     }
 
-    /// Cases that failed.
+    /// Cases that failed, including skips that record no reason.
     #[must_use]
     pub fn failures(&self) -> Vec<String> {
         self.rows
             .iter()
             .filter_map(|(id, _, _, o)| match o {
                 Outcome::Fail(m) => Some(format!("{id}: {m}")),
+                Outcome::Skip(why) if why.trim().is_empty() => {
+                    Some(format!("{id}: skipped without a reason"))
+                }
                 _ => None,
             })
             .collect()
@@ -336,3 +337,30 @@ pub const REPORT_ONLY_CASES: [&str; 6] = [
     "req_dev_023_bluetooth_speaker_mode",
     "req_dev_024_spotify_connect",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(skip: &str) -> Report {
+        Report {
+            board: "x".into(),
+            rows: vec![(
+                "req_dev_009_x",
+                "REQ-DEV-009",
+                Pri::Must,
+                Outcome::Skip(skip.into()),
+            )],
+        }
+    }
+
+    #[test]
+    fn req_dev_005_a_skip_without_a_reason_does_not_pass() {
+        let ok = report("needs a person on the unit");
+        assert!(ok.passed() && ok.failures().is_empty());
+        let bad = report("  ");
+        assert!(!bad.passed(), "a skip must record why");
+        assert_eq!(bad.failures().len(), 1);
+        assert!(bad.failures()[0].contains("req_dev_009_x"));
+    }
+}
