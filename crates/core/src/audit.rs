@@ -816,6 +816,21 @@ impl State {
             day = day.max(newest);
         }
         let first_real = if oldest == 0 { day } else { oldest };
+        let mut c = self.recount(day, first_real);
+        // The log may have rotated away some of the day; the counts file has not forgotten them. Take the larger.
+        // A missing or unreadable file changes nothing: the recount stands.
+        let saved_day = |s: &SavedCounts| if s.day == 0 { first_real } else { s.day };
+        if let Some(saved) = saved.filter(|s| saved_day(s) == day) {
+            c.actions = c.actions.max(saved.actions);
+            c.costly = c.costly.max(saved.costly);
+        }
+        self.counts = c;
+        day
+    }
+
+    /// The day's counters, counted from the log. A record from before the clock was valid (day 0) counts on
+    /// `first_real`.
+    fn recount(&self, day: i64, first_real: i64) -> Counts {
         let mut c = Counts {
             day,
             known: true,
@@ -836,15 +851,7 @@ impl State {
                 }
             }
         });
-        // The log may have rotated away some of the day; the counts file has not forgotten them. Take the larger.
-        // A missing or unreadable file changes nothing: the recount stands.
-        let saved_day = |s: &SavedCounts| if s.day == 0 { first_real } else { s.day };
-        if let Some(saved) = saved.filter(|s| saved_day(s) == day) {
-            c.actions = c.actions.max(saved.actions);
-            c.costly = c.costly.max(saved.costly);
-        }
-        self.counts = c;
-        day
+        c
     }
 
     /// Write the day's counts to their own file. A failure is reported, never fatal: the counts in memory still
