@@ -23,6 +23,7 @@ Sizes: **S** is under an hour, **M** is a few hours, **L** is a day or more.
 
 | # | What | State | What to do |
 |---|---|---|---|
+| P-left | **Portal review leftovers.** P26: only the "installed" phase stops polling; other phases not checked. P31: `attempt()` is used only where the body has no return or finally. P32: unused fields in `portal/src/types.ts` not audited. P14: not every control has been checked for a name. P28 has no test. | Most of the 35 findings fixed (see the completed list). | Finish the four partial items; look at the page by eye (toast close button, Copied region, label CSS). |
 | U2 | **Streaming the model's text into speech** (first sound before the model has finished). | Designed in [speech-latency.md](../architecture/speech-latency.md), stage 2. Not built. The reply is spoken sentence by sentence only after the whole reply text exists. | Build it as the design says. This is a feature, not a fix; it goes through the roadmap. |
 | U3 | **The branch `docs/agent-harness-brains`** (a research note on agent harnesses as an optional brain, and an untested recipe for using Hermes Agent as the model). | Unlanded, several days behind `dev`. | Merge `dev` into it, check the recipe still matches the settings, land it or delete it. |
 | U4 | **The guide for the MCP server** ([hermes-mcp.md](../guides/hermes-mcp.md)) says it was written from Hermes Agent's documentation and never run against a live one. | Untested. | Run it against a real MCP client and correct the configuration example. |
