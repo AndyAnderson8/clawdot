@@ -46,7 +46,7 @@ jobs:
           cp CHANGELOG.md LICENSE NOTICE dist/
           (cd dist && sha256sum -- * > SHA256SUMS)
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
           files: dist/*
