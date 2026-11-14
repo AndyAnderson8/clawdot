@@ -156,62 +156,67 @@ impl Endpointer {
         let level = rms(frame);
         let loud = level >= self.threshold();
         match self.state {
-            State::Waiting => {
-                if loud {
-                    self.loud_run += 1;
-                } else {
-                    // Follow the background slowly so a steady hum does not read as speech.
-                    self.noise = self.noise * 0.95 + level * 0.05;
-                    self.loud_run = 0;
-                }
-                let cap = frames_for(self.cfg.preroll_ms) * FRAME;
-                for &s in frame {
-                    self.preroll.push_back(s);
-                }
-                while self.preroll.len() > cap + FRAME * self.cfg.start_frames {
-                    self.preroll.pop_front();
-                }
-                if self.loud_run >= self.cfg.start_frames {
-                    self.state = State::Speaking;
-                    self.utterance = self.preroll.drain(..).collect();
-                    self.speech_frames = self.loud_run;
-                    self.quiet_run = 0;
-                    return Event::SpeechStarted;
-                }
-                self.waited_frames += 1;
-                if self.waited_frames >= frames_for(self.cfg.no_speech_ms) {
-                    return Event::NoSpeech;
-                }
-                Event::Nothing
-            }
-            State::Speaking => {
-                self.utterance.extend_from_slice(frame);
-                if loud {
-                    self.speech_frames += 1;
-                    self.quiet_run = 0;
-                } else {
-                    self.quiet_run += 1;
-                }
-                let too_long =
-                    self.utterance.len() >= self.cfg.max_utterance_ms * SAMPLE_RATE / 1000;
-                if self.quiet_run >= frames_for(self.cfg.silence_ms) || too_long {
-                    if self.speech_frames < frames_for(self.cfg.min_speech_ms) && !too_long {
-                        // A click or cough: go back to waiting without reporting anything.
-                        self.state = State::Waiting;
-                        self.utterance.clear();
-                        self.loud_run = 0;
-                        self.speech_frames = 0;
-                        return Event::Nothing;
-                    }
-                    let pcm = std::mem::take(&mut self.utterance);
-                    return Event::Ended {
-                        pcm,
-                        truncated: too_long,
-                    };
-                }
-                Event::Nothing
-            }
+            State::Waiting => self.waiting_frame(frame, level, loud),
+            State::Speaking => self.speaking_frame(frame, loud),
         }
+    }
+
+    /// One frame while waiting for speech to start.
+    fn waiting_frame(&mut self, frame: &[i16], level: f32, loud: bool) -> Event {
+        if loud {
+            self.loud_run += 1;
+        } else {
+            // Follow the background slowly so a steady hum does not read as speech.
+            self.noise = self.noise * 0.95 + level * 0.05;
+            self.loud_run = 0;
+        }
+        let cap = frames_for(self.cfg.preroll_ms) * FRAME;
+        for &s in frame {
+            self.preroll.push_back(s);
+        }
+        while self.preroll.len() > cap + FRAME * self.cfg.start_frames {
+            self.preroll.pop_front();
+        }
+        if self.loud_run >= self.cfg.start_frames {
+            self.state = State::Speaking;
+            self.utterance = self.preroll.drain(..).collect();
+            self.speech_frames = self.loud_run;
+            self.quiet_run = 0;
+            return Event::SpeechStarted;
+        }
+        self.waited_frames += 1;
+        if self.waited_frames >= frames_for(self.cfg.no_speech_ms) {
+            return Event::NoSpeech;
+        }
+        Event::Nothing
+    }
+
+    /// One frame while an utterance is being heard.
+    fn speaking_frame(&mut self, frame: &[i16], loud: bool) -> Event {
+        self.utterance.extend_from_slice(frame);
+        if loud {
+            self.speech_frames += 1;
+            self.quiet_run = 0;
+        } else {
+            self.quiet_run += 1;
+        }
+        let too_long = self.utterance.len() >= self.cfg.max_utterance_ms * SAMPLE_RATE / 1000;
+        if self.quiet_run >= frames_for(self.cfg.silence_ms) || too_long {
+            if self.speech_frames < frames_for(self.cfg.min_speech_ms) && !too_long {
+                // A click or cough: go back to waiting without reporting anything.
+                self.state = State::Waiting;
+                self.utterance.clear();
+                self.loud_run = 0;
+                self.speech_frames = 0;
+                return Event::Nothing;
+            }
+            let pcm = std::mem::take(&mut self.utterance);
+            return Event::Ended {
+                pcm,
+                truncated: too_long,
+            };
+        }
+        Event::Nothing
     }
 }
 
