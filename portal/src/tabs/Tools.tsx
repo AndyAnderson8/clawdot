@@ -1,8 +1,9 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
+import { enc } from "../api.ts";
 import { relaxWarning, tierLabel } from "../activity.ts";
 import { AddButton, Dialog } from "../dialog.tsx";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { change, loadExt, say, useApp, usePolled } from "../store.ts";
 import { matching, toolDefinition, type ParamForm } from "../forms.ts";
 import type { Extensions, Tool } from "../types.ts";
@@ -42,15 +43,19 @@ function whenWords(tier: string): string {
 function WhenItRuns(props: { t: Tool }): JSX.Element {
   const { t } = props;
   const id = "tier-" + t.name;
-  const pick = async (to: string) => {
+  // The box shows the pick at once, so a pick that is declined or does not save is put back to the real level.
+  const pick = async (sel: HTMLSelectElement) => {
+    const to = sel.value;
     const warn = relaxWarning(t.name, t.tier ?? "costly", to);
-    if (warn && !(await ask(warn, "Change it"))) return;
-    void change(
-      "POST",
-      "/api/tools/" + t.name + "/tier",
-      { tier: to === "" ? null : to },
-      to === "" ? "Back to the usual level." : "Saved. It applies from the next request.",
-    );
+    const saved =
+      !(warn && !(await ask(warn, "Change it"))) &&
+      (await change(
+        "POST",
+        "/api/tools/" + enc(t.name) + "/tier",
+        { tier: to === "" ? null : to },
+        to === "" ? "Back to the usual level." : "Saved. It applies from the next request.",
+      ));
+    if (!saved) sel.value = t.tier ?? "";
   };
   if (!(t.tier && t.tier_options?.length)) {
     return (
@@ -64,7 +69,7 @@ function WhenItRuns(props: { t: Tool }): JSX.Element {
       <label class="sr" for={id}>
         How {t.name} runs
       </label>
-      <select id={id} class="whensel" value={t.tier} onChange={(e) => pick(e.currentTarget.value)}>
+      <select id={id} class="whensel" value={t.tier} onChange={(e) => void pick(e.currentTarget)}>
         {(t.tier_options ?? []).map((o) => (
           <option key={o} value={o}>
             {whenWords(o)}
@@ -95,7 +100,7 @@ function ToolRow(props: { t: Tool }) {
   const t = props.t;
   const remove = async () => {
     if (await ask("Delete the tool " + t.name + "? The assistant will stop being able to use it.", "Delete"))
-      void change("DELETE", "/api/tools/" + t.name, undefined, "Deleted.");
+      void change("DELETE", "/api/tools/" + enc(t.name), undefined, "Deleted.");
   };
   return (
     <li class={"toolrow" + (t.enabled ? "" : " off")}>
@@ -104,11 +109,11 @@ function ToolRow(props: { t: Tool }) {
         class="switch"
         type="checkbox"
         checked={t.enabled}
-        aria-label={t.name + (t.enabled ? " is on" : " is off")}
+        aria-label={t.name}
         onChange={() =>
           change(
             "POST",
-            "/api/tools/" + t.name + "/enabled",
+            "/api/tools/" + enc(t.name) + "/enabled",
             { enabled: !t.enabled },
             t.name + (t.enabled ? " turned off." : " turned on."),
           )
@@ -124,7 +129,7 @@ function ToolRow(props: { t: Tool }) {
       </div>
       <div class="toolact">
         {t.deletable ? (
-          <button class="danger small" type="button" onClick={remove}>
+          <button class="danger small" type="button" aria-label={"Delete " + t.name} onClick={remove}>
             Delete
           </button>
         ) : null}
@@ -162,6 +167,7 @@ function AddTool(props: { open: boolean; onClose: () => void }) {
   const [tokenVar, setTokenVar] = useState("");
   const [confirmFirst, setConfirmFirst] = useState(true);
   const [params, setParams] = useState<ParamForm[]>([]);
+  const [busy, run] = useBusy();
   const edit = (id: number, patch: Partial<ParamForm>) =>
     setParams(params.map((p) => (p.id === id ? { ...p, ...patch } : p)));
 
@@ -172,16 +178,18 @@ function AddTool(props: { open: boolean; onClose: () => void }) {
       say(def, true);
       return;
     }
-    if (await change("POST", "/api/tools", def, "Added. The assistant can use it now.")) {
-      setName("");
-      setDescription("");
-      setMethod("POST");
-      setUrl("");
-      setTokenVar("");
-      setConfirmFirst(true);
-      setParams([]);
-      props.onClose();
-    }
+    await run(async () => {
+      if (await change("POST", "/api/tools", def, "Added. The assistant can use it now.")) {
+        setName("");
+        setDescription("");
+        setMethod("POST");
+        setUrl("");
+        setTokenVar("");
+        setConfirmFirst(true);
+        setParams([]);
+        props.onClose();
+      }
+    });
   };
 
   return (
@@ -324,7 +332,7 @@ function AddTool(props: { open: boolean; onClose: () => void }) {
           />
         </div>
         <div class="row dlgfoot">
-          <button>Add tool</button>
+          <button disabled={busy}>Add tool</button>
           <button class="plain" type="button" onClick={props.onClose}>
             Cancel
           </button>

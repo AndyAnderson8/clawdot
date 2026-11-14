@@ -102,6 +102,10 @@ export async function signIn(c: Ctx): Promise<void> {
         "wrong password message",
       );
       await eq(`T.q('#msg').className`, "toast err", "error styling");
+      await eq(`T.q('#msg').getAttribute('role')`, "alert", "an error is announced as one");
+      await T(`click('#msg button')`);
+      await eq(`T.text('#msg')`, "", "an error can be closed");
+      await eq(`T.q('#pw').value`, "wrong", "what was typed stays, to correct");
       await T(`set('#pw', ${JSON.stringify(PASSWORD)})`);
       await T(`submit('#loginform')`);
       await b.until(`!!T.q('#band')`, "portal");
@@ -122,9 +126,22 @@ export async function signIn(c: Ctx): Promise<void> {
     await T(`set('#pw', ${JSON.stringify(PASSWORD)})`);
     await T(`submit('#loginform')`);
     await b.until(`!!T.q('#band')`, "portal");
+    // a webhook made in this session shows its token once; that must not outlive the session
+    await b.ev(`location.hash = '#/settings/webhooks'`);
+    await b.until(`!!T.q('#addwebhook')`, "the webhooks");
+    await T(`click('#addwebhook')`);
+    await T(`set('#wname', 'zz')`);
+    await T(`submit('#webhookdialog form')`);
+    await b.until(`!!T.q('#snip-zz code.token')`, "its token is shown");
     mock.state["session"] = "other"; // the device forgot us
     await b.ev(`location.hash = '#/clock'`); // the tab's first fetch is refused
     await b.until(`!!T.q('#login')`, "sign-in screen after a 401");
     await eq(`T.text('#msg')`, "Please sign in again.", "explanation");
+    await T(`set('#pw', ${JSON.stringify(PASSWORD)})`);
+    await T(`submit('#loginform')`);
+    await b.until(`!!T.q('#band')`, "portal again");
+    await b.ev(`location.hash = '#/settings/webhooks'`);
+    await b.until(`!!T.q('#snip-zz')`, "the webhooks again");
+    await eq(`T.q('#snip-zz code.token') === null`, true, "the old token is gone with the old session");
   });
 }

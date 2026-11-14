@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api } from "../api.ts";
 import { saveFile } from "../parts.tsx";
-import { fail, say, usePolled, zone } from "../store.ts";
+import { attempt, say, usePolled, zone } from "../store.ts";
 import { fmt } from "../time.ts";
 import type { LogList } from "../types.ts";
 import { Activity } from "./Activity.tsx";
@@ -30,21 +30,17 @@ function Problems(): JSX.Element {
   const [level, setLevel] = useState("");
   const [query, setQuery] = useState("");
   const load = async () => {
-    try {
+    await attempt(async () => {
       setLogs(await api<LogList>("GET", "/api/logs?limit=200"));
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   usePolled(load);
   const diagnostics = async () => {
-    try {
+    await attempt(async () => {
       const doc = await api<unknown>("GET", "/api/diagnostics");
       saveFile("clawdot-diagnostics.json", JSON.stringify(doc, null, 2));
       say("Saved the diagnostics file. It holds no passwords, keys, or tokens.");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const shown = (logs?.lines ?? []).filter(

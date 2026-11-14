@@ -1,9 +1,9 @@
 import type { JSX } from "preact";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { useEffect, useState } from "preact/hooks";
-import { api, ApiError } from "../api.ts";
-import { fail, say, usePolled, zone } from "../store.ts";
+import { api, ApiError, enc } from "../api.ts";
+import { attempt, deviceNow, fail, say, usePolled, useSeq, zone } from "../store.ts";
 import { whenText } from "../time.ts";
 import type { Note, NotesList } from "../types.ts";
 import { ask } from "../confirm.tsx";
@@ -18,6 +18,7 @@ export function Notes(): JSX.Element {
   const [editing, setEditing] = useState<Note | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Note[] | null>(null);
+  const [busy, run] = useBusy();
 
   // Searching asks the device, which ranks memories the same way it picks them for a request. A short wait after
   // typing keeps it from asking on every key.
@@ -29,7 +30,7 @@ export function Notes(): JSX.Element {
     }
     let live = true;
     const t = setTimeout(() => {
-      api<NotesList>("GET", "/api/notes?q=" + encodeURIComponent(q))
+      api<NotesList>("GET", "/api/notes?q=" + enc(q))
         .then((r) => {
           if (live) setHits(r.notes);
         })
@@ -39,11 +40,15 @@ export function Notes(): JSX.Element {
       live = false;
       clearTimeout(t);
     };
-  }, [query, data?.notes.length]);
+  }, [query, data]);
 
+  const next = useSeq();
   const load = async () => {
+    const current = next();
     try {
-      setData(await api<NotesList>("GET", "/api/notes"));
+      const list = await api<NotesList>("GET", "/api/notes");
+      if (!current()) return;
+      setData(list);
       setMissing(false);
     } catch (x) {
       if (x instanceof ApiError && x.status === 503) setMissing(true);
@@ -61,28 +66,28 @@ export function Notes(): JSX.Element {
   const save = async (ev: Event) => {
     ev.preventDefault();
     setErr("");
-    try {
-      setData(
-        editing
-          ? await api<NotesList>("PUT", "/api/notes/" + editing.id, { text })
-          : await api<NotesList>("POST", "/api/notes", { text }),
-      );
-      say(editing ? "Saved." : "Saved. The assistant will see it from now on.");
-      close();
-    } catch (x) {
-      if (x instanceof ApiError && [400, 404, 409].includes(x.status)) setErr(x.message);
-      else fail(x);
-    }
+    await run(async () => {
+      try {
+        const list = editing
+          ? await api<NotesList>("PUT", "/api/notes/" + enc(editing.id), { text })
+          : await api<NotesList>("POST", "/api/notes", { text });
+        next();
+        setData(list);
+        say(editing ? "Saved." : "Saved. The assistant will see it from now on.");
+        close();
+      } catch (x) {
+        if (x instanceof ApiError && [400, 404, 409].includes(x.status)) setErr(x.message);
+        else fail(x);
+      }
+    });
   };
   const forget = async (id: number) => {
     if (!(await ask("Forget this memory? The assistant will no longer know it.", "Forget"))) return;
-    try {
-      await api("DELETE", "/api/notes/" + id);
+    await attempt(async () => {
+      await api("DELETE", "/api/notes/" + enc(id));
       say("Forgotten.");
       await load();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const forgetAll = async () => {
     const sure = await ask(
@@ -90,17 +95,15 @@ export function Notes(): JSX.Element {
       "Forget all",
     );
     if (!sure) return;
-    try {
+    await attempt(async () => {
       await api("DELETE", "/api/notes");
       say("Everything forgotten.");
       await load();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   const max = data?.limits.max_note_chars ?? 200;
-  const now = Math.floor(Date.now() / 1000);
+  const now = deviceNow();
   return (
     <>
       <p class="lead">
@@ -237,7 +240,7 @@ export function Notes(): JSX.Element {
                 </p>
               </Field>
               <div class="row dlgfoot">
-                <button disabled={!data.enabled}>{editing ? "Save changes" : "Save memory"}</button>
+                <button disabled={!data.enabled || busy}>{editing ? "Save changes" : "Save memory"}</button>
                 <button class="plain" type="button" onClick={close}>
                   Cancel
                 </button>

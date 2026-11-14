@@ -16,6 +16,7 @@ export async function clock(c: Ctx): Promise<void> {
     await b.until(`T.rows().length === 1`, "one alarm");
     await shot("clock");
     await eq(`T.rows()[0].includes('<b>work</b>')`, true, "label shown as text");
+    await eq(`T.q('#panel li button').getAttribute('aria-label')`, "Edit <b>work</b>", "a row's button says which row");
     await eq(`T.q('#panel strong b') === null`, true, "no markup from the label");
     await eq(`T.rows()[0].includes('Weekdays at')`, true, "repeat text");
     await eq(`T.text('#clocklist h3').startsWith('Alarms')`, true, "the list has a title and a count");
@@ -30,11 +31,21 @@ export async function clock(c: Ctx): Promise<void> {
       "INPUTINPUT",
       "the hour and minute are plain boxes you can type in",
     );
+    await eq(`T.q('#rtime').getAttribute('aria-label')`, "Alarm time, hour", "the box is named for what it is");
+    // emptying one box leaves no time: the form must not still send the old one
+    await T(`set('#rtime-m', '')`);
+    const posts = () => mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").length;
+    const before = posts();
+    await T(`submit('#clockdialog form')`);
+    await eq(`T.text('#msg')`, "Pick a time for the alarm.", "an incomplete time is refused");
+    assert.equal(posts(), before, "nothing was sent");
+    await setTime("rtime", "06:30");
     await T(`set('#rlabel', 'gym')`);
     await T(`click('.days input[value="0"]')`);
     await T(`click('.days input[value="2"]')`);
-    await T(`submit('#clockdialog form')`);
+    await b.ev(`(() => { const f = T.q('#clockdialog form'); f.requestSubmit(); f.requestSubmit(); })()`);
     await b.until(`T.rows().length === 2 && T.q('#clockdialog').open === false`, "alarm added, and the dialog closes");
+    assert.equal(posts() - before, 1, "one request for a double click");
     const post = mock.log.filter((l) => l.method === "POST" && l.path === "/api/schedule").pop()!;
     assert.deepEqual(post.body, { kind: "alarm", label: "gym", hour: 6, minute: 30, days: [0, 2] });
     // Timers: the timer is listed here and the alarms are not.

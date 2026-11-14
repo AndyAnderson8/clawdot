@@ -7,7 +7,7 @@ import { Media } from "./tabs/Media.tsx";
 import { SettingsPage } from "./tabs/SettingsPage.tsx";
 import { AuthShell, Login, Setup } from "./auth.tsx";
 import { Logo, Wordmark } from "./brand.tsx";
-import { useApp } from "./store.ts";
+import { say, useApp } from "./store.ts";
 import { ConfirmHost } from "./confirm.tsx";
 
 /** What a view is given: the part of the address after the destination (`#/settings/assistant` gives "assistant"). */
@@ -77,6 +77,23 @@ function Rail(props: { tab: Tab }) {
   );
 }
 
+/** The message at the bottom of the page. A good one goes by itself; an error stays until it is closed. */
+function Toast(): JSX.Element {
+  const t = useApp().toast;
+  return (
+    <div id="msg" class={"toast" + (t.bad ? " err" : "")} role={t.bad ? "alert" : "status"}>
+      {t.text ? <span>{t.text}</span> : null}
+      {t.text && t.bad ? (
+        <button class="toastclose" type="button" aria-label="Close this message" onClick={() => say("")}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18" />
+          </svg>
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function App(): JSX.Element {
   const s = useApp();
   const [hash, setHash] = useState(location.hash);
@@ -103,9 +120,7 @@ export function App(): JSX.Element {
     return (
       <>
         <AuthShell>{s.view === "setup" ? <Setup /> : <Login />}</AuthShell>
-        <div id="msg" class={"toast" + (s.toast.bad ? " err" : "")} role="status">
-          {s.toast.text || null}
-        </div>
+        <Toast />
       </>
     );
   }
@@ -161,9 +176,7 @@ export function App(): JSX.Element {
           </footer>
         </main>
       </div>
-      <div id="msg" class={"toast" + (s.toast.bad ? " err" : "")} role="status">
-        {s.toast.text || null}
-      </div>
+      <Toast />
     </div>
   );
 }

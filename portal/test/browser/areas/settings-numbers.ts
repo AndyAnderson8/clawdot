@@ -48,6 +48,37 @@ export async function settingsNumbers(c: Ctx): Promise<void> {
     assert.deepEqual(mock.log.filter((l) => l.method === "PUT").pop()!.body, { agent_max_rounds: null });
     // quiet hours are on the Assistant tab
     await section("assistant", "Assistant");
+    // saving one group leaves what is typed in the others alone
+    const persona = await b.ev<string>(`T.q('#f-persona').value`);
+    await T(`set('#f-persona', 'a draft nobody saved')`);
+    await T(`set('#f-agent_max_rounds', '6')`);
+    await b.ev(`T.q('#f-agent_max_rounds').form.requestSubmit()`);
+    await b.until(`T.text('#msg') === 'Saved.'`, "the limits saved");
+    await eq(`T.q('#f-persona').value`, "a draft nobody saved", "the other group keeps its unsaved text");
+    await eq(`T.q('#f-agent_max_rounds').value`, "6", "the saved group shows what was saved");
+    await b.ev(`T.q('#f-agent_max_rounds').form.querySelector('.head button').click()`);
+    await b.until(`T.q('#f-agent_max_rounds').value === '8'`, "the limits are back to the default");
+    await eq(`T.q('#f-persona').value`, "a draft nobody saved", "and still after a reset");
+    await T(`set('#f-persona', ${JSON.stringify(persona)})`);
+    // a number the page cannot read is refused with a sentence; it is never sent (it would reset the setting)
+    const puts = () => mock.log.filter((l) => l.method === "PUT" && l.path === "/api/settings").length;
+    const before = puts();
+    const calls = await b.ev<string>(`T.q('#f-agent_max_tool_calls').value`);
+    await b.ev(`T.q('#f-agent_max_tool_calls').focus()`);
+    await b.send("Input.insertText", { text: "1e" });
+    await b.ev(`T.q('#f-agent_max_tool_calls').form.requestSubmit()`);
+    await eq(`T.q('#f-agent_max_tool_calls').validity.badInput`, true, "the browser reads it as a bad number");
+    await T(`set('#f-daily_spend_usd', '.')`);
+    await b.ev(`T.q('#f-daily_spend_usd').form.requestSubmit()`);
+    await b.until(
+      `T.q('#f-daily_spend_usd').form.querySelector('.errtext').textContent.includes('needs a number')`,
+      "a lone point is refused",
+    );
+    await b.ev(`T.q('#f-daily_spend_usd').blur()`);
+    await eq(`T.q('#f-daily_spend_usd').value`, ".", "and is not turned into NaN");
+    assert.equal(puts(), before, "nothing was sent, for the half-typed number (the browser stops it) or the point");
+    await T(`set('#f-daily_spend_usd', '')`);
+    await T(`set('#f-agent_max_tool_calls', '${calls}')`);
     // the spending limit is in dollars; there is no limit on how many requests are made
     await T(`set('#f-daily_spend_usd', '2.5')`);
     await b.ev(`T.q('#f-daily_spend_usd').form.requestSubmit()`);
@@ -72,6 +103,14 @@ export async function settingsNumbers(c: Ctx): Promise<void> {
     await b.until(
       `T.all('.errtext').some((e) => e.textContent.startsWith('Set both the quiet hours'))`,
       "needs both ends",
+    );
+    // a time with only one box filled is not taken for "no time", and is not sent
+    await eq(`T.q('#f-quiet_end').getAttribute('aria-label')`, "Quiet until, hour", "the box is named for what it is");
+    await T(`set('#f-quiet_end', '7')`);
+    await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);
+    await b.until(
+      `T.all('.errtext').some((e) => e.textContent.startsWith('Finish the time for'))`,
+      "a half-filled time is refused",
     );
     await setTime("f-quiet_end", "07:00");
     await b.ev(`T.q('#f-quiet_start').form.requestSubmit()`);

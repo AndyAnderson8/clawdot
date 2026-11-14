@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, ApiError } from "../api.ts";
 import { isRefusal, refusal, speakBlock, type SpeakBlock } from "../dashboard.ts";
-import { Field } from "../parts.tsx";
+import { Field, useBusy } from "../parts.tsx";
 import { fail, load, say, useApp } from "../store.ts";
 
 /** Say a phrase out loud, or say plainly why it cannot be done and where to fix that. Lives under the voice settings. */
@@ -10,21 +10,24 @@ export function TestSpeaker(): JSX.Element {
   const s = useApp();
   const [text, setText] = useState("");
   const [refused, setRefused] = useState<SpeakBlock | null>(null);
+  const [busy, run] = useBusy();
   const known = speakBlock(s.status);
   const block = known ?? refused;
 
   const speak = async (ev: Event) => {
     ev.preventDefault();
     setRefused(null);
-    try {
-      await api("POST", "/api/speak", { text });
-      setText("");
-      say("Sent. Listen for the speaker.");
-      void load();
-    } catch (x) {
-      if (x instanceof ApiError && isRefusal(x.reason)) setRefused(refusal(x.reason));
-      else fail(x);
-    }
+    await run(async () => {
+      try {
+        await api("POST", "/api/speak", { text });
+        setText("");
+        say("Sent. Listen for the speaker.");
+        void load();
+      } catch (x) {
+        if (x instanceof ApiError && isRefusal(x.reason)) setRefused(refusal(x.reason));
+        else fail(x);
+      }
+    });
   };
   return (
     <form id="sayform" class="panel" onSubmit={speak}>
@@ -42,7 +45,7 @@ export function TestSpeaker(): JSX.Element {
         />
       </Field>
       <div class="row">
-        <button id="saybtn" disabled={!!known}>
+        <button id="saybtn" disabled={!!known || busy}>
           Say it
         </button>
       </div>

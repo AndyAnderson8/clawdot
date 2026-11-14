@@ -11,7 +11,9 @@ import {
   reminderBody,
   restartText,
   settingsChanges,
+  peerLink,
   settingsPatch,
+  skillSendProblem,
   skillImports,
   shownValue,
   skillBody,
@@ -172,6 +174,40 @@ test("settings patch sends only what changed", () => {
     {},
     "a disabled field is never sent",
   );
+});
+
+test("a skill import the device would refuse is caught before it is sent", () => {
+  const file = (text: string) => ({ path: "a/" + text.length, text });
+  const one = (n: number) => Array.from({ length: n }, (_, i) => file("x".repeat(i + 1)));
+  assert.equal(skillSendProblem(one(64), []), "");
+  assert.match(skillSendProblem(one(65), []), /at most 64/);
+  const big = [file("y".repeat(200 * 1024)), file("z".repeat(200 * 1024))];
+  assert.match(skillSendProblem(big, []), /at most 384 KB/);
+  const tools = Array.from({ length: 17 }, (_, i) => "t" + i);
+  assert.match(skillSendProblem([], [{ name: "Many", tools }]), /more than 16 tools/);
+  assert.equal(skillSendProblem([], [{ name: "Few", tools: tools.slice(0, 16) }]), "");
+});
+
+test("another speaker's page is linked only from a literal IP address and a real port", () => {
+  assert.equal(peerLink("192.0.2.7", 3335), "http://192.0.2.7:3335/");
+  assert.equal(peerLink("fe80::1", 3335), "http://[fe80::1]:3335/", "IPv6 goes in brackets");
+  assert.equal(peerLink("192.0.2.300", 3335), null);
+  assert.equal(peerLink("192.0.2.7", 0), null);
+  assert.equal(peerLink("192.0.2.7", 70000), null);
+  assert.equal(peerLink("evil.example/x", 3335), null, "a name is not turned into a link");
+  assert.equal(peerLink("fe80::1%eth0", 3335), null);
+  assert.equal(peerLink("java" + "script:alert(1)//", 3335), null);
+});
+
+test("a number that is not a number is refused, not sent as null (which would reset the setting)", () => {
+  const cur = Object.fromEntries(specs.map((s) => [s.key, currentText(settings, s.key)]));
+  const got = settingsPatch(settings.fields, specs, cur, { ...cur, daily_spend_usd: "." });
+  assert.equal(typeof got, "string");
+  assert.match(typeof got === "string" ? got : "", /needs a number/);
+  assert.equal(typeof settingsPatch(settings.fields, specs, cur, { ...cur, daily_spend_usd: "x1" }), "string");
+  assert.deepEqual(settingsPatch(settings.fields, specs, cur, { ...cur, daily_spend_usd: "0.50" }), {
+    daily_spend_usd: 0.5,
+  });
 });
 
 test("labels", () => {

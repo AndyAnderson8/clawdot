@@ -1,9 +1,10 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import { api, ApiError } from "../api.ts";
+import { api, ApiError, enc } from "../api.ts";
 import { reminderBody } from "../forms.ts";
-import { fail, say, usePolled, zone } from "../store.ts";
+import { attempt, deviceNow, fail, say, usePolled, useSeq, zone } from "../store.ts";
 import { TimeField } from "../timefield.tsx";
+import { useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { DAYS, fmt, hhmm, parts, repeatText, span, whenText, zoneName } from "../time.ts";
 import type { ScheduleItem, ScheduleKind, ScheduleList } from "../types.ts";
@@ -22,7 +23,7 @@ const EMPTY: Record<ScheduleKind, string> = {
   reminder: "No reminders set. Add one below, or ask the speaker.",
 };
 const ADD: Record<ScheduleKind, string> = { timer: "Add a timer", alarm: "Add an alarm", reminder: "Add a reminder" };
-const today = () => parts(Math.floor(Date.now() / 1000), zone()).date;
+const today = () => parts(deviceNow(), zone()).date;
 
 export function whenLine(i: ScheduleItem, now: number): string {
   const z = zone();
@@ -48,10 +49,15 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const [time2, setTime2] = useState("09:00");
   const [when, setWhen] = useState<"delay" | "time">("time");
   const [open, setOpen] = useState(false);
+  const [busy, run] = useBusy();
 
+  const next = useSeq();
   usePolled(async () => {
+    const current = next();
     try {
-      setData(await api<ScheduleList>("GET", "/api/schedule"));
+      const list = await api<ScheduleList>("GET", "/api/schedule");
+      if (!current()) return;
+      setData(list);
       setUnavailable("");
     } catch (x) {
       if (x instanceof ApiError && x.status === 503) setUnavailable(x.message);
@@ -79,16 +85,17 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
       say(body, true);
       return;
     }
-    try {
-      const r = editing
-        ? await api<ScheduleList>("PUT", "/api/schedule/" + editing, body)
-        : await api<ScheduleList>("POST", "/api/schedule", body);
-      say(editing ? "Saved." : "Added.");
-      reset();
-      setData(r);
-    } catch (x) {
-      fail(x);
-    }
+    await run(async () => {
+      await attempt(async () => {
+        const r = editing
+          ? await api<ScheduleList>("PUT", "/api/schedule/" + enc(editing), body)
+          : await api<ScheduleList>("POST", "/api/schedule", body);
+        say(editing ? "Saved." : "Added.");
+        reset();
+        next();
+        setData(r);
+      });
+    });
   };
 
   const startEdit = (i: ScheduleItem) => {
@@ -116,12 +123,12 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const cancel = async (i: ScheduleItem) => {
     if (!(await ask("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?", "Cancel it", "Keep it")))
       return;
-    try {
-      setData(await api<ScheduleList>("DELETE", "/api/schedule/" + i.id));
+    await attempt(async () => {
+      const list = await api<ScheduleList>("DELETE", "/api/schedule/" + enc(i.id));
+      next();
+      setData(list);
       say("Cancelled.");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   const note =
@@ -164,10 +171,20 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
               </div>
               <div class="when">{data ? whenLine(i, data.now) : ""}</div>
               <div class="acts">
-                <button class="plain small" type="button" onClick={() => startEdit(i)}>
+                <button
+                  class="plain small"
+                  type="button"
+                  aria-label={"Edit " + (i.label || NAMES[i.kind])}
+                  onClick={() => startEdit(i)}
+                >
                   Edit
                 </button>
-                <button class="danger" type="button" onClick={() => cancel(i)}>
+                <button
+                  class="danger"
+                  type="button"
+                  aria-label={"Cancel " + (i.label || NAMES[i.kind])}
+                  onClick={() => cancel(i)}
+                >
                   Cancel
                 </button>
               </div>
@@ -227,12 +244,12 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
                   <label for="rtime">Time</label>
                 </div>
                 <div class="sctl">
-                  <TimeField id="rtime" value={time} onChange={setTime} />
+                  <TimeField id="rtime" label="Alarm time" value={time} onChange={setTime} />
                 </div>
               </div>
               <div class="srow">
                 <div class="slabel">
-                  <label>Repeat on</label>
+                  <span class="ltitle">Repeat on</span>
                   <p class="mut">Leave every day off to ring once, at the next time it comes round.</p>
                 </div>
                 <div class="sctl">
@@ -271,7 +288,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
                   <label for="rtime2">Time</label>
                 </div>
                 <div class="sctl">
-                  <TimeField id="rtime2" value={time2} onChange={setTime2} />
+                  <TimeField id="rtime2" label="Reminder time" value={time2} onChange={setTime2} />
                 </div>
               </div>
             </div>
@@ -292,7 +309,7 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
             </div>
           </div>
           <div class="row dlgfoot">
-            <button>{editing ? "Save changes" : "Add"}</button>
+            <button disabled={busy}>{editing ? "Save changes" : "Add"}</button>
             <button class="plain" type="button" onClick={reset}>
               Cancel
             </button>

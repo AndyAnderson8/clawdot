@@ -49,6 +49,12 @@ export async function settingsTheme(c: Ctx): Promise<void> {
       const dt = new DataTransfer(); dt.items.add(new File([${JSON.stringify(text)}], 'mine.json', { type: 'application/json' }));
       const i = document.getElementById('themefile'); i.files = dt.files; i.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
+    await b.ev(`(() => {
+      const dt = new DataTransfer(); const f = new File(['{}'], 'mine.json');
+      Object.defineProperty(f, 'text', { value: () => Promise.reject(new Error('gone')) }); dt.items.add(f);
+      const i = document.getElementById('themefile'); i.files = dt.files; i.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await b.until(`T.text('#thememsg') === 'That file could not be read. Choose it again.'`, "an unreadable file");
     await upload("not json");
     await b.until(`T.text('#thememsg').startsWith('That is not a theme file')`, "a file that is not JSON is refused");
     await upload(JSON.stringify({ name: "Bad", colors: { "--color-text-primary": "url(http://x/)" } }));

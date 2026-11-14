@@ -82,9 +82,9 @@ export function readPhoto(file: File): Promise<string> {
 }
 
 /** A drawing of the device whose light shows what it is doing. `state` is the speaker state from the dashboard. */
-export function Look(props: { id: LookId; state?: string }): JSX.Element {
+export function Look(props: { id: LookId; state?: string; photo?: string }): JSX.Element {
   if (props.id === "photo")
-    return <img class="lookphoto" src={photoPref()} alt="" data-state={props.state ?? "idle"} />;
+    return <img class="lookphoto" src={props.photo ?? photoPref()} alt="" data-state={props.state ?? "idle"} />;
   return (
     <svg class="look" data-state={props.state ?? "idle"} viewBox="0 0 160 120" aria-hidden="true">
       {props.id === "puck" ? (
