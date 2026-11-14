@@ -284,6 +284,199 @@ fn same_quant(a: &Tensor, b: &Tensor, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Variables by shared name: their sizes (known once an operator uses them) and initial values.
+#[derive(Default)]
+struct Vars {
+    names: Vec<Vec<u8>>,
+    sizes: Vec<Option<usize>>,
+    init: Vec<Option<Bytes>>,
+}
+
+impl Vars {
+    /// The index of the variable with this shared name, adding it on first sight.
+    fn index_for(&mut self, name: &[u8]) -> usize {
+        if let Some(p) = self.names.iter().position(|n| n == name) {
+            return p;
+        }
+        self.names.push(name.to_vec());
+        self.sizes.push(None);
+        self.init.push(None);
+        self.names.len() - 1
+    }
+}
+
+/// Mark the handle tensors of the main graph and return the initialisation subgraphs it calls.
+fn bind_handles(sg: &Subgraph, loc: &mut [Option<Loc>], vars: &mut Vars) -> Result<Vec<usize>> {
+    let mut init_graphs: Vec<usize> = Vec::new();
+    for op in &sg.operators {
+        match (op.kind, &op.options) {
+            (OpKind::VarHandle, Options::VarHandle { shared_name }) => {
+                let out = output_at(op, 0)?;
+                let v = vars.index_for(shared_name);
+                let idx = usize::try_from(out).map_err(|_| invalid("VAR_HANDLE output"))?;
+                if tensor(sg, out, "VAR_HANDLE")?.ty != TensorType::Resource {
+                    return Err(invalid("VAR_HANDLE output is not a resource"));
+                }
+                loc[idx] = Some(Loc::Handle(v));
+            }
+            (OpKind::CallOnce, Options::CallOnce { init_subgraph }) => {
+                init_graphs.push(*init_subgraph)
+            }
+            _ => {}
+        }
+    }
+    Ok(init_graphs)
+}
+
+/// Run the initialisation subgraphs symbolically: their assigns give the initial value of each variable.
+fn read_initial_values(model: &Model, init_graphs: &[usize], vars: &mut Vars) -> Result<()> {
+    for &gi in init_graphs {
+        let g = model
+            .subgraphs
+            .get(gi)
+            .ok_or_else(|| invalid("CALL_ONCE names a missing subgraph"))?;
+        let mut handles: Vec<Option<usize>> = vec![None; g.tensors.len()];
+        for op in &g.operators {
+            match (op.kind, &op.options) {
+                (OpKind::VarHandle, Options::VarHandle { shared_name }) => {
+                    let out = usize::try_from(output_at(op, 0)?)
+                        .map_err(|_| invalid("VAR_HANDLE output"))?;
+                    let v = vars.index_for(shared_name);
+                    if let Some(h) = handles.get_mut(out) {
+                        *h = Some(v);
+                    }
+                }
+                (OpKind::AssignVariable, _) => {
+                    let h = usize::try_from(input_at(op, 0)?)
+                        .ok()
+                        .and_then(|u| handles.get(u).copied().flatten());
+                    let value = tensor(g, input_at(op, 1)?, "ASSIGN_VARIABLE")?;
+                    let (Some(v), Some(range)) = (h, value.data) else {
+                        return Err(invalid("an initial variable value must be constant"));
+                    };
+                    if value.ty != TensorType::Int8 || range.1 != value.elements() {
+                        return Err(unsupported(
+                            "variable initial values must be int8 constants",
+                        ));
+                    }
+                    if let Some(slot) = vars.init.get_mut(v) {
+                        *slot = Some(range);
+                    }
+                }
+                _ => {
+                    return Err(unsupported(format!(
+                        "{:?} in an initialisation subgraph",
+                        op.kind
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Tensors with constant data that are not handles live in the model file.
+fn classify_constants(sg: &Subgraph, loc: &mut [Option<Loc>]) {
+    for (i, t) in sg.tensors.iter().enumerate() {
+        if loc[i].is_some() {
+            continue;
+        }
+        if t.data.is_some() {
+            loc[i] = Some(Loc::Const);
+        } else if t.ty == TensorType::Resource {
+            loc[i] = None;
+        }
+    }
+}
+
+/// The index of the last operator that reads each tensor (the model output lives to the end), checking that every
+/// tensor is written once and before it is read.
+fn tensor_lifetimes(
+    sg: &Subgraph,
+    loc: &[Option<Loc>],
+    flow: &[&Operator],
+    input_id: usize,
+    output_id: usize,
+) -> Result<Vec<usize>> {
+    let mut def: Vec<Option<usize>> = vec![None; sg.tensors.len()];
+    let mut last: Vec<usize> = vec![0; sg.tensors.len()];
+    def[input_id] = Some(0);
+    for (k, op) in flow.iter().enumerate() {
+        for &t in &op.inputs {
+            if let Ok(u) = usize::try_from(t) {
+                if matches!(loc.get(u), Some(Some(Loc::Const | Loc::Handle(_)))) {
+                    continue;
+                }
+                if def[u].is_none() {
+                    return Err(invalid(format!("tensor {u} is read before it is written")));
+                }
+                last[u] = last[u].max(k);
+            }
+        }
+        for &t in &op.outputs {
+            let u = usize::try_from(t).map_err(|_| invalid("negative output tensor"))?;
+            if matches!(loc.get(u), Some(Some(Loc::Const | Loc::Handle(_)))) {
+                return Err(invalid("an operator writes a constant"));
+            }
+            if def[u].is_some() {
+                return Err(invalid(format!("tensor {u} is written twice")));
+            }
+            def[u] = Some(k);
+            last[u] = last[u].max(k);
+        }
+    }
+    last[output_id] = flow.len();
+    Ok(last)
+}
+
+/// First-fit allocation by lifetime. An allocation is free once its last reader has run, so an operator's output
+/// never overlaps its own inputs. Fills in `loc` for the input and every operator output and returns the arena size.
+fn allocate_arena(
+    sg: &Subgraph,
+    loc: &mut [Option<Loc>],
+    flow: &[&Operator],
+    last: &[usize],
+    input_id: usize,
+) -> Result<usize> {
+    let mut live: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, last use)
+    let mut arena_len = 0usize;
+    let mut allocate = |t: usize, at: usize| -> Result<Range<usize>> {
+        let elems = sg.tensors[t].elements();
+        let size = match sg.tensors[t].ty {
+            TensorType::Int8 | TensorType::UInt8 => elems,
+            _ => {
+                return Err(unsupported(format!(
+                    "activation tensor {t} is not int8 or uint8"
+                )));
+            }
+        };
+        live.retain(|&(_, _, l)| l >= at);
+        live.sort_unstable();
+        let mut start = 0usize;
+        for &(s, e, _) in live.iter() {
+            if start + size <= s {
+                break;
+            }
+            start = start.max(e);
+        }
+        let end = start + size;
+        live.push((start, end, last[t]));
+        arena_len = arena_len.max(end);
+        if arena_len > MAX_MEMORY {
+            return Err(Error::Limit("tensor arena over 1 MiB"));
+        }
+        Ok(start..end)
+    };
+    loc[input_id] = Some(Loc::Arena(allocate(input_id, 0)?));
+    for (k, op) in flow.iter().enumerate() {
+        for &t in &op.outputs {
+            let u = t as usize;
+            loc[u] = Some(Loc::Arena(allocate(u, k)?));
+        }
+    }
+    Ok(arena_len)
+}
+
 impl Interpreter {
     /// Parse, validate and plan a model.
     pub fn new(file: Vec<u8>) -> Result<Self> {
@@ -309,99 +502,11 @@ impl Interpreter {
         };
         let (input_id, output_id) = (*input_id, *output_id);
 
-        // Variables by shared name, and the subgraph that initialises them.
-        let mut var_names: Vec<Vec<u8>> = Vec::new();
-        let mut var_sizes: Vec<Option<usize>> = Vec::new();
-        let mut var_init: Vec<Option<Bytes>> = Vec::new();
-        let var_for = |name: &[u8],
-                       names: &mut Vec<Vec<u8>>,
-                       sizes: &mut Vec<Option<usize>>,
-                       init: &mut Vec<Option<Bytes>>|
-         -> usize {
-            if let Some(p) = names.iter().position(|n| n == name) {
-                return p;
-            }
-            names.push(name.to_vec());
-            sizes.push(None);
-            init.push(None);
-            names.len() - 1
-        };
-
-        // Handle tensors of the main graph.
+        let mut vars = Vars::default();
         let mut loc: Vec<Option<Loc>> = vec![None; sg.tensors.len()];
-        let mut init_graphs: Vec<usize> = Vec::new();
-        for op in &sg.operators {
-            match (op.kind, &op.options) {
-                (OpKind::VarHandle, Options::VarHandle { shared_name }) => {
-                    let out = output_at(op, 0)?;
-                    let v = var_for(shared_name, &mut var_names, &mut var_sizes, &mut var_init);
-                    let idx = usize::try_from(out).map_err(|_| invalid("VAR_HANDLE output"))?;
-                    if tensor(sg, out, "VAR_HANDLE")?.ty != TensorType::Resource {
-                        return Err(invalid("VAR_HANDLE output is not a resource"));
-                    }
-                    loc[idx] = Some(Loc::Handle(v));
-                }
-                (OpKind::CallOnce, Options::CallOnce { init_subgraph }) => {
-                    init_graphs.push(*init_subgraph)
-                }
-                _ => {}
-            }
-        }
-        // Run the initialisation subgraphs symbolically: their assigns give the initial value of each variable.
-        for &gi in &init_graphs {
-            let g = model
-                .subgraphs
-                .get(gi)
-                .ok_or_else(|| invalid("CALL_ONCE names a missing subgraph"))?;
-            let mut handles: Vec<Option<usize>> = vec![None; g.tensors.len()];
-            for op in &g.operators {
-                match (op.kind, &op.options) {
-                    (OpKind::VarHandle, Options::VarHandle { shared_name }) => {
-                        let out = usize::try_from(output_at(op, 0)?)
-                            .map_err(|_| invalid("VAR_HANDLE output"))?;
-                        let v = var_for(shared_name, &mut var_names, &mut var_sizes, &mut var_init);
-                        if let Some(h) = handles.get_mut(out) {
-                            *h = Some(v);
-                        }
-                    }
-                    (OpKind::AssignVariable, _) => {
-                        let h = usize::try_from(input_at(op, 0)?)
-                            .ok()
-                            .and_then(|u| handles.get(u).copied().flatten());
-                        let value = tensor(g, input_at(op, 1)?, "ASSIGN_VARIABLE")?;
-                        let (Some(v), Some(range)) = (h, value.data) else {
-                            return Err(invalid("an initial variable value must be constant"));
-                        };
-                        if value.ty != TensorType::Int8 || range.1 != value.elements() {
-                            return Err(unsupported(
-                                "variable initial values must be int8 constants",
-                            ));
-                        }
-                        if let Some(slot) = var_init.get_mut(v) {
-                            *slot = Some(range);
-                        }
-                    }
-                    _ => {
-                        return Err(unsupported(format!(
-                            "{:?} in an initialisation subgraph",
-                            op.kind
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Classify tensors.
-        for (i, t) in sg.tensors.iter().enumerate() {
-            if loc[i].is_some() {
-                continue;
-            }
-            if t.data.is_some() {
-                loc[i] = Some(Loc::Const);
-            } else if t.ty == TensorType::Resource {
-                loc[i] = None;
-            }
-        }
+        let init_graphs = bind_handles(sg, &mut loc, &mut vars)?;
+        read_initial_values(&model, &init_graphs, &mut vars)?;
+        classify_constants(sg, &mut loc);
 
         // Which data-flow operators run, and the lifetime of every activation tensor.
         let flow: Vec<&Operator> = sg
@@ -410,75 +515,13 @@ impl Interpreter {
             .filter(|o| !matches!(o.kind, OpKind::VarHandle | OpKind::CallOnce))
             .collect();
         let n_ops = flow.len();
-        let mut def: Vec<Option<usize>> = vec![None; sg.tensors.len()];
-        let mut last: Vec<usize> = vec![0; sg.tensors.len()];
-        def[input_id] = Some(0);
-        for (k, op) in flow.iter().enumerate() {
-            for &t in &op.inputs {
-                if let Ok(u) = usize::try_from(t) {
-                    if matches!(loc.get(u), Some(Some(Loc::Const | Loc::Handle(_)))) {
-                        continue;
-                    }
-                    if def[u].is_none() {
-                        return Err(invalid(format!("tensor {u} is read before it is written")));
-                    }
-                    last[u] = last[u].max(k);
-                }
-            }
-            for &t in &op.outputs {
-                let u = usize::try_from(t).map_err(|_| invalid("negative output tensor"))?;
-                if matches!(loc.get(u), Some(Some(Loc::Const | Loc::Handle(_)))) {
-                    return Err(invalid("an operator writes a constant"));
-                }
-                if def[u].is_some() {
-                    return Err(invalid(format!("tensor {u} is written twice")));
-                }
-                def[u] = Some(k);
-                last[u] = last[u].max(k);
-            }
-        }
-        last[output_id] = n_ops;
-
-        // First-fit allocation by lifetime. An allocation is free once its last reader has run, so an operator's
-        // output never overlaps its own inputs.
-        let mut live: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, last use)
-        let mut arena_len = 0usize;
-        let mut allocate =
-            |t: usize, at: usize, live: &mut Vec<(usize, usize, usize)>| -> Result<Range<usize>> {
-                let elems = sg.tensors[t].elements();
-                let size = match sg.tensors[t].ty {
-                    TensorType::Int8 | TensorType::UInt8 => elems,
-                    _ => {
-                        return Err(unsupported(format!(
-                            "activation tensor {t} is not int8 or uint8"
-                        )));
-                    }
-                };
-                live.retain(|&(_, _, l)| l >= at);
-                live.sort_unstable();
-                let mut start = 0usize;
-                for &(s, e, _) in live.iter() {
-                    if start + size <= s {
-                        break;
-                    }
-                    start = start.max(e);
-                }
-                let end = start + size;
-                live.push((start, end, last[t]));
-                arena_len = arena_len.max(end);
-                if arena_len > MAX_MEMORY {
-                    return Err(Error::Limit("tensor arena over 1 MiB"));
-                }
-                Ok(start..end)
-            };
-        loc[input_id] = Some(Loc::Arena(allocate(input_id, 0, &mut live)?));
-        for (k, op) in flow.iter().enumerate() {
-            for &t in &op.outputs {
-                let u = t as usize;
-                let r = allocate(u, k, &mut live)?;
-                loc[u] = Some(Loc::Arena(r));
-            }
-        }
+        let last = tensor_lifetimes(sg, &loc, &flow, input_id, output_id)?;
+        let arena_len = allocate_arena(sg, &mut loc, &flow, &last, input_id)?;
+        let Vars {
+            sizes: var_sizes,
+            init: var_init,
+            ..
+        } = vars;
 
         // Build the steps.
         let plan = Plan {
@@ -694,234 +737,259 @@ impl Plan<'_> {
     }
 
     fn step(&self, op: &Operator, var_sizes: &mut [Option<usize>]) -> Result<Step> {
-        let sg = self.sg;
         let what = format!("{:?}", op.kind);
         let what = what.as_str();
         match op.kind {
             OpKind::Conv2d | OpKind::DepthwiseConv2d => self.conv(op, what),
-            OpKind::FullyConnected => {
-                let Options::FullyConnected { activation } = op.options else {
-                    return Err(invalid("FULLY_CONNECTED options"));
-                };
-                let (in_i, w_i, out_i) = (input_at(op, 0)?, input_at(op, 1)?, output_at(op, 0)?);
-                let (it, wt, ot) = (
-                    tensor(sg, in_i, what)?,
-                    tensor(sg, w_i, what)?,
-                    tensor(sg, out_i, what)?,
-                );
-                let (w_t, weights) = self.constant(w_i, what)?;
-                let [out_c, depth] = *wt.shape.as_slice() else {
-                    return Err(invalid("FULLY_CONNECTED weights must be rank 2"));
-                };
-                if depth == 0 || it.elements() % depth != 0 {
-                    return Err(invalid(
-                        "FULLY_CONNECTED input does not divide into the weight depth",
-                    ));
-                }
-                let batches = it.elements() / depth;
-                if ot.elements() != batches * out_c {
-                    return Err(invalid("FULLY_CONNECTED output size mismatch"));
-                }
-                let scales = filter_scales(w_t, out_c, 0, what)?;
-                if scales.len() != 1 {
-                    return Err(unsupported("FULLY_CONNECTED with per-channel weights"));
-                }
-                let (in_scale, in_zp) = scalar_quant(it, what)?;
-                let (out_scale, out_zp) = scalar_quant(ot, what)?;
-                let (lo, hi) = activation_range(activation, out_zp);
-                let bias = self.bias(op, 2, out_c, what)?;
-                self.account((batches * out_c) as u64, depth as u64)?;
-                Ok(Step::Fc(Box::new(Fc {
-                    batches,
-                    depth,
-                    out_c,
-                    quant: QuantParams {
-                        input_zp: in_zp,
-                        output_zp: out_zp,
-                        act_min: lo,
-                        act_max: hi,
-                        requant: vec![checked_requant(
-                            f64::from(in_scale) * f64::from(scales[0]) / f64::from(out_scale),
-                        )?],
-                        rounding: self.rounding,
-                    },
-                    input: self.arena(in_i, what)?,
-                    output: self.arena(out_i, what)?,
-                    weights,
-                    bias,
-                })))
-            }
-            OpKind::Reshape => {
-                let (in_i, out_i) = (input_at(op, 0)?, output_at(op, 0)?);
-                let (it, ot) = (tensor(sg, in_i, what)?, tensor(sg, out_i, what)?);
-                same_quant(it, ot, what)?;
-                if it.elements() != ot.elements() {
-                    return Err(invalid("RESHAPE changes the number of elements"));
-                }
-                Ok(Step::Copy {
-                    src: self.arena(in_i, what)?,
-                    dst: self.arena(out_i, what)?,
-                })
-            }
-            OpKind::Concatenation => {
-                let Options::Concat { axis, activation } = op.options else {
-                    return Err(invalid("CONCATENATION options"));
-                };
-                if activation != Activation::None {
-                    return Err(unsupported("CONCATENATION with a fused activation"));
-                }
-                if op.inputs.is_empty() || op.inputs.len() > FAN {
-                    return Err(unsupported("CONCATENATION fan-in above 5"));
-                }
-                let out_i = output_at(op, 0)?;
-                let ot = tensor(sg, out_i, what)?;
-                let rank = ot.shape.len();
-                let ax = normalise_axis(axis, rank, what)?;
-                let outer: usize = ot.shape[..ax].iter().product();
-                let inner: usize = ot.shape[ax + 1..].iter().product();
-                let mut total_axis = 0usize;
-                let mut inputs = Vec::new();
-                for &i in &op.inputs {
-                    let it = tensor(sg, i, what)?;
-                    same_quant(it, ot, what)?;
-                    if it.shape.len() != rank
-                        || it.shape[..ax] != ot.shape[..ax]
-                        || it.shape[ax + 1..] != ot.shape[ax + 1..]
-                    {
-                        return Err(invalid("CONCATENATION input shapes disagree"));
-                    }
-                    total_axis += it.shape[ax];
-                    inputs.push((self.arena(i, what)?, it.shape[ax] * inner));
-                }
-                if total_axis != ot.shape[ax] {
-                    return Err(invalid("CONCATENATION output size mismatch"));
-                }
-                Ok(Step::Concat {
-                    inputs,
-                    output: self.arena(out_i, what)?,
-                    outer,
-                })
-            }
-            OpKind::SplitV => {
-                let Options::SplitV { num_splits } = op.options else {
-                    return Err(invalid("SPLIT_V options"));
-                };
-                if num_splits != op.outputs.len() || num_splits > FAN {
-                    return Err(unsupported("SPLIT_V fan-out"));
-                }
-                let in_i = input_at(op, 0)?;
-                let it = tensor(sg, in_i, what)?;
-                let axis_v = self.const_i32s(input_at(op, 2)?, what)?;
-                let axis = *axis_v.first().ok_or_else(|| invalid("SPLIT_V axis"))?;
-                let rank = it.shape.len();
-                let ax = normalise_axis(axis, rank, what)?;
-                let outer: usize = it.shape[..ax].iter().product();
-                let inner: usize = it.shape[ax + 1..].iter().product();
-                let mut outputs = Vec::new();
-                let mut sum = 0usize;
-                for &o in &op.outputs {
-                    let ot = tensor(sg, o, what)?;
-                    same_quant(it, ot, what)?;
-                    if ot.shape.len() != rank
-                        || ot.shape[..ax] != it.shape[..ax]
-                        || ot.shape[ax + 1..] != it.shape[ax + 1..]
-                    {
-                        return Err(invalid("SPLIT_V output shape"));
-                    }
-                    sum += ot.shape[ax];
-                    outputs.push((self.arena(o, what)?, ot.shape[ax] * inner));
-                }
-                if sum != it.shape[ax] {
-                    return Err(invalid("SPLIT_V outputs do not add up to the input"));
-                }
-                Ok(Step::Split {
-                    input: self.arena(in_i, what)?,
-                    outputs,
-                    outer,
-                })
-            }
+            OpKind::FullyConnected => self.fully_connected(op, what),
+            OpKind::Reshape => self.reshape(op, what),
+            OpKind::Concatenation => self.concatenation(op, what),
+            OpKind::SplitV => self.split_v(op, what),
             OpKind::StridedSlice => self.strided_slice(op, what),
-            OpKind::Logistic => {
-                let (in_i, out_i) = (input_at(op, 0)?, output_at(op, 0)?);
-                let (it, ot) = (tensor(sg, in_i, what)?, tensor(sg, out_i, what)?);
-                if it.ty != TensorType::Int8
-                    || ot.ty != TensorType::Int8
-                    || it.elements() != ot.elements()
-                {
-                    return Err(unsupported("LOGISTIC needs int8 tensors of equal size"));
-                }
-                let (in_scale, in_zp) = scalar_quant(it, what)?;
-                let (out_scale, out_zp) = scalar_quant(ot, what)?;
-                if (out_scale - 1.0 / 256.0).abs() > 1e-9 || out_zp != -128 {
-                    return Err(unsupported(
-                        "LOGISTIC output must have scale 1/256 and zero point -128",
-                    ));
-                }
-                Ok(Step::Logistic {
-                    input: self.arena(in_i, what)?,
-                    output: self.arena(out_i, what)?,
-                    table: Box::new(logistic_table(in_scale, in_zp)),
-                })
-            }
-            OpKind::Quantize => {
-                let (in_i, out_i) = (input_at(op, 0)?, output_at(op, 0)?);
-                let (it, ot) = (tensor(sg, in_i, what)?, tensor(sg, out_i, what)?);
-                if it.ty != TensorType::Int8
-                    || !matches!(ot.ty, TensorType::Int8 | TensorType::UInt8)
-                    || it.elements() != ot.elements()
-                {
-                    return Err(unsupported("QUANTIZE from int8 to int8 or uint8 only"));
-                }
-                let (in_scale, in_zp) = scalar_quant(it, what)?;
-                let (out_scale, out_zp) = scalar_quant(ot, what)?;
-                let (lo, hi) = if ot.ty == TensorType::UInt8 {
-                    (0, 255)
-                } else {
-                    (-128, 127)
-                };
-                Ok(Step::Quantize {
-                    input: self.arena(in_i, what)?,
-                    output: self.arena(out_i, what)?,
-                    input_zp: in_zp,
-                    output_zp: out_zp,
-                    requant: checked_requant(f64::from(in_scale) / f64::from(out_scale))?,
-                    lo,
-                    hi,
-                })
-            }
+            OpKind::Logistic => self.logistic(op, what),
+            OpKind::Quantize => self.quantize(op, what),
             OpKind::ReadVariable | OpKind::AssignVariable => {
-                let handle = input_at(op, 0)?;
-                let var = match usize::try_from(handle).ok().and_then(|u| self.loc.get(u)) {
-                    Some(Some(Loc::Handle(v))) => *v,
-                    _ => return Err(invalid(format!("{what}: not a variable handle"))),
-                };
-                let (value_i, reading) = if op.kind == OpKind::ReadVariable {
-                    (output_at(op, 0)?, true)
-                } else {
-                    (input_at(op, 1)?, false)
-                };
-                let vt = tensor(sg, value_i, what)?;
-                if vt.ty != TensorType::Int8 {
-                    return Err(unsupported(format!("{what}: only int8 variables")));
-                }
-                let slot = var_sizes
-                    .get_mut(var)
-                    .ok_or_else(|| invalid("variable index"))?;
-                match slot {
-                    Some(n) if *n != vt.elements() => {
-                        return Err(invalid(format!("{what}: variable size mismatch")));
-                    }
-                    _ => *slot = Some(vt.elements()),
-                }
-                let range = self.arena(value_i, what)?;
-                Ok(if reading {
-                    Step::ReadVar { var, dst: range }
-                } else {
-                    Step::AssignVar { var, src: range }
-                })
+                self.variable_access(op, what, var_sizes)
             }
             OpKind::VarHandle | OpKind::CallOnce => Err(invalid("handled earlier")),
         }
+    }
+
+    fn fully_connected(&self, op: &Operator, what: &str) -> Result<Step> {
+        let sg = self.sg;
+        let Options::FullyConnected { activation } = op.options else {
+            return Err(invalid("FULLY_CONNECTED options"));
+        };
+        let (in_i, w_i, out_i) = (input_at(op, 0)?, input_at(op, 1)?, output_at(op, 0)?);
+        let (it, wt, ot) = (
+            tensor(sg, in_i, what)?,
+            tensor(sg, w_i, what)?,
+            tensor(sg, out_i, what)?,
+        );
+        let (w_t, weights) = self.constant(w_i, what)?;
+        let [out_c, depth] = *wt.shape.as_slice() else {
+            return Err(invalid("FULLY_CONNECTED weights must be rank 2"));
+        };
+        if depth == 0 || it.elements() % depth != 0 {
+            return Err(invalid(
+                "FULLY_CONNECTED input does not divide into the weight depth",
+            ));
+        }
+        let batches = it.elements() / depth;
+        if ot.elements() != batches * out_c {
+            return Err(invalid("FULLY_CONNECTED output size mismatch"));
+        }
+        let scales = filter_scales(w_t, out_c, 0, what)?;
+        if scales.len() != 1 {
+            return Err(unsupported("FULLY_CONNECTED with per-channel weights"));
+        }
+        let (in_scale, in_zp) = scalar_quant(it, what)?;
+        let (out_scale, out_zp) = scalar_quant(ot, what)?;
+        let (lo, hi) = activation_range(activation, out_zp);
+        let bias = self.bias(op, 2, out_c, what)?;
+        self.account((batches * out_c) as u64, depth as u64)?;
+        Ok(Step::Fc(Box::new(Fc {
+            batches,
+            depth,
+            out_c,
+            quant: QuantParams {
+                input_zp: in_zp,
+                output_zp: out_zp,
+                act_min: lo,
+                act_max: hi,
+                requant: vec![checked_requant(
+                    f64::from(in_scale) * f64::from(scales[0]) / f64::from(out_scale),
+                )?],
+                rounding: self.rounding,
+            },
+            input: self.arena(in_i, what)?,
+            output: self.arena(out_i, what)?,
+            weights,
+            bias,
+        })))
+    }
+
+    fn reshape(&self, op: &Operator, what: &str) -> Result<Step> {
+        let sg = self.sg;
+        let (in_i, out_i) = (input_at(op, 0)?, output_at(op, 0)?);
+        let (it, ot) = (tensor(sg, in_i, what)?, tensor(sg, out_i, what)?);
+        same_quant(it, ot, what)?;
+        if it.elements() != ot.elements() {
+            return Err(invalid("RESHAPE changes the number of elements"));
+        }
+        Ok(Step::Copy {
+            src: self.arena(in_i, what)?,
+            dst: self.arena(out_i, what)?,
+        })
+    }
+
+    fn concatenation(&self, op: &Operator, what: &str) -> Result<Step> {
+        let sg = self.sg;
+        let Options::Concat { axis, activation } = op.options else {
+            return Err(invalid("CONCATENATION options"));
+        };
+        if activation != Activation::None {
+            return Err(unsupported("CONCATENATION with a fused activation"));
+        }
+        if op.inputs.is_empty() || op.inputs.len() > FAN {
+            return Err(unsupported("CONCATENATION fan-in above 5"));
+        }
+        let out_i = output_at(op, 0)?;
+        let ot = tensor(sg, out_i, what)?;
+        let rank = ot.shape.len();
+        let ax = normalise_axis(axis, rank, what)?;
+        let outer: usize = ot.shape[..ax].iter().product();
+        let inner: usize = ot.shape[ax + 1..].iter().product();
+        let mut total_axis = 0usize;
+        let mut inputs = Vec::new();
+        for &i in &op.inputs {
+            let it = tensor(sg, i, what)?;
+            same_quant(it, ot, what)?;
+            if it.shape.len() != rank
+                || it.shape[..ax] != ot.shape[..ax]
+                || it.shape[ax + 1..] != ot.shape[ax + 1..]
+            {
+                return Err(invalid("CONCATENATION input shapes disagree"));
+            }
+            total_axis += it.shape[ax];
+            inputs.push((self.arena(i, what)?, it.shape[ax] * inner));
+        }
+        if total_axis != ot.shape[ax] {
+            return Err(invalid("CONCATENATION output size mismatch"));
+        }
+        Ok(Step::Concat {
+            inputs,
+            output: self.arena(out_i, what)?,
+            outer,
+        })
+    }
+
+    fn split_v(&self, op: &Operator, what: &str) -> Result<Step> {
+        let sg = self.sg;
+        let Options::SplitV { num_splits } = op.options else {
+            return Err(invalid("SPLIT_V options"));
+        };
+        if num_splits != op.outputs.len() || num_splits > FAN {
+            return Err(unsupported("SPLIT_V fan-out"));
+        }
+        let in_i = input_at(op, 0)?;
+        let it = tensor(sg, in_i, what)?;
+        let axis_v = self.const_i32s(input_at(op, 2)?, what)?;
+        let axis = *axis_v.first().ok_or_else(|| invalid("SPLIT_V axis"))?;
+        let rank = it.shape.len();
+        let ax = normalise_axis(axis, rank, what)?;
+        let outer: usize = it.shape[..ax].iter().product();
+        let inner: usize = it.shape[ax + 1..].iter().product();
+        let mut outputs = Vec::new();
+        let mut sum = 0usize;
+        for &o in &op.outputs {
+            let ot = tensor(sg, o, what)?;
+            same_quant(it, ot, what)?;
+            if ot.shape.len() != rank
+                || ot.shape[..ax] != it.shape[..ax]
+                || ot.shape[ax + 1..] != it.shape[ax + 1..]
+            {
+                return Err(invalid("SPLIT_V output shape"));
+            }
+            sum += ot.shape[ax];
+            outputs.push((self.arena(o, what)?, ot.shape[ax] * inner));
+        }
+        if sum != it.shape[ax] {
+            return Err(invalid("SPLIT_V outputs do not add up to the input"));
+        }
+        Ok(Step::Split {
+            input: self.arena(in_i, what)?,
+            outputs,
+            outer,
+        })
+    }
+
+    fn logistic(&self, op: &Operator, what: &str) -> Result<Step> {
+        let sg = self.sg;
+        let (in_i, out_i) = (input_at(op, 0)?, output_at(op, 0)?);
+        let (it, ot) = (tensor(sg, in_i, what)?, tensor(sg, out_i, what)?);
+        if it.ty != TensorType::Int8 || ot.ty != TensorType::Int8 || it.elements() != ot.elements()
+        {
+            return Err(unsupported("LOGISTIC needs int8 tensors of equal size"));
+        }
+        let (in_scale, in_zp) = scalar_quant(it, what)?;
+        let (out_scale, out_zp) = scalar_quant(ot, what)?;
+        if (out_scale - 1.0 / 256.0).abs() > 1e-9 || out_zp != -128 {
+            return Err(unsupported(
+                "LOGISTIC output must have scale 1/256 and zero point -128",
+            ));
+        }
+        Ok(Step::Logistic {
+            input: self.arena(in_i, what)?,
+            output: self.arena(out_i, what)?,
+            table: Box::new(logistic_table(in_scale, in_zp)),
+        })
+    }
+
+    fn quantize(&self, op: &Operator, what: &str) -> Result<Step> {
+        let sg = self.sg;
+        let (in_i, out_i) = (input_at(op, 0)?, output_at(op, 0)?);
+        let (it, ot) = (tensor(sg, in_i, what)?, tensor(sg, out_i, what)?);
+        if it.ty != TensorType::Int8
+            || !matches!(ot.ty, TensorType::Int8 | TensorType::UInt8)
+            || it.elements() != ot.elements()
+        {
+            return Err(unsupported("QUANTIZE from int8 to int8 or uint8 only"));
+        }
+        let (in_scale, in_zp) = scalar_quant(it, what)?;
+        let (out_scale, out_zp) = scalar_quant(ot, what)?;
+        let (lo, hi) = if ot.ty == TensorType::UInt8 {
+            (0, 255)
+        } else {
+            (-128, 127)
+        };
+        Ok(Step::Quantize {
+            input: self.arena(in_i, what)?,
+            output: self.arena(out_i, what)?,
+            input_zp: in_zp,
+            output_zp: out_zp,
+            requant: checked_requant(f64::from(in_scale) / f64::from(out_scale))?,
+            lo,
+            hi,
+        })
+    }
+
+    fn variable_access(
+        &self,
+        op: &Operator,
+        what: &str,
+        var_sizes: &mut [Option<usize>],
+    ) -> Result<Step> {
+        let sg = self.sg;
+        let handle = input_at(op, 0)?;
+        let var = match usize::try_from(handle).ok().and_then(|u| self.loc.get(u)) {
+            Some(Some(Loc::Handle(v))) => *v,
+            _ => return Err(invalid(format!("{what}: not a variable handle"))),
+        };
+        let (value_i, reading) = if op.kind == OpKind::ReadVariable {
+            (output_at(op, 0)?, true)
+        } else {
+            (input_at(op, 1)?, false)
+        };
+        let vt = tensor(sg, value_i, what)?;
+        if vt.ty != TensorType::Int8 {
+            return Err(unsupported(format!("{what}: only int8 variables")));
+        }
+        let slot = var_sizes
+            .get_mut(var)
+            .ok_or_else(|| invalid("variable index"))?;
+        match slot {
+            Some(n) if *n != vt.elements() => {
+                return Err(invalid(format!("{what}: variable size mismatch")));
+            }
+            _ => *slot = Some(vt.elements()),
+        }
+        let range = self.arena(value_i, what)?;
+        Ok(if reading {
+            Step::ReadVar { var, dst: range }
+        } else {
+            Step::AssignVar { var, src: range }
+        })
     }
 
     fn bias(&self, op: &Operator, at: usize, channels: usize, what: &str) -> Result<Option<Bytes>> {
@@ -1176,39 +1244,14 @@ fn bytes(file: &[u8], b: Bytes) -> Result<&[u8]> {
     .ok_or(Error::Malformed("constant range"))
 }
 
+fn overlap() -> Error {
+    Error::Invalid("operator ranges overlap".into())
+}
+
 fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) -> Result<()> {
-    let overlap = || Error::Invalid("operator ranges overlap".into());
     match step {
-        Step::Conv(c) => {
-            let [i, o, ..] = carve(arena, &[&c.input, &c.output]).ok_or_else(overlap)?;
-            let filter = bytes(file, c.filter)?;
-            let bias = match c.bias {
-                Some(b) => bytes(file, b)?,
-                None => &[],
-            };
-            if c.depthwise {
-                depthwise_conv2d(&c.geometry, &c.quant, i, filter, bias, o);
-            } else {
-                conv2d(&c.geometry, &c.quant, i, filter, bias, o);
-            }
-        }
-        Step::Fc(f) => {
-            let [i, o, ..] = carve(arena, &[&f.input, &f.output]).ok_or_else(overlap)?;
-            let bias = match f.bias {
-                Some(b) => bytes(file, b)?,
-                None => &[],
-            };
-            fully_connected(
-                f.batches,
-                f.depth,
-                f.out_c,
-                &f.quant,
-                i,
-                bytes(file, f.weights)?,
-                bias,
-                o,
-            );
-        }
+        Step::Conv(c) => run_conv(c, file, arena)?,
+        Step::Fc(f) => run_fc(f, file, arena)?,
         Step::Copy { src, dst } => {
             let [s, d, ..] = carve(arena, &[src, dst]).ok_or_else(overlap)?;
             if s.len() != d.len() {
@@ -1220,79 +1263,13 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
             inputs,
             output,
             outer,
-        } => {
-            let n = inputs.len();
-            let mut ranges: [&Range<usize>; 2 * FAN] = [output; 2 * FAN];
-            for (slot, (r, _)) in ranges.iter_mut().zip(inputs.iter()) {
-                *slot = r;
-            }
-            ranges[n] = output;
-            let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
-            let total: usize = inputs.iter().map(|(_, c)| *c).sum();
-            // The inputs come first in the array order asked for, the output after them.
-            let (ins, rest) = slots.split_at_mut(n);
-            let out = rest.first_mut().ok_or_else(overlap)?;
-            for o in 0..*outer {
-                let mut at = o * total;
-                for (k, (_, chunk)) in inputs.iter().enumerate() {
-                    let src = ins
-                        .get(k)
-                        .and_then(|s| s.get(o * chunk..(o + 1) * chunk))
-                        .ok_or_else(overlap)?;
-                    out.get_mut(at..at + chunk)
-                        .ok_or_else(overlap)?
-                        .copy_from_slice(src);
-                    at += chunk;
-                }
-            }
-        }
+        } => run_concat(inputs, output, *outer, arena)?,
         Step::Split {
             input,
             outputs,
             outer,
-        } => {
-            let n = outputs.len();
-            let mut ranges: [&Range<usize>; 2 * FAN] = [input; 2 * FAN];
-            for (slot, (r, _)) in ranges.iter_mut().skip(1).zip(outputs.iter()) {
-                *slot = r;
-            }
-            let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
-            let total: usize = outputs.iter().map(|(_, c)| *c).sum();
-            let (head, outs) = slots.split_at_mut(1);
-            let inp = head.first().ok_or_else(overlap)?;
-            for o in 0..*outer {
-                let mut at = o * total;
-                for (k, (_, chunk)) in outputs.iter().enumerate() {
-                    let src = inp.get(at..at + chunk).ok_or_else(overlap)?;
-                    outs.get_mut(k)
-                        .and_then(|s| s.get_mut(o * chunk..(o + 1) * chunk))
-                        .ok_or_else(overlap)?
-                        .copy_from_slice(src);
-                    at += chunk;
-                }
-            }
-        }
-        Step::Slice(s) => {
-            let [i, o, ..] = carve(arena, &[&s.input, &s.output]).ok_or_else(overlap)?;
-            let mut at = 0usize;
-            for a in 0..s.out_shape[0] {
-                for b in 0..s.out_shape[1] {
-                    for c in 0..s.out_shape[2] {
-                        for d in 0..s.out_shape[3] {
-                            let idx = [a, b, c, d];
-                            let mut off = 0usize;
-                            #[allow(clippy::needless_range_loop)]
-                            for ax in 0..4 {
-                                off = off * s.in_shape[ax] + s.begin[ax] + idx[ax] * s.stride[ax];
-                            }
-                            *o.get_mut(at).ok_or_else(overlap)? =
-                                *i.get(off).ok_or_else(overlap)?;
-                            at += 1;
-                        }
-                    }
-                }
-            }
-        }
+        } => run_split(input, outputs, *outer, arena)?,
+        Step::Slice(s) => run_slice(s, arena)?,
         Step::Logistic {
             input,
             output,
@@ -1334,6 +1311,124 @@ fn run_step(step: &Step, file: &[u8], arena: &mut [i8], vars: &mut [Vec<i8>]) ->
                 return Err(overlap());
             }
             v.copy_from_slice(s);
+        }
+    }
+    Ok(())
+}
+
+fn run_conv(c: &Conv, file: &[u8], arena: &mut [i8]) -> Result<()> {
+    let [i, o, ..] = carve(arena, &[&c.input, &c.output]).ok_or_else(overlap)?;
+    let filter = bytes(file, c.filter)?;
+    let bias = match c.bias {
+        Some(b) => bytes(file, b)?,
+        None => &[],
+    };
+    if c.depthwise {
+        depthwise_conv2d(&c.geometry, &c.quant, i, filter, bias, o);
+    } else {
+        conv2d(&c.geometry, &c.quant, i, filter, bias, o);
+    }
+    Ok(())
+}
+
+fn run_fc(f: &Fc, file: &[u8], arena: &mut [i8]) -> Result<()> {
+    let [i, o, ..] = carve(arena, &[&f.input, &f.output]).ok_or_else(overlap)?;
+    let bias = match f.bias {
+        Some(b) => bytes(file, b)?,
+        None => &[],
+    };
+    fully_connected(
+        f.batches,
+        f.depth,
+        f.out_c,
+        &f.quant,
+        i,
+        bytes(file, f.weights)?,
+        bias,
+        o,
+    );
+    Ok(())
+}
+
+fn run_concat(
+    inputs: &[(Range<usize>, usize)],
+    output: &Range<usize>,
+    outer: usize,
+    arena: &mut [i8],
+) -> Result<()> {
+    let n = inputs.len();
+    let mut ranges: [&Range<usize>; 2 * FAN] = [output; 2 * FAN];
+    for (slot, (r, _)) in ranges.iter_mut().zip(inputs.iter()) {
+        *slot = r;
+    }
+    ranges[n] = output;
+    let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
+    let total: usize = inputs.iter().map(|(_, c)| *c).sum();
+    // The inputs come first in the array order asked for, the output after them.
+    let (ins, rest) = slots.split_at_mut(n);
+    let out = rest.first_mut().ok_or_else(overlap)?;
+    for o in 0..outer {
+        let mut at = o * total;
+        for (k, (_, chunk)) in inputs.iter().enumerate() {
+            let src = ins
+                .get(k)
+                .and_then(|s| s.get(o * chunk..(o + 1) * chunk))
+                .ok_or_else(overlap)?;
+            out.get_mut(at..at + chunk)
+                .ok_or_else(overlap)?
+                .copy_from_slice(src);
+            at += chunk;
+        }
+    }
+    Ok(())
+}
+
+fn run_split(
+    input: &Range<usize>,
+    outputs: &[(Range<usize>, usize)],
+    outer: usize,
+    arena: &mut [i8],
+) -> Result<()> {
+    let n = outputs.len();
+    let mut ranges: [&Range<usize>; 2 * FAN] = [input; 2 * FAN];
+    for (slot, (r, _)) in ranges.iter_mut().skip(1).zip(outputs.iter()) {
+        *slot = r;
+    }
+    let mut slots = carve(arena, &ranges[..=n]).ok_or_else(overlap)?;
+    let total: usize = outputs.iter().map(|(_, c)| *c).sum();
+    let (head, outs) = slots.split_at_mut(1);
+    let inp = head.first().ok_or_else(overlap)?;
+    for o in 0..outer {
+        let mut at = o * total;
+        for (k, (_, chunk)) in outputs.iter().enumerate() {
+            let src = inp.get(at..at + chunk).ok_or_else(overlap)?;
+            outs.get_mut(k)
+                .and_then(|s| s.get_mut(o * chunk..(o + 1) * chunk))
+                .ok_or_else(overlap)?
+                .copy_from_slice(src);
+            at += chunk;
+        }
+    }
+    Ok(())
+}
+
+fn run_slice(s: &Slice, arena: &mut [i8]) -> Result<()> {
+    let [i, o, ..] = carve(arena, &[&s.input, &s.output]).ok_or_else(overlap)?;
+    let mut at = 0usize;
+    for a in 0..s.out_shape[0] {
+        for b in 0..s.out_shape[1] {
+            for c in 0..s.out_shape[2] {
+                for d in 0..s.out_shape[3] {
+                    let idx = [a, b, c, d];
+                    let mut off = 0usize;
+                    #[allow(clippy::needless_range_loop)]
+                    for ax in 0..4 {
+                        off = off * s.in_shape[ax] + s.begin[ax] + idx[ax] * s.stride[ax];
+                    }
+                    *o.get_mut(at).ok_or_else(overlap)? = *i.get(off).ok_or_else(overlap)?;
+                    at += 1;
+                }
+            }
         }
     }
     Ok(())

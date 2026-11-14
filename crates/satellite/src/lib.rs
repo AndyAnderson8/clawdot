@@ -253,8 +253,59 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
         .map_err(|e| e.to_string())?;
     let mut dec = Decoder::new(Limits::default());
     let mut closed = false;
+    handshake(&mut sock, &mut dec, &mut closed, device, cfg)?;
+
+    let mut report = Report::default();
+    let mut st = LoopState::default();
+    let mut last_heard = Instant::now();
+    let mut last_ping = Instant::now();
+    loop {
+        if st.done_pending && device.playback_idle() {
+            st.done_pending = false;
+            send(&mut sock, &Message::PlaybackDone { id: None })?;
+        }
+        if closed || device.finished() {
+            return Ok(report);
+        }
+        send_device_events(&mut sock, device, &mut st)?;
+        if last_heard.elapsed() >= cfg.dead_after {
+            return Err("the core stopped responding".into());
+        }
+        // Either side may ping (REQ-SAT-008); this also exposes a half-open connection when the core is quiet.
+        if last_ping.elapsed() >= cfg.dead_after / 4 {
+            last_ping = Instant::now();
+            send(&mut sock, &Message::Ping)?;
+        }
+        if st.streaming && !st.muted {
+            stream_mic(&mut sock, device)?;
+        }
+        let Some(msg) = poll(&mut sock, &mut dec, &mut closed)? else {
+            continue;
+        };
+        last_heard = Instant::now();
+        handle_message(msg, &mut sock, device, &mut st, &mut report)?;
+    }
+}
+
+/// What the session loop remembers between iterations.
+#[derive(Default)]
+struct LoopState {
+    streaming: bool,
+    muted: bool,
+    /// The reply audio has ended but is still playing; tell the core when it finishes.
+    done_pending: bool,
+}
+
+/// Send Hello, wait for Welcome (or a rejection), then open the device session and announce a wake on connect.
+fn handshake(
+    sock: &mut TcpStream,
+    dec: &mut Decoder,
+    closed: &mut bool,
+    device: &mut impl Device,
+    cfg: &Config,
+) -> Result<(), String> {
     send(
-        &mut sock,
+        sock,
         &Message::Hello(Hello {
             protocol: PROTOCOL_VERSION,
             device_id: cfg.device_id.clone(),
@@ -270,13 +321,13 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
     )?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match poll(&mut sock, &mut dec, &mut closed)? {
+        match poll(sock, dec, closed)? {
             Some(Message::Welcome(_)) => break,
             Some(Message::Reject(r)) => {
                 return Err(format!("{REFUSED}: {}", plain(&r.reason)));
             }
             Some(_) => {}
-            None if closed => {
+            None if *closed => {
                 return Err("the core closed the connection during the handshake".into());
             }
             None if Instant::now() > deadline => return Err("no welcome from the core".into()),
@@ -286,129 +337,125 @@ pub fn run(mut sock: TcpStream, device: &mut impl Device, cfg: &Config) -> Resul
     device.session_open();
     if cfg.wake_on_connect {
         send(
-            &mut sock,
+            sock,
             &Message::Wake(Wake {
                 name: "button".into(),
                 timestamp_ms: None,
             }),
         )?;
     }
+    Ok(())
+}
 
-    let mut report = Report::default();
-    let mut streaming = false;
-    let mut muted = false;
-    let mut last_heard = Instant::now();
-    let mut last_ping = Instant::now();
-    let mut done_pending = false;
-    loop {
-        if done_pending && device.playback_idle() {
-            done_pending = false;
-            send(&mut sock, &Message::PlaybackDone { id: None })?;
-        }
-        if closed || device.finished() {
-            return Ok(report);
-        }
-        if let Some(m) = device.poll_mute_change() {
-            muted = m;
-            send(&mut sock, &Message::MuteChanged { muted: m })?;
-        }
-        if device.poll_admin_reset() {
-            send(&mut sock, &Message::AdminReset)?;
-        }
-        if device.poll_wake() {
-            send(
-                &mut sock,
-                &Message::Wake(Wake {
-                    name: device.wake_name(),
-                    timestamp_ms: None,
-                }),
-            )?;
-        }
-        if last_heard.elapsed() >= cfg.dead_after {
-            return Err("the core stopped responding".into());
-        }
-        // Either side may ping (REQ-SAT-008); this also exposes a half-open connection when the core is quiet.
-        if last_ping.elapsed() >= cfg.dead_after / 4 {
-            last_ping = Instant::now();
-            send(&mut sock, &Message::Ping)?;
-        }
-        if streaming && !muted {
-            for _ in 0..device.mic_burst().max(1) {
-                let Some(pcm) = device.read_mic() else { break };
-                let payload: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-                send(
-                    &mut sock,
-                    &Message::AudioChunk {
-                        format: AudioFormat::PCM_16K_MONO,
-                        timestamp_ms: None,
-                        payload,
-                    },
-                )?;
-            }
-        }
-        let Some(msg) = poll(&mut sock, &mut dec, &mut closed)? else {
-            continue;
-        };
-        last_heard = Instant::now();
-        match msg {
-            Message::Ping => send(&mut sock, &Message::Pong)?,
-            Message::StreamStart => {
-                streaming = true;
-                device.mic_active(true);
-            }
-            Message::StreamStop => {
-                streaming = false;
-                device.mic_active(false);
-            }
-            Message::SetIndicator(i) => {
-                if report.indicators.len() >= MAX_REPORTED_INDICATORS {
-                    report.indicators.remove(0);
-                }
-                report.indicators.push(i);
-                device.indicator(i);
-            }
-            Message::SetVolume { level } => device.set_volume(level),
-            Message::SetMute { muted: m } => {
-                muted = m;
-                device.set_mute(m);
-            }
-            Message::StopPlayback => device.stop_playback(),
-            Message::AdminResetWindow { open_secs, reason } => {
-                device.admin_reset_window(open_secs, reason.as_deref());
-            }
-            Message::PlayUrl { url, title } if device.supports_streams() => {
-                device.play_url(&url, &title)
-            }
-            Message::MediaControl(a) if device.supports_streams() => {
-                device.pause_stream(a == clawdot_protocol::message::MediaAction::Pause);
-            }
-            Message::AudioStart(f) => {
-                check_format(f)?;
-                device.begin_playback();
-            }
-            Message::AudioChunk {
-                format, payload, ..
-            } => {
-                check_format(format)?;
-                let pcm = samples(&payload);
-                report.samples_played += pcm.len();
-                device.play(&pcm);
-            }
-            Message::AudioStop => {
-                device.end_playback();
-                if device.playback_idle() {
-                    send(&mut sock, &Message::PlaybackDone { id: None })?;
-                } else {
-                    done_pending = true;
-                }
-            }
-            Message::Reject(r) => {
-                return Err(format!("the core ended the session: {}", plain(&r.reason)));
-            }
-            // Welcome again, errors, events from the satellite side, and anything unknown: ignore (REQ-SAT-009).
-            _ => {}
-        }
+/// Forward what the device reports on its own: a mute change, an admin reset, a wake.
+fn send_device_events(
+    sock: &mut TcpStream,
+    device: &mut impl Device,
+    st: &mut LoopState,
+) -> Result<(), String> {
+    if let Some(m) = device.poll_mute_change() {
+        st.muted = m;
+        send(sock, &Message::MuteChanged { muted: m })?;
     }
+    if device.poll_admin_reset() {
+        send(sock, &Message::AdminReset)?;
+    }
+    if device.poll_wake() {
+        send(
+            sock,
+            &Message::Wake(Wake {
+                name: device.wake_name(),
+                timestamp_ms: None,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// Send up to one burst of microphone audio.
+fn stream_mic(sock: &mut TcpStream, device: &mut impl Device) -> Result<(), String> {
+    for _ in 0..device.mic_burst().max(1) {
+        let Some(pcm) = device.read_mic() else { break };
+        let payload: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        send(
+            sock,
+            &Message::AudioChunk {
+                format: AudioFormat::PCM_16K_MONO,
+                timestamp_ms: None,
+                payload,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Act on one message from the core.
+fn handle_message(
+    msg: Message,
+    sock: &mut TcpStream,
+    device: &mut impl Device,
+    st: &mut LoopState,
+    report: &mut Report,
+) -> Result<(), String> {
+    match msg {
+        Message::Ping => send(sock, &Message::Pong)?,
+        Message::StreamStart => {
+            st.streaming = true;
+            device.mic_active(true);
+        }
+        Message::StreamStop => {
+            st.streaming = false;
+            device.mic_active(false);
+        }
+        Message::SetIndicator(i) => {
+            if report.indicators.len() >= MAX_REPORTED_INDICATORS {
+                report.indicators.remove(0);
+            }
+            report.indicators.push(i);
+            device.indicator(i);
+        }
+        Message::SetVolume { level } => device.set_volume(level),
+        Message::SetMute { muted: m } => {
+            st.muted = m;
+            device.set_mute(m);
+        }
+        Message::StopPlayback => device.stop_playback(),
+        Message::AdminResetWindow { open_secs, reason } => {
+            device.admin_reset_window(open_secs, reason.as_deref());
+        }
+        Message::PlayUrl { url, title } if device.supports_streams() => {
+            device.play_url(&url, &title)
+        }
+        Message::MediaControl(a) if device.supports_streams() => {
+            device.pause_stream(a == clawdot_protocol::message::MediaAction::Pause);
+        }
+        Message::AudioStart(f) => {
+            check_format(f)?;
+            device.begin_playback();
+        }
+        Message::AudioChunk {
+            format, payload, ..
+        } => {
+            check_format(format)?;
+            let pcm = samples(&payload);
+            report.samples_played += pcm.len();
+            device.play(&pcm);
+        }
+        Message::AudioStop => {
+            device.end_playback();
+            if device.playback_idle() {
+                send(sock, &Message::PlaybackDone { id: None })?;
+            } else {
+                st.done_pending = true;
+            }
+        }
+        Message::Reject(r) => {
+            return Err(format!("the core ended the session: {}", plain(&r.reason)));
+        }
+        // Welcome again, errors, events from the satellite side, and anything unknown: ignore (REQ-SAT-009).
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A development device: its microphone is a list of samples (then silence), and the reply is collected.

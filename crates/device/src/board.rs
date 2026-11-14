@@ -5,7 +5,8 @@
 //! [`NullBoard`] has no hardware at all. A new device is a new board file, not a new type.
 
 use crate::board_file::{
-    AudioKind, BoardFile, ButtonSource as SourceSpec, LedDriverKind, PcmFormat,
+    AudioKind, BoardFile, ButtonSource as SourceSpec, DEFAULT_DOUBLE_PRESS_MS,
+    DEFAULT_LED_BRIGHTNESS_PCT, DEFAULT_LED_QUIET_BRIGHTNESS_PCT, DEFAULT_LONG_PRESS_MS, PcmFormat,
 };
 use crate::button::{ActionMap, ButtonSource, KeyButtons, NoButtons};
 use crate::caps::{Build, Declared};
@@ -15,6 +16,10 @@ use clawdot_satellite::command::{
     CommandIn, CommandOut, DEFAULT_STALL, custom, default_capture, default_playback,
 };
 use std::io::{BufRead, Write};
+
+/// LED brightness (normal, quiet) for a board with no LEDs.
+const DEFAULT_LED_BRIGHTNESS: (u8, u8) =
+    (DEFAULT_LED_BRIGHTNESS_PCT, DEFAULT_LED_QUIET_BRIGHTNESS_PCT);
 
 /// Everything the daemon needs from a board.
 pub struct Parts {
@@ -84,9 +89,9 @@ impl Board for NullBoard {
             leds: Box::new(NullLeds),
             buttons: Box::new(NoButtons),
             actions: ActionMap::default(),
-            gesture_ms: (700, 350),
+            gesture_ms: (DEFAULT_LONG_PRESS_MS, DEFAULT_DOUBLE_PRESS_MS),
             declared: Declared::software_only(),
-            led_brightness: (100, 10),
+            led_brightness: DEFAULT_LED_BRIGHTNESS,
             problems: Vec::new(),
         })
     }
@@ -235,7 +240,7 @@ impl Board for ConfiguredBoard {
         };
 
         let (leds, led_brightness): (Box<dyn LedSink>, (u8, u8)) = match &file.leds {
-            Some(spec) if spec.driver == LedDriverKind::Console && this.build.console_leds => {
+            Some(spec) if this.build.drives_leds(&file) => {
                 let sink = match this.led_out {
                     Some(w) => ConsoleLeds::new(w, spec.states.clone()),
                     None => ConsoleLeds::stderr(spec.states.clone()),
@@ -250,19 +255,14 @@ impl Board for ConfiguredBoard {
                     "leds.driver `{:?}` is not available in this build; LEDs are declared absent and tones stand in",
                     spec.driver
                 ));
-                (Box::new(NullLeds), (100, 10))
+                (Box::new(NullLeds), DEFAULT_LED_BRIGHTNESS)
             }
-            None => (Box::new(NullLeds), (100, 10)),
+            None => (Box::new(NullLeds), DEFAULT_LED_BRIGHTNESS),
         };
 
-        let all_keys = !file.buttons.is_empty()
-            && file
-                .buttons
-                .iter()
-                .all(|b| matches!(b.source, SourceSpec::Key(_)));
         let buttons: Box<dyn ButtonSource> = if file.buttons.is_empty() {
             Box::new(NoButtons)
-        } else if all_keys && this.build.key_buttons {
+        } else if this.build.reads_buttons(&file) {
             match this.key_reader {
                 Some(r) => {
                     let keys = file
