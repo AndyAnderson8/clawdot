@@ -23,28 +23,7 @@ pub(super) fn run_note_command(
             ),
             Err(e) => e.spoken(),
         },
-        Cmd::List => {
-            let all = store.list();
-            if all.is_empty() {
-                return if store.enabled() {
-                    "I don't have any notes.".to_owned()
-                } else {
-                    NoteError::Off.spoken()
-                };
-            }
-            let mut s = format!(
-                "I have {} note{}.",
-                all.len(),
-                if all.len() == 1 { "" } else { "s" }
-            );
-            for (i, n) in all.iter().take(5).enumerate() {
-                s.push_str(&format!(" {}: {}.", i + 1, n.text.trim_end_matches('.')));
-            }
-            if all.len() > 5 {
-                s.push_str(&format!(" And {} more.", all.len() - 5));
-            }
-            s
-        }
+        Cmd::List => spoken_list(&store),
         Cmd::ForgetNth(n) => match store.forget_nth(n) {
             Ok(note) => format!(
                 "Okay, I forgot note {n}: {}.",
@@ -69,4 +48,29 @@ pub(super) fn run_note_command(
             }
         }
     }
+}
+
+/// The spoken answer to "what are my notes": the count and the first five.
+fn spoken_list(store: &notes::NoteStore) -> String {
+    use notes::NoteError;
+    let all = store.list();
+    if all.is_empty() {
+        return if store.enabled() {
+            "I don't have any notes.".to_owned()
+        } else {
+            NoteError::Off.spoken()
+        };
+    }
+    let mut s = format!(
+        "I have {} note{}.",
+        all.len(),
+        if all.len() == 1 { "" } else { "s" }
+    );
+    for (i, n) in all.iter().take(5).enumerate() {
+        s.push_str(&format!(" {}: {}.", i + 1, n.text.trim_end_matches('.')));
+    }
+    if all.len() > 5 {
+        s.push_str(&format!(" And {} more.", all.len() - 5));
+    }
+    s
 }
