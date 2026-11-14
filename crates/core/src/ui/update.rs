@@ -2,7 +2,7 @@
 
 use super::common::{Resp, error};
 #[cfg(feature = "tls")]
-use super::common::{json_reply, read_json};
+use super::common::{json_or_reply, json_reply};
 use crate::app::Core;
 use hyper::StatusCode;
 use hyper::body::Incoming;
@@ -53,9 +53,9 @@ pub(super) async fn update_apply(core: &Core, body: Incoming) -> Resp {
     let Some(u) = core.updater() else {
         return update_status(core);
     };
-    let v = match read_json::<Value>(body).await {
+    let v = match json_or_reply::<Value>(body).await {
         Ok(v) => v,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     let Some(version) = v["version"].as_str() else {
         return error(StatusCode::BAD_REQUEST, "Say which version to install.");

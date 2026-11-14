@@ -444,6 +444,47 @@ fn an_unset_clock_at_boot_keeps_the_day_s_spend() {
     assert_eq!(back.request_days().1[0], (20_000, 2));
 }
 
+// While the wall clock has not been set this run, nobody knows today's day: the chart's "today" must not be the
+// day of the saved counters, which may be days old.
+#[test]
+fn the_chart_does_not_name_the_saved_day_as_today_while_the_clock_is_unset() {
+    let dir = TempDir::new("usage-chart-clock");
+    let store = JsonStore::new(dir.0.join("usage.json"), SCHEMA);
+    let t = UsageTracker::new(UsageLimits::default());
+    t.record_request(20_000);
+    t.record_request(20_000);
+    t.save(&store).unwrap();
+    let back = UsageTracker::load(&store, UsageLimits::default()).unwrap();
+    assert!(back.check(0).is_ok());
+    back.record_request(0);
+    let (today, days) = back.request_days();
+    assert_eq!(today, 0, "the day is unknown, not the saved day");
+    assert_eq!(days, vec![(20_000, 3)], "what was counted is still charted");
+    // A day before the saved one is a clock that stepped back, not a known day.
+    assert!(back.check(3).is_ok());
+    assert_eq!(back.request_days().0, 0);
+    // The clock arrives on a later day: the saved day becomes a past day and today starts clean.
+    assert!(back.check(20_003).is_ok());
+    assert_eq!(
+        back.request_days(),
+        (20_003, vec![(20_000, 3), (20_003, 0)])
+    );
+}
+
+#[test]
+fn requests_counted_before_any_real_day_are_charted_on_the_first_real_day() {
+    let t = UsageTracker::new(UsageLimits::default());
+    t.record_request(0);
+    t.record_request(0);
+    assert_eq!(
+        t.request_days(),
+        (0, vec![]),
+        "no day yet, nothing to chart"
+    );
+    t.record_request(20_000);
+    assert_eq!(t.request_days(), (20_000, vec![(20_000, 3)]));
+}
+
 #[test]
 fn spend_counted_before_the_first_real_day_is_kept_on_it() {
     let t = UsageTracker::new(UsageLimits::default());

@@ -121,6 +121,34 @@ pub(super) async fn read_json_limit<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|_| (StatusCode::BAD_REQUEST, "bad request body"))
 }
 
+/// [`read_json`] with the failure already turned into the reply to send: `Err(reply)` is returned as is.
+#[allow(clippy::result_large_err)] // the error is the reply itself, sent at once
+pub(super) async fn json_or_reply<T: serde::de::DeserializeOwned>(
+    body: Incoming,
+) -> Result<T, Resp> {
+    read_json(body).await.map_err(|(s, m)| error(s, m))
+}
+
+/// [`read_json_limit`] with the failure already turned into the reply to send.
+#[allow(clippy::result_large_err)] // the error is the reply itself, sent at once
+pub(super) async fn json_limit_or_reply<T: serde::de::DeserializeOwned>(
+    body: Incoming,
+    max: usize,
+) -> Result<T, Resp> {
+    read_json_limit(body, max)
+        .await
+        .map_err(|(s, m)| error(s, m))
+}
+
+/// Run a change to tools, connections or skills in the main loop (see [`Core::portal_call`]); the answer is the
+/// new listing.
+pub(super) async fn portal_json(core: &Core, op: crate::app::Op) -> Resp {
+    match core.portal_call(op).await {
+        Ok(v) => json_reply(StatusCode::OK, &v),
+        Err(f) => fail_reply(&f),
+    }
+}
+
 /// Turn a success into the truth when what it changed could not be saved (see [`Core::saved_since`]).
 pub(super) async fn saved(core: &Core, mark: SaveMark, resp: Resp) -> Resp {
     if resp.status().is_success() {
