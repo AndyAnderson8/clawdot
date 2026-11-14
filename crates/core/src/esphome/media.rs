@@ -253,10 +253,12 @@ fn parse_request(head: &str) -> Option<(&str, bool)> {
     Some((token, head_only))
 }
 
-async fn handle(mut stream: tokio::net::TcpStream, store: MediaStore) {
+/// Read the request head (up to the blank line) within five seconds. `None` when it is too long, never ends,
+/// or the reader goes away first.
+async fn read_head(stream: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(512);
     let mut tmp = [0u8; 512];
-    let read_head = async {
+    let fill = async {
         loop {
             if buf.windows(4).any(|w| w == b"\r\n\r\n") {
                 return true;
@@ -270,22 +272,26 @@ async fn handle(mut stream: tokio::net::TcpStream, store: MediaStore) {
             }
         }
     };
-    let complete = tokio::time::timeout(Duration::from_secs(5), read_head)
+    let complete = tokio::time::timeout(Duration::from_secs(5), fill)
         .await
         .unwrap_or(false);
-    let parsed = if complete {
-        std::str::from_utf8(&buf)
+    complete.then_some(buf)
+}
+
+async fn handle(mut stream: tokio::net::TcpStream, store: MediaStore) {
+    let head = read_head(&mut stream).await;
+    let parsed = head.as_deref().and_then(|b| {
+        std::str::from_utf8(b)
             .ok()
             .and_then(parse_request)
             .map(|(t, h)| (t.to_owned(), h))
-    } else {
-        None
-    };
+    });
     let found = parsed.as_ref().and_then(|(t, _)| store.get(t));
     if let Some(Body::Live(live)) = &found {
         let head_only = parsed.as_ref().is_some_and(|(_, h)| *h);
-        let http11 = std::str::from_utf8(&buf)
-            .ok()
+        let http11 = head
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
             .and_then(|h| h.lines().next())
             .is_some_and(|l| l.ends_with(" HTTP/1.1"));
         stream_live(stream, live, &store, http11, head_only).await;
@@ -358,43 +364,8 @@ async fn stream_live(
         return;
     }
     if !head_only {
-        let started = Instant::now();
-        let mut last = started;
-        let mut pos = 0;
-        let mut changes = live.changed.subscribe();
-        let mut sink = [0u8; 64];
-        loop {
-            if started.elapsed() >= store.live_open {
-                break;
-            }
-            changes.borrow_and_update();
-            let (piece, closed) = live.piece(pos);
-            if !piece.is_empty() {
-                if !write_piece(&mut wr, &piece, http11).await {
-                    return;
-                }
-                pos += piece.len();
-                last = Instant::now();
-                continue;
-            }
-            if closed {
-                break;
-            }
-            let until = (started + store.live_open).min(last + store.live_idle);
-            tokio::select! {
-                r = changes.changed() => {
-                    if r.is_err() {
-                        break;
-                    }
-                }
-                r = rd.read(&mut sink) => {
-                    // Anything the reader sends now is ignored; its closing the connection ends the response.
-                    if matches!(r, Ok(0) | Err(_)) {
-                        return;
-                    }
-                }
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(until)) => break,
-            }
+        if !pump_live(&mut rd, &mut wr, live, store, http11).await {
+            return;
         }
         if http11 {
             // An empty chunk is the terminator: `0 CRLF CRLF`. The reader can tell a finished reply from a cut one.
@@ -402,6 +373,56 @@ async fn stream_live(
         }
     }
     let _ = tokio::time::timeout(WRITE_TIMEOUT, wr.shutdown()).await;
+}
+
+/// Write the audio of a live file as it arrives. True when the writer finished or a time limit ran out (the
+/// response is then ended properly); false when the reader went away or a write failed.
+async fn pump_live(
+    rd: &mut tokio::net::tcp::OwnedReadHalf,
+    wr: &mut tokio::net::tcp::OwnedWriteHalf,
+    live: &Arc<Live>,
+    store: &MediaStore,
+    http11: bool,
+) -> bool {
+    let started = Instant::now();
+    let mut last = started;
+    let mut pos = 0;
+    let mut changes = live.changed.subscribe();
+    let mut sink = [0u8; 64];
+    loop {
+        if started.elapsed() >= store.live_open {
+            break;
+        }
+        changes.borrow_and_update();
+        let (piece, closed) = live.piece(pos);
+        if !piece.is_empty() {
+            if !write_piece(wr, &piece, http11).await {
+                return false;
+            }
+            pos += piece.len();
+            last = Instant::now();
+            continue;
+        }
+        if closed {
+            break;
+        }
+        let until = (started + store.live_open).min(last + store.live_idle);
+        tokio::select! {
+            r = changes.changed() => {
+                if r.is_err() {
+                    break;
+                }
+            }
+            r = rd.read(&mut sink) => {
+                // Anything the reader sends now is ignored; its closing the connection ends the response.
+                if matches!(r, Ok(0) | Err(_)) {
+                    return false;
+                }
+            }
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(until)) => break,
+        }
+    }
+    true
 }
 
 /// Serve files from `store` on `listener` until `shutdown` completes.
