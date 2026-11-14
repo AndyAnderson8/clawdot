@@ -19,39 +19,7 @@ impl App {
         let reply = match source {
             Source::Portal(reply) => reply,
             Source::Saved => {
-                let mut reserved = brain.builtin.clone();
-                reserved.extend(brain.http_tools.specs().into_iter().map(|t| t.name));
-                let name = done.pending.name().to_owned();
-                let listed = done.tools.as_ref().ok().map(Vec::len);
-                // Only what the administrator approved is offered; a server never approved (saved before
-                // approvals existed, or defined in the configuration file) is approved as found, once.
-                let approved = brain.ext.approved_tools(&name);
-                let warnings = Arc::make_mut(&mut brain.mcp).settle(
-                    done.pending.name(),
-                    done.tools,
-                    &reserved,
-                    approved.as_ref(),
-                );
-                for w in warnings {
-                    eprintln!("clawdot: {w}");
-                }
-                if let Some(n) = listed {
-                    println!("clawdot: mcp server `{name}` connected ({n} tools listed)");
-                }
-                if approved.is_none() {
-                    match brain.ext.pin_first_connect(&name, &brain.mcp) {
-                        Ok(true) => println!(
-                            "clawdot: mcp server `{name}`: its tools are approved as found (first connect); later changes wait for review"
-                        ),
-                        Ok(false) => {}
-                        Err(e) => {
-                            eprintln!(
-                                "clawdot: mcp server `{name}`: could not record its tools: {e:?}"
-                            );
-                        }
-                    }
-                }
-                core.set_ui_tools(brain.listing());
+                self.settle_saved(done);
                 return;
             }
         };
@@ -77,6 +45,43 @@ impl App {
             }
         };
         let _ = reply.send(answer);
+    }
+
+    /// A source saved earlier reported: record how the connection went. It stays in the list either way.
+    fn settle_saved(&mut self, done: Done) {
+        let brain = &mut self.brain;
+        let core = &self.core;
+        let mut reserved = brain.builtin.clone();
+        reserved.extend(brain.http_tools.specs().into_iter().map(|t| t.name));
+        let name = done.pending.name().to_owned();
+        let listed = done.tools.as_ref().ok().map(Vec::len);
+        // Only what the administrator approved is offered; a server never approved (saved before
+        // approvals existed, or defined in the configuration file) is approved as found, once.
+        let approved = brain.ext.approved_tools(&name);
+        let warnings = Arc::make_mut(&mut brain.mcp).settle(
+            done.pending.name(),
+            done.tools,
+            &reserved,
+            approved.as_ref(),
+        );
+        for w in warnings {
+            eprintln!("clawdot: {w}");
+        }
+        if let Some(n) = listed {
+            println!("clawdot: mcp server `{name}` connected ({n} tools listed)");
+        }
+        if approved.is_none() {
+            match brain.ext.pin_first_connect(&name, &brain.mcp) {
+                Ok(true) => println!(
+                    "clawdot: mcp server `{name}`: its tools are approved as found (first connect); later changes wait for review"
+                ),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("clawdot: mcp server `{name}`: could not record its tools: {e:?}");
+                }
+            }
+        }
+        core.set_ui_tools(brain.listing());
     }
 
     /// Serve the connection results until none is outstanding. For the one-shot command: with no loop to serve
