@@ -4,7 +4,7 @@ use clawdot_bridge::client::Url;
 use clawdot_bridge::harness::ClaudeCode;
 use clawdot_bridge::state::Handled;
 use clawdot_bridge::{Config, DryRunner, ProcessRunner, Runner, stream_once};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -92,6 +92,72 @@ fn default_state_path(endpoint: &str) -> Option<PathBuf> {
     )
 }
 
+/// The bridge's token: from the file when one is named, else from `CLAWDOT_TOKEN`.
+fn read_token(token_file: Option<&Path>) -> Result<String, String> {
+    match (token_file, std::env::var("CLAWDOT_TOKEN")) {
+        (Some(path), _) => std::fs::read_to_string(path)
+            .map(|s| s.trim().to_owned())
+            .map_err(|e| format!("cannot read {}: {e}", path.display())),
+        (None, Ok(t)) if !t.trim().is_empty() => Ok(t.trim().to_owned()),
+        _ => Err("set CLAWDOT_TOKEN or pass --token-file".to_owned()),
+    }
+}
+
+/// The record of handled events: loaded from `state_path` when there is one, else (or when it cannot be
+/// read) kept in memory only.
+fn open_state(state_path: Option<&Path>) -> Handled {
+    match state_path {
+        Some(p) => {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            Handled::load(p).unwrap_or_else(|e| {
+                eprintln!(
+                    "clawdot-bridge: cannot read state {}: {e}; continuing without it",
+                    p.display()
+                );
+                Handled::in_memory()
+            })
+        }
+        None => Handled::in_memory(),
+    }
+}
+
+/// Follow the event stream, reconnecting with a growing pause, until `once` is satisfied or the token is
+/// refused.
+fn stream_forever(
+    cfg: &Config,
+    handled: &mut Handled,
+    runner: &mut dyn Runner,
+    once: bool,
+) -> ExitCode {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match stream_once(cfg, handled, runner, None) {
+            Ok(_) => {
+                backoff = Duration::from_secs(1);
+                if once {
+                    return ExitCode::SUCCESS;
+                }
+                eprintln!("clawdot-bridge: the stream closed; reconnecting");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("clawdot-bridge: {e}. Check the token (it may have been rotated).");
+                return ExitCode::from(3);
+            }
+            Err(e) => {
+                if once {
+                    eprintln!("clawdot-bridge: {e}");
+                    return ExitCode::from(1);
+                }
+                eprintln!("clawdot-bridge: {e}; retrying in {}s", backoff.as_secs());
+            }
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}
+
 fn main() -> ExitCode {
     let args = match parse() {
         Ok(a) => a,
@@ -115,14 +181,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let token = match (&args.token_file, std::env::var("CLAWDOT_TOKEN")) {
-        (Some(path), _) => std::fs::read_to_string(path)
-            .map(|s| s.trim().to_owned())
-            .map_err(|e| format!("cannot read {}: {e}", path.display())),
-        (None, Ok(t)) if !t.trim().is_empty() => Ok(t.trim().to_owned()),
-        _ => Err("set CLAWDOT_TOKEN or pass --token-file".to_owned()),
-    };
-    let token = match token {
+    let token = match read_token(args.token_file.as_deref()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("clawdot-bridge: {e}");
@@ -131,21 +190,7 @@ fn main() -> ExitCode {
     };
 
     let state_path = args.state.or_else(|| default_state_path(&args.endpoint));
-    let mut handled = match &state_path {
-        Some(p) => {
-            if let Some(dir) = p.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            Handled::load(p).unwrap_or_else(|e| {
-                eprintln!(
-                    "clawdot-bridge: cannot read state {}: {e}; continuing without it",
-                    p.display()
-                );
-                Handled::in_memory()
-            })
-        }
-        None => Handled::in_memory(),
-    };
+    let mut handled = open_state(state_path.as_deref());
 
     let cfg = Config {
         url,
@@ -166,29 +211,5 @@ fn main() -> ExitCode {
         cfg.endpoint,
         if args.dry_run { " (dry run)" } else { "" }
     );
-    let mut backoff = Duration::from_secs(1);
-    loop {
-        match stream_once(&cfg, &mut handled, runner.as_mut(), None) {
-            Ok(_) => {
-                backoff = Duration::from_secs(1);
-                if args.once {
-                    return ExitCode::SUCCESS;
-                }
-                eprintln!("clawdot-bridge: the stream closed; reconnecting");
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("clawdot-bridge: {e}. Check the token (it may have been rotated).");
-                return ExitCode::from(3);
-            }
-            Err(e) => {
-                if args.once {
-                    eprintln!("clawdot-bridge: {e}");
-                    return ExitCode::from(1);
-                }
-                eprintln!("clawdot-bridge: {e}; retrying in {}s", backoff.as_secs());
-            }
-        }
-        std::thread::sleep(backoff);
-        backoff = (backoff * 2).min(Duration::from_secs(30));
-    }
+    stream_forever(&cfg, &mut handled, runner.as_mut(), args.once)
 }

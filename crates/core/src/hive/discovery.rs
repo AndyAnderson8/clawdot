@@ -159,58 +159,71 @@ fn apply_response(
             peers.remove_instance(inst, src);
             continue;
         }
-        let find = |want: fn(&Rdata) -> bool| {
-            msg.records
-                .iter()
-                .find(|r| &r.name == inst && want(&r.data))
-                .map(|r| &r.data)
-        };
-        // An advertised address record is not read: the peer's address is the packet's source (REQ-CFG-009).
-        let (Some(Rdata::Srv { port, .. }), Some(Rdata::Txt(txt))) = (
-            find(|d| matches!(d, Rdata::Srv { .. })),
-            find(|d| matches!(d, Rdata::Txt(_))),
-        ) else {
-            continue;
-        };
-        let get = |k: &str| {
-            txt.iter()
-                .find(|(key, _)| key == k)
-                .map(|(_, v)| v.as_str())
-        };
-        if get("v") != Some("1") {
-            continue;
+        if let Some(peer) = peer_from_ptr(msg, rec.ttl, inst, src, own_id, now) {
+            peers.upsert(peer);
         }
-        let Some(id) = get("id").filter(|i| is_device_id(i)) else {
-            continue;
-        };
-        if own_id == Some(id) {
-            continue;
-        }
-        let announced_port = get("p")
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(*port);
-        // The name from the TXT record, else the instance label; both come from the network, so both lose
-        // control characters and are cut to the same length.
-        let plain = |n: &str| {
-            n.chars()
-                .filter(|c| !c.is_control())
-                .take(40)
-                .collect::<String>()
-        };
-        let name = get("n")
-            .map(plain)
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| plain(inst.split('.').next().unwrap_or("")));
-        peers.upsert(Peer {
-            id: id.to_owned(),
-            name,
-            address: src,
-            port: announced_port,
-            last_seen: now,
-            expires: now + Duration::from_secs(u64::from(rec.ttl.min(MAX_TTL))),
-            instance: inst.clone(),
-        });
     }
+}
+
+/// The peer that the service pointer record to `inst` describes, read from the SRV and TXT records beside it.
+/// `None` when those are missing, the version or id is not acceptable, or it is this speaker's own announcement.
+fn peer_from_ptr(
+    msg: &dns::Message,
+    ttl: u32,
+    inst: &str,
+    src: IpAddr,
+    own_id: Option<&str>,
+    now: Instant,
+) -> Option<Peer> {
+    let find = |want: fn(&Rdata) -> bool| {
+        msg.records
+            .iter()
+            .find(|r| r.name == inst && want(&r.data))
+            .map(|r| &r.data)
+    };
+    // An advertised address record is not read: the peer's address is the packet's source (REQ-CFG-009).
+    let (Some(Rdata::Srv { port, .. }), Some(Rdata::Txt(txt))) = (
+        find(|d| matches!(d, Rdata::Srv { .. })),
+        find(|d| matches!(d, Rdata::Txt(_))),
+    ) else {
+        return None;
+    };
+    let get = |k: &str| {
+        txt.iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v.as_str())
+    };
+    if get("v") != Some("1") {
+        return None;
+    }
+    let id = get("id").filter(|i| is_device_id(i))?;
+    if own_id == Some(id) {
+        return None;
+    }
+    let announced_port = get("p")
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(*port);
+    // The name from the TXT record, else the instance label; both come from the network, so both lose
+    // control characters and are cut to the same length.
+    let plain = |n: &str| {
+        n.chars()
+            .filter(|c| !c.is_control())
+            .take(40)
+            .collect::<String>()
+    };
+    let name = get("n")
+        .map(plain)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| plain(inst.split('.').next().unwrap_or("")));
+    Some(Peer {
+        id: id.to_owned(),
+        name,
+        address: src,
+        port: announced_port,
+        last_seen: now,
+        expires: now + Duration::from_secs(u64::from(ttl.min(MAX_TTL))),
+        instance: inst.to_owned(),
+    })
 }
 
 /// What the responder should do about a received query.
@@ -352,24 +365,38 @@ async fn run(
                     continue;
                 }
                 let Some(msg) = buf.get(..n).and_then(dns::parse) else { continue };
-                let now = Instant::now();
-                if msg.response {
-                    if cfg.browse {
-                        let mut p = peers.lock().unwrap_or_else(PoisonError::into_inner);
-                        apply_response(&mut p, &msg, from.ip(), cfg.own_id.as_deref(), now);
-                    }
-                } else if let (Some(ad), Some(reply)) = (&cfg.advert, &announce)
-                    && wants_answer(&msg, ad)
-                    && last_response.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
-                {
-                    last_response = Some(now);
-                    send_all(&sock, &cfg.dests, reply).await;
-                }
+                on_datagram(&sock, &cfg, &peers, announce.as_deref(), &mut last_response, &msg, from.ip()).await;
             }
         }
     }
     if let Some(bye) = cfg.advert.as_ref().and_then(|a| a.response(0)) {
         send_all(&sock, &cfg.dests, &bye).await;
+    }
+}
+
+/// Act on one datagram from a local sender: take a response into the peer list, or answer a query with the
+/// announcement (at most once a second).
+async fn on_datagram(
+    sock: &UdpSocket,
+    cfg: &Config,
+    peers: &Mutex<Peers>,
+    announce: Option<&[u8]>,
+    last_response: &mut Option<Instant>,
+    msg: &dns::Message,
+    from: IpAddr,
+) {
+    let now = Instant::now();
+    if msg.response {
+        if cfg.browse {
+            let mut p = peers.lock().unwrap_or_else(PoisonError::into_inner);
+            apply_response(&mut p, msg, from, cfg.own_id.as_deref(), now);
+        }
+    } else if let (Some(ad), Some(reply)) = (&cfg.advert, announce)
+        && wants_answer(msg, ad)
+        && last_response.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+    {
+        *last_response = Some(now);
+        send_all(sock, &cfg.dests, reply).await;
     }
 }
 

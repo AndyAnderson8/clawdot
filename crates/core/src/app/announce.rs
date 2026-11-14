@@ -278,22 +278,7 @@ impl Core {
     ) -> Result<(HookOutcome, String), AnnounceError> {
         let (now, mono) = (self.clock.now(), self.clock.monotonic_secs());
         let mut g = self.lock();
-        let ep = match caller {
-            Caller::Token(token, peer) => self
-                .token_endpoint(&mut g, token, peer, mono)
-                .map_err(AnnounceError::Hook)?,
-            Caller::Admin => {
-                let name = a.endpoint.as_deref().ok_or_else(|| {
-                    AnnounceError::Endpoint(
-                        "name the endpoint to announce on (field endpoint)".into(),
-                    )
-                })?;
-                match g.endpoints.get(name) {
-                    Some(ep) if ep.enabled => ep.clone(),
-                    _ => return Err(AnnounceError::Endpoint("no such endpoint".into())),
-                }
-            }
-        };
+        let ep = self.announce_endpoint(&mut g, caller, a, mono)?;
         let bucket = g.buckets.entry(ep.id.clone()).or_insert(Bucket {
             tokens: self.limits.hook_burst,
             last: mono,
@@ -335,6 +320,33 @@ impl Core {
         drop(g);
         self.audit_announcement(now, &ep.name, &source, a, outcome, audit_as);
         Ok((outcome, ep.name))
+    }
+
+    /// The endpoint an announcement goes on: the one that owns the caller's token, or the one an administrator
+    /// names (which must exist and be enabled).
+    fn announce_endpoint(
+        &self,
+        g: &mut super::Inner,
+        caller: Caller<'_>,
+        a: &Announcement,
+        mono: i64,
+    ) -> Result<crate::inbox::endpoint::Endpoint, AnnounceError> {
+        Ok(match caller {
+            Caller::Token(token, peer) => self
+                .token_endpoint(g, token, peer, mono)
+                .map_err(AnnounceError::Hook)?,
+            Caller::Admin => {
+                let name = a.endpoint.as_deref().ok_or_else(|| {
+                    AnnounceError::Endpoint(
+                        "name the endpoint to announce on (field endpoint)".into(),
+                    )
+                })?;
+                match g.endpoints.get(name) {
+                    Some(ep) if ep.enabled => ep.clone(),
+                    _ => return Err(AnnounceError::Endpoint("no such endpoint".into())),
+                }
+            }
+        })
     }
 
     /// Write the audit record. It carries no tier, so it never counts against the action caps (REQ-INB-024).

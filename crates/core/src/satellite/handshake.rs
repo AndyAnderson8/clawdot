@@ -4,7 +4,7 @@ use super::settings::Settings;
 use super::wire::{new_session_id, next_message, send};
 use crate::inbox::endpoint::verify_token;
 use clawdot_protocol::frame::Decoder;
-use clawdot_protocol::message::{AudioCodec, Message, PROTOCOL_VERSION, Reject, Welcome};
+use clawdot_protocol::message::{AudioCodec, Hello, Message, PROTOCOL_VERSION, Reject, Welcome};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// What the handshake learned about an accepted satellite.
@@ -36,26 +36,9 @@ where
         }
         None => return Ok(None),
     };
-    if !PROTOCOL_VERSION.compatible_with(hello.protocol) {
-        let reason = format!(
-            "protocol {}.{} is not supported; this core speaks {}.{}",
-            hello.protocol.major,
-            hello.protocol.minor,
-            PROTOCOL_VERSION.major,
-            PROTOCOL_VERSION.minor
-        );
+    if let Some(reason) = refusal(&hello, settings) {
         reject(wr, reason).await?;
         return Ok(None);
-    }
-    if !settings.token_hashes.is_empty() {
-        let ok = hello
-            .token
-            .as_deref()
-            .is_some_and(|t| settings.token_hashes.iter().any(|h| verify_token(t, h)));
-        if !ok {
-            reject(wr, "unauthorized".into()).await?;
-            return Ok(None);
-        }
     }
     // The connection's own random identifier. It names this speaker's conversation and held confirmation in the
     // core, so one speaker's "yes" can never answer another's question; a new connection starts fresh.
@@ -78,6 +61,30 @@ where
         speaker_id,
         media_url: hello.capabilities.media_url,
     }))
+}
+
+/// Why a hello is refused, if it is: an incompatible protocol version, or a token that does not match when the
+/// core requires one.
+fn refusal(hello: &Hello, settings: &Settings) -> Option<String> {
+    if !PROTOCOL_VERSION.compatible_with(hello.protocol) {
+        return Some(format!(
+            "protocol {}.{} is not supported; this core speaks {}.{}",
+            hello.protocol.major,
+            hello.protocol.minor,
+            PROTOCOL_VERSION.major,
+            PROTOCOL_VERSION.minor
+        ));
+    }
+    if !settings.token_hashes.is_empty() {
+        let ok = hello
+            .token
+            .as_deref()
+            .is_some_and(|t| settings.token_hashes.iter().any(|h| verify_token(t, h)));
+        if !ok {
+            return Some("unauthorized".into());
+        }
+    }
+    None
 }
 
 pub(super) async fn reject<W: AsyncWrite + Unpin>(w: &mut W, reason: String) -> Result<(), String> {

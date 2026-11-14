@@ -317,6 +317,13 @@ impl Inbox {
             }
         }
 
+        let id = self.push_event(endpoint, mapped, now);
+        self.enforce_limits(id);
+        Ingest::Accepted(id)
+    }
+
+    /// Add a new event for `mapped` on `endpoint` and return its id. The limits are not enforced here.
+    fn push_event(&mut self, endpoint: &Endpoint, mapped: Mapped, now: Moment) -> u64 {
         self.state.next_id += 1;
         let id = self.state.next_id;
         self.state.events.push(Event {
@@ -343,8 +350,7 @@ impl Inbox {
             state: EventState::New,
             spoken_seq: 0,
         });
-        self.enforce_limits(id);
-        Ingest::Accepted(id)
+        id
     }
 
     /// The endpoint that should give up an event now: the one holding the most of whichever limit is broken

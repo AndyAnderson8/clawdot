@@ -137,21 +137,10 @@ fn end_name(e: &TurnEnd) -> Ends {
     }
 }
 
-/// Run `s` once against `model`. `usage` carries the spend cap in live mode (and is a fresh tracker in
-/// replay mode).
-pub async fn run_scenario<M: Model>(
-    s: &Scenario,
-    model: &M,
-    usage: &mut UsageTracker,
-) -> RunReport {
-    let mut report = RunReport {
-        id: s.id.clone(),
-        ..RunReport::default()
-    };
-    let clock = Arc::new(ManualClock::new(s.setup.now));
-    let mut host = EvalHost::new(s, Arc::clone(&clock));
+/// An in-memory audit log with the scenario's action caps and dry-run setting.
+fn scenario_log(s: &Scenario) -> Arc<AuditLog> {
     let defaults = ActionPolicy::default();
-    let log = Arc::new(AuditLog::in_memory(AuditConfig {
+    Arc::new(AuditLog::in_memory(AuditConfig {
         policy: ActionPolicy {
             dry_run: s.setup.dry_run,
             max_actions_per_day: s
@@ -164,18 +153,13 @@ pub async fn run_scenario<M: Model>(
                 .unwrap_or(defaults.max_costly_per_day),
         },
         ..AuditConfig::default()
-    }));
-    let mut conv = Conversation::standard(s.setup.system.as_deref().unwrap_or(DEFAULT_PERSONA));
-    conv.set_audit(Arc::clone(&log));
-    let notes = Arc::new(NoteStore::in_memory(
-        clawdot_core::lang::DEFAULT,
-        s.setup.notes,
-    ));
-    if s.setup.notes {
-        conv.set_notes(Arc::clone(&notes));
-    }
+    }))
+}
+
+/// The turn configuration a scenario's setup asks for, over the defaults.
+fn scenario_config(s: &Scenario) -> TurnConfig {
     let d = TurnConfig::default();
-    let cfg = TurnConfig {
+    TurnConfig {
         model: "eval-model".into(),
         summary_model: Some("eval-summary-model".into()),
         allow_destructive: s.setup.allow_destructive,
@@ -190,7 +174,33 @@ pub async fn run_scenario<M: Model>(
         progress_speech: s.setup.progress_speech.unwrap_or(d.progress_speech),
         summarize_over: s.setup.summarize_over.unwrap_or(d.summarize_over),
         ..d
+    }
+}
+
+/// Run `s` once against `model`. `usage` carries the spend cap in live mode (and is a fresh tracker in
+/// replay mode).
+pub async fn run_scenario<M: Model>(
+    s: &Scenario,
+    model: &M,
+    usage: &mut UsageTracker,
+) -> RunReport {
+    let mut report = RunReport {
+        id: s.id.clone(),
+        ..RunReport::default()
     };
+    let clock = Arc::new(ManualClock::new(s.setup.now));
+    let mut host = EvalHost::new(s, Arc::clone(&clock));
+    let log = scenario_log(s);
+    let mut conv = Conversation::standard(s.setup.system.as_deref().unwrap_or(DEFAULT_PERSONA));
+    conv.set_audit(Arc::clone(&log));
+    let notes = Arc::new(NoteStore::in_memory(
+        clawdot_core::lang::DEFAULT,
+        s.setup.notes,
+    ));
+    if s.setup.notes {
+        conv.set_notes(Arc::clone(&notes));
+    }
+    let cfg = scenario_config(s);
 
     let mut now = s.setup.now;
     let mut seen_records = 0_u64;
@@ -212,42 +222,20 @@ pub async fn run_scenario<M: Model>(
         if turn.cancel {
             ctl.cancel.cancel();
         }
+        let inputs = TurnInputs {
+            host: &mut host,
+            conv: &mut conv,
+            cfg: &cfg,
+            usage,
+            day,
+            now,
+            mono: now,
+        };
         let result = match turn.trigger {
-            Trigger::User => {
-                run_turn_with(
-                    &ctl,
-                    model,
-                    TurnInputs {
-                        host: &mut host,
-                        conv: &mut conv,
-                        cfg: &cfg,
-                        usage,
-                        day,
-                        now,
-                        mono: now,
-                    },
-                    &turn.say,
-                )
-                .await
-            }
+            Trigger::User => run_turn_with(&ctl, model, inputs, &turn.say).await,
             Trigger::Event => {
                 let source = turn.source.as_deref().unwrap_or("event");
-                run_event_turn_with(
-                    &ctl,
-                    source,
-                    model,
-                    TurnInputs {
-                        host: &mut host,
-                        conv: &mut conv,
-                        cfg: &cfg,
-                        usage,
-                        day,
-                        now,
-                        mono: now,
-                    },
-                    &turn.say,
-                )
-                .await
+                run_event_turn_with(&ctl, source, model, inputs, &turn.say).await
             }
         };
         drop(ctl);
@@ -255,29 +243,7 @@ pub async fn run_scenario<M: Model>(
         while let Ok(p) = rx.try_recv() {
             streamed.push(p);
         }
-        report.model_requests += result.model_requests;
-        report.speech.push(
-            result
-                .early
-                .iter()
-                .map(String::as_str)
-                .chain([result.speech.as_str()])
-                .collect::<Vec<_>>()
-                .join(" "),
-        );
-        report.push(
-            Some(n),
-            "speech sink matches what the turn says it spoke early",
-            false,
-            if streamed == result.early {
-                Ok(())
-            } else {
-                Err(format!(
-                    "sink got {streamed:?}, the turn reports {:?}",
-                    result.early
-                ))
-            },
-        );
+        record_turn(&mut report, n, &result, &streamed);
         let ran: Vec<crate::host::Executed> = host.executed[seen_executed..].to_vec();
         seen_executed = host.executed.len();
         let records = new_records(&log, &mut seen_records);
@@ -302,24 +268,7 @@ pub async fn run_scenario<M: Model>(
             report.stopped_by_limit = true;
             break;
         }
-        if model.exhausted() {
-            report.push(
-                Some(n),
-                "script",
-                false,
-                Err("the loop asked for more model replies than the turn scripted".into()),
-            );
-        } else if model.leftover() > 0 {
-            report.push(
-                Some(n),
-                "script",
-                false,
-                Err(format!(
-                    "{} scripted model replies were never used",
-                    model.leftover()
-                )),
-            );
-        }
+        check_script(&mut report, n, model);
     }
     report.tool_calls = host.executed.len();
     report.spend_usd = usage.spend_today() - spend_at_start;
@@ -329,6 +278,55 @@ pub async fn run_scenario<M: Model>(
     }
     check_whole(&mut report, s, &host.executed);
     report
+}
+
+/// Note what the turn spoke and cost, and check the speech sink saw what the turn says it spoke early.
+fn record_turn(report: &mut RunReport, n: usize, result: &TurnResult, streamed: &[String]) {
+    report.model_requests += result.model_requests;
+    report.speech.push(
+        result
+            .early
+            .iter()
+            .map(String::as_str)
+            .chain([result.speech.as_str()])
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    report.push(
+        Some(n),
+        "speech sink matches what the turn says it spoke early",
+        false,
+        if streamed == result.early {
+            Ok(())
+        } else {
+            Err(format!(
+                "sink got {streamed:?}, the turn reports {:?}",
+                result.early
+            ))
+        },
+    );
+}
+
+/// Whether the model was given exactly as many scripted replies as the turn used.
+fn check_script<M: Model>(report: &mut RunReport, n: usize, model: &M) {
+    if model.exhausted() {
+        report.push(
+            Some(n),
+            "script",
+            false,
+            Err("the loop asked for more model replies than the turn scripted".into()),
+        );
+    } else if model.leftover() > 0 {
+        report.push(
+            Some(n),
+            "script",
+            false,
+            Err(format!(
+                "{} scripted model replies were never used",
+                model.leftover()
+            )),
+        );
+    }
 }
 
 fn new_records(log: &AuditLog, seen: &mut u64) -> Vec<Record> {
@@ -359,6 +357,22 @@ fn check_turn(
 ) {
     let e: &Expect = &turn.expect;
     let speech = result.speech.as_str();
+    check_actions(r, n, e, result, ran, conv);
+    check_speech(r, n, e, speech);
+    check_records(r, n, e, records, log, last_request);
+    check_early_and_state(r, n, e, result, records, notes);
+}
+
+/// How the turn ended, which calls ran, and what is held for the user's yes.
+fn check_actions(
+    r: &mut RunReport,
+    n: usize,
+    e: &Expect,
+    result: &TurnResult,
+    ran: &[crate::host::Executed],
+    conv: &Conversation,
+) {
+    let speech = result.speech.as_str();
     if let Some(want) = e.ends {
         // The gate says it held an action and is waiting for the answer; the spoken question is not read.
         let got = if result.pending {
@@ -379,6 +393,12 @@ fn check_turn(
             },
         );
     }
+    check_calls(r, n, e, ran);
+    check_held(r, n, e, conv, speech);
+}
+
+/// Which calls ran, in order, and which must not have.
+fn check_calls(r: &mut RunReport, n: usize, e: &Expect, ran: &[crate::host::Executed]) {
     if let Some(calls) = &e.calls {
         let outcome = (|| {
             if calls.len() != ran.len() {
@@ -428,6 +448,10 @@ fn check_turn(
             },
         );
     }
+}
+
+/// What is held for the user's yes, and that nothing is when none is expected.
+fn check_held(r: &mut RunReport, n: usize, e: &Expect, conv: &Conversation, speech: &str) {
     if let Some(h) = &e.held {
         let outcome = match conv.pending() {
             None => Err("nothing is being held for the user's yes".to_owned()),
@@ -454,6 +478,10 @@ fn check_turn(
             },
         );
     }
+}
+
+/// What the turn said.
+fn check_speech(r: &mut RunReport, n: usize, e: &Expect, speech: &str) {
     r.push(
         Some(n),
         "speech_contains",
@@ -504,6 +532,48 @@ fn check_turn(
             },
         );
     }
+}
+
+/// The audit records, and what the model was shown.
+fn check_records(
+    r: &mut RunReport,
+    n: usize,
+    e: &Expect,
+    records: &[Record],
+    log: &AuditLog,
+    last_request: &dyn Fn() -> Option<clawdot_core::llm::ChatRequest>,
+) {
+    check_audit_order(r, n, e, records);
+    let saw = request_text(last_request);
+    r.push(
+        Some(n),
+        "model_saw",
+        false,
+        contains_all(&saw, &e.model_saw),
+    );
+    r.push(
+        Some(n),
+        "model_not_saw",
+        false,
+        contains_none(&saw, &e.model_not_saw),
+    );
+    if !e.audit_text_not_contains.is_empty() {
+        let all = log.query(&Query {
+            limit: Some(clawdot_core::audit::MAX_PAGE),
+            ..Query::default()
+        });
+        let text = serde_json::to_string(&all.records).unwrap_or_default();
+        r.push(
+            Some(n),
+            "audit_text_not_contains",
+            true,
+            contains_none(&text, &e.audit_text_not_contains),
+        );
+    }
+}
+
+/// The audit records the scenario expects, in order, among the ones the turn wrote.
+fn check_audit_order(r: &mut RunReport, n: usize, e: &Expect, records: &[Record]) {
     if !e.audit.is_empty() {
         let mut it = records.iter();
         let mut outcome = Ok(());
@@ -532,33 +602,11 @@ fn check_turn(
         }
         r.push(Some(n), "audit", false, outcome);
     }
-    let saw = request_text(last_request);
-    r.push(
-        Some(n),
-        "model_saw",
-        false,
-        contains_all(&saw, &e.model_saw),
-    );
-    r.push(
-        Some(n),
-        "model_not_saw",
-        false,
-        contains_none(&saw, &e.model_not_saw),
-    );
-    if !e.audit_text_not_contains.is_empty() {
-        let all = log.query(&Query {
-            limit: Some(clawdot_core::audit::MAX_PAGE),
-            ..Query::default()
-        });
-        let text = serde_json::to_string(&all.records).unwrap_or_default();
-        r.push(
-            Some(n),
-            "audit_text_not_contains",
-            true,
-            contains_none(&text, &e.audit_text_not_contains),
-        );
-    }
-    let early = result.early.join(" ");
+}
+
+/// What was said while the turn was working.
+fn check_early(r: &mut RunReport, n: usize, e: &Expect, phrases: &[String]) {
+    let early = phrases.join(" ");
     if !e.early_contains.is_empty() {
         r.push(
             Some(n),
@@ -574,7 +622,7 @@ fn check_turn(
         contains_none(&early, &e.early_not_contains),
     );
     if let Some(max) = e.early_max {
-        let got = result.early.len();
+        let got = phrases.len();
         r.push(
             Some(n),
             "early_max",
@@ -588,6 +636,18 @@ fn check_turn(
             },
         );
     }
+}
+
+/// The notes, the audit detail and whether a reply is expected.
+fn check_early_and_state(
+    r: &mut RunReport,
+    n: usize,
+    e: &Expect,
+    result: &TurnResult,
+    records: &[Record],
+    notes: &NoteStore,
+) {
+    check_early(r, n, e, &result.early);
     if let Some(want) = &e.notes {
         let got: Vec<String> = notes.list().into_iter().map(|x| x.text).collect();
         r.push(

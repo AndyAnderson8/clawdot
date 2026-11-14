@@ -93,18 +93,9 @@ fn io_err(e: &std::io::Error) -> WsError {
     WsError::Io(e.kind().to_string())
 }
 
-/// Perform the client handshake on `io` and return the connected socket. `headers` are extra request
-/// headers (for example `Authorization`); a value with a line break is refused.
-///
-/// # Errors
-/// Stream failures, a non-101 reply, or a reply that is not valid.
-pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
-    mut io: S,
-    host: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-) -> Result<WebSocket<S>, WsError> {
-    // Everything that goes into the request line or a header is checked before anything is sent.
+/// The client's upgrade request. Everything that goes into the request line or a header is checked, so
+/// nothing with a line break is ever sent.
+fn upgrade_request(host: &str, path: &str, headers: &[(&str, &str)]) -> Result<String, WsError> {
     if host.contains(['\r', '\n']) || path.contains(['\r', '\n', ' ']) {
         return Err(WsError::Protocol("the address contains a line break"));
     }
@@ -121,6 +112,21 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         req.push_str(&format!("{k}: {v}\r\n"));
     }
     req.push_str("\r\n");
+    Ok(req)
+}
+
+/// Perform the client handshake on `io` and return the connected socket. `headers` are extra request
+/// headers (for example `Authorization`); a value with a line break is refused.
+///
+/// # Errors
+/// Stream failures, a non-101 reply, or a reply that is not valid.
+pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
+    mut io: S,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Result<WebSocket<S>, WsError> {
+    let req = upgrade_request(host, path, headers)?;
     io.write_all(req.as_bytes()).await.map_err(|e| io_err(&e))?;
     io.flush().await.map_err(|e| io_err(&e))?;
 
@@ -139,7 +145,19 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         }
         buf.extend_from_slice(&tmp[..n]);
     };
-    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+    check_upgrade_reply(&String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase())?;
+    buf.drain(..end);
+    Ok(WebSocket {
+        io,
+        buf,
+        client: true,
+        partial: Vec::new(),
+        fragment: Fragment::Idle,
+    })
+}
+
+/// Check the (lower-cased) reply head: status 101, and an upgrade to websocket.
+fn check_upgrade_reply(head: &str) -> Result<(), WsError> {
     let status = head
         .lines()
         .next()
@@ -152,14 +170,7 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     if !head.contains("upgrade: websocket") {
         return Err(WsError::Protocol("the reply does not upgrade to websocket"));
     }
-    buf.drain(..end);
-    Ok(WebSocket {
-        io,
-        buf,
-        client: true,
-        partial: Vec::new(),
-        fragment: Fragment::Idle,
-    })
+    Ok(())
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {

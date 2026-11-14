@@ -304,6 +304,29 @@ impl Brain {
         })
     }
 
+    /// The usage block of the status page: today's requests and spend, the caps and prices, and the history.
+    fn usage_json(&self) -> serde_json::Value {
+        let limits = self.usage.limits();
+        let (day, history) = self.usage.request_days();
+        let history: Vec<serde_json::Value> = history
+            .iter()
+            .map(|(d, n)| serde_json::json!({ "day": d, "requests": n }))
+            .collect();
+        serde_json::json!({
+            "day": day,
+            "history": history,
+            "daily_spend_cap_usd": limits.daily_spend_cap_usd,
+            "requests_today": self.usage.requests_today(),
+            "spend_today": self.usage.spend_today(),
+            // What spend_today rests on: "reported" (the provider's own costs), "priced" (its token
+            // counts times the person's prices), "estimated" (built-in prices and/or sizes), or "none"
+            // while nothing today has cost anything.
+            "spend_basis": self.usage.basis().map_or("none", crate::usage::Basis::as_str),
+            "llm_usd_per_mtok_in": limits.llm_usd_per_mtok_in,
+            "llm_usd_per_mtok_out": limits.llm_usd_per_mtok_out,
+        })
+    }
+
     /// A snapshot for the web UI. Contains no secrets and no agent text.
     pub fn status_json(
         &self,
@@ -331,31 +354,13 @@ impl Brain {
                 serde_json::json!({ "kind": kind, "label": label, "seconds_left": secs })
             })
             .collect();
-        let limits = self.usage.limits();
-        let (day, history) = self.usage.request_days();
-        let history: Vec<serde_json::Value> = history
-            .iter()
-            .map(|(d, n)| serde_json::json!({ "day": d, "requests": n }))
-            .collect();
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "llm": {
                 "configured": self.llm.is_some(),
                 "model": self.llm.as_ref().map(|l| l.cfg.model.clone()),
             },
-            "usage": {
-                "day": day,
-                "history": history,
-                "daily_spend_cap_usd": limits.daily_spend_cap_usd,
-                "requests_today": self.usage.requests_today(),
-                "spend_today": self.usage.spend_today(),
-                // What spend_today rests on: "reported" (the provider's own costs), "priced" (its token
-                // counts times the person's prices), "estimated" (built-in prices and/or sizes), or "none"
-                // while nothing today has cost anything.
-                "spend_basis": self.usage.basis().map_or("none", crate::usage::Basis::as_str),
-                "llm_usd_per_mtok_in": limits.llm_usd_per_mtok_in,
-                "llm_usd_per_mtok_out": limits.llm_usd_per_mtok_out,
-            },
+            "usage": self.usage_json(),
             "hardware": &self.hardware,
             "clock_valid": self.clock.wall_clock_valid(),
             "satellites": satellites,

@@ -329,6 +329,19 @@ fn answer_data(end: &AskEnd) -> Value {
     }
 }
 
+/// The wait for an answer, in seconds: `timeout_secs` when it is a whole number in range, else a message.
+fn ask_timeout(args: &Value) -> Result<u64, String> {
+    match args.get("timeout_secs") {
+        None | Some(Value::Null) => Ok(DEFAULT_ASK_SECS),
+        Some(n) => match n.as_u64() {
+            Some(s) if (MIN_ASK_SECS..=MAX_ASK_SECS).contains(&s) => Ok(s),
+            _ => Err(format!(
+                "timeout_secs must be a whole number from {MIN_ASK_SECS} to {MAX_ASK_SECS}"
+            )),
+        },
+    }
+}
+
 async fn ask_user(core: &Core, token: &str, peer: IpAddr, args: &Value) -> Value {
     if let Err(m) = check_args(args, &["question", "timeout_secs"]) {
         return tool_fail(&m);
@@ -337,16 +350,9 @@ async fn ask_user(core: &Core, token: &str, peer: IpAddr, args: &Value) -> Value
         Ok(t) => t,
         Err(m) => return tool_fail(&m),
     };
-    let secs = match args.get("timeout_secs") {
-        None | Some(Value::Null) => DEFAULT_ASK_SECS,
-        Some(n) => match n.as_u64() {
-            Some(s) if (MIN_ASK_SECS..=MAX_ASK_SECS).contains(&s) => s,
-            _ => {
-                return tool_fail(&format!(
-                    "timeout_secs must be a whole number from {MIN_ASK_SECS} to {MAX_ASK_SECS}"
-                ));
-            }
-        },
+    let secs = match ask_timeout(args) {
+        Ok(s) => s,
+        Err(m) => return tool_fail(&m),
     };
     if let Some(p) = speaker_problem(core) {
         return tool_fail(p);

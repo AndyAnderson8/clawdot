@@ -113,25 +113,6 @@ pub(super) fn diagnostics(core: &Core) -> Resp {
         .iter()
         .map(|e| json!({ "name": e.name, "adapter": e.adapter, "enabled": e.enabled, "created_at": e.created_at }))
         .collect();
-    let listing = core.ui_tools();
-    let count = |source: &str| {
-        listing["tools"]
-            .as_array()
-            .map_or(0, |t| t.iter().filter(|t| t["source"] == source).count())
-    };
-    let servers: Vec<Value> = listing["mcp"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|s| {
-                    json!({
-                        "name": s["name"], "connected": s["connected"], "enabled": s["enabled"],
-                        "error": s["error"].as_str().map(crate::audit::redact_text),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     // The status snapshot lists what is scheduled with its label ("call the doctor"): the user's own words. A bug
     // report needs how many there are and of what kind, not what they say.
     let mut status = core.ui_status();
@@ -153,12 +134,7 @@ pub(super) fn diagnostics(core: &Core) -> Resp {
             "llm_key_present": settings["llm"]["key_present"],
         },
         "endpoints": endpoints,
-        "tools": {
-            "builtin": count("builtin"), "http": count("http"), "mcp": count("mcp"),
-            "skills": listing["skills"].as_array().map_or(0, Vec::len),
-            "connections": servers,
-            "problems": listing["problems"],
-        },
+        "tools": tools_summary(&core.ui_tools()),
         "audit": core.audit().map(|a| json!({ "summary": a.summary(), "health": {
             "bytes": a.health().bytes, "corrupt_lines": a.health().corrupt_lines, "write_errors": a.health().write_errors,
         }, "policy": { "dry_run": a.policy().dry_run, "max_actions_per_day": a.policy().max_actions_per_day,
@@ -167,6 +143,35 @@ pub(super) fn diagnostics(core: &Core) -> Resp {
         "note": "No secrets, audio, spoken words, notes or event text are included.",
     });
     attachment(json_reply(StatusCode::OK, &doc), "clawdot-diagnostics.json")
+}
+
+/// The tool counts, the connection states (errors redacted) and the problems of a tool listing, for a bug
+/// report: names and states, never definitions or credentials.
+fn tools_summary(listing: &Value) -> Value {
+    let count = |source: &str| {
+        listing["tools"]
+            .as_array()
+            .map_or(0, |t| t.iter().filter(|t| t["source"] == source).count())
+    };
+    let servers: Vec<Value> = listing["mcp"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|s| {
+                    json!({
+                        "name": s["name"], "connected": s["connected"], "enabled": s["enabled"],
+                        "error": s["error"].as_str().map(crate::audit::redact_text),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "builtin": count("builtin"), "http": count("http"), "mcp": count("mcp"),
+        "skills": listing["skills"].as_array().map_or(0, Vec::len),
+        "connections": servers,
+        "problems": listing["problems"],
+    })
 }
 
 /// `GET /api/audit`: the record of what the assistant did (REQ-SEC-014), newest first. Filters: `limit`

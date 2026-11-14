@@ -333,6 +333,28 @@ async fn read_record<IO: AsyncRead + Unpin>(
     }
 }
 
+/// The handshake message in the device's reply, or why the device refused: a status byte of 0 is followed by
+/// the message; anything else is followed by the device's reason.
+fn reply_body(reply: &[u8]) -> Result<&[u8], String> {
+    match reply.first() {
+        Some(0) => {}
+        Some(_) => {
+            let why = String::from_utf8_lossy(&reply[1..]);
+            return Err(if why == "Handshake MAC failure" {
+                "the device rejected the Noise key (wrong `psk_env` value)".to_owned()
+            } else {
+                "the device refused the Noise handshake".to_owned()
+            });
+        }
+        None => return Err("empty Noise handshake reply".into()),
+    }
+    let msg2 = &reply[1..];
+    if msg2.len() != MSG2_LEN {
+        return Err("the Noise handshake reply has the wrong size".into());
+    }
+    Ok(msg2)
+}
+
 /// Run the initiator handshake on `io` and return the encrypted link.
 ///
 /// # Errors
@@ -366,22 +388,7 @@ where
     }
     // <- e, ee
     let reply = read_record(&mut io, &mut rx).await?;
-    match reply.first() {
-        Some(0) => {}
-        Some(_) => {
-            let why = String::from_utf8_lossy(&reply[1..]);
-            return Err(if why == "Handshake MAC failure" {
-                "the device rejected the Noise key (wrong `psk_env` value)".to_owned()
-            } else {
-                "the device refused the Noise handshake".to_owned()
-            });
-        }
-        None => return Err("empty Noise handshake reply".into()),
-    }
-    let msg2 = &reply[1..];
-    if msg2.len() != MSG2_LEN {
-        return Err("the Noise handshake reply has the wrong size".into());
-    }
+    let msg2 = reply_body(&reply)?;
     let (re, ct) = msg2.split_at(KEY_LEN);
     st.mix_hash(re);
     st.mix_key(re);

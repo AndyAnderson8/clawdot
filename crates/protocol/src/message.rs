@@ -376,6 +376,73 @@ fn one(key: &str, value: Value) -> Map<String, Value> {
     m
 }
 
+/// Decode the value under `key` (missing counts as null) into `T`.
+fn from_field<T: serde::de::DeserializeOwned>(
+    name: &str,
+    data: &Map<String, Value>,
+    key: &str,
+) -> Result<T, MessageError> {
+    let v = data.get(key).cloned().unwrap_or(Value::Null);
+    serde_json::from_value(v).map_err(|e| MessageError {
+        kind: name.to_owned(),
+        reason: e.to_string(),
+    })
+}
+
+/// `set_volume`: a level from 0 to 100.
+fn set_volume(name: &str, data: &Map<String, Value>) -> Result<Message, MessageError> {
+    let level = data
+        .get("level")
+        .and_then(Value::as_u64)
+        .filter(|l| *l <= 100)
+        .and_then(|l| u8::try_from(l).ok())
+        .ok_or_else(|| MessageError {
+            kind: name.to_owned(),
+            reason: "`level` must be 0 to 100".into(),
+        })?;
+    Ok(Message::SetVolume { level })
+}
+
+/// `play_url`: an http or https address (no spaces, bounded) and a bounded title.
+fn play_url(name: &str, data: &Map<String, Value>) -> Result<Message, MessageError> {
+    let bad = |reason: &str| MessageError {
+        kind: name.to_owned(),
+        reason: reason.into(),
+    };
+    let url = data.get("url").and_then(Value::as_str).unwrap_or("");
+    if !(url.starts_with("http://") || url.starts_with("https://"))
+        || url.len() > MAX_URL
+        || url.contains(char::is_whitespace)
+    {
+        return Err(bad("`url` must be an http:// or https:// address"));
+    }
+    let title = data.get("title").and_then(Value::as_str).unwrap_or("");
+    if title.chars().count() > MAX_TITLE {
+        return Err(bad("`title` is too long"));
+    }
+    Ok(Message::PlayUrl {
+        url: url.to_owned(),
+        title: title.to_owned(),
+    })
+}
+
+/// `admin_reset_window`: the seconds the window stays open, and an optional reason (bounded).
+fn admin_reset_window(name: &str, data: &Map<String, Value>) -> Result<Message, MessageError> {
+    let open_secs = data
+        .get("open_secs")
+        .and_then(Value::as_u64)
+        .and_then(|s| u32::try_from(s).ok())
+        .ok_or_else(|| MessageError {
+            kind: name.to_owned(),
+            reason: "`open_secs` must be a whole number".into(),
+        })?;
+    let reason = data
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(|r| r.chars().take(200).collect());
+    Ok(Message::AdminResetWindow { open_secs, reason })
+}
+
 impl Message {
     /// Convert to a wire frame.
     #[must_use]
@@ -494,72 +561,15 @@ impl Message {
             kind::STREAM_START => Self::StreamStart,
             kind::STREAM_STOP => Self::StreamStop,
             kind::STOP_PLAYBACK => Self::StopPlayback,
-            kind::SET_VOLUME => {
-                let level = data
-                    .get("level")
-                    .and_then(Value::as_u64)
-                    .filter(|l| *l <= 100)
-                    .and_then(|l| u8::try_from(l).ok())
-                    .ok_or_else(|| MessageError {
-                        kind: name.clone(),
-                        reason: "`level` must be 0 to 100".into(),
-                    })?;
-                Self::SetVolume { level }
-            }
-            kind::SET_INDICATOR => {
-                let state = data.get("state").cloned().unwrap_or(Value::Null);
-                Self::SetIndicator(serde_json::from_value(state).map_err(|e| MessageError {
-                    kind: name.clone(),
-                    reason: e.to_string(),
-                })?)
-            }
+            kind::SET_VOLUME => set_volume(&name, &data)?,
+            kind::SET_INDICATOR => Self::SetIndicator(from_field(&name, &data, "state")?),
             kind::SET_MUTE => Self::SetMute {
                 muted: simple_bool(&data, "muted")?,
             },
-            kind::PLAY_URL => {
-                let bad = |reason: &str| MessageError {
-                    kind: name.clone(),
-                    reason: reason.into(),
-                };
-                let url = data.get("url").and_then(Value::as_str).unwrap_or("");
-                if !(url.starts_with("http://") || url.starts_with("https://"))
-                    || url.len() > MAX_URL
-                    || url.contains(char::is_whitespace)
-                {
-                    return Err(bad("`url` must be an http:// or https:// address"));
-                }
-                let title = data.get("title").and_then(Value::as_str).unwrap_or("");
-                if title.chars().count() > MAX_TITLE {
-                    return Err(bad("`title` is too long"));
-                }
-                Self::PlayUrl {
-                    url: url.to_owned(),
-                    title: title.to_owned(),
-                }
-            }
-            kind::MEDIA_CONTROL => {
-                let action = data.get("action").cloned().unwrap_or(Value::Null);
-                Self::MediaControl(serde_json::from_value(action).map_err(|e| MessageError {
-                    kind: name.clone(),
-                    reason: e.to_string(),
-                })?)
-            }
+            kind::PLAY_URL => play_url(&name, &data)?,
+            kind::MEDIA_CONTROL => Self::MediaControl(from_field(&name, &data, "action")?),
             kind::ADMIN_RESET => Self::AdminReset,
-            kind::ADMIN_RESET_WINDOW => {
-                let open_secs = data
-                    .get("open_secs")
-                    .and_then(Value::as_u64)
-                    .and_then(|s| u32::try_from(s).ok())
-                    .ok_or_else(|| MessageError {
-                        kind: name.clone(),
-                        reason: "`open_secs` must be a whole number".into(),
-                    })?;
-                let reason = data
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .map(|r| r.chars().take(200).collect());
-                Self::AdminResetWindow { open_secs, reason }
-            }
+            kind::ADMIN_RESET_WINDOW => admin_reset_window(&name, &data)?,
             _ => Self::Unknown(Frame {
                 kind: name,
                 data,

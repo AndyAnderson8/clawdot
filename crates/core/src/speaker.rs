@@ -270,36 +270,42 @@ pub async fn speak(voice: Arc<Voice>, mut rx: mpsc::UnboundedReceiver<Say>) {
             }
             Say::Poll { minute, day, llm } => {
                 speak_waiting(v, &mut waiting).await;
-                let connected = v.announcer.connected() > 0;
-                let free = connected && v.announcer.is_available().await;
-                v.available.store(free, Ordering::Relaxed);
-                // A satellite that is busy, muted or (when one is meant to speak) not connected: keep the event
-                // queued and try again.
-                if may_announce(connected, free, v.waits_for_satellite)
-                    && let Some(next) = v.core.next_announcement(true, minute)
-                {
-                    let spoken = match &llm {
-                        Some(l) => {
-                            let mut usage = v.usage.clone();
-                            let s = summarise(l, &mut usage, day, &next.event).await;
-                            usage.save_queued(&v.usage_store, v.core.writer().as_deref());
-                            s
-                        }
-                        // No model: say only the headline and outcome, never raw agent text.
-                        None => short_announcement(&next.event)
-                            .unwrap_or_else(|| fallback_summary(&next.event)),
-                    };
-                    let line = announcement(&next.event, &spoken, next.more_waiting);
-                    if v.echo {
-                        println!("speaker> {line}");
-                    }
-                    let delivered = !connected || v.announcer.announce(&line).await;
-                    if delivered {
-                        v.core.mark_announced(&[next.event.id]);
-                    }
-                }
+                announce_next(v, minute, day, llm.as_ref()).await;
                 v.polling.store(false, Ordering::Relaxed);
             }
+        }
+    }
+}
+
+/// Look for an agent event worth announcing and say it, if a satellite can take it now.
+async fn announce_next(v: &Voice, minute: u16, day: i64, llm: Option<&Llm>) {
+    let connected = v.announcer.connected() > 0;
+    let free = connected && v.announcer.is_available().await;
+    v.available.store(free, Ordering::Relaxed);
+    // A satellite that is busy, muted or (when one is meant to speak) not connected: keep the event
+    // queued and try again.
+    if may_announce(connected, free, v.waits_for_satellite)
+        && let Some(next) = v.core.next_announcement(true, minute)
+    {
+        let spoken = match llm {
+            Some(l) => {
+                let mut usage = v.usage.clone();
+                let s = summarise(l, &mut usage, day, &next.event).await;
+                usage.save_queued(&v.usage_store, v.core.writer().as_deref());
+                s
+            }
+            // No model: say only the headline and outcome, never raw agent text.
+            None => {
+                short_announcement(&next.event).unwrap_or_else(|| fallback_summary(&next.event))
+            }
+        };
+        let line = announcement(&next.event, &spoken, next.more_waiting);
+        if v.echo {
+            println!("speaker> {line}");
+        }
+        let delivered = !connected || v.announcer.announce(&line).await;
+        if delivered {
+            v.core.mark_announced(&[next.event.id]);
         }
     }
 }

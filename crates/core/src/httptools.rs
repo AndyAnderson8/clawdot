@@ -14,8 +14,8 @@ use crate::llm::ToolSpec;
 use crate::session::{Risk, Tier};
 use crate::transport::{Connector, Endpoint};
 use http_body_util::{BodyExt, Full};
-use hyper::Method;
 use hyper::body::Bytes;
+use hyper::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -144,6 +144,22 @@ impl ToolDef {
         }
         Endpoint::parse(&self.url.replace(['{', '}'], ""))
             .map_err(|e| format!("tool `{n}`: {e}"))?;
+        self.validate_params()?;
+        if self
+            .timeout_secs
+            .is_some_and(|t| t == 0 || t > MAX_TIMEOUT_SECS)
+        {
+            return Err(format!(
+                "tool `{n}`: timeout_secs must be 1 to {MAX_TIMEOUT_SECS}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The parameter checks of [`Self::validate`]: names, types, enums, and that each URL placeholder is a
+    /// required parameter.
+    fn validate_params(&self) -> Result<(), String> {
+        let n = &self.name;
         for (p, d) in &self.params {
             if !matches!(d.kind.as_str(), "string" | "integer" | "number" | "boolean") {
                 return Err(format!(
@@ -169,14 +185,6 @@ impl ToolDef {
                     "tool `{n}`: URL placeholder `{{{ph}}}` must be a required parameter"
                 ));
             }
-        }
-        if self
-            .timeout_secs
-            .is_some_and(|t| t == 0 || t > MAX_TIMEOUT_SECS)
-        {
-            return Err(format!(
-                "tool `{n}`: timeout_secs must be 1 to {MAX_TIMEOUT_SECS}"
-            ));
         }
         Ok(())
     }
@@ -452,19 +460,25 @@ impl HttpTools {
         let (status, kept) = timeout(Duration::from_secs(secs), work)
             .await
             .map_err(|_| format!("no response within {secs} s"))??;
-        let mut text = String::from_utf8_lossy(&kept).trim().to_owned();
-        if text.chars().count() > MAX_RESPONSE {
-            text = text.chars().take(MAX_RESPONSE).collect::<String>() + "…";
-        }
-        if status.is_success() {
-            Ok(if text.is_empty() {
-                format!("done (HTTP {})", status.as_u16())
-            } else {
-                format!("HTTP {}: {text}", status.as_u16())
-            })
+        reply_text(status, &kept)
+    }
+}
+
+/// The text a call returns for a response: the body (cut to `MAX_RESPONSE` characters) with the status, as an
+/// error for a non-success status.
+fn reply_text(status: StatusCode, kept: &[u8]) -> Result<String, String> {
+    let mut text = String::from_utf8_lossy(kept).trim().to_owned();
+    if text.chars().count() > MAX_RESPONSE {
+        text = text.chars().take(MAX_RESPONSE).collect::<String>() + "…";
+    }
+    if status.is_success() {
+        Ok(if text.is_empty() {
+            format!("done (HTTP {})", status.as_u16())
         } else {
-            Err(format!("HTTP {}: {text}", status.as_u16()))
-        }
+            format!("HTTP {}: {text}", status.as_u16())
+        })
+    } else {
+        Err(format!("HTTP {}: {text}", status.as_u16()))
     }
 }
 
