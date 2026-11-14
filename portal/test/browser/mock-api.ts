@@ -13,6 +13,8 @@ export interface Logged {
   path: string;
   body: unknown;
   auth: string;
+  /** The part of the address after the question mark. */
+  query: string;
 }
 // The fake device keeps whatever JSON the page sends, so its bodies and state are deliberately untyped. eslint.config.mjs
 // relaxes the no-explicit-any and no-unsafe-* rules for this one file.
@@ -421,7 +423,7 @@ export async function startMock(initial: "setup" | "password" | "open" = "open")
       const m = req.method ?? "GET";
       const body = raw ? JSON.parse(raw) : null;
       const auth = String(req.headers["authorization"] ?? "");
-      log.push({ method: m, path, body, auth });
+      log.push({ method: m, path, body, auth, query: (req.url ?? "").split("?")[1] ?? "" });
       const seg = path.slice(5).split("/");
       const err = (code: number, message: string) => send(code, { error: message });
 

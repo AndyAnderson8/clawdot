@@ -3,7 +3,7 @@ import { Field, useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
 import { useEffect, useState } from "preact/hooks";
 import { api, ApiError, enc } from "../api.ts";
-import { deviceNow, fail, say, usePolled, zone } from "../store.ts";
+import { attempt, deviceNow, fail, say, usePolled, useSeq, zone } from "../store.ts";
 import { whenText } from "../time.ts";
 import type { Note, NotesList } from "../types.ts";
 import { ask } from "../confirm.tsx";
@@ -42,9 +42,13 @@ export function Notes(): JSX.Element {
     };
   }, [query, data]);
 
+  const next = useSeq();
   const load = async () => {
+    const current = next();
     try {
-      setData(await api<NotesList>("GET", "/api/notes"));
+      const list = await api<NotesList>("GET", "/api/notes");
+      if (!current()) return;
+      setData(list);
       setMissing(false);
     } catch (x) {
       if (x instanceof ApiError && x.status === 503) setMissing(true);
@@ -64,11 +68,11 @@ export function Notes(): JSX.Element {
     setErr("");
     await run(async () => {
       try {
-        setData(
-          editing
-            ? await api<NotesList>("PUT", "/api/notes/" + enc(editing.id), { text })
-            : await api<NotesList>("POST", "/api/notes", { text }),
-        );
+        const list = editing
+          ? await api<NotesList>("PUT", "/api/notes/" + enc(editing.id), { text })
+          : await api<NotesList>("POST", "/api/notes", { text });
+        next();
+        setData(list);
         say(editing ? "Saved." : "Saved. The assistant will see it from now on.");
         close();
       } catch (x) {
@@ -79,13 +83,11 @@ export function Notes(): JSX.Element {
   };
   const forget = async (id: number) => {
     if (!(await ask("Forget this memory? The assistant will no longer know it.", "Forget"))) return;
-    try {
+    await attempt(async () => {
       await api("DELETE", "/api/notes/" + enc(id));
       say("Forgotten.");
       await load();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
   const forgetAll = async () => {
     const sure = await ask(
@@ -93,13 +95,11 @@ export function Notes(): JSX.Element {
       "Forget all",
     );
     if (!sure) return;
-    try {
+    await attempt(async () => {
       await api("DELETE", "/api/notes");
       say("Everything forgotten.");
       await load();
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   const max = data?.limits.max_note_chars ?? 200;

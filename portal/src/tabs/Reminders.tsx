@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import { api, ApiError, enc } from "../api.ts";
 import { reminderBody } from "../forms.ts";
-import { deviceNow, fail, say, usePolled, zone } from "../store.ts";
+import { attempt, deviceNow, fail, say, usePolled, useSeq, zone } from "../store.ts";
 import { TimeField } from "../timefield.tsx";
 import { useBusy } from "../parts.tsx";
 import { AddButton, Dialog } from "../dialog.tsx";
@@ -51,9 +51,13 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const [open, setOpen] = useState(false);
   const [busy, run] = useBusy();
 
+  const next = useSeq();
   usePolled(async () => {
+    const current = next();
     try {
-      setData(await api<ScheduleList>("GET", "/api/schedule"));
+      const list = await api<ScheduleList>("GET", "/api/schedule");
+      if (!current()) return;
+      setData(list);
       setUnavailable("");
     } catch (x) {
       if (x instanceof ApiError && x.status === 503) setUnavailable(x.message);
@@ -82,16 +86,15 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
       return;
     }
     await run(async () => {
-      try {
+      await attempt(async () => {
         const r = editing
           ? await api<ScheduleList>("PUT", "/api/schedule/" + enc(editing), body)
           : await api<ScheduleList>("POST", "/api/schedule", body);
         say(editing ? "Saved." : "Added.");
         reset();
+        next();
         setData(r);
-      } catch (x) {
-        fail(x);
-      }
+      });
     });
   };
 
@@ -120,12 +123,12 @@ function KindPage(props: { kind: ScheduleKind }): JSX.Element {
   const cancel = async (i: ScheduleItem) => {
     if (!(await ask("Cancel this " + i.kind + (i.label ? " (" + i.label + ")" : "") + "?", "Cancel it", "Keep it")))
       return;
-    try {
-      setData(await api<ScheduleList>("DELETE", "/api/schedule/" + enc(i.id)));
+    await attempt(async () => {
+      const list = await api<ScheduleList>("DELETE", "/api/schedule/" + enc(i.id));
+      next();
+      setData(list);
       say("Cancelled.");
-    } catch (x) {
-      fail(x);
-    }
+    });
   };
 
   const note =
