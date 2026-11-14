@@ -176,7 +176,7 @@ jobs:
       - name: Size budget (spec 0002, 8 MiB)
         run: bash .github/scripts/dot-size.sh "${{ matrix.name }}" "target/${TARGET}/release/clawdot"
       - name: Keep the binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: clawdot-armv7-${{ matrix.name }}
           path: target/${{ env.TARGET }}/release/clawdot
