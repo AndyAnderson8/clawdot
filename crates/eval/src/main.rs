@@ -211,17 +211,19 @@ async fn replay(a: &Args, chosen: &[Loaded]) -> ExitCode {
     }
 }
 
-async fn live(a: &Args, chosen: &[Loaded], fingerprint: &str) -> ExitCode {
+/// Check that a live run may start: the spend was accepted, the options are in range, the endpoint and key
+/// are usable. Prints why not and returns `None` otherwise; else the URL, the model name and the key.
+fn live_preflight(a: &Args) -> Option<(&str, &str, String)> {
     if !a.yes_spend {
         eprintln!(
             "clawdot-eval: live mode calls a paid API. Add --yes-spend to say you accept that (cap: {:.2} USD, change with --spend-cap-usd).",
             a.options.spend_cap_usd
         );
-        return ExitCode::from(2);
+        return None;
     }
     let (Some(url), Some(model)) = (a.url.as_deref(), a.model.as_deref()) else {
         eprintln!("clawdot-eval: live mode needs --url and --model");
-        return ExitCode::from(2);
+        return None;
     };
     let o = a.options;
     if !(o.spend_cap_usd > 0.0 && o.spend_cap_usd <= 50.0)
@@ -231,7 +233,7 @@ async fn live(a: &Args, chosen: &[Loaded], fingerprint: &str) -> ExitCode {
         eprintln!(
             "clawdot-eval: --spend-cap-usd must be above 0 and at most 50, --runs 1 to 10, --max-requests above 0"
         );
-        return ExitCode::from(2);
+        return None;
     }
     let key = std::env::var(&a.key_env).unwrap_or_default();
     if key.is_empty() && url.starts_with("https://") {
@@ -239,20 +241,46 @@ async fn live(a: &Args, chosen: &[Loaded], fingerprint: &str) -> ExitCode {
             "clawdot-eval: set {} to the API key first (the key is never printed or saved)",
             a.key_env
         );
-        return ExitCode::from(2);
+        return None;
     }
+    if let Err(e) = HttpBackend::new(url, &key, Duration::from_secs(60)) {
+        eprintln!("clawdot-eval: {e}");
+        return None;
+    }
+    Some((url, model, key))
+}
+
+/// Write each run's model replies to `dir` as `<id>.transcript.json`. A failure is reported and skipped.
+fn save_recordings(
+    dir: &std::path::Path,
+    recordings: Vec<(String, Vec<Vec<clawdot_eval::scenario::Reply>>)>,
+) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("clawdot-eval: cannot create {}: {e}", dir.display());
+    }
+    for (id, turns) in recordings {
+        let t = serde_json::json!({ "version": VERSION, "turns": turns });
+        let path = dir.join(format!("{id}.transcript.json"));
+        if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&t).unwrap_or_default())
+        {
+            eprintln!("clawdot-eval: cannot write {}: {e}", path.display());
+        }
+    }
+}
+
+async fn live(a: &Args, chosen: &[Loaded], fingerprint: &str) -> ExitCode {
+    let Some((url, model, key)) = live_preflight(a) else {
+        return ExitCode::from(2);
+    };
+    let o = a.options;
     let make = || match HttpBackend::new(url, &key, Duration::from_secs(60)) {
         Ok(b) => b,
         Err(e) => {
-            // Checked once below before any run starts; a failure here would be a bug in that check.
+            // Checked once in `live_preflight` before any run starts; a failure here would be a bug in that check.
             eprintln!("clawdot-eval: {e}");
             std::process::exit(2);
         }
     };
-    if let Err(e) = HttpBackend::new(url, &key, Duration::from_secs(60)) {
-        eprintln!("clawdot-eval: {e}");
-        return ExitCode::from(2);
-    }
     let mut scenarios: Vec<Loaded> = chosen.to_vec();
     // Run the safety-critical set first so a capped run still covers it.
     scenarios.sort_by_key(|l| l.scenario.use_case != "INJ");
@@ -276,18 +304,7 @@ async fn live(a: &Args, chosen: &[Loaded], fingerprint: &str) -> ExitCode {
     })
     .await;
     if let Some(dir) = &a.save {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("clawdot-eval: cannot create {}: {e}", dir.display());
-        }
-        for (id, turns) in recordings {
-            let t = serde_json::json!({ "version": VERSION, "turns": turns });
-            let path = dir.join(format!("{id}.transcript.json"));
-            if let Err(e) =
-                std::fs::write(&path, serde_json::to_string_pretty(&t).unwrap_or_default())
-            {
-                eprintln!("clawdot-eval: cannot write {}: {e}", path.display());
-            }
-        }
+        save_recordings(dir, recordings);
     }
     print!("{}", render(&summary, model, fingerprint));
     let runs = o.runs;
