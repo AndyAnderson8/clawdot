@@ -947,6 +947,40 @@ pub struct SettingsState {
     machine: Option<String>,
 }
 
+/// Read the saved settings from `store`. Retired keys are skipped; an unknown key is an error; a value that is
+/// no longer valid is dropped and returned as a warning.
+fn load_saved(store: &JsonStore) -> Result<(Layer, Vec<String>), String> {
+    let mut loaded = Layer::new();
+    let mut warnings = Vec::new();
+    let raw: Layer = store
+        .load()
+        .map_err(|e| format!("{}: {e}. Fix or remove the file.", store.path().display()))?;
+    for (k, v) in raw {
+        // A setting that was removed: a file saved by an older version may still hold it, and that is no reason to refuse to start.
+        if RETIRED.contains(&k.as_str()) {
+            continue;
+        }
+        if field(&k).is_none() {
+            return Err(format!(
+                "{} has an unknown setting `{k}`. Remove that line, or restore a copy of the file.",
+                store.path().display()
+            ));
+        }
+        // The key variable may not be set yet (it is the service's job); only the shape matters here.
+        let lk = Lookup {
+            env: &|_| Some("x".to_owned()),
+            secrets: &Secrets::none(),
+        };
+        match normalize(&k, &v, &lk) {
+            Ok(v) => {
+                loaded.insert(k, v);
+            }
+            Err(e) => warnings.push(format!("ignoring saved `{k}`: {e}")),
+        }
+    }
+    Ok((loaded, warnings))
+}
+
 impl std::fmt::Debug for SettingsState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SettingsState")
@@ -975,36 +1009,10 @@ impl SettingsState {
             flags,
         } = sources;
         let store = dir.map(|d| JsonStore::new(d.join("settings.json"), SCHEMA));
-        let mut loaded = Layer::new();
-        let mut warnings = Vec::new();
-        if let Some(s) = &store {
-            let raw: Layer = s
-                .load()
-                .map_err(|e| format!("{}: {e}. Fix or remove the file.", s.path().display()))?;
-            for (k, v) in raw {
-                // A setting that was removed: a file saved by an older version may still hold it, and that is no reason to refuse to start.
-                if RETIRED.contains(&k.as_str()) {
-                    continue;
-                }
-                if field(&k).is_none() {
-                    return Err(format!(
-                        "{} has an unknown setting `{k}`. Remove that line, or restore a copy of the file.",
-                        s.path().display()
-                    ));
-                }
-                // The key variable may not be set yet (it is the service's job); only the shape matters here.
-                let lk = Lookup {
-                    env: &|_| Some("x".to_owned()),
-                    secrets: &Secrets::none(),
-                };
-                match normalize(&k, &v, &lk) {
-                    Ok(v) => {
-                        loaded.insert(k, v);
-                    }
-                    Err(e) => warnings.push(format!("ignoring saved `{k}`: {e}")),
-                }
-            }
-        }
+        let (loaded, warnings) = match &store {
+            Some(s) => load_saved(s)?,
+            None => (Layer::new(), Vec::new()),
+        };
         let mut st = Self {
             defaults,
             file,
