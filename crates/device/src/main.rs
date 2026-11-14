@@ -143,6 +143,36 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Option<Opts>, String> {
     Ok(Some(o))
 }
 
+/// Apply one `--wake-sensitivity [model=]value` to the engine: to the model whose file name stem is `model`,
+/// or to every model when none is named.
+#[cfg(feature = "mww")]
+fn apply_sensitivity(
+    engine: &mut clawdot_device::wake_mww::MwwEngine,
+    stems: &[String],
+    s: &str,
+) -> Result<(), String> {
+    use clawdot_device::wake::{WakeEngine, WordId};
+    let (word, value) = s.split_once('=').map_or((None, s), |(w, v)| (Some(w), v));
+    let v: f32 = value
+        .parse()
+        .ok()
+        .filter(|v| (0.0..=1.0).contains(v))
+        .ok_or_else(|| format!("--wake-sensitivity {s}: needs a number from 0 to 1"))?;
+    let targets: Vec<usize> = match word {
+        None => (0..stems.len()).collect(),
+        Some(w) => vec![
+            stems
+                .iter()
+                .position(|x| *x == w.to_lowercase())
+                .ok_or_else(|| format!("--wake-sensitivity {s}: no model is named `{w}`"))?,
+        ],
+    };
+    for i in targets {
+        engine.set_sensitivity(WordId(u16::try_from(i + 1).unwrap_or(u16::MAX)), v);
+    }
+    Ok(())
+}
+
 #[cfg(feature = "mww")]
 fn wake_sink(o: &Opts) -> Result<Option<Box<dyn WakeSink>>, String> {
     use clawdot_device::wake::{WakeEngine, WordId};
@@ -171,26 +201,7 @@ fn wake_sink(o: &Opts) -> Result<Option<Box<dyn WakeSink>>, String> {
         engine = engine.with_refractory(ms.saturating_mul(16));
     }
     for s in &o.wake_sensitivity {
-        let (word, value) = s
-            .split_once('=')
-            .map_or((None, s.as_str()), |(w, v)| (Some(w), v));
-        let v: f32 = value
-            .parse()
-            .ok()
-            .filter(|v| (0.0..=1.0).contains(v))
-            .ok_or_else(|| format!("--wake-sensitivity {s}: needs a number from 0 to 1"))?;
-        let targets: Vec<usize> = match word {
-            None => (0..stems.len()).collect(),
-            Some(w) => vec![
-                stems
-                    .iter()
-                    .position(|x| *x == w.to_lowercase())
-                    .ok_or_else(|| format!("--wake-sensitivity {s}: no model is named `{w}`"))?,
-            ],
-        };
-        for i in targets {
-            engine.set_sensitivity(WordId(u16::try_from(i + 1).unwrap_or(u16::MAX)), v);
-        }
+        apply_sensitivity(&mut engine, &stems, s)?;
     }
     for w in engine.words() {
         let hash: String = w.model_sha256.iter().map(|b| format!("{b:02x}")).collect();
