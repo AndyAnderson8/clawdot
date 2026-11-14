@@ -38,19 +38,18 @@
 
 use crate::admin;
 use crate::app::Core;
-use crate::extensions::{self, ExtOp};
+use crate::extensions::ExtOp;
 use hyper::body::Incoming;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode};
-use serde_json::{Value, json};
+#[cfg(test)]
+use serde_json::Value;
+use serde_json::json;
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use self::auth::{admin_error, change_password, login, recover_window, setup};
-use self::common::{
-    MAX_SKILL_BODY, MAX_TOOL_BODY, Resp, bearer, error, fail_reply, json_reply, query_param,
-    read_json, read_json_limit,
-};
+use self::common::{Resp, bearer, error, json_reply, query_param};
 use self::endpoints::create;
 use self::models::{llm_key_clear, llm_key_set, models, models_with_key};
 use self::notes::{notes_add, notes_edit, notes_forget, notes_list, notes_search};
@@ -60,7 +59,10 @@ use self::speech::{
     realtime_key_clear, realtime_key_set, speak, speech_key_clear, speech_key_set, voices,
 };
 use self::status::{audit, diagnostics, hive_peers, logs, overview};
-use self::tools::{accept_choice, enabled_flag, ext, skill_action, tier_choice};
+use self::tools::{
+    connection_accept, connection_add, connection_enable, connection_test, ext, skill_action,
+    skill_add, tool_add, tool_enable, tool_tier,
+};
 use self::update::{update_apply, update_check, update_status};
 
 mod auth;
@@ -340,44 +342,17 @@ pub(crate) async fn handle(
         Id::EndpointDelete => endpoints::delete(core, p).await,
         Id::AdminPassword => change_password(core, peer, body).await,
         Id::ToolsList => json_reply(StatusCode::OK, &core.ui_tools()),
-        Id::ToolAdd => match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
-            Ok(v) => ext(core, ExtOp::ToolAdd(v)).await,
-            Err((s, m)) => error(s, m),
-        },
+        Id::ToolAdd => tool_add(core, body).await,
         Id::ToolDelete => ext(core, ExtOp::ToolDelete(p.to_owned())).await,
-        Id::ToolEnable => match enabled_flag(body).await {
-            Ok(on) => ext(core, ExtOp::ToolEnable(p.to_owned(), on)).await,
-            Err((s, m)) => error(s, m),
-        },
-        Id::ToolTier => match tier_choice(body).await {
-            Ok(t) => ext(core, ExtOp::ToolTier(p.to_owned(), t)).await,
-            Err((s, m)) => error(s, m),
-        },
-        Id::ConnectionTest => match read_json::<Value>(body).await {
-            Ok(v) => match extensions::test_connection(&v, |n| core.env().get(n)).await {
-                Ok(r) => json_reply(StatusCode::OK, &r),
-                Err(f) => fail_reply(&f),
-            },
-            Err((s, m)) => error(s, m),
-        },
-        Id::ConnectionAdd => match read_json::<Value>(body).await {
-            Ok(v) => ext(core, ExtOp::McpAdd(v)).await,
-            Err((s, m)) => error(s, m),
-        },
+        Id::ToolEnable => tool_enable(core, p, body).await,
+        Id::ToolTier => tool_tier(core, p, body).await,
+        Id::ConnectionTest => connection_test(core, body).await,
+        Id::ConnectionAdd => connection_add(core, body).await,
         Id::ConnectionDelete => ext(core, ExtOp::McpDelete(p.to_owned())).await,
-        Id::ConnectionEnable => match enabled_flag(body).await {
-            Ok(on) => ext(core, ExtOp::McpEnable(p.to_owned(), on)).await,
-            Err((s, m)) => error(s, m),
-        },
-        Id::ConnectionAccept => match accept_choice(body).await {
-            Ok(tool) => ext(core, ExtOp::McpAccept(p.to_owned(), tool)).await,
-            Err((s, m)) => error(s, m),
-        },
+        Id::ConnectionEnable => connection_enable(core, p, body).await,
+        Id::ConnectionAccept => connection_accept(core, p, body).await,
         Id::SkillAction => skill_action(core, p, body).await,
-        Id::SkillAdd => match read_json_limit::<Value>(body, MAX_SKILL_BODY).await {
-            Ok(v) => ext(core, ExtOp::SkillAdd(v)).await,
-            Err((s, m)) => error(s, m),
-        },
+        Id::SkillAdd => skill_add(core, body).await,
         Id::SettingsGet => settings::get(core),
         Id::SettingsPut => settings::put(core, body).await,
         Id::SettingsExport => export_settings(core),

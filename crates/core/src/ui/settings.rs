@@ -1,7 +1,7 @@
 //! Settings: saving a change and exporting the saved settings (REQ-CFG-037..040, 065).
 
 use super::common::{
-    MAX_TOOL_BODY, Resp, attachment, error, fail_reply, json_reply, read_json_limit,
+    MAX_TOOL_BODY, Resp, attachment, error, fail_reply, json_limit_or_reply, json_reply,
 };
 use crate::app::{Core, Op};
 use hyper::StatusCode;
@@ -15,9 +15,9 @@ pub(super) fn get(core: &Core) -> Resp {
 
 /// `PUT /api/settings`: save the changes in the body (an object of `{key: value|null}`).
 pub(super) async fn put(core: &Core, body: Incoming) -> Resp {
-    match read_json_limit::<Value>(body, MAX_TOOL_BODY).await {
+    match json_limit_or_reply::<Value>(body, MAX_TOOL_BODY).await {
         Ok(v) => change_settings(core, &v).await,
-        Err((s, m)) => error(s, m),
+        Err(r) => r,
     }
 }
 

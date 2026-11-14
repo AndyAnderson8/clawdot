@@ -1,6 +1,6 @@
 //! Speech in the portal: the speech and realtime keys, the voice list, and the test phrase (REQ-VOI-022, 023, REQ-CFG-070, 081).
 
-use super::common::{KeyBody, MAX_BODY, Resp, error, json_reply, read_json};
+use super::common::{KeyBody, MAX_BODY, Resp, error, json_or_reply, json_reply};
 use crate::app::Core;
 use crate::http::{BODY_TIMEOUT, read_body};
 use hyper::StatusCode;
@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 /// `PUT /api/speech/key`: keep the speech-service key pasted on the page. It is read on every request, so it applies at
 /// once (REQ-VOI-023). Only the masked hint comes back.
 pub(super) async fn speech_key_set(core: &Core, body: Incoming) -> Resp {
-    let k = match read_json::<KeyBody>(body).await {
+    let k = match json_or_reply::<KeyBody>(body).await {
         Ok(k) => k,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     if let Err(m) = core.secrets().set(crate::secrets::SPEECH_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
@@ -35,9 +35,9 @@ pub(super) fn speech_key_clear(core: &Core) -> Resp {
 /// `PUT /api/realtime/key`: keep the key for the realtime voice service. It is read at the start of each session, so
 /// it applies to the next one without a restart, and it wins over the environment variable.
 pub(super) async fn realtime_key_set(core: &Core, body: Incoming) -> Resp {
-    let k = match read_json::<KeyBody>(body).await {
+    let k = match json_or_reply::<KeyBody>(body).await {
         Ok(k) => k,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     if let Err(m) = core.secrets().set(crate::secrets::REALTIME_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);

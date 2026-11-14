@@ -1,6 +1,6 @@
 //! The language-model service: its list of models and its key (REQ-CFG-081).
 
-use super::common::{KeyBody, Resp, error, json_reply, read_json};
+use super::common::{KeyBody, Resp, error, json_or_reply, json_reply};
 use crate::app::{Core, Op};
 use hyper::StatusCode;
 use hyper::body::Incoming;
@@ -66,9 +66,9 @@ pub(super) struct ModelsAsk {
 /// `POST /api/models`: the same list, asking with a key typed on the page, so the key is checked before it is kept and
 /// never travels in a web address.
 pub(super) async fn models_with_key(core: &Core, body: Incoming) -> Resp {
-    let ask = match read_json::<ModelsAsk>(body).await {
+    let ask = match json_or_reply::<ModelsAsk>(body).await {
         Ok(a) => a,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     let url = ask.url.trim();
     if url.is_empty() {
@@ -83,9 +83,9 @@ pub(super) async fn models_with_key(core: &Core, body: Incoming) -> Resp {
 
 /// `PUT /api/llm/key`: keep the key pasted on the page and use it from now on.
 pub(super) async fn llm_key_set(core: &Core, body: Incoming) -> Resp {
-    let k = match read_json::<KeyBody>(body).await {
+    let k = match json_or_reply::<KeyBody>(body).await {
         Ok(k) => k,
-        Err((s, m)) => return error(s, m),
+        Err(r) => return r,
     };
     if let Err(m) = core.secrets().set(crate::secrets::LLM_KEY, &k.key) {
         return error(StatusCode::BAD_REQUEST, &m);
