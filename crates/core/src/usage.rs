@@ -209,6 +209,9 @@ struct State {
 struct Cell {
     limits: UsageLimits,
     state: State,
+    /// A real day, not older than the saved one, has been seen since start-up. Until then `state.day` may be days
+    /// old (or 0), and is not today.
+    clock_seen: bool,
 }
 
 impl Cell {
@@ -217,6 +220,9 @@ impl Cell {
     /// wipe today's spend. A day below the saved one is ignored for the same reason. The first real day seen
     /// after a file with no day keeps what was counted before it. Only a greater day rolls (REQ-AST-011).
     fn roll(&mut self, day: i64) {
+        if day > 0 && day >= self.state.day {
+            self.clock_seen = true;
+        }
         if day <= 0 || day <= self.state.day {
             return;
         }
@@ -270,6 +276,7 @@ impl UsageTracker {
         Self(Arc::new(Mutex::new(Cell {
             limits,
             state: State::default(),
+            clock_seen: false,
         })))
     }
 
@@ -281,6 +288,7 @@ impl UsageTracker {
         Ok(Self(Arc::new(Mutex::new(Cell {
             limits,
             state: store.load()?,
+            clock_seen: false,
         }))))
     }
 
@@ -396,7 +404,9 @@ impl UsageTracker {
         self.cell().state.basis
     }
 
-    /// The local day the counters are for, and the requests each recent day made, today last.
+    /// The local day the counters are for, and the requests each recent day made, the counted day last. The day is
+    /// 0 while the wall clock has not given a real day this run: the saved day is then a past day (it is still
+    /// charted), not today, and the page must not draw a chart as if it knew today.
     #[must_use]
     pub fn request_days(&self) -> (i64, Vec<(i64, u32)>) {
         let c = self.cell();
@@ -409,7 +419,7 @@ impl UsageTracker {
         if c.state.day != 0 {
             days.push((c.state.day, c.state.requests));
         }
-        (c.state.day, days)
+        (if c.clock_seen { c.state.day } else { 0 }, days)
     }
 
     /// Requests made today.

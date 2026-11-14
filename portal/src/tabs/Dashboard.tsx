@@ -20,7 +20,7 @@ function Stat(props: { label: string; value: string; note?: string; id?: string 
 }
 
 /** Bars for the last two weeks: how many requests the assistant made to the language model each day. */
-function UsageChart(props: { days: Day[] | null }): JSX.Element {
+function UsageChart(props: { days: Day[] | null; clockUnset?: boolean }): JSX.Element {
   const days = props.days;
   const max = Math.max(1, ...(days ?? []).map((d) => d.count));
   const total = (days ?? []).reduce((n, d) => n + d.count, 0);
@@ -57,6 +57,8 @@ function UsageChart(props: { days: Day[] | null }): JSX.Element {
               : "Nothing yet. Each question the assistant answers adds to this chart."}
           </p>
         </>
+      ) : props.clockUnset ? (
+        <p class="empty">The clock is not set yet, so the days cannot be drawn. They appear once it is.</p>
       ) : (
         <p class="empty">Loading.</p>
       )}
@@ -296,7 +298,7 @@ export function Dashboard(): JSX.Element {
       </div>
 
       <div class="cols">
-        <UsageChart days={u?.day !== undefined ? requestDays(u.history ?? [], u.day) : null} />
+        <UsageChart days={u?.day ? requestDays(u.history ?? [], u.day) : null} clockUnset={u?.day === 0} />
         <section class="card d-recent" id="recent">
           <div class="head">
             <h3>Recent</h3>
