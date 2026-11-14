@@ -536,6 +536,15 @@ impl Frontend {
     }
 
     fn frame(&mut self) -> [u16; NUM_CHANNELS] {
+        let input_shift = self.window_and_transform();
+        let mut signal = self.channel_energies(input_shift);
+        self.reduce_noise(&mut signal);
+        self.control_gain(&mut signal);
+        self.log_scale(&signal)
+    }
+
+    /// Window the input, scale it up for resolution and run the FFT. Returns the scale-up shift.
+    fn window_and_transform(&mut self) -> u32 {
         // Window.
         // The reference keeps the running maximum in an int16: the absolute value of -32768 wraps and is ignored.
         let mut max_abs: i16 = 0;
@@ -554,7 +563,11 @@ impl Frontend {
             *v = 0;
         }
         self.fft.real(&self.fft_in, &mut self.spectrum);
+        input_shift
+    }
 
+    /// Power spectrum, then the triangular filterbank: one signal value per channel.
+    fn channel_energies(&mut self, input_shift: u32) -> [u32; NUM_CHANNELS] {
         // Power spectrum of the used bins.
         let fb = &self.filterbank;
         for k in fb.start_index..=fb.end_index {
@@ -586,8 +599,10 @@ impl Frontend {
         for (i, s) in signal.iter_mut().enumerate() {
             *s = sqrt_round(work[i + 1]) >> input_shift;
         }
+        signal
+    }
 
-        // Noise reduction.
+    fn reduce_noise(&mut self, signal: &mut [u32; NUM_CHANNELS]) {
         for (i, s) in signal.iter_mut().enumerate() {
             let smoothing = if i & 1 == 0 {
                 self.even_smoothing
@@ -608,15 +623,17 @@ impl Frontend {
             let subtracted = (scaled_up - estimate) >> SMOOTHING_BITS;
             *s = subtracted.max(floor);
         }
+    }
 
-        // Per-channel gain control.
+    fn control_gain(&self, signal: &mut [u32; NUM_CHANNELS]) {
         for (i, s) in signal.iter_mut().enumerate() {
             let gain = wide_dynamic(self.noise_estimate[i], &self.lut_gain) as u32;
             let snr = ((u64::from(*s) * u64::from(gain)) >> PCAN_SNR_SHIFT) as u32;
             *s = pcan_shrink(snr);
         }
+    }
 
-        // Log scale.
+    fn log_scale(&self, signal: &[u32; NUM_CHANNELS]) -> [u16; NUM_CHANNELS] {
         let mut out = [0u16; NUM_CHANNELS];
         for (o, &s) in out.iter_mut().zip(signal.iter()) {
             let value = s << CORRECTION_BITS;
