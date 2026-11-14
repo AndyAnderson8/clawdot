@@ -284,6 +284,199 @@ fn same_quant(a: &Tensor, b: &Tensor, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Variables by shared name: their sizes (known once an operator uses them) and initial values.
+#[derive(Default)]
+struct Vars {
+    names: Vec<Vec<u8>>,
+    sizes: Vec<Option<usize>>,
+    init: Vec<Option<Bytes>>,
+}
+
+impl Vars {
+    /// The index of the variable with this shared name, adding it on first sight.
+    fn index_for(&mut self, name: &[u8]) -> usize {
+        if let Some(p) = self.names.iter().position(|n| n == name) {
+            return p;
+        }
+        self.names.push(name.to_vec());
+        self.sizes.push(None);
+        self.init.push(None);
+        self.names.len() - 1
+    }
+}
+
+/// Mark the handle tensors of the main graph and return the initialisation subgraphs it calls.
+fn bind_handles(sg: &Subgraph, loc: &mut [Option<Loc>], vars: &mut Vars) -> Result<Vec<usize>> {
+    let mut init_graphs: Vec<usize> = Vec::new();
+    for op in &sg.operators {
+        match (op.kind, &op.options) {
+            (OpKind::VarHandle, Options::VarHandle { shared_name }) => {
+                let out = output_at(op, 0)?;
+                let v = vars.index_for(shared_name);
+                let idx = usize::try_from(out).map_err(|_| invalid("VAR_HANDLE output"))?;
+                if tensor(sg, out, "VAR_HANDLE")?.ty != TensorType::Resource {
+                    return Err(invalid("VAR_HANDLE output is not a resource"));
+                }
+                loc[idx] = Some(Loc::Handle(v));
+            }
+            (OpKind::CallOnce, Options::CallOnce { init_subgraph }) => {
+                init_graphs.push(*init_subgraph)
+            }
+            _ => {}
+        }
+    }
+    Ok(init_graphs)
+}
+
+/// Run the initialisation subgraphs symbolically: their assigns give the initial value of each variable.
+fn read_initial_values(model: &Model, init_graphs: &[usize], vars: &mut Vars) -> Result<()> {
+    for &gi in init_graphs {
+        let g = model
+            .subgraphs
+            .get(gi)
+            .ok_or_else(|| invalid("CALL_ONCE names a missing subgraph"))?;
+        let mut handles: Vec<Option<usize>> = vec![None; g.tensors.len()];
+        for op in &g.operators {
+            match (op.kind, &op.options) {
+                (OpKind::VarHandle, Options::VarHandle { shared_name }) => {
+                    let out = usize::try_from(output_at(op, 0)?)
+                        .map_err(|_| invalid("VAR_HANDLE output"))?;
+                    let v = vars.index_for(shared_name);
+                    if let Some(h) = handles.get_mut(out) {
+                        *h = Some(v);
+                    }
+                }
+                (OpKind::AssignVariable, _) => {
+                    let h = usize::try_from(input_at(op, 0)?)
+                        .ok()
+                        .and_then(|u| handles.get(u).copied().flatten());
+                    let value = tensor(g, input_at(op, 1)?, "ASSIGN_VARIABLE")?;
+                    let (Some(v), Some(range)) = (h, value.data) else {
+                        return Err(invalid("an initial variable value must be constant"));
+                    };
+                    if value.ty != TensorType::Int8 || range.1 != value.elements() {
+                        return Err(unsupported(
+                            "variable initial values must be int8 constants",
+                        ));
+                    }
+                    if let Some(slot) = vars.init.get_mut(v) {
+                        *slot = Some(range);
+                    }
+                }
+                _ => {
+                    return Err(unsupported(format!(
+                        "{:?} in an initialisation subgraph",
+                        op.kind
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Tensors with constant data that are not handles live in the model file.
+fn classify_constants(sg: &Subgraph, loc: &mut [Option<Loc>]) {
+    for (i, t) in sg.tensors.iter().enumerate() {
+        if loc[i].is_some() {
+            continue;
+        }
+        if t.data.is_some() {
+            loc[i] = Some(Loc::Const);
+        } else if t.ty == TensorType::Resource {
+            loc[i] = None;
+        }
+    }
+}
+
+/// The index of the last operator that reads each tensor (the model output lives to the end), checking that every
+/// tensor is written once and before it is read.
+fn tensor_lifetimes(
+    sg: &Subgraph,
+    loc: &[Option<Loc>],
+    flow: &[&Operator],
+    input_id: usize,
+    output_id: usize,
+) -> Result<Vec<usize>> {
+    let mut def: Vec<Option<usize>> = vec![None; sg.tensors.len()];
+    let mut last: Vec<usize> = vec![0; sg.tensors.len()];
+    def[input_id] = Some(0);
+    for (k, op) in flow.iter().enumerate() {
+        for &t in &op.inputs {
+            if let Ok(u) = usize::try_from(t) {
+                if matches!(loc.get(u), Some(Some(Loc::Const | Loc::Handle(_)))) {
+                    continue;
+                }
+                if def[u].is_none() {
+                    return Err(invalid(format!("tensor {u} is read before it is written")));
+                }
+                last[u] = last[u].max(k);
+            }
+        }
+        for &t in &op.outputs {
+            let u = usize::try_from(t).map_err(|_| invalid("negative output tensor"))?;
+            if matches!(loc.get(u), Some(Some(Loc::Const | Loc::Handle(_)))) {
+                return Err(invalid("an operator writes a constant"));
+            }
+            if def[u].is_some() {
+                return Err(invalid(format!("tensor {u} is written twice")));
+            }
+            def[u] = Some(k);
+            last[u] = last[u].max(k);
+        }
+    }
+    last[output_id] = flow.len();
+    Ok(last)
+}
+
+/// First-fit allocation by lifetime. An allocation is free once its last reader has run, so an operator's output
+/// never overlaps its own inputs. Fills in `loc` for the input and every operator output and returns the arena size.
+fn allocate_arena(
+    sg: &Subgraph,
+    loc: &mut [Option<Loc>],
+    flow: &[&Operator],
+    last: &[usize],
+    input_id: usize,
+) -> Result<usize> {
+    let mut live: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, last use)
+    let mut arena_len = 0usize;
+    let mut allocate = |t: usize, at: usize| -> Result<Range<usize>> {
+        let elems = sg.tensors[t].elements();
+        let size = match sg.tensors[t].ty {
+            TensorType::Int8 | TensorType::UInt8 => elems,
+            _ => {
+                return Err(unsupported(format!(
+                    "activation tensor {t} is not int8 or uint8"
+                )));
+            }
+        };
+        live.retain(|&(_, _, l)| l >= at);
+        live.sort_unstable();
+        let mut start = 0usize;
+        for &(s, e, _) in live.iter() {
+            if start + size <= s {
+                break;
+            }
+            start = start.max(e);
+        }
+        let end = start + size;
+        live.push((start, end, last[t]));
+        arena_len = arena_len.max(end);
+        if arena_len > MAX_MEMORY {
+            return Err(Error::Limit("tensor arena over 1 MiB"));
+        }
+        Ok(start..end)
+    };
+    loc[input_id] = Some(Loc::Arena(allocate(input_id, 0)?));
+    for (k, op) in flow.iter().enumerate() {
+        for &t in &op.outputs {
+            let u = t as usize;
+            loc[u] = Some(Loc::Arena(allocate(u, k)?));
+        }
+    }
+    Ok(arena_len)
+}
+
 impl Interpreter {
     /// Parse, validate and plan a model.
     pub fn new(file: Vec<u8>) -> Result<Self> {
@@ -309,99 +502,11 @@ impl Interpreter {
         };
         let (input_id, output_id) = (*input_id, *output_id);
 
-        // Variables by shared name, and the subgraph that initialises them.
-        let mut var_names: Vec<Vec<u8>> = Vec::new();
-        let mut var_sizes: Vec<Option<usize>> = Vec::new();
-        let mut var_init: Vec<Option<Bytes>> = Vec::new();
-        let var_for = |name: &[u8],
-                       names: &mut Vec<Vec<u8>>,
-                       sizes: &mut Vec<Option<usize>>,
-                       init: &mut Vec<Option<Bytes>>|
-         -> usize {
-            if let Some(p) = names.iter().position(|n| n == name) {
-                return p;
-            }
-            names.push(name.to_vec());
-            sizes.push(None);
-            init.push(None);
-            names.len() - 1
-        };
-
-        // Handle tensors of the main graph.
+        let mut vars = Vars::default();
         let mut loc: Vec<Option<Loc>> = vec![None; sg.tensors.len()];
-        let mut init_graphs: Vec<usize> = Vec::new();
-        for op in &sg.operators {
-            match (op.kind, &op.options) {
-                (OpKind::VarHandle, Options::VarHandle { shared_name }) => {
-                    let out = output_at(op, 0)?;
-                    let v = var_for(shared_name, &mut var_names, &mut var_sizes, &mut var_init);
-                    let idx = usize::try_from(out).map_err(|_| invalid("VAR_HANDLE output"))?;
-                    if tensor(sg, out, "VAR_HANDLE")?.ty != TensorType::Resource {
-                        return Err(invalid("VAR_HANDLE output is not a resource"));
-                    }
-                    loc[idx] = Some(Loc::Handle(v));
-                }
-                (OpKind::CallOnce, Options::CallOnce { init_subgraph }) => {
-                    init_graphs.push(*init_subgraph)
-                }
-                _ => {}
-            }
-        }
-        // Run the initialisation subgraphs symbolically: their assigns give the initial value of each variable.
-        for &gi in &init_graphs {
-            let g = model
-                .subgraphs
-                .get(gi)
-                .ok_or_else(|| invalid("CALL_ONCE names a missing subgraph"))?;
-            let mut handles: Vec<Option<usize>> = vec![None; g.tensors.len()];
-            for op in &g.operators {
-                match (op.kind, &op.options) {
-                    (OpKind::VarHandle, Options::VarHandle { shared_name }) => {
-                        let out = usize::try_from(output_at(op, 0)?)
-                            .map_err(|_| invalid("VAR_HANDLE output"))?;
-                        let v = var_for(shared_name, &mut var_names, &mut var_sizes, &mut var_init);
-                        if let Some(h) = handles.get_mut(out) {
-                            *h = Some(v);
-                        }
-                    }
-                    (OpKind::AssignVariable, _) => {
-                        let h = usize::try_from(input_at(op, 0)?)
-                            .ok()
-                            .and_then(|u| handles.get(u).copied().flatten());
-                        let value = tensor(g, input_at(op, 1)?, "ASSIGN_VARIABLE")?;
-                        let (Some(v), Some(range)) = (h, value.data) else {
-                            return Err(invalid("an initial variable value must be constant"));
-                        };
-                        if value.ty != TensorType::Int8 || range.1 != value.elements() {
-                            return Err(unsupported(
-                                "variable initial values must be int8 constants",
-                            ));
-                        }
-                        if let Some(slot) = var_init.get_mut(v) {
-                            *slot = Some(range);
-                        }
-                    }
-                    _ => {
-                        return Err(unsupported(format!(
-                            "{:?} in an initialisation subgraph",
-                            op.kind
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Classify tensors.
-        for (i, t) in sg.tensors.iter().enumerate() {
-            if loc[i].is_some() {
-                continue;
-            }
-            if t.data.is_some() {
-                loc[i] = Some(Loc::Const);
-            } else if t.ty == TensorType::Resource {
-                loc[i] = None;
-            }
-        }
+        let init_graphs = bind_handles(sg, &mut loc, &mut vars)?;
+        read_initial_values(&model, &init_graphs, &mut vars)?;
+        classify_constants(sg, &mut loc);
 
         // Which data-flow operators run, and the lifetime of every activation tensor.
         let flow: Vec<&Operator> = sg
@@ -410,75 +515,13 @@ impl Interpreter {
             .filter(|o| !matches!(o.kind, OpKind::VarHandle | OpKind::CallOnce))
             .collect();
         let n_ops = flow.len();
-        let mut def: Vec<Option<usize>> = vec![None; sg.tensors.len()];
-        let mut last: Vec<usize> = vec![0; sg.tensors.len()];
-        def[input_id] = Some(0);
-        for (k, op) in flow.iter().enumerate() {
-            for &t in &op.inputs {
-                if let Ok(u) = usize::try_from(t) {
-                    if matches!(loc.get(u), Some(Some(Loc::Const | Loc::Handle(_)))) {
-                        continue;
-                    }
-                    if def[u].is_none() {
-                        return Err(invalid(format!("tensor {u} is read before it is written")));
-                    }
-                    last[u] = last[u].max(k);
-                }
-            }
-            for &t in &op.outputs {
-                let u = usize::try_from(t).map_err(|_| invalid("negative output tensor"))?;
-                if matches!(loc.get(u), Some(Some(Loc::Const | Loc::Handle(_)))) {
-                    return Err(invalid("an operator writes a constant"));
-                }
-                if def[u].is_some() {
-                    return Err(invalid(format!("tensor {u} is written twice")));
-                }
-                def[u] = Some(k);
-                last[u] = last[u].max(k);
-            }
-        }
-        last[output_id] = n_ops;
-
-        // First-fit allocation by lifetime. An allocation is free once its last reader has run, so an operator's
-        // output never overlaps its own inputs.
-        let mut live: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, last use)
-        let mut arena_len = 0usize;
-        let mut allocate =
-            |t: usize, at: usize, live: &mut Vec<(usize, usize, usize)>| -> Result<Range<usize>> {
-                let elems = sg.tensors[t].elements();
-                let size = match sg.tensors[t].ty {
-                    TensorType::Int8 | TensorType::UInt8 => elems,
-                    _ => {
-                        return Err(unsupported(format!(
-                            "activation tensor {t} is not int8 or uint8"
-                        )));
-                    }
-                };
-                live.retain(|&(_, _, l)| l >= at);
-                live.sort_unstable();
-                let mut start = 0usize;
-                for &(s, e, _) in live.iter() {
-                    if start + size <= s {
-                        break;
-                    }
-                    start = start.max(e);
-                }
-                let end = start + size;
-                live.push((start, end, last[t]));
-                arena_len = arena_len.max(end);
-                if arena_len > MAX_MEMORY {
-                    return Err(Error::Limit("tensor arena over 1 MiB"));
-                }
-                Ok(start..end)
-            };
-        loc[input_id] = Some(Loc::Arena(allocate(input_id, 0, &mut live)?));
-        for (k, op) in flow.iter().enumerate() {
-            for &t in &op.outputs {
-                let u = t as usize;
-                let r = allocate(u, k, &mut live)?;
-                loc[u] = Some(Loc::Arena(r));
-            }
-        }
+        let last = tensor_lifetimes(sg, &loc, &flow, input_id, output_id)?;
+        let arena_len = allocate_arena(sg, &mut loc, &flow, &last, input_id)?;
+        let Vars {
+            sizes: var_sizes,
+            init: var_init,
+            ..
+        } = vars;
 
         // Build the steps.
         let plan = Plan {
